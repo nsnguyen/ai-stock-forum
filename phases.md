@@ -2,7 +2,7 @@
 
 **Status:** Approved backend/frontend delivery design
 
-**Updated:** 2026-08-10
+**Updated:** 2026-08-15
 
 **Architecture:** [architecture.md](architecture.md)
 
@@ -174,12 +174,18 @@ approved ChatGPT subscription path safely enough for later phases.
 
 - Backend tests, lint, type checks, and package build pass independently.
 - Frontend tests, lint, type checks, and production build pass independently.
-- Regenerating OpenAPI and the TypeScript client produces no uncommitted diff.
+- Regenerating OpenAPI and the TypeScript client produces no uncommitted diff;
+  the committed MSW worker matches the pinned dependency.
 - The browser obtains health from the real backend and the same screen passes
   against MSW mocks.
+- A production-preview browser test observes no mock-worker request or
+  service-worker registration.
 
 Passing this gate unblocks Phases 1 and 2 even if Phase 0B is still waiting for
 user-assisted installation or authorization.
+
+Detailed execution plan:
+[Phase 0A workspace and contract foundation](docs/superpowers/plans/2026-08-15-phase-0a-workspace-contract-foundation.md).
 
 ### Phase 0B feasibility gate
 
