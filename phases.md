@@ -1,9 +1,9 @@
 # AI Stock Forum — Agent Platform Delivery Phases
 
-**Status:** Proposed version 1 roadmap incorporating approved decisions;
-awaiting document review
+**Status:** Approved version 1 roadmap, including the full-screen TUI and
+live-participation design
 
-**Updated:** 2026-08-29
+**Updated:** 2026-08-30
 
 **Canonical design:** [architecture.md](architecture.md)
 
@@ -18,21 +18,28 @@ plan or source of truth.
 
 ## 1. How this roadmap is organized
 
-Version 1 is a single Rust terminal application, so it is not divided into
-separate frontend and backend projects. Instead, every phase is a **vertical
-slice**: it adds the shell command, application behavior, policy checks,
-persistence, adapter boundary, audit events, and tests needed for one usable
-capability.
+Version 1 is a single Rust full-screen terminal application, so it is not
+divided into separately deployed frontend and backend projects. The integrated
+TUI is the primary client and line-oriented command mode is a fallback adapter.
+Every phase is a **vertical slice**: it adds the typed commands and events, TUI
+view, fallback command path, application behavior, policy checks, persistence,
+adapter boundary, audit events, and tests needed for one usable capability.
 
 The internal boundaries still matter:
 
 ```text
-terminal shell → application service → policy/domain logic → adapters/storage
+full-screen TUI or fallback command mode
+                    ↓ typed command
+             application service
+                    ↓
+       policy/domain logic and adapters
+                    ↓ committed event
+        persistence and UI projection
 ```
 
-The shell never owns business rules. This lets a future web or TUI frontend use
-the same application service without rebuilding permissions, risk calculations,
-or workflow transitions.
+Neither presentation adapter owns business rules or calls a provider, MCP, or
+repository directly. A future client can use the same application service
+without rebuilding permissions, risk calculations, or workflow transitions.
 
 ### Phase rules
 
@@ -51,7 +58,9 @@ Every phase must:
 8. emit typed, redacted audit events for sensitive actions;
 9. fail closed rather than silently use a more permissive path;
 10. update user help and architecture notes when an interface changes; and
-11. pass its exit gate before the next dependent phase begins.
+11. test user-visible behavior through headless view models plus the fallback
+    command adapter, without requiring an actual terminal; and
+12. pass its exit gate before the next dependent phase begins.
 
 No phase may introduce a VM, unrestricted coding mode, broker execution,
 automatic merge/push, community MCP installation, or agent-controlled permission
@@ -59,22 +68,50 @@ change.
 
 ## 2. Dependency map
 
+The roadmap is intentionally top-to-bottom and uses the same high-contrast grey
+palette as the architecture diagrams so it remains readable while scrolling on
+a phone or viewing the document on a dark background.
+
 ```mermaid
-flowchart LR
-    P0["Phase 0<br/>Rust foundation"] --> P1["Phase 1<br/>Profiles, skills, memory"]
-    P1 --> P2["Phase 2<br/>Connections and single-agent runs"]
-    P2 --> P3["Phase 3<br/>MCP marketplace and broker"]
-    P3 --> P4["Phase 4<br/>Chief and discussion rooms"]
+---
+config:
+  theme: base
+  themeCSS: "svg { background-color: #2B2F36 !important; }"
+  themeVariables:
+    darkMode: true
+    background: "#2B2F36"
+    primaryColor: "#414750"
+    primaryTextColor: "#F8F9FA"
+    primaryBorderColor: "#AAB2BD"
+    secondaryColor: "#343A40"
+    secondaryTextColor: "#F8F9FA"
+    secondaryBorderColor: "#9AA4AF"
+    tertiaryColor: "#4B525C"
+    tertiaryTextColor: "#FFFFFF"
+    tertiaryBorderColor: "#C5CCD3"
+    lineColor: "#D0D7DE"
+    textColor: "#F8F9FA"
+    edgeLabelBackground: "#343A40"
+    clusterBkg: "#30353C"
+    clusterBorder: "#8C959F"
+---
+flowchart TB
+    P0["Phase 0<br/>Rust event core"] --> P1["Phase 1<br/>Full-screen TUI foundation"]
+    P1 --> P2["Phase 2<br/>Profiles, skills, memory"]
+    P2 --> P3["Phase 3<br/>Connections and single-agent chat"]
+    P3 --> P4["Phase 4<br/>MCP marketplace and broker"]
+    P4 --> P5["Phase 5<br/>Chief and bounded room engine"]
+    P5 --> P6["Phase 6<br/>Live room TUI and recovery"]
 
-    P3 --> P5["Phase 5<br/>Sandboxed engineering jobs"]
-    P5 --> P6["Phase 6<br/>Separate merge and push gates"]
+    P4 --> P7["Phase 7<br/>Sandboxed engineering jobs"]
+    P7 --> P8["Phase 8<br/>Separate merge and push gates"]
 
-    P3 --> P7["Phase 7<br/>Finance evidence pack"]
-    P4 --> P7
-    P7 --> P8["Phase 8<br/>Defined-risk trade decisions"]
+    P6 --> P9["Phase 9<br/>Finance evidence pack"]
+    P9 --> P10["Phase 10<br/>Defined-risk trade decisions"]
 
-    P6 --> P9["Phase 9<br/>Hardening and release"]
-    P8 --> P9
+    P6 --> P11["Phase 11<br/>Hardening and release"]
+    P8 --> P11
+    P10 --> P11
 ```
 
 Discussion-agent inference uses only the three direct-provider adapters in
@@ -86,7 +123,9 @@ future external runtime can be designed without changing the room coordinator.
 These choices are already approved and should not be reopened inside an
 implementation phase unless new evidence shows they are impossible:
 
-- one Rust modular monolith and one interactive terminal executable;
+- one Rust modular monolith with an integrated event-driven core;
+- a full-screen TUI as the primary version 1 client and line-oriented command
+  mode as a fallback/recovery/test adapter over the same commands and events;
 - OpenAI, Anthropic, and xAI direct-provider adapters as the only version 1
   discussion-agent inference paths;
 - a normalized inference contract that preserves a post-version-1 extension
@@ -94,7 +133,28 @@ implementation phase unless new evidence shows they are impossible:
 - Chief of Staff as a policy-constrained coordinator, with the user above it;
 - versioned agent profiles, skills, memory, policy, and approvals;
 - user-approved internal MCP entries and lazy per-turn tool-schema loading;
-- coordinator-mediated, bounded agent discussions;
+- coordinator-mediated, bounded agent discussions with one visible speaker and
+  only one auto-running live room at a time;
+- concurrent bounded evidence/MCP research may update status, but conversational
+  inference launches serially and publishes into one shared transcript;
+- non-preemptive human messages: `@Name` targets one agent, `@all` creates
+  ordered obligations, unaddressed input routes to the Chief at the next safe
+  turn boundary, and multiple messages are handled FIFO by durable event ID;
+- a human intervention closes an unfinished sealed first-pass batch; unstarted
+  obligations are replanned after the routed human turn from a new sealed
+  snapshot rather than running with stale input;
+- automatic continuation by default, with user pause, resume, step, explicit
+  cancel, and explicit finite budget overrides at any time;
+- each finite room cap contains a protected closing allowance; every metered
+  call must fit a conservative reservation before launch, actual use is
+  reconciled afterward, and exhausted queued input enters `AwaitingExtension`;
+- durable numbered room events, rebuildable checkpoints, bounded per-agent
+  context reconstruction, `PartialMessage` retry-or-skip recovery, and distinct
+  deterministic `PartialRoomResult` fallback;
+- closing or losing the TUI requests a pause, cancels or joins background work,
+  and starts no new turn; only the already-visible response may drain in the
+  foreground process during handled graceful shutdown, and there is no
+  background room daemon in version 1;
 - Codex CLI or Claude Code selected by the user for each engineering profile/job;
 - strict built-in runtime sandbox plus an isolated Git worktree;
 - hard refusal if the required sandbox is unavailable;
@@ -103,18 +163,20 @@ implementation phase unless new evidence shows they are impossible:
 - deterministic finance validation and defined-risk recommendations only; and
 - no broker order interface in version 1.
 
-## Phase 0 — Rust foundation and interactive shell
+## Phase 0 — Rust foundation and typed event core
 
 ### Objective
 
-Create the smallest durable Rust application that can accept commands, persist
-state, emit audit events, and recover cleanly after restart.
+Create the smallest durable Rust application core that can accept typed commands,
+persist state, emit application/audit events, and recover cleanly after restart
+without depending on a terminal renderer.
 
 ### User-visible result
 
-The user can start one executable, see `forum>`, run `/help`, `/status`,
-`/audit tail`, and `/quit`, and restart without losing the local installation
-identity or event history.
+The user can start one executable in fallback command mode, run `/help`,
+`/status`, `/audit tail`, and `/quit`, and restart without losing the local
+installation identity or event history. The same use cases pass headlessly
+through typed commands and events for the Phase 1 TUI.
 
 ### Scope
 
@@ -124,12 +186,16 @@ identity or event history.
   history.
 - Establish the Rust toolchain policy, formatting, linting, test, and build
   commands.
-- Create module boundaries for shell, app, policy, persistence, audit, agents,
-  rooms, adapters, jobs, and domain packs.
-- Implement a line-oriented REPL with structured command parsing and clear error
-  rendering.
-- Add an application command bus so the shell cannot call storage or adapters
-  directly.
+- Create module boundaries for TUI and fallback command presentation, app,
+  policy, persistence, audit, recovery, agents, rooms, adapters, jobs, and domain
+  packs.
+- Define typed application commands, application events, correlation IDs,
+  bounded channels, and deterministic reducers/view projections before a
+  full-screen renderer exists.
+- Implement a minimal line-oriented fallback mode with structured command
+  parsing and clear text rendering.
+- Add an application command/event boundary so neither presentation adapter can
+  call storage or adapters directly.
 - Define stable IDs, timestamps, object versions/digests, typed errors, and
   normalized event envelopes.
 - Add SQLite migrations, transactions, owner-only local state permissions, and
@@ -138,8 +204,8 @@ identity or event history.
   keep secrets out of configuration and SQLite.
 - Add the initial deny-wins capability vocabulary and typed approval record
   skeleton, without sensitive approval actions yet.
-- Add clean shutdown, interrupted-operation recovery hooks, fake clock/ID
-  support, and deterministic test fixtures.
+- Add clean shutdown, interrupted-operation recovery hooks, terminal-independent
+  fake clock/ID support, and deterministic test fixtures.
 - Inventory old Python/web artifacts in the detailed Phase 0 plan. Remove or
   archive them only as an explicit reviewed change; do not touch unrelated user
   files merely because they are not part of the target architecture.
@@ -151,8 +217,8 @@ identity or event history.
   warning.
 - Fresh install, migration, restart, and corrupt/incompatible-database error
   paths are tested.
-- Commands flow shell → application service → repository and generate typed
-  events.
+- Commands flow presentation adapter → application service → repository and
+  generate typed events that rebuild the same projection.
 - Unknown commands and malformed input cannot panic the process.
 - `cargo fmt`, strict linting, unit tests, and integration tests pass.
 - No Python, Node, browser, provider credential, subscription, or network access
@@ -160,10 +226,68 @@ identity or event history.
 
 ### Explicitly deferred
 
-Agents, real providers, MCP, discussions, engineering processes, Git promotion,
-and finance behavior.
+Full-screen rendering, agents, real providers, MCP, discussions, engineering
+processes, Git promotion, and finance behavior.
 
-## Phase 1 — Agent profiles, skills, and hybrid memory
+## Phase 1 — Full-screen TUI foundation
+
+### Objective
+
+Make the full-screen TUI the primary executable experience while preserving the
+typed application boundary established in Phase 0.
+
+### User-visible result
+
+Launching the executable opens a responsive dark-friendly terminal workspace
+with navigation, status, help, audit activity, a command palette, and a composer.
+The interface restores the terminal cleanly on exit and adapts to narrower
+windows without hiding critical status or actions.
+
+### Scope
+
+- Select and pin the Rust terminal renderer/input dependencies in the detailed
+  Phase 1 plan after verifying their current platform and accessibility support.
+- Implement alternate-screen/raw-mode lifecycle, bounded input/event pumping,
+  resize handling, cursor/focus management, and terminal restoration on normal
+  exit, handled signals, and panic paths.
+- Build a headless TUI reducer and immutable view model that consume only typed
+  application events and submit only typed application commands.
+- Add a workspace shell with header/status, primary content, collapsible
+  activity/help region, persistent composer, command palette, notifications, and
+  contextual key help.
+- Keep wide layouts useful while collapsing secondary regions into tabs on
+  narrow terminals; define and test a supported minimum size and an explicit
+  too-small fallback screen.
+- Use a high-contrast dark-default palette plus monochrome/no-color mode. Never
+  encode status only by color.
+- Sanitize or visibly escape control characters and terminal escape sequences in
+  every untrusted string before layout or rendering.
+- Render `/help`, `/status`, `/audit tail`, settings, and safe quit through the
+  TUI while retaining command-mode parity.
+- Add deterministic headless snapshots, focus/input tests, resize matrices, and
+  pseudo-terminal tests for terminal restoration.
+
+### Exit gate
+
+- Normal startup opens the full-screen TUI; fallback command mode remains an
+  explicit option and produces the same committed state/events.
+- Help, status, audit, settings, and quit work without presentation code reading
+  or writing repositories directly.
+- Resize, Unicode/wide characters, long wrapped text, scroll, focus changes, and
+  minimum-size handling cannot panic or corrupt terminal state.
+- Normal exit, handled interruption, and injected panic restore canonical
+  terminal mode in automated tests.
+- Dark/high-contrast and monochrome snapshots remain readable, and untrusted
+  control sequences cannot alter terminal state or spoof UI chrome.
+- Default tests remain offline, deterministic, and usable without an attached
+  interactive terminal.
+
+### Explicitly deferred
+
+Agent editors, provider chat, MCP views, live rooms, engineering jobs, Git
+promotion, and finance-specific screens.
+
+## Phase 2 — Agent profiles, skills, and hybrid memory
 
 ### Objective
 
@@ -172,9 +296,10 @@ a real model.
 
 ### User-visible result
 
-The user can create a Bull, Bear, Chief, or Engineering profile; give each a
-personality and specialty; assign skills; edit private memory; inspect version
-history; and activate a reviewed profile revision.
+The user can create a Bull, Bear, Chief, or Engineering profile in guided TUI
+workspaces; give each a personality and specialty; assign skills; edit private
+memory; inspect version history and field-level diffs; and activate a reviewed
+profile revision.
 
 ### Scope
 
@@ -182,6 +307,8 @@ history; and activate a reviewed profile revision.
   projections.
 - Add `/agent create|list|show|edit|history` with guided editing, validation,
   field-level diffs, and activation confirmation.
+- Add TUI list/detail/editor/history views for profiles, skills, memory, and
+  proposals; every action maps to the same typed commands as fallback mode.
 - Support separate inference and optional engineering bindings as references;
   the actual adapters arrive later.
 - Implement versioned declarative skill manifests, content, static resources,
@@ -206,6 +333,8 @@ history; and activate a reviewed profile revision.
 - A skill cannot add an MCP, provider, filesystem, network, or Git capability.
 - Export/editor flows contain no secret fields and reject malformed revisions
   before activation.
+- TUI and fallback command mode produce identical profile versions, memory
+  proposals, approval events, and validation failures for the same inputs.
 - Migration, retrieval-budget, isolation, and approval tests pass.
 
 ### Explicitly deferred
@@ -213,7 +342,7 @@ history; and activate a reviewed profile revision.
 Real direct-provider model calls, MCP connections, rooms, engineering children,
 and finance-specific skills.
 
-## Phase 2 — Connections, normalized inference, and single-agent runs
+## Phase 3 — Connections, normalized inference, and single-agent chat
 
 ### Objective
 
@@ -223,8 +352,10 @@ placing credentials in application data.
 ### User-visible result
 
 The user can add/test a direct OpenAI, Anthropic, or xAI API connection, bind a
-profile to a model, and have a private single-agent conversation. Plain text can
-be routed to a minimally configured Chief profile.
+profile to a model, and have a private streaming single-agent conversation in
+the TUI. The interface shows connection state, the current draft, usage, errors,
+and cancellation without freezing navigation. Plain text can be routed to a
+minimally configured Chief profile.
 
 ### Scope
 
@@ -241,10 +372,14 @@ be routed to a minimally configured Chief profile.
 - Add direct OpenAI, Anthropic, and xAI adapters behind the same contract.
 - Add bounded retries, deadlines, cancellation, output-schema validation,
   redaction, usage reporting, and clear provider-unavailable states.
+- Project normalized provider events into TUI connection and single-agent chat
+  views. Streaming deltas are draft state until a completed message commits.
+- Add guided connection setup/testing and model binding in the TUI with fallback
+  command parity and no secret value in any view model or snapshot.
 - Build prompt context from the pinned profile, personality, relevant skill
   versions, scoped memory, and application policy—not from the full database.
 - Add a minimal Chief profile template. At this phase it can converse and route
-  explicit shell commands but cannot yet open multi-agent rooms.
+  typed application commands but cannot yet open multi-agent rooms.
 - Record normalized request/result metadata without leaking prompt credentials or
   authorization headers.
 
@@ -259,6 +394,8 @@ be routed to a minimally configured Chief profile.
 - A runtime-managed login cannot be read back as an API key.
 - Cancellation, timeout, malformed structured output, rate-limit, and redaction
   behavior is tested.
+- Streaming, navigation, resize, cancellation, and provider failure remain
+  responsive under bounded event-channel backpressure.
 
 ### Explicitly deferred
 
@@ -266,7 +403,7 @@ Multi-agent rooms, MCP use, engineering CLI launch, and automatic fallback from
 one provider to another. External discussion-agent runtimes such as Hermes are
 excluded from all version 1 phases.
 
-## Phase 3 — Internal MCP marketplace and lazy tool broker
+## Phase 4 — Internal MCP marketplace and lazy tool broker
 
 ### Objective
 
@@ -275,9 +412,10 @@ loading every server or schema into context.
 
 ### User-visible result
 
-The user can review an MCP entry, approve it into the internal marketplace,
-grant it to selected agents, see why an agent requested it, and inspect its
-short-lived activation and results in the audit trail.
+The user can review an MCP entry in the TUI, approve it into the internal
+marketplace, grant it to selected agents, see why an agent requested it, and
+inspect its short-lived activation, selected schemas, results, and failures in
+the activity/audit views.
 
 ### Scope
 
@@ -286,6 +424,8 @@ short-lived activation and results in the audit trail.
   and review metadata.
 - Add `/marketplace list|show|approve|revoke` and
   `/mcp grant|revoke|status`.
+- Add marketplace, entry-review, per-agent grant, health, lease, and tool-activity
+  TUI views backed by the same commands and events.
 - Implement separate concurrent records: `EntryVersion` approval/revocation,
   `Grant(profile, entry_digest)` activation/revocation, and
   `ActivationLease(grant, operation)` selection/activation/release.
@@ -322,6 +462,8 @@ short-lived activation and results in the audit trail.
 - An agent can select only from its granted subset; denied/revoked requests fail
   before process/network activity.
 - Only selected schemas appear in recorded prompt-context manifests.
+- TUI activity projections show compact metadata and redacted results without
+  placing every catalog entry or schema into an agent context.
 - Multiple profiles and turns can hold independent concurrent grants/leases;
   entry or grant revocation terminates exactly the matching leases and every new
   selection revalidates instead of reusing a released lease.
@@ -339,7 +481,7 @@ short-lived activation and results in the audit trail.
 Community discovery, automatic installation, unpinned updates, and general
 write-capable MCP actions.
 
-## Phase 4 — Chief of Staff and bounded discussion rooms
+## Phase 5 — Chief of Staff and bounded room engine
 
 ### Objective
 
@@ -349,45 +491,206 @@ than forcing consensus.
 ### User-visible result
 
 The user asks the Chief a question, reviews or edits a proposed roster and room
-budget, watches named agents produce independent views and bounded rebuttals,
-and receives a synthesis with evidence, uncertainty, and dissent.
+budget, starts one bounded room, watches a basic ordered transcript of named
+agents, and receives a synthesis with evidence, uncertainty, and dissent. The
+engine is fully exercisable with fake providers before the richer participatory
+room TUI arrives in Phase 6.
 
 ### Scope
 
-- Add `/room new|list|show|send|stop` and plain-text routing to the active room.
-- Implement the room state machine: proposed, gathering, independent, challenge,
-  rebuttal, synthesis, validating, completed/partial/failed/cancelled.
+- Add `/room new|list|show|send|pause|resume|step|cancel`,
+  `/room retry-partial-message|skip-partial-message`, exact finite budget
+  override commands, and plain-text routing to the active room.
+- Implement the room state machine: proposed, gathering, independent,
+  publishing, challenge, rebuttal, pause-requested, paused, synthesis,
+  validating, awaiting-extension, awaiting-partial-message-decision, completed,
+  completed-partial-room-result, failed, and cancelled.
 - Pin agent, skill, policy, memory-snapshot, model, and MCP-entry versions at room
   start.
 - Let the Chief propose objective, roster, evidence needs, allowed capability
-  categories, round count, time, token, and cost budgets from existing grants.
-- Keep first-pass responses sealed until all agents respond or the round deadline
-  closes, reducing anchoring between Bull/Bear or other roles.
+  categories, round count, time, token, and cost budgets from existing grants,
+  including the closing allowance reserved inside those finite totals.
+- Enforce one auto-running live room while allowing any number of saved, paused,
+  completed, or failed rooms. Resuming a different room first requests a safe
+  pause of the current room.
+- Build every specialist's first conversational turn from the same sealed
+  pre-round transcript/evidence snapshot. Launch those turns serially and do not
+  include earlier first-pass outputs in later first-pass contexts until the round
+  closes, reducing anchoring without hidden parallel conversations.
+- If a queued human message is selected before that sealed batch finishes,
+  close the batch, invalidate its unstarted obligations, route the human turn,
+  and replan remaining work from a new sealed snapshot. Never let a specialist
+  answer from a snapshot that silently omits the processed intervention.
+- Permit bounded evidence/MCP research concurrently, but launch and stream only
+  the coordinator-selected conversational inference so one agent is the visible
+  speaker.
 - Route typed claims, evidence references, confidence, questions, concessions,
   and rebuttals through the coordinator.
-- Allow agents to request relevant granted MCPs through the Phase 3 broker.
+- Allow agents to request relevant granted MCPs through the Phase 4 broker.
+- Model the user as a room actor with a durable priority queue. Select multiple
+  messages FIFO by durable event ID unless the user explicitly cancels one.
+  `@Name` targets one pinned agent, `@all` creates a stable ordered response
+  list, and unaddressed input routes to the Chief after the current speaker
+  finishes.
+- Make automatic continuation the default while supporting user pause, resume,
+  step-one-turn, and distinct explicit cancellation.
+- Permit only the user to replace an active room's limits, require every override
+  to specify exact finite values, and pause for an extension decision when a
+  queued human message reaches an exhausted budget.
+- Partition every accepted round/time/token/cost cap into working and protected
+  closing allowances inside the same finite total. Refuse a proposal that
+  cannot fund its declared closing path.
+- Before each metered provider or MCP operation, conservatively reserve the
+  maximum authorized turn, active time, tokens, and cost under pinned metadata.
+  Refuse launch if any dimension cannot fit, reconcile trusted actual usage,
+  release unused capacity, and retain the full reservation when usage is
+  unknown. Serialize ledger updates so concurrent research cannot oversubscribe.
+- When a queued human turn cannot fit the working allowance, enter
+  `AwaitingExtension`. A finite user extension may continue; choosing to close
+  preserves the queued message as visibly unhandled and uses only the protected
+  closing allowance.
+- Persist numbered authoritative room events, provisional stream chunks, and
+  safe-boundary checkpoints before the next visible turn begins.
+- Build bounded per-agent context from pinned identity, source-linked older
+  summary, recent committed turns, unresolved work, evidence, and that agent's
+  prior published position. Exclude hidden reasoning and `PartialMessage`
+  output.
 - Add a synthesizer contract that returns recommendation, neutral/no action,
-  split decision, or insufficient evidence and preserves material dissent.
-- Allow the user to interrupt, add context, stop the room, or ask a follow-up.
-- Persist enough state to resume or terminate deterministically after restart.
+  split decision, or insufficient evidence and preserves material dissent. Its
+  one bounded normal call uses only the pre-reserved closing allowance.
+- If normal synthesis fails or times out, make no further model call and build a
+  clearly labeled `PartialRoomResult` deterministically from already committed
+  structured claims, dissent, evidence, and failures.
+- Define `PartialMessage` retry/skip behavior and deterministic replay
+  independent of provider-side conversation/session memory.
 
 ### Exit gate
 
 - A Bull and Bear can use the same direct provider connection/model while
   retaining separate pinned profiles and sealed first passes.
 - No unrestricted agent-to-agent channel exists outside coordinator events.
-- Turn/time/token/cost limits always terminate with a labeled partial result.
+- At most one published draft/response is visible; concurrent fake-agent and MCP
+  work cannot reorder the committed transcript.
+- A queued human message never truncates the visible speaker and is selected
+  FIFO by durable event ID before the next agent turn; `@all` ordering and
+  Chief-default routing are deterministic. Mid-batch intervention invalidates
+  and replans unstarted first-pass obligations from a new sealed snapshot.
+- Turn/time/token/cost limits stop progression unless the user records a new
+  explicit finite override; agents and the Chief cannot override them. No
+  metered call starts without a fitting conservative reservation, unknown usage
+  consumes the full reservation, and closing allowance never increases the cap.
 - The Chief cannot add ungranted agents/MCPs, change a profile/provider binding,
   approve a memory mutation, or override a denial.
 - Synthesis fixtures prove that dissent and unavailable evidence are not erased.
-- Cancellation and crash recovery leave an inspectable audit trail.
+- Exhausting working allowance still permits only the already-reserved closing
+  path. Failed normal synthesis yields `PartialRoomResult` without another model
+  call, and a finance consumer cannot treat it as an eligible trade.
+- Interrupted provider streams become excluded `PartialMessage` records and
+  cannot advance until the user records retry or skip.
+- No next turn starts before its predecessor and checkpoint boundary are durable.
+- Event replay and context-reconstruction fixtures reproduce the same next
+  speaker, FIFO queue, reservations, working/closing balances, unresolved work,
+  and transcript from temporary SQLite.
 
 ### Explicitly deferred
 
-Finance recommendations, unlimited debates, majority voting as an authority
-mechanism, and remote/background rooms.
+Rich participatory room rendering, automatic background execution after TUI
+exit, multiple live rooms, simultaneous visible speakers, finance
+recommendations, unlimited debates, and majority voting as an authority
+mechanism.
 
-## Phase 5 — Strictly sandboxed engineering jobs
+## Phase 6 — Live participatory room TUI and durable recovery
+
+### Objective
+
+Turn the bounded room engine into the primary Grok-like full-screen experience
+where the user participates in real time without weakening deterministic order,
+budgets, recovery, or authority.
+
+### User-visible result
+
+The user watches one named speaker stream at a time, sees other agents research
+and use MCPs through compact status/activity updates, types while a response is
+streaming, and sees that message queued for the next safe boundary. The user can
+target `@Name` or `@all`, let the Chief route unaddressed text, pause, resume,
+step, explicitly cancel, adjust exact finite budgets, close safely, and later
+resume the complete room history.
+
+### Scope
+
+- Add the live room workspace: objective/budget header, agent roster/status,
+  shared transcript, collapsible MCP/evidence/approval activity, persistent
+  composer, pending-message queue, warnings, and contextual actions.
+- Stream only the coordinator-selected draft into the transcript region. Show
+  concurrent research and MCP work as status/activity events rather than extra
+  speaking panes.
+- Persist user input before showing `Queued`; disable editing that durable event
+  and provide an explicit follow-up/cancel workflow instead.
+- Give queued human input FIFO priority by durable event ID after the current
+  response commits. Render target resolution, cancelled pending messages, and
+  ordered `@all` obligations before continuation.
+- Auto-continue by default, with clear pause-requested, paused, step, cancelling,
+  synthesizing, validating, `AwaitingExtension`, `PartialMessage`, and
+  `PartialRoomResult` states.
+- Show total, working, reserved-closing, reserved-in-flight, and consumed
+  round/time/token/cost amounts continuously. Let only the user apply an exact
+  finite override, display its audit effect, and provide no unlimited mode.
+- When the room enters `AwaitingExtension`, present two explicit choices: add an
+  exact finite extension or close using the existing reserved allowance while
+  retaining the queued message as unhandled.
+- Implement saved-room navigation while enforcing one auto-running room. A
+  request to start/resume another shows and completes the current room's safe
+  pause transition first.
+- On `/quit`, persist a pause request, cancel and join background evidence/MCP
+  work, start no new work, and keep the TUI visible in `Pausing` while only the
+  already in-flight visible turn reaches its existing deadline. Resolve it as a
+  completed message or `PartialMessage`, checkpoint `Paused`, restore terminal
+  state, and exit.
+- On handled renderer or terminal loss, restore terminal state promptly and
+  perform the same bounded drain in the foreground process. Never detach or
+  daemonize, and do not mark the room durably `Paused` until background work is
+  joined and the visible turn is resolved.
+- On abrupt death, replay the event stream, rebuild or discard a bad checkpoint,
+  display recovered chunks as `PartialMessage`, exclude them from agent context,
+  and require retry or skip before resume.
+- Render source-linked older summaries plus recent verbatim transcript without
+  conflating room history with durable agent memory.
+- Add terminal-width/resize matrices, large-transcript virtualization or bounded
+  rendering, focus/scroll/search behavior, and untrusted-control-sequence
+  sanitization.
+
+### Exit gate
+
+- End-to-end fake-provider sessions prove one visible speaker, concurrent status
+  updates, event-ID/FIFO queued-user priority, Chief/default and mention routing,
+  ordered `@all`, first-pass replanning after an intervention, automatic
+  continuation, and pause/resume/step/cancel behavior.
+- TUI and fallback commands generate the same room events, checkpoints, budget
+  overrides, and recovery decisions.
+- Starting a second live room cannot overlap provider work with the first; saved
+  and paused room history remains browsable.
+- Graceful exit starts no new work, cancels/joins background leases, resolves at
+  most the visible turn by its existing deadline, checkpoints, and restores
+  terminal state. Handled-loss tests prove the drain stays in the foreground;
+  abrupt-kill tests reopen paused with a clearly labeled `PartialMessage` and
+  deterministic retry/skip outcomes.
+- Long histories resume from a bounded context packet with source-linked older
+  summaries, exact recent turns, unresolved work, and no `PartialMessage` output
+  or hidden reasoning.
+- Budget projections exactly match the authoritative ledger. Exhausted working
+  allowance never spends more without the user's exact finite override,
+  including when a human message is queued, while normal close can consume only
+  the allowance already reserved inside the total cap.
+- Resize, minimum-size, Unicode, long-message, status-churn, and malicious escape
+  sequence tests remain readable and responsive.
+
+### Explicitly deferred
+
+Background daemon execution, remote attachment, multiple simultaneously running
+rooms, simultaneous visible speakers, voice, web/mobile clients, and finance
+recommendations.
+
+## Phase 7 — Strictly sandboxed engineering jobs
 
 ### Objective
 
@@ -397,14 +700,18 @@ CLI or Claude Code while containing effects to a dedicated worktree.
 ### User-visible result
 
 The user selects a repository, base ref, task, agent, runtime, and limits; starts
-a job; watches normalized progress; cancels if needed; and reviews the preserved
-worktree, independently derived diff, checks, platform-created checkpoint, and
-failures. The Chief may prepare the same bounded job proposal, but only the user
-can accept and start it. This phase cannot merge or push.
+a job through the TUI; watches normalized progress and tool activity; cancels if
+needed; and reviews the preserved worktree, independently derived diff, checks,
+platform-created checkpoint, and failures. The Chief may prepare the same
+bounded job proposal, but only the user can accept and start it. This phase
+cannot merge or push.
 
 ### Scope
 
 - Add `/job start|list|show|cancel|diff` and guided job specification.
+- Add TUI job proposal, running-status, normalized event, cancellation, diff,
+  checks, checkpoint, and failure views; never embed or scrape the coding CLI's
+  interactive terminal UI.
 - Let the Chief create a policy-bounded job proposal using only already allowed
   repositories, agents, runtimes, MCP grants, and limits. Starting it requires
   explicit user acceptance; an edit creates a new proposal digest.
@@ -466,6 +773,9 @@ can accept and start it. This phase cannot merge or push.
   and signed-in runtime.
 - A Chief proposal cannot start itself, broaden its scope after acceptance, or
   bypass the same sandbox/worktree gates as a user-authored job.
+- TUI and fallback commands create identical job specifications and cancellation
+  events, and app exit/owner-death containment cannot leave a hidden child
+  running.
 - No VM and no unrestricted mode exists in configuration or code.
 
 ### Explicitly deferred
@@ -473,7 +783,7 @@ can accept and start it. This phase cannot merge or push.
 Merge, push, deployment, arbitrary host directories, dirty-working-tree import,
 and remote workers.
 
-## Phase 6 — Review, exact merge approval, and separate push approval
+## Phase 8 — Review, exact merge approval, and separate push approval
 
 ### Objective
 
@@ -493,6 +803,9 @@ expected-old-object lease.
 - Add review summaries with repository identity, source checkpoint, expected
   target ref/object ID, diff digest, checks digest, unresolved warnings, and
   policy version.
+- Add TUI review, diff, checks, merge-proposal, merged-result, and later
+  push-proposal views. Merge and push use different labels, confirmation text,
+  typed actions, and records; the distinction cannot depend on color alone.
 - Build the candidate in a controlled promotion worktree with hooks, signing,
   user Git configuration, and credential helpers disabled. Stop on conflicts;
   otherwise compute the candidate tree and commit without updating the target
@@ -537,13 +850,15 @@ expected-old-object lease.
 - Integration tests use temporary repositories and a local bare remote; no real
   remote or credential is needed.
 - The user's existing checkout and uncommitted files remain untouched.
+- TUI and fallback approval paths pin and claim the same exact digests, and no
+  focus/key sequence can accept an action other than the one visibly pending.
 
 ### Explicitly deferred
 
 Force push, automatic pull/rebase, branch deletion, tags, PR creation,
 deployment, release, and any combined “merge and push” command.
 
-## Phase 7 — Finance evidence and GEX domain pack
+## Phase 9 — Finance evidence and GEX domain pack
 
 ### Objective
 
@@ -561,6 +876,9 @@ missing, conflicting, or unavailable before any trade conclusion.
 - Define the domain-pack interface for room templates, evidence schemas,
   specialist roles, structured outputs, deterministic validators, and rendering.
 - Add the finance pack without adding finance rules to generic room modules.
+- Add TUI finance-room setup and evidence views for symbol/horizon, source
+  freshness, conflicts, missing data, GEX activity, specialist status, and
+  source-linked claims within the shared live-room workspace.
 - Define immutable evidence envelopes with symbol, as-of time, source IDs,
   retrieval time, content digest, freshness, conflicts, and missing fields.
 - Add adapters or approved read-only MCP pathways for market data, option chains,
@@ -585,18 +903,20 @@ missing, conflicting, or unavailable before any trade conclusion.
   freshness decisions, and role projections.
 - GEX is not connected and its schemas are not loaded for agents that do not
   select it or lack a grant.
-- Stale, contradictory, malformed, partial, timed-out, and malicious-source data
+- Stale, contradictory, malformed, incomplete, timed-out, and malicious-source data
   is labeled and cannot masquerade as verified evidence.
 - Every displayed finance claim can reference an envelope source ID or is clearly
   labeled as analysis/opinion.
 - Finance modules can be disabled without breaking generic agent rooms.
+- Live user mentions and Chief routing retain the same room ordering/budget
+  semantics when finance evidence panels are active.
 
 ### Explicitly deferred
 
-Trade eligibility, payoff/risk calculations, plan approval, real-time streaming,
-and broker writes.
+Trade eligibility, payoff/risk calculations, plan approval, continuously
+streaming market feeds, and broker writes.
 
-## Phase 8 — Deterministic defined-risk recommendations
+## Phase 10 — Deterministic defined-risk recommendations
 
 ### Objective
 
@@ -635,6 +955,9 @@ an order.
 - Require agents to propose structured candidates; never parse trade authority
   from prose.
 - Run deterministic validation after synthesis and preserve all failures.
+- Add a TUI decision view that keeps the exact plan or `NoTrade` result, Bull and
+  Bear evidence, dissent, failed gates, maximum loss, and approval digest
+  inspectable without hiding them behind model prose.
 - Render exact entry limit, debit/credit, legs/shares, maximum loss, risk percent,
   pinned budget/capacity snapshot, profit/exit plan, time stop, thesis
   invalidation, evidence snapshot, and engine/policy versions.
@@ -661,6 +984,8 @@ an order.
 - End-to-end synthetic sessions cover eligible stock, defined-risk multi-leg,
   no-trade, split, missing evidence, and expired-plan scenarios.
 - Repository search and capability tests confirm no broker execution path exists.
+- TUI and fallback approval paths accept only the exact displayed immutable plan
+  digest and show invalidation before any replacement approval.
 
 ### Explicitly deferred
 
@@ -668,7 +993,7 @@ Unsupported multi-expiration structures, naked options, margin-dependent
 unbounded positions, live orders, paper orders, auto-refresh/reapproval, and
 portfolio automation.
 
-## Phase 9 — Security hardening, recovery, and version 1 release
+## Phase 11 — Security hardening, recovery, and version 1 release
 
 ### Objective
 
@@ -677,22 +1002,25 @@ local use.
 
 ### User-visible result
 
-The user can install the terminal application, complete guided setup, configure
-agents/connections/MCPs, run general and finance rooms, run contained engineering
-jobs, recover interrupted work, inspect/export an audit trail, and deliberately
-approve merge, push, memory, and finance-plan actions.
+The user can install the full-screen terminal application, complete guided
+setup, configure agents/connections/MCPs, participate in general and finance
+rooms, run contained engineering jobs, recover interrupted work, inspect/export
+an audit trail, and deliberately approve merge, push, memory, and finance-plan
+actions.
 
 ### Scope
 
 - Perform end-to-end threat-model review for prompt injection, MCP compromise,
-  credential leakage, sandbox escape attempts, approval confusion, and corrupted
-  persistence.
+  credential leakage, terminal-control injection/UI spoofing, sandbox escape
+  attempts, approval confusion, and corrupted persistence.
 - Add resource quotas, log rotation/retention controls, redacted audit export,
   backup/restore guidance, health diagnostics, and migration recovery tooling.
 - Fuzz command parsing, normalized provider and engineering-runtime events, MCP
-  manifests/results, finance inputs, and persisted event decoding.
-- Add crash tests across every durable workflow state and confirm idempotent
-  restart behavior.
+  manifests/results, finance inputs, persisted event decoding, TUI reducers, and
+  untrusted display strings.
+- Add crash tests across every durable workflow state and safe turn boundary;
+  confirm idempotent restart, one-live-room enforcement, `PartialMessage`
+  exclusion, and retry/skip behavior.
 - Verify owner-only file permissions and secret redaction across logs, errors,
   exports, child environments, and support bundles.
 - Re-run sandbox negative conformance for every advertised
@@ -702,6 +1030,9 @@ approve merge, push, memory, and finance-plan actions.
   state, force attempts, stale approvals, and dirty user checkouts.
 - Add installation/setup/status documentation, command reference, sample safe
   profiles, synthetic finance demo, and troubleshooting guidance.
+- Run TUI accessibility and rendering QA across the supported terminal-size
+  matrix, dark/high-contrast and monochrome modes, keyboard-only operation,
+  Unicode/wrapping, large transcripts, status churn, and terminal restoration.
 - Provide clear provider and engineering-runtime capability/availability
   reporting.
 - Produce a reproducible release build and software-bill-of-materials/dependency
@@ -717,6 +1048,9 @@ approve merge, push, memory, and finance-plan actions.
   cancellation, and no-unrestricted fallback.
 - Merge and push remain distinct exact approvals in UI, policy, persistence,
   tests, and audit events.
+- One visible speaker, event-ID/FIFO queued-human priority, finite user-only
+  budget overrides, protected closing allowance, one live room, safe TUI
+  shutdown, and durable resume remain invariant in the packaged release.
 - A fresh user can follow the docs without relying on the obsolete web/Python
   plans.
 - Known limitations are documented; unsupported adapters/features show
@@ -726,11 +1060,17 @@ approve merge, push, memory, and finance-plan actions.
 
 Version 1 is complete only when all applicable phase gates pass and the user can:
 
+- launch a responsive full-screen TUI as the primary client while retaining a
+  policy-equivalent fallback command mode;
 - create and version agents with fixed specialties, personality, skills, memory,
   direct model bindings, optional engineering-runtime bindings, and MCP grants;
 - use direct OpenAI, Anthropic, and xAI connections without storing raw keys in
   application data;
-- ask the Chief to coordinate bounded rooms while retaining user control;
+- ask the Chief to coordinate a bounded room, watch one visible speaker at a
+  time, and participate live with Chief-default, `@Name`, or ordered `@all`
+  messages that wait for the current speaker to finish;
+- let the room auto-continue while retaining pause, resume, step, explicit
+  cancel, exact finite budget override, and one-live-room control;
 - let agents lazily select only granted entries from an approved internal MCP
   marketplace;
 - receive a transparent synthesis that may recommend, remain neutral, split, or
@@ -741,8 +1081,10 @@ Version 1 is complete only when all applicable phase gates pass and the user can
   push;
 - obtain an evidence-backed, deterministic, defined-risk swing-trade plan or
   concrete reason not to trade; and
-- inspect an audit trail and recover interrupted rooms/jobs without any broker
-  execution capability.
+- close safely, inspect full source-linked room history, resume from durable
+  checkpoints and bounded agent context, resolve `PartialMessage` output by
+  retry/skip, distinguish a `PartialRoomResult` from a complete synthesis, and
+  inspect an audit trail without any broker execution capability.
 
 ## 5. Deferred roadmap
 
@@ -750,8 +1092,10 @@ After version 1, separate design reviews may consider:
 
 - Hermes or another external discussion-agent runtime adapter;
 - Herdr or another general-purpose external terminal supervisor; the narrow
-  fail-closed per-job guardian in Phase 5 remains required version 1 machinery;
-- web, full-screen TUI, or mobile clients;
+  fail-closed per-job guardian in Phase 7 remains required version 1 machinery;
+- web, mobile, or remote-attachment clients;
+- background-daemon room execution, multiple simultaneously auto-running rooms,
+  or simultaneous visible speakers;
 - remote workers, VMs, and multi-user/cloud operation;
 - community MCP distribution and executable plugin packages;
 - write-capable MCP workflows with domain-specific approval policies;

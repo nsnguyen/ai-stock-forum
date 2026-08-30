@@ -1,9 +1,9 @@
 # AI Stock Forum — Agent Platform Architecture
 
-**Status:** Proposed version 1 architecture incorporating approved decisions;
-awaiting document review
+**Status:** Approved version 1 architecture, including the full-screen TUI and
+live-participation design
 
-**Updated:** 2026-08-29
+**Updated:** 2026-08-30
 
 **Delivery roadmap:** [phases.md](phases.md)
 
@@ -13,9 +13,9 @@ history, but they are not implementation instructions for the Rust version.
 
 ## 1. Product in plain language
 
-AI Stock Forum is being rebuilt as a local, terminal-first agent platform where
-the user creates AI agent profiles and lets them work alone or in structured
-discussions. An agent profile can have its own:
+AI Stock Forum is being rebuilt as a local, full-screen terminal agent platform
+where the user creates AI agent profiles and participates with them in live,
+structured discussions. An agent profile can have its own:
 
 - name, specialty, personality, and instructions;
 - direct model-provider binding;
@@ -30,11 +30,13 @@ set: OpenAI, Anthropic, or xAI. The same core should later support engineering,
 research, or other domains without rebuilding orchestration, permissions,
 memory, or auditing.
 
-The experience is inspired by a multi-agent group discussion, but the platform
-does not copy or depend on Grok's implementation. Agents first form independent
-views, then challenge relevant claims, and finally produce a bounded synthesis.
-Agreement is not forced. A split decision, insufficient-evidence result, or
-evidence-backed `No Trade` is valid.
+The experience is inspired by a Grok-like multi-agent group discussion, but the
+platform does not copy or depend on Grok's implementation. The user watches one
+visible speaker at a time, may queue a message while that speaker finishes, and
+can address the Chief, one agent, or the whole room. Agents first form
+independent views, then challenge relevant claims, and finally produce a bounded
+synthesis. Agreement is not forced. A split decision, insufficient-evidence
+result, or evidence-backed `No Trade` is valid.
 
 The user is the product's root authority. This means the user controls agents,
 permissions, jobs, and approvals; it does **not** mean the program runs as the
@@ -44,8 +46,9 @@ operating-system `root` user.
 
 Version 1 is:
 
-- one local Rust executable with an interactive shell;
-- single-user and terminal-only;
+- one local Rust executable with an integrated event-driven application core;
+- single-user and terminal-only, with a full-screen TUI as the primary client
+  and a line-oriented command mode as a fallback and test adapter;
 - provider-neutral at the core, with OpenAI, Anthropic, and xAI direct-provider
   adapters as the only discussion-agent inference paths;
 - an internal, user-approved MCP marketplace with per-agent grants;
@@ -56,7 +59,9 @@ Version 1 is:
 
 Version 1 is not:
 
-- a web application or full-screen TUI;
+- a web, mobile, or remote application, nor an application with concurrently
+  attached clients;
+- a background daemon that keeps rooms spending after the TUI exits;
 - a cloud or multi-user service;
 - a broker or order-execution system;
 - a community marketplace for unreviewed MCP servers or executable skills;
@@ -80,6 +85,16 @@ permissions and implementation details from leaking across boundaries.
 | **MCP grant** | Permission for one profile to request an approved MCP entry | Bear may request GEX |
 | **MCP activation** | A short-lived connection and selected schemas for one turn/job | GEX tools loaded for turn 18 |
 | **Room** | A bounded, coordinator-mediated multi-agent workflow | `Analyze GOOGL swing trade` |
+| **Human participant** | The user as a first-class room actor with authority above the Chief | queues `@Bear challenge the catalyst` |
+| **Room event** | One ordered durable fact used for rendering, audit, and recovery | committed message or budget override |
+| **Room checkpoint** | Rebuildable safe-boundary snapshot that accelerates resume | next speaker and pending queue |
+| **TUI** | Primary full-screen presentation adapter; never the owner of business rules | transcript, roster, evidence, approvals |
+| **Application command** | Typed request from the TUI or fallback command adapter | `QueueHumanMessage` |
+| **Application event** | Typed result emitted after application validation and persistence | `HumanMessageQueued` |
+| **Safe turn boundary** | Durable point after one visible turn finishes and before another starts | committed agent response |
+| **PartialMessage** | An interrupted provider stream that remains visible but is excluded from debate context | response interrupted by timeout or power loss |
+| **PartialRoomResult** | A deterministic room-level result built from committed material when normal model synthesis cannot finish | deadline expires before synthesis completes |
+| **Closing allowance** | Token, cost, time, and turn capacity reserved inside the finite room cap for final synthesis | one bounded synthesis call |
 | **Domain pack** | Compile-time Rust module containing domain prompts, schemas, and validators | Finance pack |
 | **StructuredProcessRunner** | Rust child-process supervisor; not an AI model or sandbox | launches `codex exec` |
 | **Worktree** | Git change isolation for one job; not a security boundary | job branch checkout |
@@ -114,43 +129,81 @@ Chief of Staff, provider, MCP response, or engineering-runtime output.
     If maximum loss cannot be proven within the supported model, the result is
     ineligible rather than guessed.
 11. Version 1 cannot place, stage, or transmit broker orders.
+12. Only one room may auto-run at a time. Closing or losing the TUI requests a
+    pause, cancels or joins background work, and starts no new turn or tool
+    activation. During a handled graceful shutdown, only the already-visible
+    response may drain to its existing deadline in the foreground process; no
+    discussion continues through a background service.
+13. User messages never silently truncate the visible speaker. They enter a
+    durable queue and receive priority at the next safe turn boundary unless the
+    user invokes the separate explicit cancel action.
+14. Only the user may change an active room's round, time, token, or cost budget.
+    Every override is explicit, finite, and audited; version 1 has no unlimited
+    room mode.
+15. Every metered provider or MCP operation requires a conservative reservation
+    that fits the remaining finite allowance before it starts. The room's
+    closing allowance is reserved inside—not added beyond—the accepted cap.
+16. The coordinator may not start the next visible turn until the prior message,
+    queue decision, budget state, and checkpoint boundary are durable.
+17. A `PartialMessage` is never evidence or debate context. The user must choose
+    retry or skip before the room can continue.
 
 ## 5. System overview
 
+Every Mermaid diagram in this document uses a top-to-bottom layout and an
+explicit high-contrast grey palette. This keeps the diagrams narrow enough for
+phone scrolling and readable on a dark document background.
+
 ```mermaid
+---
+config:
+  theme: base
+  themeCSS: "svg { background-color: #2B2F36 !important; }"
+  themeVariables:
+    darkMode: true
+    background: "#2B2F36"
+    primaryColor: "#414750"
+    primaryTextColor: "#F8F9FA"
+    primaryBorderColor: "#AAB2BD"
+    secondaryColor: "#343A40"
+    secondaryTextColor: "#F8F9FA"
+    secondaryBorderColor: "#9AA4AF"
+    tertiaryColor: "#4B525C"
+    tertiaryTextColor: "#FFFFFF"
+    tertiaryBorderColor: "#C5CCD3"
+    lineColor: "#D0D7DE"
+    textColor: "#F8F9FA"
+    edgeLabelBackground: "#343A40"
+    clusterBkg: "#30353C"
+    clusterBorder: "#8C959F"
+---
 flowchart TB
-    User["User: root product authority"] --> Shell["Interactive Rust shell"]
-    Shell --> App["Application service"]
-
-    subgraph Core["One Rust modular monolith"]
-        App --> Policy["Policy engine"]
-        App --> Chief["Chief of Staff"]
-        App --> Rooms["Room coordinator"]
-        App --> Profiles["Agent / skill / memory registries"]
-        App --> Connections["Connection and secret broker"]
-        App --> McpBroker["MCP marketplace and broker"]
-        App --> Jobs["Engineering job service"]
-        App --> Packs["Compile-time domain packs"]
-        App --> Store["SQLite state and append-only events"]
-    end
-
-    Rooms --> Inference["Direct provider adapters"]
-    Inference --> APIs["OpenAI / Anthropic / xAI APIs"]
-
-    McpBroker --> ApprovedMcp["Approved MCP servers"]
-
-    Jobs --> Runner["StructuredProcessRunner"]
-    Runner --> CodingCli["Codex CLI or Claude Code<br/>with strict built-in sandbox"]
-    CodingCli --> Worktree["Per-job Git worktree"]
-
-    Packs --> Finance["Finance evidence and risk engine"]
+    User["User<br/>root product authority"] --> Tui["Primary full-screen Rust TUI"]
+    User -.-> Command["Fallback command mode"]
+    Tui --> Boundary["Typed UI commands and application events"]
+    Command --> Boundary
+    Boundary --> App["Application service"]
+    App -.->|"typed events"| Boundary
+    App --> Core["Policy engine · Chief · rooms<br/>profiles · skills · memory<br/>engineering jobs · domain packs"]
+    Core --> Boundaries["Durable and controlled boundaries<br/>SQLite events · projections · checkpoints<br/>adapters · finance evidence · risk validation"]
+    Boundaries --> ModelTools["Direct provider and MCP paths<br/>OpenAI / Anthropic / xAI<br/>approved MCP servers"]
+    Boundaries --> Coding["Engineering runtime path<br/>Codex CLI / Claude Code"]
+    Coding --> Isolation["Strict runtime sandbox<br/>per-job Git worktree"]
 ```
 
 The platform is a **modular monolith**: one core application process and
 executable, plus only the child processes it explicitly supervises. It is
 divided into modules with explicit interfaces. This is easier to build, test,
-and audit than local microservices. Later interfaces can reuse the application
-service, but version 1 does not split into frontend and backend deployments.
+and audit than local microservices. The TUI, fallback command mode, application
+services, room coordinator, and persistence all live in that process; version 1
+has no local daemon or socket-separated frontend/backend deployment.
+
+The process is event-driven internally. Presentation adapters submit typed
+commands to the application service. The service validates authority, commits
+state, and publishes typed application events. The TUI renders projections of
+those events and may never mutate repositories, call providers, or grant
+permissions directly. This boundary keeps streaming responsive and makes the
+room engine testable without a real terminal.
 
 ### Suggested Rust layout
 
@@ -160,7 +213,9 @@ ai-stock-forum/
 ├── src/
 │   ├── main.rs                 # process startup only
 │   ├── app/                    # use cases and command handlers
-│   ├── shell/                  # REPL parsing, rendering, guided editors
+│   ├── ui/
+│   │   ├── tui/                # full-screen renderer, input, view models
+│   │   └── command/            # fallback command parser and text renderer
 │   ├── policy/                 # capabilities, grants, denials, approvals
 │   ├── agents/                 # profiles, executions, normalized messages
 │   ├── rooms/                  # bounded discussion state machine
@@ -173,7 +228,8 @@ ai-stock-forum/
 │   ├── domains/
 │   │   └── finance/            # evidence, GEX projection, risk validation
 │   ├── persistence/            # SQLite repositories and migrations
-│   └── audit/                  # typed append-only event recording
+│   ├── audit/                  # typed append-only event recording
+│   └── recovery/               # replay, checkpoints, interruption decisions
 ├── tests/                      # cross-module and acceptance tests
 ├── migrations/                # ordered SQLite migrations
 └── docs/
@@ -214,7 +270,29 @@ compiled capability
 ```
 
 ```mermaid
-flowchart LR
+---
+config:
+  theme: base
+  themeCSS: "svg { background-color: #2B2F36 !important; }"
+  themeVariables:
+    darkMode: true
+    background: "#2B2F36"
+    primaryColor: "#414750"
+    primaryTextColor: "#F8F9FA"
+    primaryBorderColor: "#AAB2BD"
+    secondaryColor: "#343A40"
+    secondaryTextColor: "#F8F9FA"
+    secondaryBorderColor: "#9AA4AF"
+    tertiaryColor: "#4B525C"
+    tertiaryTextColor: "#FFFFFF"
+    tertiaryBorderColor: "#C5CCD3"
+    lineColor: "#D0D7DE"
+    textColor: "#F8F9FA"
+    edgeLabelBackground: "#343A40"
+    clusterBkg: "#30353C"
+    clusterBorder: "#8C959F"
+---
+flowchart TB
     Request["Agent or Chief requests action"] --> Compiled{"Capability exists?"}
     Compiled -->|no| Deny["Deny and audit"]
     Compiled -->|yes| Approved{"Resource approved?"}
@@ -237,7 +315,14 @@ validation.
 
 Approvals are typed, immutable, one-shot records. They include the exact object
 digest and expire on material change. A generic `yes` is accepted only when the
-shell displays one unambiguous pending action and records what was approved.
+TUI displays one unambiguous pending action and records what was approved.
+
+An active-room budget override is a typed user command, not an agent capability.
+It states the exact new finite round, time, token, or cost limit, is persisted
+before it takes effect, and cannot be issued by the Chief or a specialist. Chat
+routing also grants no authority: `@Name` targets one pinned profile, `@all`
+creates sequential obligations for the pinned roster, and a message with no
+mention is routed to the Chief.
 
 ## 7. Agent profiles and executions
 
@@ -271,16 +356,50 @@ inference contract remains intentionally replaceable, but no Hermes adapter,
 Hermes authentication, Hermes profile state, or Hermes qualification work is in
 the version 1 implementation scope.
 
-## 8. Interactive shell
+## 8. Full-screen TUI and fallback command mode
 
-The executable opens a line-oriented shell, for example `forum>`. Plain text is
-sent to the active room or to the Chief of Staff. Slash commands manage durable
-objects and explicit actions.
+The executable opens a full-screen terminal user interface by default. It is
+the primary version 1 product surface, not a decorative wrapper around a REPL.
+Its normal workspace contains:
+
+- a room header with objective, phase, connection health, and finite remaining
+  round/time/token/cost budgets;
+- an agent roster showing the one visible speaker plus compact states such as
+  `Researching`, `Waiting for MCP`, `Ready`, `Speaking`, and `Unavailable`;
+- one shared scrollable transcript containing committed user, Chief, and agent
+  messages in coordinator order;
+- a collapsible activity view for evidence references, MCP selection/calls,
+  approvals, warnings, and errors; and
+- a persistent composer that accepts messages, mentions, and action commands
+  while provider output is streaming.
+
+Wide terminals may show roster, transcript, and activity side by side. Narrow
+terminals collapse secondary regions into tabs while keeping the transcript,
+speaker identity, budget warning, and composer usable. The default palette is
+high-contrast on dark backgrounds and has a monochrome/no-color mode; meaning
+never depends on color alone.
+
+Typed input is persisted and appears immediately as `Queued`. `@Name` targets a
+specific pinned agent, `@all` requests ordered responses from the pinned roster,
+and unaddressed text goes to the Chief. Ordinary input does not cancel the
+current speaker. After that response commits, queued user input has priority
+before the coordinator starts another agent turn. Multiple queued messages are
+selected in durable event-ID order (FIFO) unless the user explicitly cancels a
+pending message. The user also has distinct pause, resume, step-one-turn, and
+explicit cancel actions. Automatic continuation is the default.
+
+The same executable exposes a line-oriented fallback command mode for recovery,
+automation, accessibility, and headless tests. It submits the same typed
+application commands and consumes the same events as the TUI; it is not a
+second implementation of business rules. Slash commands are available through
+that mode and through the TUI command palette.
 
 | Command | Purpose |
 |---|---|
 | `/agent create|list|show|edit|history` | Manage versioned agent profiles |
-| `/room new|list|show|send|stop` | Run and inspect discussions |
+| `/room new|list|show|send|pause|resume|step|cancel` | Run and control discussions |
+| `/room retry-partial-message|skip-partial-message` | Resolve an interrupted visible turn |
+| `/room budget show|set|extend` | Inspect or apply an exact finite user override |
 | `/connection add|list|test|remove` | Manage provider/runtime connection references |
 | `/marketplace list|show|approve|revoke` | Manage the internal MCP catalog |
 | `/mcp grant|revoke|status` | Manage per-agent MCP eligibility |
@@ -289,16 +408,29 @@ objects and explicit actions.
 | `/job start|list|show|cancel|diff` | Manage engineering jobs |
 | `/approve show|accept|reject` | Resolve exact pending actions |
 | `/audit show|tail|export` | Inspect normalized events and decisions |
-| `/settings`, `/help`, `/quit` | Configure, learn, and exit |
+| `/settings`, `/help`, `/quit` | Configure, learn, and request safe shutdown |
 
 Plural aliases such as `/skills` and `/agents` may map to the corresponding
 `list` commands. `/agent edit` uses a guided editor by default. An optional
 `$EDITOR` flow exports a secret-free temporary document, validates it, shows a
 field-level diff, and asks before activating the new version.
 
-The shell is a presentation adapter. Business rules live in the application
-service, so a future web or TUI client cannot bypass policy by reimplementing
-commands.
+On `/quit`, the application first records a pause request, cancels and joins
+background evidence work and MCP leases, and starts no new work. The TUI remains
+visible in `Pausing` while at most the already in-flight visible turn reaches
+its existing deadline. The application then commits that response or a
+`PartialMessage`, writes the paused checkpoint, restores terminal state, and
+exits. If terminal state must be restored immediately after a handled renderer
+or terminal failure, the same bounded drain happens in the foreground process;
+it never becomes daemon work. A room is not durably `Paused` until background
+work is joined and the visible turn is resolved. An abrupt process death or
+power loss cannot guarantee a safe boundary; restart replays durable events,
+labels recovered deltas `PartialMessage`, and opens the room paused for the
+user's retry-or-skip decision.
+
+Both presentation adapters are unprivileged. Business rules live in the
+application service, so a later web or mobile client cannot bypass policy by
+reimplementing commands.
 
 ## 9. Connections, providers, and runtimes
 
@@ -333,48 +465,123 @@ Provider-specific payloads are retained only when useful for debugging and are
 redacted before storage. The orchestration layer consumes normalized events and
 validated output schemas, not vendor-specific transcript shapes.
 
+Provider text deltas may update the current draft in the TUI, and background
+provider or MCP work may update agent status concurrently. Those events do not
+publish extra speakers. Only the room coordinator can promote one completed
+draft into the ordered shared transcript, so the user never sees two agents
+speaking simultaneously.
+
 ## 10. Chief of Staff and room discussion flow
 
 The Chief listens to the user, asks only necessary questions, and converts a
 request into a bounded room proposal: objective, roster, evidence needs,
-available MCP categories, maximum rounds, time budget, and cost budget. The
-user may edit, accept, interrupt, or cancel it.
+available MCP categories, maximum rounds, time budget, token budget, and cost
+budget. The proposal also shows the closing allowance reserved inside those
+finite limits. The user may edit, accept, interrupt, or cancel it.
 
 Agents do not have an unrestricted peer network. The coordinator routes typed
-messages and owns ordering, deadlines, and the audit trail.
+messages and owns ordering, deadlines, checkpoints, and the audit trail. Any
+number of rooms may be saved, paused, or completed, but only one room may be
+auto-running. Starting or resuming another first requests a safe-boundary pause
+of the current room.
+
+Agents may gather evidence and call granted MCPs concurrently, represented only
+by status and activity events. Conversational inference launches serially for
+the coordinator-selected speaker, so the visible stream is the actual response,
+not a delayed reveal of a hidden parallel conversation. First-pass independence
+is preserved by building every specialist's first turn from the same sealed
+pre-round transcript/evidence snapshot and withholding earlier specialists'
+first-pass output from later first-pass contexts until the round closes.
+Automatic continuation is the default. This independence guarantee applies to
+an uninterrupted first-pass batch. If the user intervenes before that batch
+finishes, the intervention closes the batch at the next safe boundary; unstarted
+first-pass obligations are invalidated and replanned after the routed human turn
+from a newly sealed snapshot. This gives the user's input immediate effect
+without silently feeding one specialist's first pass into another specialist's
+supposedly independent turn.
+
+The user is a first-class room actor. A message entered during a visible response
+is durably queued without interrupting that response. At the next safe boundary,
+queued human input takes priority: `@Name` routes to one agent, `@all` creates a
+stable ordered list of agent response obligations, and an unaddressed message is
+handled by the Chief, which may answer, redirect a specialist, or revise the
+agenda within existing permissions and budgets. Multiple human messages are
+handled in durable event-ID order unless the user explicitly cancels one.
+Explicit cancel is a separate action and may terminate the in-flight provider
+request.
 
 ```mermaid
-sequenceDiagram
-    actor U as User
-    participant C as Chief of Staff
-    participant R as Room coordinator
-    participant A as Specialist agents
-    participant M as MCP broker
-    participant S as Synthesizer
-    participant V as Domain validator
-
-    U->>C: Ask a question or define a job
-    C->>R: Propose objective, roster, and limits
-    R->>M: Request allowed evidence capabilities
-    M-->>R: Compact approved/granted choices
-    par Independent first passes
-        R->>A: Same objective and evidence snapshot
-        A-->>R: Claims, evidence refs, uncertainty
-    end
-    Note over R,A: First passes stay sealed until the round closes
-    R->>A: Targeted contrary claims and questions
-    A-->>R: Bounded rebuttals or concessions
-    R->>S: Positions, dissent, evidence, and limits
-    S-->>R: Recommendation, split, neutral, or insufficient evidence
-    R->>V: Validate domain-specific structured result
-    V-->>R: Eligible result or explicit failures
-    R-->>U: Synthesis, evidence, dissent, risks, and next action
+---
+config:
+  theme: base
+  themeCSS: "svg { background-color: #2B2F36 !important; }"
+  themeVariables:
+    darkMode: true
+    background: "#2B2F36"
+    primaryColor: "#414750"
+    primaryTextColor: "#F8F9FA"
+    primaryBorderColor: "#AAB2BD"
+    secondaryColor: "#343A40"
+    secondaryTextColor: "#F8F9FA"
+    secondaryBorderColor: "#9AA4AF"
+    tertiaryColor: "#4B525C"
+    tertiaryTextColor: "#FFFFFF"
+    tertiaryBorderColor: "#C5CCD3"
+    lineColor: "#D0D7DE"
+    textColor: "#F8F9FA"
+    edgeLabelBackground: "#343A40"
+    clusterBkg: "#30353C"
+    clusterBorder: "#8C959F"
+---
+flowchart TB
+    Ask["User asks Chief"] --> Proposal["Chief proposes objective, roster,<br/>evidence, finite limits, and closing allowance"]
+    Proposal --> Accept["User accepts,<br/>edits, or cancels"]
+    Accept --> Pin["After acceptance: pin profiles, skills,<br/>memory, models, policy, and MCP entries"]
+    Pin --> Research["Agents gather evidence concurrently<br/>no conversational response yet"]
+    Research --> Boundary["At each safe boundary:<br/>process FIFO human input first"]
+    Boundary --> Replan["If the user intervened:<br/>close the first-pass batch and<br/>replan from a new sealed snapshot"]
+    Replan --> Select["Coordinator selects one visible speaker"]
+    Select --> Reserve["Atomically reserve the maximum<br/>authorized call usage"]
+    Reserve --> Work["If it fits: stream one speaker,<br/>reconcile usage, commit, checkpoint,<br/>then repeat at the next boundary"]
+    Work --> Stop["When a working call cannot fit:<br/>queued input pauses AwaitingExtension;<br/>otherwise enter the closing path"]
+    Stop --> Choice["In AwaitingExtension, the user<br/>extends finitely or chooses close"]
+    Choice --> Closing["Use only the pre-reserved<br/>closing allowance"]
+    Closing --> Synthesis["Attempt one bounded synthesis;<br/>on failure build PartialRoomResult<br/>without another model call"]
+    Synthesis --> Validate["Run domain validator<br/>when applicable"]
+    Validate --> Result["Persist and show evidence,<br/>dissent, risks, and next action"]
 ```
 
-The coordinator stops when the configured round, time, token, or cost bound is
-reached. A timeout produces an explicitly partial result. The synthesizer may
-not erase dissent, invent consensus, or use majority vote as a substitute for
-evidence. For finance, deterministic validation follows synthesis.
+The accepted room budget is finite in round, active-run time, token, and cost
+dimensions. Before work begins, each dimension is partitioned into a working
+allowance and a minimum closing allowance; the closing allowance is inside the
+accepted total, never extra capacity. A proposal that cannot fund its declared
+closing path does not start. Paused time does not consume active-run time.
+
+Before every metered provider or MCP operation, the budget ledger reserves its
+maximum authorized round slot, input/output tokens, cost under pinned pricing,
+and deadline window. The operation does not start unless every reservation fits
+its appropriate allowance. Actual reported usage is reconciled afterward and
+unused capacity is released; if trustworthy usage is unavailable, the full
+reservation remains charged. This rule also prevents concurrent background work
+from oversubscribing the same room budget.
+
+The TUI continuously displays total, working, reserved, and consumed amounts.
+Only the user may replace or extend the limits, and every override must be a new
+explicit finite value. If working allowance is exhausted while human input is
+queued, the room enters `AwaitingExtension` rather than dropping the message or
+spending more. The user may extend it finitely or close the room; closing leaves
+the queued message visibly recorded as unhandled and uses only the existing
+closing allowance. With no queued input, the room moves directly to the closing
+path.
+
+Normal synthesis uses the pre-reserved closing allowance. If that bounded call
+fails, times out, or cannot produce a valid result, the coordinator makes no
+further model call and builds a `PartialRoomResult` deterministically from
+already committed structured claims, dissent, evidence, and failure records.
+A `PartialRoomResult` is never silently presented as a complete consensus; in
+the finance pack it cannot become an eligible trade. The synthesizer may not
+erase dissent, invent consensus, or use majority vote as a substitute for
+evidence. For finance, deterministic validation follows successful synthesis.
 
 ## 11. MCP marketplace and lazy activation
 
@@ -384,24 +591,39 @@ definition, concise capability tags, risk class, secret references, and a human
 review record.
 
 ```mermaid
-flowchart LR
-    subgraph E["EntryVersion: one pinned digest"]
-        Cataloged --> Approved --> EntryRevoked["Revoked"]
-    end
-
-    subgraph G["Grant: profile + entry digest, zero or many"]
-        GrantActive["Active grant"] --> GrantRevoked["Revoked grant"]
-    end
-
-    subgraph L["ActivationLease: grant + operation, zero or many"]
-        Selected --> Active --> Released
-        Selected --> Released
-    end
-
-    Approved -->|"user creates"| GrantActive
-    GrantActive -->|"agent requests"| Selected
-    EntryRevoked -.->|"revokes matching grants"| GrantRevoked
-    GrantRevoked -.->|"terminates matching leases"| Released
+---
+config:
+  theme: base
+  themeCSS: "svg { background-color: #2B2F36 !important; }"
+  themeVariables:
+    darkMode: true
+    background: "#2B2F36"
+    primaryColor: "#414750"
+    primaryTextColor: "#F8F9FA"
+    primaryBorderColor: "#AAB2BD"
+    secondaryColor: "#343A40"
+    secondaryTextColor: "#F8F9FA"
+    secondaryBorderColor: "#9AA4AF"
+    tertiaryColor: "#4B525C"
+    tertiaryTextColor: "#FFFFFF"
+    tertiaryBorderColor: "#C5CCD3"
+    lineColor: "#D0D7DE"
+    textColor: "#F8F9FA"
+    edgeLabelBackground: "#343A40"
+    clusterBkg: "#30353C"
+    clusterBorder: "#8C959F"
+---
+flowchart TB
+    Cataloged["EntryVersion<br/>Cataloged"] --> Approved["EntryVersion<br/>Approved pinned digest"]
+    Approved -->|"user creates"| GrantActive["Grant<br/>Active for one profile"]
+    GrantActive -->|"agent requests"| Selected["ActivationLease<br/>Selected for one operation"]
+    Selected --> Active["ActivationLease<br/>Active"]
+    Selected --> Released["ActivationLease<br/>Released"]
+    Active --> Released
+    Approved --> EntryRevoked["EntryVersion<br/>Revoked"]
+    GrantActive --> GrantRevoked["Grant<br/>Revoked"]
+    EntryRevoked -.->|"matching grants"| GrantRevoked
+    GrantRevoked -.->|"matching leases"| Released
 ```
 
 Approval, grants, and activations are separate records and lifecycles:
@@ -484,6 +706,26 @@ not shared merely because two profiles use the same provider connection or
 model. Cross-agent sharing happens through the room transcript or an explicit
 user action and is audited.
 
+### Room context and resume
+
+Room history is not long-term agent memory and does not require a memory grant
+to remain recoverable. Before each turn or resumed execution, a provider-neutral
+context builder creates a bounded packet for that specific pinned agent from:
+
+- its profile, personality, specialty, operating instructions, relevant skill
+  versions, and approved memory snapshot;
+- a source-linked structured summary of older committed room events;
+- recent committed transcript turns verbatim;
+- unresolved claims, questions, response obligations, and dissent;
+- relevant evidence and MCP result references; and
+- that agent's own previously published position.
+
+The packet never contains another agent's private memory, `PartialMessage`
+output, or hidden chain-of-thought. Older summaries retain source event IDs so
+the user and context builder can inspect the underlying transcript. Promoting a
+room conclusion into durable agent memory remains a separate user-approved
+memory proposal.
+
 ## 13. Structured engineering jobs
 
 The engineering agent is a normal agent profile with an optional user-selected
@@ -530,31 +772,42 @@ only isolates Git changes.
 ### Job lifecycle and approvals
 
 ```mermaid
-sequenceDiagram
-    actor U as User
-    participant J as Job service
-    participant W as Worktree manager
-    participant R as StructuredProcessRunner
-    participant C as Codex CLI / Claude Code
-    participant P as Promotion service
-
-    U->>J: Start job with repository, base ref, runtime, and scope
-    J->>W: Create dedicated branch and worktree
-    J->>R: Preflight strict sandbox and typed policy
-    alt sandbox unavailable or weaker than policy
-        R-->>U: Refuse to start with audited reason
-    else sandbox proven
-        R->>C: Launch structured non-interactive mode
-        C-->>R: JSON/JSONL events, commands, changes, result
-        R-->>J: Untrusted normalized telemetry and final status
-        J->>J: Derive diff, rerun checks, create platform checkpoint
-        J-->>U: Checks, diff, checkpoint, risks, and review summary
-        U->>P: Approve exact source commit and target for merge
-        P->>P: Revalidate and apply exact local merge candidate
-        P-->>U: Show exact merged commit and remote/ref proposal
-        U->>P: Separately approve exact push
-        P->>P: Revalidate exact commit, remote, ref, and push
-    end
+---
+config:
+  theme: base
+  themeCSS: "svg { background-color: #2B2F36 !important; }"
+  themeVariables:
+    darkMode: true
+    background: "#2B2F36"
+    primaryColor: "#414750"
+    primaryTextColor: "#F8F9FA"
+    primaryBorderColor: "#AAB2BD"
+    secondaryColor: "#343A40"
+    secondaryTextColor: "#F8F9FA"
+    secondaryBorderColor: "#9AA4AF"
+    tertiaryColor: "#4B525C"
+    tertiaryTextColor: "#FFFFFF"
+    tertiaryBorderColor: "#C5CCD3"
+    lineColor: "#D0D7DE"
+    textColor: "#F8F9FA"
+    edgeLabelBackground: "#343A40"
+    clusterBkg: "#30353C"
+    clusterBorder: "#8C959F"
+---
+flowchart TB
+    Start["User submits repository, base ref,<br/>runtime, scope, and limits"] --> Worktree["Job service creates dedicated<br/>branch and worktree"]
+    Worktree --> Preflight["Preflight strict sandbox<br/>and typed policy"]
+    Preflight --> Proven{"Required sandbox proven?"}
+    Proven -->|no| Refuse["Refuse start and audit reason"]
+    Proven -->|yes| Launch["Launch Codex CLI or Claude Code<br/>in structured non-interactive mode"]
+    Launch --> Telemetry["Normalize untrusted JSON or JSONL<br/>events, commands, changes, and result"]
+    Telemetry --> Verify["Independently derive diff<br/>rerun checks<br/>create platform checkpoint"]
+    Verify --> Review["TUI shows checks, diff,<br/>risks, and review summary"]
+    Review --> Merge["User approves exact local merge"]
+    Merge --> RevalidateMerge["Revalidate and apply<br/>exact merge candidate"]
+    RevalidateMerge --> PushProposal["Show merged commit<br/>and exact remote/ref proposal"]
+    PushProposal --> Push["User separately approves exact push"]
+    Push --> RevalidatePush["Revalidate exact commit,<br/>remote, ref, and push"]
 ```
 
 ### Mandatory sandbox policy
@@ -710,7 +963,8 @@ state. Ordered migrations manage schema changes. Important records include:
 - connection metadata and opaque secret references;
 - MCP entries, review records, versions, grants, and activations;
 - KV memory, episodic summaries, and memory proposals;
-- rooms, pinned participants, messages, evidence references, and results;
+- rooms, pinned participants, ordered messages, human-routing targets, pending
+  queues, evidence references, budgets, checkpoints, and results;
 - engineering jobs, normalized events, worktrees, commits, and checks;
 - finance plan versions and deterministic validation reports; and
 - typed approvals, rejections, cancellations, and promotion outcomes.
@@ -718,6 +972,73 @@ state. Ordered migrations manage schema changes. Important records include:
 Operational events are append-only and have stable IDs, actor, timestamp,
 correlation ID, object version/digest, and redacted payload. Mutable views such
 as “current agent version” are projections over versioned records.
+
+For a room, the numbered append-only event stream is authoritative. It includes
+the proposal and pinned versions, state transitions, user messages and targets,
+agent turn starts and completed messages, structured claims and evidence,
+provisional stream chunks, MCP activity, response obligations, pause/cancel
+requests, budget reservations/reconciliation and user overrides,
+`PartialMessage` decisions, synthesis, `PartialRoomResult`, validation, and
+failure records. A TUI transcript or status panel is a rebuildable projection
+of those events, not a second source of truth.
+
+At every safe turn boundary, the application transactionally records the last
+applied event ID plus a rebuildable checkpoint containing room phase, next
+speaker, pending user messages, ordered `@all` obligations, remaining finite
+budgets, unresolved claims/questions, evidence references, and pinned context
+versions. No next provider turn starts until that boundary is durable.
+
+Streaming chunks remain provisional until the coordinator commits a completed
+message. Any provider stream interrupted before commit—by timeout, explicit
+cancel, handled shutdown, process death, or power loss—is projected as a visible
+`PartialMessage` but excluded from summaries, context packets, evidence, and
+synthesis. The room opens paused and the user chooses either retry, which creates
+a new turn linked to the interrupted attempt, or skip, which records why the
+attempt was omitted.
+
+```mermaid
+---
+config:
+  theme: base
+  themeCSS: "svg { background-color: #2B2F36 !important; }"
+  themeVariables:
+    darkMode: true
+    background: "#2B2F36"
+    primaryColor: "#414750"
+    primaryTextColor: "#F8F9FA"
+    primaryBorderColor: "#AAB2BD"
+    secondaryColor: "#343A40"
+    secondaryTextColor: "#F8F9FA"
+    secondaryBorderColor: "#9AA4AF"
+    tertiaryColor: "#4B525C"
+    tertiaryTextColor: "#FFFFFF"
+    tertiaryBorderColor: "#C5CCD3"
+    lineColor: "#D0D7DE"
+    textColor: "#F8F9FA"
+    edgeLabelBackground: "#343A40"
+    clusterBkg: "#30353C"
+    clusterBorder: "#8C959F"
+---
+flowchart TB
+    Input["User, coordinator, provider,<br/>or MCP produces a typed event"] --> Log["Append numbered room event<br/>to SQLite"]
+    Log --> Boundary{"Safe turn boundary?"}
+    Boundary -->|yes| Checkpoint["Persist rebuildable room checkpoint"]
+    Boundary -->|no| Draft["Keep stream chunks provisional"]
+    Checkpoint --> Restart["On resume: load checkpoint<br/>and replay later events"]
+    Draft --> Restart
+    Restart --> PartialMessage{"Incomplete visible turn?"}
+    PartialMessage -->|yes| Decision["Label PartialMessage and open paused<br/>user chooses retry or skip"]
+    PartialMessage -->|no| Context["Build bounded context<br/>for the next pinned agent"]
+    Decision --> Context
+    Context --> Next["User resumes one live room"]
+```
+
+On normal resume, the application loads the latest valid checkpoint, replays all
+later events, verifies sequence and object digests, rebuilds projections, and
+then constructs provider-independent agent context. A missing or corrupt
+checkpoint is discarded and rebuilt from the event stream. Corrupt authoritative
+events stop recovery with an inspectable error; the platform never guesses or
+silently drops transcript history.
 
 Secret values live in the operating-system credential store or the owning
 runtime's supported login store. SQLite stores only opaque references and safe
@@ -731,7 +1052,13 @@ Failing safely is part of the interface:
 
 | Failure | Required behavior |
 |---|---|
-| Provider timeout or malformed output | Bounded retry, then labeled partial/failure result |
+| Provider timeout or interrupted stream | Stop at its deadline, expose any draft only as `PartialMessage`, exclude it from context, and require retry or skip |
+| Malformed normal synthesis or exhausted closing call | Build a clearly labeled `PartialRoomResult` deterministically from committed structured material; make no further model call |
+| Graceful TUI exit | Record pause, cancel/join background work, keep `Pausing` visible while only the in-flight turn drains to its existing deadline, checkpoint, restore terminal state, and exit |
+| Handled terminal or renderer loss | Restore terminal state promptly, perform the same bounded drain in the foreground process, checkpoint, and exit; never daemonize |
+| Abrupt death during a visible response | Recover provisional chunks as `PartialMessage`, open paused, and require user retry or skip |
+| Missing or corrupt room checkpoint | Rebuild it from authoritative events; stop with an inspectable error if authoritative events are corrupt |
+| Room context cannot be rebuilt within policy | Keep the room paused and explain the missing/corrupt source; never invent a summary or silently omit history |
 | MCP unavailable or schema changed | Release lease, mark evidence unavailable, never fabricate |
 | Sandbox preflight fails | Do not start the engineering child process |
 | Job times out or is cancelled | Runner kills the contained process tree, marks interrupted, preserves worktree |
@@ -757,6 +1084,13 @@ runtime sandboxes, worktree isolation, minimal environments, secret brokering,
 network limits, deterministic finance gates, exact approval digests, and an
 append-only audit trail.
 
+The TUI is not a trusted authority boundary. Every action crosses the same typed
+application-command and policy checks as fallback command mode. Provider, MCP,
+repository, and memory text is rendered as untrusted content: control characters
+and terminal escape sequences are removed or visibly escaped so model output
+cannot rewrite the screen, spoof an approval, alter the title/clipboard, or
+inject input.
+
 Version 1 trusts the local operating-system account, compiled application,
 qualified runtime binary and adapter, and operating-system sandbox backend as
 enforcement components. It does not claim to defend against an
@@ -773,6 +1107,23 @@ Implementation phases must include tests at the boundary being introduced:
   and deny-wins policy behavior;
 - adapter contract tests using fake providers, fake runtimes, and fake MCPs;
 - migration and crash-recovery tests with temporary SQLite databases;
+- reducer and headless-view-model tests proving the TUI renders only committed
+  application state and cannot bypass command policy;
+- deterministic terminal snapshots across supported minimum widths, resize,
+  dark/high-contrast, and monochrome modes, plus panic/signal terminal-restore
+  tests;
+- room-ordering tests for one visible speaker, concurrent background status,
+  event-ID/FIFO queued-human priority, stable `@all` ordering, Chief-default
+  routing, interruption and replanning of sealed first-pass batches,
+  auto-continuation, pause/resume/step/cancel, and finite user-only overrides;
+- budget-ledger tests for conservative per-call reservation, usage
+  reconciliation, unknown-usage charging, concurrent-work exclusion, protected
+  closing allowance, `AwaitingExtension`, and deterministic
+  `PartialRoomResult` fallback without an extra model call;
+- replay tests for one-live-room switching, graceful disconnect, abrupt death,
+  `PartialMessage` retry/skip, checkpoint rebuilding, bounded context
+  reconstruction, and exclusion of `PartialMessage` output and hidden
+  reasoning;
 - negative sandbox tests for unauthorized reads/writes, home and credential
   paths, symlink/hardlink escapes, network access, environment leakage, Git
   metadata writes, orphan processes, and permissive fallback attempts;
@@ -780,7 +1131,8 @@ Implementation phases must include tests at the boundary being introduced:
   adapter version tuple;
 - MCP lifecycle/concurrency and activation-time artifact/schema digest tests;
 - Git integration tests proving merge and push approvals are separate and exact;
-- transcript tests proving independent first passes remain sealed; and
+- transcript tests proving independent first passes remain sealed and untrusted
+  control sequences cannot affect terminal state; and
 - opt-in live smoke tests that require user-provided connections and never run in
   the default test suite.
 
@@ -796,7 +1148,9 @@ The following are deliberate extensions, not missing foundation work:
   fail-closed per-job guardian required above is internal version 1 machinery;
 - virtual-machine or remote worker execution;
 - unrestricted or permission-bypass coding modes;
-- web/mobile/full-screen TUI clients;
+- web, mobile, or remote-attachment clients;
+- background-daemon room execution;
+- multiple simultaneously auto-running rooms or simultaneous visible speakers;
 - multi-user accounts, remote hosting, and team authorization;
 - community MCP installation and arbitrary executable skills;
 - dynamically loaded domain-code plugins;
@@ -815,6 +1169,8 @@ rather than treating examples in this document as immutable command lines:
 - [Claude Code headless mode](https://code.claude.com/docs/en/headless)
 - [Claude Code sandboxing](https://code.claude.com/docs/en/sandboxing)
 - [Model Context Protocol specification](https://modelcontextprotocol.io/specification/)
+- [Mermaid flowchart direction](https://mermaid.js.org/syntax/flowchart.html)
+- [Mermaid theme configuration](https://mermaid.js.org/config/theming.html)
 
 ## 21. Documentation precedence
 
