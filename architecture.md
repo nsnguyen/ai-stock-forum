@@ -18,17 +18,17 @@ the user creates AI agent profiles and lets them work alone or in structured
 discussions. An agent profile can have its own:
 
 - name, specialty, personality, and instructions;
-- model/provider or compatible agent-runtime binding;
+- direct model-provider binding;
 - versioned skills;
 - persistent memory;
 - approved MCP access; and
 - optional engineering-runtime binding.
 
 Finance is the first domain pack, not the platform boundary. A Bull and a Bear
-can both run through Hermes, while another agent uses the approved initial direct
-provider set: OpenAI, Anthropic, or xAI. The same core should later support
-engineering, research, or other domains without rebuilding orchestration,
-permissions, memory, or auditing.
+can use the same or different models from the approved initial direct-provider
+set: OpenAI, Anthropic, or xAI. The same core should later support engineering,
+research, or other domains without rebuilding orchestration, permissions,
+memory, or auditing.
 
 The experience is inspired by a multi-agent group discussion, but the platform
 does not copy or depend on Grok's implementation. Agents first form independent
@@ -46,8 +46,8 @@ Version 1 is:
 
 - one local Rust executable with an interactive shell;
 - single-user and terminal-only;
-- provider-neutral, with direct provider adapters as the primary path;
-- compatible with Hermes through a narrow optional adapter, never built on it;
+- provider-neutral at the core, with OpenAI, Anthropic, and xAI direct-provider
+  adapters as the only discussion-agent inference paths;
 - an internal, user-approved MCP marketplace with per-agent grants;
 - a bounded multi-agent discussion coordinator and Chief of Staff;
 - a safe engineering-job runner for Codex CLI or Claude Code;
@@ -60,6 +60,7 @@ Version 1 is not:
 - a cloud or multi-user service;
 - a broker or order-execution system;
 - a community marketplace for unreviewed MCP servers or executable skills;
+- Hermes or any other external discussion-agent runtime;
 - a virtual-machine manager;
 - an unrestricted coding-agent host; or
 - an autonomous system allowed to merge or push code.
@@ -72,8 +73,7 @@ permissions and implementation details from leaking across boundaries.
 | Term | Meaning | Example |
 |---|---|---|
 | **Agent profile** | Versioned platform configuration; not an always-running process | `Bear Analyst` |
-| **Provider adapter** | Calls a model API directly | OpenAI, Anthropic, xAI |
-| **Agent-runtime adapter** | Invokes another agent system behind the platform contract | Hermes |
+| **Inference backend** | Normalized interface for model calls; only direct-provider implementations exist in version 1 | OpenAI, Anthropic, xAI |
 | **Engineering runtime** | A coding CLI launched for a bounded repository job | Codex CLI, Claude Code |
 | **Skill** | Versioned instructions and resources; never a permission grant | `earnings-quality-v1` |
 | **MCP entry** | Approved metadata and launch/connection definition for a tool server | read-only GEX server |
@@ -85,14 +85,15 @@ permissions and implementation details from leaking across boundaries.
 | **Worktree** | Git change isolation for one job; not a security boundary | job branch checkout |
 
 A single agent profile may have both an inference binding and an engineering
-binding. The user chooses both. The agent may not change either binding itself.
-Hermes is the optional agent runtime discussed for version 1. Herdr is a
-different terminal supervisor and is deferred.
+binding. In version 1, inference always binds directly to a provider API; the
+optional engineering binding selects Codex CLI or Claude Code. The user chooses
+both, and the agent may not change either binding itself. Hermes and Herdr are
+different external projects, and both are deferred beyond version 1.
 
 ## 4. Non-negotiable safety invariants
 
 These rules apply in every phase and cannot be weakened by a prompt, skill,
-Chief of Staff, provider, MCP response, or agent-runtime response.
+Chief of Staff, provider, MCP response, or engineering-runtime output.
 
 1. The user can inspect, interrupt, or cancel any room or job.
 2. Explicit denial wins over every grant.
@@ -133,9 +134,8 @@ flowchart TB
         App --> Store["SQLite state and append-only events"]
     end
 
-    Rooms --> Inference["Provider and agent-runtime adapters"]
+    Rooms --> Inference["Direct provider adapters"]
     Inference --> APIs["OpenAI / Anthropic / xAI APIs"]
-    Inference --> Hermes["Optional Hermes runtime"]
 
     McpBroker --> ApprovedMcp["Approved MCP servers"]
 
@@ -164,8 +164,8 @@ ai-stock-forum/
 │   ├── policy/                 # capabilities, grants, denials, approvals
 │   ├── agents/                 # profiles, executions, normalized messages
 │   ├── rooms/                  # bounded discussion state machine
-│   ├── providers/              # direct model-provider adapters
-│   ├── runtimes/               # Hermes and engineering CLI adapters
+│   ├── providers/              # inference contract and direct API adapters
+│   ├── runtimes/               # Codex and Claude engineering CLI adapters
 │   ├── skills/                 # manifests, versions, relevance loading
 │   ├── memory/                 # KV and bounded episodic retrieval
 │   ├── mcp/                    # catalog, grants, broker, schema loading
@@ -182,6 +182,10 @@ ai-stock-forum/
 Start with Rust modules. Extract a separate crate only when an interface needs
 independent compilation or stronger dependency control. Domain packs are
 compiled into the binary in version 1; arbitrary dynamic code plugins are not.
+The `providers` module owns a normalized inference-backend contract so rooms do
+not depend on vendor payloads. Version 1 implements that contract only with
+direct APIs. A future external runtime such as Hermes could implement the same
+boundary after a separate design review without changing room orchestration.
 
 ## 6. Authority and policy model
 
@@ -246,9 +250,7 @@ AgentProfileVersion
 ├── specialties[]
 ├── personality
 ├── operating_instructions
-├── inference_binding
-│   ├── direct_provider { connection_id, model }
-│   └── agent_runtime { runtime_id, profile_ref }
+├── inference_binding { direct_provider_connection_id, model }
 ├── optional_engineering_binding { runtime_id }
 ├── skill_version_refs[]
 ├── mcp_grant_refs[]
@@ -261,17 +263,13 @@ Editing creates a new immutable version and shows a diff before activation.
 Rooms pin profile versions so a later edit cannot silently change an in-flight
 discussion. A specialty is fixed for the lifetime of that pinned version; an
 agent cannot change its own role during a room. Two profiles may use the same
-Hermes installation while retaining different instructions, memory namespaces,
-skills, and grants.
+direct provider connection and model while retaining different instructions,
+memory namespaces, skills, and grants.
 
-Hermes is therefore an optional runtime adapter, not the meaning of “agent” and
-not the platform's foundation. Its adapter must return the same normalized
-events and obey the same policy boundaries as direct providers. It is available
-only if the adapter proves per-profile runtime state, credentials, memory, and
-tool/MCP isolation; bounded execution correlation and cancellation; and
-brokered enforcement of every tool request. If Hermes lacks a stable structured
-interface or any required isolation, the platform reports it unavailable; it
-does not screen-scrape or weaken isolation.
+Version 1 does not launch an external discussion-agent runtime. The normalized
+inference contract remains intentionally replaceable, but no Hermes adapter,
+Hermes authentication, Hermes profile state, or Hermes qualification work is in
+the version 1 implementation scope.
 
 ## 8. Interactive shell
 
@@ -311,16 +309,18 @@ Supported connection kinds are deliberately distinct:
 
 1. **Direct API connection:** an API key stored by the operating-system secret
    store and referenced from SQLite by an opaque ID.
-2. **Runtime-managed login:** a user signs in through an installed CLI or agent
-   runtime. The platform records availability and a non-secret account label;
-   it does not copy that runtime's token or convert it into an API key.
+2. **Engineering-runtime-managed login:** a user signs in through an installed
+   Codex CLI or Claude Code runtime. The platform records availability and a
+   non-secret account label; it does not copy that runtime's token or convert it
+   into a direct-provider API key.
 3. **Local MCP connection:** an approved executable or endpoint definition with
    pinned metadata and no embedded secret values.
 
-Direct OpenAI API access and ChatGPT/Codex runtime login are separate connection
-types. The same rule applies to Anthropic API keys and Claude Code login. Hermes
-may use whatever legitimate authentication mode it officially supports, but the
-platform never impersonates a subscription or extracts its credentials.
+Direct OpenAI API access for a discussion agent and ChatGPT-managed Codex login
+for an engineering job are separate connection types. The same rule applies to
+Anthropic API keys and Claude Code login. A runtime-managed login is never
+offered as a discussion-agent inference binding, and the platform never
+impersonates a subscription or extracts its credentials.
 
 All adapters emit normalized events such as:
 
@@ -480,9 +480,9 @@ Version 1 uses a hybrid model:
   inserted into prompts.
 
 Retrieval is scoped by agent, room, purpose, and size budget. Private memory is
-not shared merely because two profiles use the same provider or Hermes runtime.
-Cross-agent sharing happens through the room transcript or an explicit user
-action and is audited.
+not shared merely because two profiles use the same provider connection or
+model. Cross-agent sharing happens through the room transcript or an explicit
+user action and is audited.
 
 ## 13. Structured engineering jobs
 
@@ -791,6 +791,7 @@ provider, subscription, live broker, or real secret.
 
 The following are deliberate extensions, not missing foundation work:
 
+- Hermes or another external discussion-agent runtime adapter;
 - Herdr or another general-purpose external terminal supervisor; the narrow
   fail-closed per-job guardian required above is internal version 1 machinery;
 - virtual-machine or remote worker execution;

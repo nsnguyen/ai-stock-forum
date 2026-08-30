@@ -66,10 +66,6 @@ flowchart LR
     P2 --> P3["Phase 3<br/>MCP marketplace and broker"]
     P3 --> P4["Phase 4<br/>Chief and discussion rooms"]
 
-    P2 --> PHC["Hermes contract adapter"]
-    PHC --> PHQ["Hermes MCP qualification"]
-    P3 --> PHQ
-
     P3 --> P5["Phase 5<br/>Sandboxed engineering jobs"]
     P5 --> P6["Phase 6<br/>Separate merge and push gates"]
 
@@ -81,11 +77,9 @@ flowchart LR
     P8 --> P9
 ```
 
-The Hermes contract adapter can start after Phase 2; its full tool qualification
-also depends on Phase 3. Neither milestone may delay core work or force changes
-that couple the platform to Hermes. Core version 1 does not block on an external
-Hermes installation, but the product may advertise Hermes as `supported` only
-after both qualification gates pass.
+Discussion-agent inference uses only the three direct-provider adapters in
+version 1. The normalized inference contract remains provider-neutral so a
+future external runtime can be designed without changing the room coordinator.
 
 ## 3. Cross-phase architecture decisions
 
@@ -93,8 +87,10 @@ These choices are already approved and should not be reopened inside an
 implementation phase unless new evidence shows they are impossible:
 
 - one Rust modular monolith and one interactive terminal executable;
-- direct provider adapters as the primary inference path;
-- Hermes behind an optional common runtime adapter;
+- OpenAI, Anthropic, and xAI direct-provider adapters as the only version 1
+  discussion-agent inference paths;
+- a normalized inference contract that preserves a post-version-1 extension
+  seam without implementing an external agent runtime;
 - Chief of Staff as a policy-constrained coordinator, with the user above it;
 - versioned agent profiles, skills, memory, policy, and approvals;
 - user-approved internal MCP entries and lazy per-turn tool-schema loading;
@@ -204,7 +200,7 @@ history; and activate a reviewed profile revision.
 
 - Editing always creates a new version; existing versions and pinned references
   remain immutable.
-- Two profiles bound to the same placeholder runtime retain different
+- Two profiles bound to the same placeholder provider retain different
   personalities, skills, grants, and memory namespaces.
 - An agent-authored memory change cannot become durable without user approval.
 - A skill cannot add an MCP, provider, filesystem, network, or Git capability.
@@ -214,8 +210,8 @@ history; and activate a reviewed profile revision.
 
 ### Explicitly deferred
 
-Real model calls, Hermes, MCP connections, rooms, engineering children, and
-finance-specific skills.
+Real direct-provider model calls, MCP connections, rooms, engineering children,
+and finance-specific skills.
 
 ## Phase 2 — Connections, normalized inference, and single-agent runs
 
@@ -232,14 +228,15 @@ be routed to a minimally configured Chief profile.
 
 ### Scope
 
-- Define the common provider/agent-runtime request, structured-output, tool-loop,
+- Define the common inference-provider request, structured-output, tool-loop,
   usage, cancellation, and normalized-event contracts.
 - Implement a deterministic fake provider for all default tests.
 - Add `/connection add|list|test|remove` with connection type, safe account
   label, availability, and secret reference.
 - Integrate the operating-system credential store for direct API keys. Never
   persist or display the raw key after entry.
-- Represent runtime-managed login separately from direct API keys. Do not copy,
+- Represent Codex/Claude engineering-runtime login separately from direct API
+  keys for later job bindings. It is not an inference connection. Do not copy,
   export, or reinterpret subscription/session credentials.
 - Add direct OpenAI, Anthropic, and xAI adapters behind the same contract.
 - Add bounded retries, deadlines, cancellation, output-schema validation,
@@ -266,44 +263,8 @@ be routed to a minimally configured Chief profile.
 ### Explicitly deferred
 
 Multi-agent rooms, MCP use, engineering CLI launch, and automatic fallback from
-one provider/runtime to another.
-
-## Hermes compatibility track — optional adapter, never a foundation
-
-### Timing and rule
-
-Adapter/interface work starts after Phase 2 defines the common runtime contract.
-Full tool/MCP qualification starts only after Phase 3. The track can otherwise
-run alongside later phases. No core module may import Hermes-specific types.
-
-### Scope
-
-- Verify Hermes' current, supported non-interactive or service interface,
-  authentication behavior, cancellation, structured output, and tool support.
-- Map it into the normalized agent-runtime contract without terminal
-  screen-scraping or parsing human-formatted UI text.
-- Prove isolation of each platform profile's prompt, skills, native/runtime
-  state, credentials, memory, tools, and MCP grants even when profiles share one
-  Hermes installation.
-- Pass only the MCP capability metadata and transient tool configuration selected
-  by the platform broker; never expose the entire internal marketplace.
-- Treat ChatGPT or other subscription login as runtime-managed authentication.
-  Do not extract credentials or pretend it is a direct provider API key.
-- Report installation/login/contract incompatibility as `Unavailable`; never
-  weaken policy or silently switch the agent to another runtime.
-
-### Qualification gate
-
-- Two profiles using Hermes can return different role-bound outputs without
-  sharing runtime state, credentials, private memory, tools, or permissions.
-- Structured execution correlation, cancellation, timeouts, token/tool
-  accounting when available, and broker enforcement of every lazy MCP request
-  pass the runtime contract tests.
-- A Hermes failure does not affect direct-provider agents or room persistence.
-
-Hermes is a version 1 compatibility target, but it is not a dependency for core
-development. A release may label Hermes `supported` only after this gate passes;
-otherwise it must be labeled experimental or unavailable rather than simulated.
+one provider to another. External discussion-agent runtimes such as Hermes are
+excluded from all version 1 phases.
 
 ## Phase 3 — Internal MCP marketplace and lazy tool broker
 
@@ -412,12 +373,12 @@ and receives a synthesis with evidence, uncertainty, and dissent.
 
 ### Exit gate
 
-- A Bull and Bear can use the same provider/runtime while retaining separate
-  pinned profiles and sealed first passes.
+- A Bull and Bear can use the same direct provider connection/model while
+  retaining separate pinned profiles and sealed first passes.
 - No unrestricted agent-to-agent channel exists outside coordinator events.
 - Turn/time/token/cost limits always terminate with a labeled partial result.
-- The Chief cannot add ungranted agents/MCPs, change a profile/runtime, approve a
-  memory mutation, or override a denial.
+- The Chief cannot add ungranted agents/MCPs, change a profile/provider binding,
+  approve a memory mutation, or override a denial.
 - Synthesis fixtures prove that dissent and unavailable evidence are not erased.
 - Cancellation and crash recovery leave an inspectable audit trail.
 
@@ -613,7 +574,7 @@ missing, conflicting, or unavailable before any trade conclusion.
   projections that retain source references.
 - Provide fixed finance specialties such as Bull, Bear, technical/GEX,
   fundamental/catalyst, options structure, and risk/liquidity; user profiles may
-  bind these roles to any compatible provider/runtime.
+  bind these roles to any configured direct provider/model.
 - Record missing sources explicitly and prevent models from filling them with
   uncited guesses.
 - Use synthetic data fixtures and deterministic clocks in default tests.
@@ -728,8 +689,8 @@ approve merge, push, memory, and finance-plan actions.
   persistence.
 - Add resource quotas, log rotation/retention controls, redacted audit export,
   backup/restore guidance, health diagnostics, and migration recovery tooling.
-- Fuzz command parsing, normalized provider/runtime events, MCP manifests/results,
-  finance inputs, and persisted event decoding.
+- Fuzz command parsing, normalized provider and engineering-runtime events, MCP
+  manifests/results, finance inputs, and persisted event decoding.
 - Add crash tests across every durable workflow state and confirm idempotent
   restart behavior.
 - Verify owner-only file permissions and secret redaction across logs, errors,
@@ -741,8 +702,8 @@ approve merge, push, memory, and finance-plan actions.
   state, force attempts, stale approvals, and dirty user checkouts.
 - Add installation/setup/status documentation, command reference, sample safe
   profiles, synthetic finance demo, and troubleshooting guidance.
-- Provide clear adapter capability/availability reporting. Hermes is labeled
-  supported only if its separate qualification gate passed.
+- Provide clear provider and engineering-runtime capability/availability
+  reporting.
 - Produce a reproducible release build and software-bill-of-materials/dependency
   audit appropriate for a local security-sensitive tool.
 
@@ -766,10 +727,9 @@ approve merge, push, memory, and finance-plan actions.
 Version 1 is complete only when all applicable phase gates pass and the user can:
 
 - create and version agents with fixed specialties, personality, skills, memory,
-  model/runtime bindings, and MCP grants;
+  direct model bindings, optional engineering-runtime bindings, and MCP grants;
 - use direct OpenAI, Anthropic, and xAI connections without storing raw keys in
   application data;
-- use Hermes only through the common adapter when its qualification gate passes;
 - ask the Chief to coordinate bounded rooms while retaining user control;
 - let agents lazily select only granted entries from an approved internal MCP
   marketplace;
@@ -788,6 +748,7 @@ Version 1 is complete only when all applicable phase gates pass and the user can
 
 After version 1, separate design reviews may consider:
 
+- Hermes or another external discussion-agent runtime adapter;
 - Herdr or another general-purpose external terminal supervisor; the narrow
   fail-closed per-job guardian in Phase 5 remains required version 1 machinery;
 - web, full-screen TUI, or mobile clients;
