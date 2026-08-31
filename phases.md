@@ -1,7 +1,7 @@
 # AI Stock Forum — Agent Platform Delivery Phases
 
-**Status:** Approved version 1 roadmap, including the full-screen TUI and
-live-participation design
+**Status:** Approved version 1 roadmap, including the full-screen TUI,
+first-run configuration, and live-participation design
 
 **Updated:** 2026-08-30
 
@@ -100,18 +100,19 @@ flowchart TB
     P1 --> P2["Phase 2<br/>Profiles, skills, memory"]
     P2 --> P3["Phase 3<br/>Connections and single-agent chat"]
     P3 --> P4["Phase 4<br/>MCP marketplace and broker"]
-    P4 --> P5["Phase 5<br/>Chief and bounded room engine"]
-    P5 --> P6["Phase 6<br/>Live room TUI and recovery"]
+    P4 --> P5["Phase 5<br/>First-run setup and readiness"]
+    P5 --> P6["Phase 6<br/>Chief and bounded room engine"]
+    P6 --> P7["Phase 7<br/>Live room TUI and recovery"]
 
-    P4 --> P7["Phase 7<br/>Sandboxed engineering jobs"]
-    P7 --> P8["Phase 8<br/>Separate merge and push gates"]
+    P6 --> P8["Phase 8<br/>Sandboxed engineering jobs"]
+    P8 --> P9["Phase 9<br/>Separate merge and push gates"]
 
-    P6 --> P9["Phase 9<br/>Finance evidence pack"]
-    P9 --> P10["Phase 10<br/>Defined-risk trade decisions"]
+    P7 --> P10["Phase 10<br/>Finance evidence pack"]
+    P10 --> P11["Phase 11<br/>Defined-risk trade decisions"]
 
-    P6 --> P11["Phase 11<br/>Hardening and release"]
-    P8 --> P11
-    P10 --> P11
+    P7 --> P12["Phase 12<br/>Hardening and release"]
+    P9 --> P12
+    P11 --> P12
 ```
 
 Discussion-agent inference uses only the three direct-provider adapters in
@@ -130,6 +131,16 @@ implementation phase unless new evidence shows they are impossible:
   discussion-agent inference paths;
 - a normalized inference contract that preserves a post-version-1 extension
   seam without implementing an external agent runtime;
+- a deterministic, resumable first-run setup with Quick Start and Customize
+  paths backed by the same typed commands, schema, validation, and audit events;
+- versioned built-in Quick Start templates that never invent credentials,
+  enable provider fallback, or grant MCP access by default;
+- immutable applied installation configurations, editable only by creating and
+  reviewing a new setup draft/version through `/setup` or Settings;
+- capability-specific readiness: missing configuration disables only the
+  dependent operation with an explanation and never triggers a silent fallback;
+- credential values flow directly to the operating-system secret broker, while
+  setup drafts, projections, snapshots, and audits contain opaque references;
 - Chief of Staff as a policy-constrained coordinator, with the user above it;
 - versioned agent profiles, skills, memory, policy, and approvals;
 - user-approved internal MCP entries and lazy per-turn tool-schema loading;
@@ -174,9 +185,9 @@ without depending on a terminal renderer.
 ### User-visible result
 
 The user can start one executable in fallback command mode, run `/help`,
-`/status`, `/audit tail`, and `/quit`, and restart without losing the local
-installation identity or event history. The same use cases pass headlessly
-through typed commands and events for the Phase 1 TUI.
+`/status`, `/setup status`, `/audit tail`, and `/quit`, and restart without
+losing the local installation identity or event history. The same use cases
+pass headlessly through typed commands and events for the Phase 1 TUI.
 
 ### Scope
 
@@ -200,6 +211,9 @@ through typed commands and events for the Phase 1 TUI.
   normalized event envelopes.
 - Add SQLite migrations, transactions, owner-only local state permissions, and
   an append-only event repository.
+- Add installation identity, setup-draft, installation-configuration-version,
+  setup-step-outcome, and capability-readiness event/projection skeletons. Phase
+  5 supplies the complete guided setup state machine.
 - Add configuration discovery using platform-appropriate application directories;
   keep secrets out of configuration and SQLite.
 - Add the initial deny-wins capability vocabulary and typed approval record
@@ -219,6 +233,8 @@ through typed commands and events for the Phase 1 TUI.
   paths are tested.
 - Commands flow presentation adapter → application service → repository and
   generate typed events that rebuild the same projection.
+- `/setup status` reports that guided setup is not yet implemented without
+  inventing readiness or writing an applied configuration.
 - Unknown commands and malformed input cannot panic the process.
 - `cargo fmt`, strict linting, unit tests, and integration tests pass.
 - No Python, Node, browser, provider credential, subscription, or network access
@@ -255,6 +271,9 @@ windows without hiding critical status or actions.
 - Add a workspace shell with header/status, primary content, collapsible
   activity/help region, persistent composer, command palette, notifications, and
   contextual key help.
+- Add the first-launch setup shell, step navigation, progress, review, and
+  interrupted-draft projections using placeholder setup data. Phase 5 connects
+  the complete Quick Start/Customize workflow and applies configurations.
 - Keep wide layouts useful while collapsing secondary regions into tabs on
   narrow terminals; define and test a supported minimum size and an explicit
   too-small fallback screen.
@@ -284,8 +303,8 @@ windows without hiding critical status or actions.
 
 ### Explicitly deferred
 
-Agent editors, provider chat, MCP views, live rooms, engineering jobs, Git
-promotion, and finance-specific screens.
+Complete first-run setup behavior, agent editors, provider chat, MCP views, live
+rooms, engineering jobs, Git promotion, and finance-specific screens.
 
 ## Phase 2 — Agent profiles, skills, and hybrid memory
 
@@ -309,6 +328,9 @@ profile revision.
   field-level diffs, and activation confirmation.
 - Add TUI list/detail/editor/history views for profiles, skills, memory, and
   proposals; every action maps to the same typed commands as fallback mode.
+- Expose reusable typed draft validators and safe built-in starter-profile
+  template versions so Phase 5 can configure agents without a second editor or
+  a privileged setup-only write path.
 - Support separate inference and optional engineering bindings as references;
   the actual adapters arrive later.
 - Implement versioned declarative skill manifests, content, static resources,
@@ -335,6 +357,8 @@ profile revision.
   before activation.
 - TUI and fallback command mode produce identical profile versions, memory
   proposals, approval events, and validation failures for the same inputs.
+- Applying a profile choice from a synthetic setup draft produces the same
+  immutable profile version as the normal guided editor.
 - Migration, retrieval-budget, isolation, and approval tests pass.
 
 ### Explicitly deferred
@@ -376,6 +400,9 @@ minimally configured Chief profile.
   views. Streaming deltas are draft state until a completed message commits.
 - Add guided connection setup/testing and model binding in the TUI with fallback
   command parity and no secret value in any view model or snapshot.
+- Expose the same connection/runtime commands, independent test outcomes, and
+  rebuildable readiness predicates to setup drafts. Credential entry writes
+  directly to the secret broker and returns only an opaque reference.
 - Build prompt context from the pinned profile, personality, relevant skill
   versions, scoped memory, and application policy—not from the full database.
 - Add a minimal Chief profile template. At this phase it can converse and route
@@ -392,6 +419,9 @@ minimally configured Chief profile.
 - Removing a connection makes dependent profiles unavailable without deleting
   their configuration or silently selecting another model.
 - A runtime-managed login cannot be read back as an API key.
+- A failed provider or runtime test marks only its dependent capability
+  unavailable, includes redacted remediation, and never selects another
+  connection automatically.
 - Cancellation, timeout, malformed structured output, rate-limit, and redaction
   behavior is tested.
 - Streaming, navigation, resize, cancellation, and provider failure remain
@@ -426,6 +456,9 @@ the activity/audit views.
   `/mcp grant|revoke|status`.
 - Add marketplace, entry-review, per-agent grant, health, lease, and tool-activity
   TUI views backed by the same commands and events.
+- Expose approved-entry selection and exact per-agent grant commands to setup
+  drafts. The empty grant set is valid and is the default for every Quick Start
+  template.
 - Implement separate concurrent records: `EntryVersion` approval/revocation,
   `Grant(profile, entry_digest)` activation/revocation, and
   `ActivationLease(grant, operation)` selection/activation/release.
@@ -459,6 +492,9 @@ the activity/audit views.
 
 - Catalog approval does not grant an agent access, and a grant does not start a
   server or load a schema.
+- A setup draft cannot approve a marketplace entry. Built-in Quick Start
+  templates contain no grants; if the user adds a grant in the MCP configuration
+  step, that exact choice must be committed to the draft before final review.
 - An agent can select only from its granted subset; denied/revoked requests fail
   before process/network activity.
 - Only selected schemas appear in recorded prompt-context manifests.
@@ -481,7 +517,143 @@ the activity/audit views.
 Community discovery, automatic installation, unpinned updates, and general
 write-capable MCP actions.
 
-## Phase 5 — Chief of Staff and bounded room engine
+## Phase 5 — First-run setup, configuration, and readiness
+
+### Objective
+
+Turn the configuration capabilities from Phases 0–4 into one deterministic,
+resumable first-run experience without giving setup a privileged path around
+normal validation, secrets, permissions, or auditing.
+
+### User-visible result
+
+On a clean launch, the user chooses Quick Start or Customize in the full-screen
+TUI, configures the desired uses, connections, agents, skills, memory, and MCP
+grants, reviews the exact result, and applies it. The user can save and quit at
+any step, resume after restart, and later edit the same configuration with
+`/setup` or Settings. Missing optional configuration disables only affected
+actions and explains how to make them ready.
+
+### Scope
+
+- Implement a typed setup state machine with `NotStarted`, `Drafting`,
+  `Reviewing`, `ValidationBlocked`, `Applied`, and `Interrupted` states.
+- Persist `SetupDraftCreated`, accepted step outcomes, navigation decisions,
+  validation results, safe connection-test results, review digests, apply or
+  reject decisions, supersession, and readiness changes as redacted events.
+- Save after every accepted step. Support back, skip for optional categories,
+  save-and-quit, resume, and switching between Customize and a Quick Start
+  proposal without discarding explicit compatible choices.
+- Require at least one intended use plus valid local policy, finite-default, and
+  retention choices. Provider connections, engineering runtimes, runnable agent
+  bindings, MCP grants, and domain preferences may be explicitly skipped; a
+  skipped category is durable and may leave dependent actions unavailable.
+- Implement versioned built-in Quick Start templates selected from the user's
+  intended uses: general discussion, finance research, engineering jobs, or an
+  available combination. Templates are ordinary draft input to the same typed
+  validators and commands as Customize.
+- Keep every Quick Start template conservative: never invent a credential or
+  runtime login, never enable provider/runtime fallback, never weaken policy,
+  and start with no MCP grants.
+- Guide Customize through direct OpenAI/Anthropic/xAI connections and model
+  bindings; optional Codex CLI/Claude Code runtime-managed login checks; starter
+  or custom agents; fixed specialties, personalities, instructions, skills, and
+  memory namespaces; approved MCP entries and exact per-agent grants; finite
+  room defaults with a protected closing allowance; local history, summary,
+  audit-retention, and redacted-export preferences; and finance preference
+  ceilings.
+- Treat finance setup values as preference ceilings only. A future finance room
+  still needs a current explicit risk budget and capacity snapshot before a
+  recommendation can become eligible.
+- Add a policy-checked secret-entry command that returns a one-use, expiring,
+  purpose-bound `SecretInputSession`. The TUI and fallback adapter use a
+  non-echoing interactive prompt to send credential bytes directly to the
+  operating-system secret broker; fallback mode refuses when it cannot provide
+  that channel. Persist and render only an opaque reference, safe label, and
+  redacted outcome; never accept a raw value in command text/arguments, a pipe,
+  environment variables, a setup command, draft, application event, SQLite,
+  view model, snapshot, log, or export.
+- Keep secret input out of the normal composer/history path. Hold it only in a
+  guarded mutable buffer that zeroizes on success, rejection, cancellation,
+  broker failure, and unwind/drop; never copy it into clipboard handling,
+  panic/error payloads, or retained application state.
+- Give secret writes an opaque idempotency/reconciliation token. If interrupted,
+  reconcile an existing receipt or ask the user to retry or request broker
+  deletion of a quarantined item. Remove local state only after the broker
+  confirms deletion/absence; never blindly repeat the write, infer the value,
+  or orphan an unknown credential. A new entry session never clears an older
+  unresolved quarantine.
+- Test every selected direct connection and engineering runtime independently,
+  retaining redacted failures and remediation without automatically switching
+  providers or runtimes.
+- Compute rebuildable readiness per operation rather than one global configured
+  bit. Keep the shell, setup, Settings, help, audit, and safe profile inspection
+  available; require an explicitly tested provider and valid agent binding for
+  discussion; report engineering-runtime readiness while leaving sandbox
+  qualification to Phase 8; and make MCP readiness depend on an approved,
+  granted entry only when the requested workflow needs it.
+- Add a final review that shows intended uses, exact template/version, safe
+  connection labels and test state, runtime bindings, agent/profile versions,
+  skills, memory namespaces, exact MCP grants, finite room defaults, retention
+  and redacted-export preferences, finance ceilings, policy effects, skipped
+  items, failures, and the proposed installation-configuration version—never
+  secret values. The review is read-only; an edit returns to the applicable
+  step, durably changes the draft, and creates a new canonical review digest.
+- Require an explicit apply action over the final canonical review digest.
+  Atomically require that it equals the draft's current digest; any edit clears
+  earlier review authorization, and a delayed apply with a superseded digest is
+  rejected. One SQLite transaction keyed by draft ID plus current digest creates
+  or reuses the draft's single immutable `InstallationConfigurationVersion`,
+  updates the active pointer, marks the draft applied, appends audit, and updates
+  or invalidates readiness projections. Retry after an uncertain outcome returns
+  the same version. Later edits create a new draft, diff, review digest, and
+  version.
+- Define the pin contract requiring future rooms and jobs to record the
+  installation-configuration, profile, policy, binding, skill/memory, and MCP
+  versions with which they started, so Settings cannot mutate in-flight work.
+- Add `/setup start|resume|status|edit` plus the equivalent first-launch and
+  Settings workspaces. TUI and fallback paths use the same commands, events,
+  validation failures, review digest, and apply operation, including the same
+  secret-session request and safe receipt events; credential bytes never become
+  an application command in either adapter.
+
+### Exit gate
+
+- A clean installation opens the setup workspace before the normal room
+  workspace, and setup itself requires no Chief or model call.
+- Quick Start and Customize complete end to end with fake providers, runtimes,
+  secret broker, and MCP catalog in the offline default suite.
+- Quit, crash, and restart at every step resume the exact durable draft state;
+  interruption around a secret write cannot duplicate, reveal, or orphan a
+  secret; every application-owned prompt buffer is zeroized on all exit paths;
+  and non-interactive fallback input refuses credential entry.
+- Quick Start always presents the exact resulting configuration before apply,
+  every built-in template begins with an empty MCP grant set, any user-added
+  grant is durable before the read-only review, and no normal validator or
+  policy denial can be bypassed.
+- The apply predicate requires the intended-use/local-policy decisions and an
+  explicit outcome for every category, while allowing a clearly disclosed
+  configuration with zero currently runnable provider/runtime capabilities.
+- Failed or skipped configuration makes only dependent operations visibly
+  `Unavailable` with redacted remediation; no silent provider/runtime selection
+  or permission expansion occurs.
+- Review/apply is digest-bound and produces an immutable configuration version.
+  Editing invalidates the old digest, and delayed application of it fails. Crash
+  tests before, during, and after commit either roll back while preserving the
+  prior active pointer—or none on first install—or return the same applied
+  version and pointer. Editing through `/setup` or Settings produces a new
+  version and does not change any pinned room or job.
+- Headless TUI snapshots and fallback tests prove behavioral parity, readable
+  dark/monochrome rendering, exact review contents, no secret fields, and safe
+  handling of narrow terminals and interrupted drafts.
+
+### Explicitly deferred
+
+Cloud-synchronized/shared setup profiles, automatic credential import,
+community Quick Start templates, automatic provider/runtime fallback, and
+remote or multi-user onboarding.
+
+## Phase 6 — Chief of Staff and bounded room engine
 
 ### Objective
 
@@ -494,7 +666,7 @@ The user asks the Chief a question, reviews or edits a proposed roster and room
 budget, starts one bounded room, watches a basic ordered transcript of named
 agents, and receives a synthesis with evidence, uncertainty, and dissent. The
 engine is fully exercisable with fake providers before the richer participatory
-room TUI arrives in Phase 6.
+room TUI arrives in Phase 7.
 
 ### Scope
 
@@ -505,8 +677,9 @@ room TUI arrives in Phase 6.
   publishing, challenge, rebuttal, pause-requested, paused, synthesis,
   validating, awaiting-extension, awaiting-partial-message-decision, completed,
   completed-partial-room-result, failed, and cancelled.
-- Pin agent, skill, policy, memory-snapshot, model, and MCP-entry versions at room
-  start.
+- Pin the active installation-configuration version plus agent profiles,
+  provider/model bindings, skills, policy, memory snapshots, and MCP entry/grant
+  versions at room start.
 - Let the Chief propose objective, roster, evidence needs, allowed capability
   categories, round count, time, token, and cost budgets from existing grants,
   including the closing allowance reserved inside those finite totals.
@@ -588,6 +761,8 @@ room TUI arrives in Phase 6.
 - Interrupted provider streams become excluded `PartialMessage` records and
   cannot advance until the user records retry or skip.
 - No next turn starts before its predecessor and checkpoint boundary are durable.
+- Editing setup or Settings after room start cannot change any pinned
+  configuration, profile, provider/model, policy, skill/memory, or MCP version.
 - Event replay and context-reconstruction fixtures reproduce the same next
   speaker, FIFO queue, reservations, working/closing balances, unresolved work,
   and transcript from temporary SQLite.
@@ -599,7 +774,7 @@ exit, multiple live rooms, simultaneous visible speakers, finance
 recommendations, unlimited debates, and majority voting as an authority
 mechanism.
 
-## Phase 6 — Live participatory room TUI and durable recovery
+## Phase 7 — Live participatory room TUI and durable recovery
 
 ### Objective
 
@@ -690,7 +865,7 @@ Background daemon execution, remote attachment, multiple simultaneously running
 rooms, simultaneous visible speakers, voice, web/mobile clients, and finance
 recommendations.
 
-## Phase 7 — Strictly sandboxed engineering jobs
+## Phase 8 — Strictly sandboxed engineering jobs
 
 ### Objective
 
@@ -715,6 +890,10 @@ cannot merge or push.
 - Let the Chief create a policy-bounded job proposal using only already allowed
   repositories, agents, runtimes, MCP grants, and limits. Starting it requires
   explicit user acceptance; an edit creates a new proposal digest.
+- When the user accepts, pin the installation-configuration, agent-profile,
+  policy, engineering binding/runtime/adapter, skill, memory-snapshot, and MCP
+  entry/grant versions together with repository identity, base object, scope,
+  and finite limits. Later Settings edits affect only a new proposal.
 - Implement repository/base-ref validation and a dedicated job branch/worktree
   manager. Treat worktrees as change isolation, not security.
 - Implement `StructuredProcessRunner` using explicit executable/argument arrays,
@@ -773,6 +952,9 @@ cannot merge or push.
   and signed-in runtime.
 - A Chief proposal cannot start itself, broaden its scope after acceptance, or
   bypass the same sandbox/worktree gates as a user-authored job.
+- Editing setup or Settings after acceptance cannot change the job's pinned
+  configuration, profile, runtime/adapter, policy, skill/memory, MCP, repository,
+  scope, or limit versions.
 - TUI and fallback commands create identical job specifications and cancellation
   events, and app exit/owner-death containment cannot leave a hidden child
   running.
@@ -783,7 +965,7 @@ cannot merge or push.
 Merge, push, deployment, arbitrary host directories, dirty-working-tree import,
 and remote workers.
 
-## Phase 8 — Review, exact merge approval, and separate push approval
+## Phase 9 — Review, exact merge approval, and separate push approval
 
 ### Objective
 
@@ -858,7 +1040,7 @@ expected-old-object lease.
 Force push, automatic pull/rebase, branch deletion, tags, PR creation,
 deployment, release, and any combined “merge and push” command.
 
-## Phase 9 — Finance evidence and GEX domain pack
+## Phase 10 — Finance evidence and GEX domain pack
 
 ### Objective
 
@@ -916,7 +1098,7 @@ missing, conflicting, or unavailable before any trade conclusion.
 Trade eligibility, payoff/risk calculations, plan approval, continuously
 streaming market feeds, and broker writes.
 
-## Phase 10 — Deterministic defined-risk recommendations
+## Phase 11 — Deterministic defined-risk recommendations
 
 ### Objective
 
@@ -993,7 +1175,7 @@ Unsupported multi-expiration structures, naked options, margin-dependent
 unbounded positions, live orders, paper orders, auto-refresh/reapproval, and
 portfolio automation.
 
-## Phase 11 — Security hardening, recovery, and version 1 release
+## Phase 12 — Security hardening, recovery, and version 1 release
 
 ### Objective
 
@@ -1012,15 +1194,16 @@ actions.
 
 - Perform end-to-end threat-model review for prompt injection, MCP compromise,
   credential leakage, terminal-control injection/UI spoofing, sandbox escape
-  attempts, approval confusion, and corrupted persistence.
+  attempts, setup-template/configuration abuse, approval confusion, and
+  corrupted persistence.
 - Add resource quotas, log rotation/retention controls, redacted audit export,
   backup/restore guidance, health diagnostics, and migration recovery tooling.
 - Fuzz command parsing, normalized provider and engineering-runtime events, MCP
   manifests/results, finance inputs, persisted event decoding, TUI reducers, and
   untrusted display strings.
-- Add crash tests across every durable workflow state and safe turn boundary;
-  confirm idempotent restart, one-live-room enforcement, `PartialMessage`
-  exclusion, and retry/skip behavior.
+- Add crash tests across every durable setup step, secret-write reconciliation
+  point, workflow state, and safe turn boundary; confirm idempotent restart,
+  one-live-room enforcement, `PartialMessage` exclusion, and retry/skip behavior.
 - Verify owner-only file permissions and secret redaction across logs, errors,
   exports, child environments, and support bundles.
 - Re-run sandbox negative conformance for every advertised
@@ -1028,7 +1211,8 @@ actions.
   longer proves all required capabilities.
 - Run negative Git tests for protected refs, changing remotes, non-fast-forward
   state, force attempts, stale approvals, and dirty user checkouts.
-- Add installation/setup/status documentation, command reference, sample safe
+- Add first-run Quick Start/Customize documentation, `/setup` and Settings
+  editing guidance, readiness remediation, command reference, sample safe
   profiles, synthetic finance demo, and troubleshooting guidance.
 - Run TUI accessibility and rendering QA across the supported terminal-size
   matrix, dark/high-contrast and monochrome modes, keyboard-only operation,
@@ -1051,8 +1235,11 @@ actions.
 - One visible speaker, event-ID/FIFO queued-human priority, finite user-only
   budget overrides, protected closing allowance, one live room, safe TUI
   shutdown, and durable resume remain invariant in the packaged release.
+- A clean install exercises both Quick Start and Customize, survives restart at
+  every step, shows an exact secret-free review, applies an immutable
+  configuration, and later edits it through `/setup` and Settings.
 - A fresh user can follow the docs without relying on the obsolete web/Python
-  plans.
+  plans, and unavailable capabilities always show specific remediation.
 - Known limitations are documented; unsupported adapters/features show
   unavailable rather than silently falling back.
 
@@ -1062,6 +1249,14 @@ Version 1 is complete only when all applicable phase gates pass and the user can
 
 - launch a responsive full-screen TUI as the primary client while retaining a
   policy-equivalent fallback command mode;
+- on a clean install choose Quick Start or Customize; configure intended uses,
+  provider/runtime connections, agents, skills, memory, exact MCP grants, room
+  defaults, retention, and finance ceilings; save and resume at any step; review
+  and apply a secret-free immutable configuration; and later edit it through
+  `/setup` or Settings;
+- keep configured capabilities usable while missing or failed configuration
+  leaves only dependent actions unavailable with explicit remediation and no
+  silent fallback or permission expansion;
 - create and version agents with fixed specialties, personality, skills, memory,
   direct model bindings, optional engineering-runtime bindings, and MCP grants;
 - use direct OpenAI, Anthropic, and xAI connections without storing raw keys in
@@ -1092,11 +1287,13 @@ After version 1, separate design reviews may consider:
 
 - Hermes or another external discussion-agent runtime adapter;
 - Herdr or another general-purpose external terminal supervisor; the narrow
-  fail-closed per-job guardian in Phase 7 remains required version 1 machinery;
+  fail-closed per-job guardian in Phase 8 remains required version 1 machinery;
 - web, mobile, or remote-attachment clients;
 - background-daemon room execution, multiple simultaneously auto-running rooms,
   or simultaneous visible speakers;
 - remote workers, VMs, and multi-user/cloud operation;
+- cloud-synchronized/shared setup profiles, automatic credential import, and
+  community Quick Start templates;
 - community MCP distribution and executable plugin packages;
 - write-capable MCP workflows with domain-specific approval policies;
 - additional compile-time domain packs;

@@ -1,7 +1,7 @@
 # AI Stock Forum — Agent Platform Architecture
 
-**Status:** Approved version 1 architecture, including the full-screen TUI and
-live-participation design
+**Status:** Approved version 1 architecture, including the full-screen TUI,
+first-run configuration, and live-participation design
 
 **Updated:** 2026-08-30
 
@@ -44,11 +44,16 @@ operating-system `root` user.
 
 ## 2. Version 1 boundary
 
-Version 1 is:
+The full-screen terminal user interface is an included, required version 1
+feature. It is not part of the exclusion list below.
+
+Version 1 explicitly includes:
 
 - one local Rust executable with an integrated event-driven application core;
 - single-user and terminal-only, with a full-screen TUI as the primary client
   and a line-oriented command mode as a fallback and test adapter;
+- a resumable first-run setup flow with Quick Start and Customize paths, plus
+  later editing through `/setup` and Settings;
 - provider-neutral at the core, with OpenAI, Anthropic, and xAI direct-provider
   adapters as the only discussion-agent inference paths;
 - an internal, user-approved MCP marketplace with per-agent grants;
@@ -57,10 +62,9 @@ Version 1 is:
 - a finance pack for evidence-backed swing-trade research; and
 - recommendation and code-change support only, with explicit human approvals.
 
-Version 1 is not:
+Version 1 explicitly excludes:
 
-- a web, mobile, or remote application, nor an application with concurrently
-  attached clients;
+- web, mobile, or remote applications and concurrently attached clients;
 - a background daemon that keeps rooms spending after the TUI exits;
 - a cloud or multi-user service;
 - a broker or order-execution system;
@@ -91,6 +95,10 @@ permissions and implementation details from leaking across boundaries.
 | **TUI** | Primary full-screen presentation adapter; never the owner of business rules | transcript, roster, evidence, approvals |
 | **Application command** | Typed request from the TUI or fallback command adapter | `QueueHumanMessage` |
 | **Application event** | Typed result emitted after application validation and persistence | `HumanMessageQueued` |
+| **Setup draft** | Durable, resumable first-run choices that grant no authority until reviewed and applied | provider and starter-agent choices |
+| **Installation configuration** | Immutable applied setup version containing non-secret choices and references | enabled uses, defaults, connection IDs |
+| **Readiness result** | Rebuildable capability-specific check explaining what can run and what remains unavailable | rooms ready; engineering runtime missing |
+| **Secret input session** | One-use, expiring, purpose-bound channel from a non-echoing terminal prompt directly to the secret broker | enter an OpenAI API key without an application command carrying it |
 | **Safe turn boundary** | Durable point after one visible turn finishes and before another starts | committed agent response |
 | **PartialMessage** | An interrupted provider stream that remains visible but is excluded from debate context | response interrupted by timeout or power loss |
 | **PartialRoomResult** | A deterministic room-level result built from committed material when normal model synthesis cannot finish | deadline expires before synthesis completes |
@@ -147,6 +155,20 @@ Chief of Staff, provider, MCP response, or engineering-runtime output.
     queue decision, budget state, and checkpoint boundary are durable.
 17. A `PartialMessage` is never evidence or debate context. The user must choose
     retry or skip before the room can continue.
+18. Quick Start may propose safe templates, but a built-in template may not
+    invent credentials, approve MCP entries, contain MCP grants, enable a
+    provider/runtime fallback, or weaken a denial. If the user adds an exact MCP
+    grant during setup, that choice must be durable in the draft before the
+    read-only final review; built-in templates start with no grants.
+19. Incomplete setup blocks only operations whose explicit readiness
+    requirements are missing. It never causes silent defaults or broader
+    permissions; the TUI, help, audit, setup, and settings remain available.
+20. Applying a setup draft is bound to its canonical review digest and is an
+    atomic, idempotent state transition. Apply must reject any digest other than
+    the draft's current review digest, and every draft edit invalidates earlier
+    review authorization. A retry after interruption returns the same
+    configuration version; it never creates a duplicate or ambiguously changes
+    which version is active.
 
 ## 5. System overview
 
@@ -184,7 +206,7 @@ flowchart TB
     Command --> Boundary
     Boundary --> App["Application service"]
     App -.->|"typed events"| Boundary
-    App --> Core["Policy engine · Chief · rooms<br/>profiles · skills · memory<br/>engineering jobs · domain packs"]
+    App --> Core["Setup and readiness · policy engine<br/>Chief · rooms · profiles · skills · memory<br/>engineering jobs · domain packs"]
     Core --> Boundaries["Durable and controlled boundaries<br/>SQLite events · projections · checkpoints<br/>adapters · finance evidence · risk validation"]
     Boundaries --> ModelTools["Direct provider and MCP paths<br/>OpenAI / Anthropic / xAI<br/>approved MCP servers"]
     Boundaries --> Coding["Engineering runtime path<br/>Codex CLI / Claude Code"]
@@ -216,6 +238,7 @@ ai-stock-forum/
 │   ├── ui/
 │   │   ├── tui/                # full-screen renderer, input, view models
 │   │   └── command/            # fallback command parser and text renderer
+│   ├── setup/                   # first-run drafts, presets, readiness checks
 │   ├── policy/                 # capabilities, grants, denials, approvals
 │   ├── agents/                 # profiles, executions, normalized messages
 │   ├── rooms/                  # bounded discussion state machine
@@ -360,7 +383,143 @@ the version 1 implementation scope.
 
 The executable opens a full-screen terminal user interface by default. It is
 the primary version 1 product surface, not a decorative wrapper around a REPL.
-Its normal workspace contains:
+
+### First-run setup and configuration
+
+When no applied installation configuration exists, the TUI opens a deterministic
+setup workspace before the normal room workspace. Setup does not require the
+Chief or any model call. It creates a durable `SetupDraft` after the first
+choice, saves each accepted step, and resumes at the last incomplete step after
+quit, crash, or restart.
+
+The user chooses one of two paths backed by the same typed commands, draft
+schema, validation, and audit events:
+
+- **Quick Start** proposes a small safe baseline from versioned built-in
+  templates after the user selects intended uses. It never fabricates a key or
+  runtime login, and every built-in template contains an empty MCP grant set.
+  The user may add exact grants in the MCP configuration step, then sees and
+  approves the resulting configuration before it becomes active.
+- **Customize** exposes every setup category in a guided sequence. The user may
+  move backward, save and quit, skip optional categories, or switch to the
+  Quick Start proposal without losing explicitly entered choices.
+
+The guided categories are:
+
+1. intended uses: general discussion, finance research, engineering jobs, or
+   any combination available in version 1;
+2. direct discussion-provider connections and models: OpenAI, Anthropic, and
+   xAI, with secrets written directly to the operating-system credential store;
+3. optional engineering runtimes: Codex CLI and Claude Code, represented as
+   runtime-managed logins rather than discussion API keys;
+4. starter or custom agent profiles, including fixed specialty, personality,
+   provider/model binding, instructions, skills, and memory namespace;
+5. approved internal MCP entries and explicit per-agent grants, with no
+   automatic grant and no schema activation during setup;
+6. room defaults: finite round, active-time, token, and cost caps, including a
+   closing allowance reserved inside the total;
+7. local history, summary, audit-retention, and redacted-export preferences; and
+8. finance preferences such as swing horizon, allowed defined-risk strategy
+   families, and concentration limits. These are policy ceilings, not a current
+   trade authorization; every finance room still requires a current explicit
+   risk budget and capacity snapshot.
+
+Credential entry uses a policy-checked `SecretInputSession`, not an application
+command containing the credential. The TUI or fallback adapter first requests a
+one-use, purpose-bound, expiring session through the application service. It
+then reads the value through a non-echoing terminal prompt and sends the bytes
+directly to the secret broker. The broker returns only an opaque reference and
+safe outcome to the application. Fallback mode refuses secret entry when it
+cannot establish an interactive non-echoing terminal; credentials are never
+accepted through command arguments, command text, environment variables, or a
+pipe.
+
+The secret prompt is separate from the normal composer and command parser. Its
+application-owned mutable byte buffer is guarded for zeroization and is erased
+on success, rejection, cancellation, broker failure, and unwind/drop. It never
+enters input history, clipboard handling, panic/error payloads, logs, view
+models, or retained application state.
+
+Each configured connection/runtime is tested independently. The final review
+shows selected templates and versions, safe connection labels, agent bindings,
+skills, memory namespaces, MCP grants, finite room defaults, retention and
+redacted-export preferences, finance ceilings, policy effects, failed or skipped
+checks, and the proposed configuration version. The final review is read-only:
+changing any choice returns to its configuration step and produces a new
+canonical review digest. Secret values are never shown in the review, view
+model, SQLite, audit payload, or exported setup summary.
+
+A draft may become `Applied` only after the user selects at least one intended
+use, validates required local policy/default/retention fields, explicitly skips
+or completes every remaining category, resolves every pending secret operation,
+and approves the canonical review digest. A tested provider, runtime, or MCP
+grant is not required to apply; their absence may leave every dependent action
+unavailable, which the review must state plainly.
+
+```mermaid
+---
+config:
+  theme: base
+  themeCSS: "svg { background-color: #2B2F36 !important; }"
+  themeVariables:
+    darkMode: true
+    background: "#2B2F36"
+    primaryColor: "#414750"
+    primaryTextColor: "#F8F9FA"
+    primaryBorderColor: "#AAB2BD"
+    secondaryColor: "#343A40"
+    secondaryTextColor: "#F8F9FA"
+    secondaryBorderColor: "#9AA4AF"
+    tertiaryColor: "#4B525C"
+    tertiaryTextColor: "#FFFFFF"
+    tertiaryBorderColor: "#C5CCD3"
+    lineColor: "#D0D7DE"
+    textColor: "#F8F9FA"
+    edgeLabelBackground: "#343A40"
+    clusterBkg: "#30353C"
+    clusterBorder: "#8C959F"
+---
+flowchart TB
+    Launch["First launch or /setup"] --> Draft["Create or resume durable SetupDraft"]
+    Draft --> Mode["Choose Quick Start or Customize"]
+    Mode --> Uses["Select intended uses and domain features"]
+    Uses --> Connections["Configure and test providers<br/>and optional engineering runtimes"]
+    Connections --> Agents["Choose or create agents<br/>skills, personality, and memory"]
+    Agents --> Tools["Review approved MCP entries<br/>and grant none or selected entries"]
+    Tools --> Defaults["Set finite room defaults<br/>retention and finance ceilings"]
+    Defaults --> Review["Review exact configuration<br/>secrets remain hidden"]
+    Review --> Readiness["Apply version and compute<br/>capability-specific readiness"]
+    Readiness --> Workspace["Enter TUI workspace<br/>unready operations stay unavailable"]
+```
+
+Readiness is capability-specific rather than one global “configured” flag. A
+discussion room requires a tested direct provider plus at least one valid agent
+binding. An engineering job requires the selected installed runtime and later
+passes the job sandbox preflight. MCP is optional unless a particular workflow
+requires an approved entry. A finance recommendation additionally requires its
+evidence and deterministic-risk inputs. Missing readiness leaves the affected
+action visibly unavailable with remediation, while setup, Settings, help,
+audit, profile editing, and other ready capabilities remain usable.
+
+`/setup start|resume|status|edit` and the Settings workspace reopen the same
+flow after first run. Editing an applied setup creates a new draft and an exact
+diff; applying it creates a new immutable installation-configuration version.
+Existing rooms and jobs keep their pinned versions, and no edit silently changes
+in-flight work. Apply is one idempotent SQLite transaction keyed by draft ID and
+canonical review digest: it creates or reuses the immutable configuration
+version, updates the active pointer, marks the draft applied, appends the audit
+event, and updates or invalidates rebuildable readiness projections together.
+The transaction first requires the supplied digest to equal the draft's current
+review digest and rejects every superseded digest; any draft edit invalidates
+the earlier review authorization. If an initial apply rolls back, no version is
+active. If a replacement apply rolls back, the prior active version and pointer
+remain unchanged. If apply committed, retry returns that same version and
+rebuilds projections as needed.
+
+### Normal room workspace
+
+After setup is applied—or while the user browses with some capabilities still
+unready—the normal workspace contains:
 
 - a room header with objective, phase, connection health, and finite remaining
   round/time/token/cost budgets;
@@ -396,6 +555,7 @@ that mode and through the TUI command palette.
 
 | Command | Purpose |
 |---|---|
+| `/setup start|resume|status|edit` | Run first-time setup or revise applied configuration |
 | `/agent create|list|show|edit|history` | Manage versioned agent profiles |
 | `/room new|list|show|send|pause|resume|step|cancel` | Run and control discussions |
 | `/room retry-partial-message|skip-partial-message` | Resolve an interrupted visible turn |
@@ -408,7 +568,7 @@ that mode and through the TUI command palette.
 | `/job start|list|show|cancel|diff` | Manage engineering jobs |
 | `/approve show|accept|reject` | Resolve exact pending actions |
 | `/audit show|tail|export` | Inspect normalized events and decisions |
-| `/settings`, `/help`, `/quit` | Configure, learn, and request safe shutdown |
+| `/settings`, `/help`, `/quit` | Reopen configuration, learn, and request safe shutdown |
 
 Plural aliases such as `/skills` and `/agents` may map to the corresponding
 `list` commands. `/agent edit` uses a guided editor by default. An optional
@@ -471,6 +631,11 @@ publish extra speakers. Only the room coordinator can promote one completed
 draft into the ordered shared transcript, so the user never sees two agents
 speaking simultaneously.
 
+First-run setup and later Settings edits call these same typed connection
+commands and readiness checks. Quick Start supplies only versioned template
+inputs; it cannot bypass the separation between discussion API credentials,
+runtime-managed logins, and MCP connection metadata.
+
 ## 10. Chief of Staff and room discussion flow
 
 The Chief listens to the user, asks only necessary questions, and converts a
@@ -478,6 +643,11 @@ request into a bounded room proposal: objective, roster, evidence needs,
 available MCP categories, maximum rounds, time budget, token budget, and cost
 budget. The proposal also shows the closing allowance reserved inside those
 finite limits. The user may edit, accept, interrupt, or cancel it.
+
+Acceptance pins the active installation-configuration version together with the
+exact agent profiles, provider/model bindings, skills, memory snapshots, policy,
+MCP entry/grant versions, and domain-pack policy used by the room. Later setup
+or Settings edits affect only new work.
 
 Agents do not have an unrestricted peer network. The coordinator routes typed
 messages and owns ordering, deadlines, checkpoints, and the audit trail. Any
@@ -536,7 +706,7 @@ config:
 flowchart TB
     Ask["User asks Chief"] --> Proposal["Chief proposes objective, roster,<br/>evidence, finite limits, and closing allowance"]
     Proposal --> Accept["User accepts,<br/>edits, or cancels"]
-    Accept --> Pin["After acceptance: pin profiles, skills,<br/>memory, models, policy, and MCP entries"]
+    Accept --> Pin["After acceptance: pin installation config,<br/>profiles, skills, memory, models,<br/>policy, and MCP entries/grants"]
     Pin --> Research["Agents gather evidence concurrently<br/>no conversational response yet"]
     Research --> Boundary["At each safe boundary:<br/>process FIFO human input first"]
     Boundary --> Replan["If the user intervened:<br/>close the first-pass batch and<br/>replan from a new sealed snapshot"]
@@ -733,6 +903,13 @@ engineering binding. Its default may be Codex CLI or Claude Code, and the user
 may override that choice for a particular job. The profile and runtime cannot
 switch themselves.
 
+An accepted `EngineeringJobSpec` pins its installation-configuration version,
+agent-profile version, policy version, engineering binding/runtime and adapter
+versions, skill versions, approved memory snapshot, MCP entry/grant versions,
+repository identity, base object, scope, and finite limits. A later `/setup` or
+Settings edit affects only a new proposal; it cannot change a queued, running,
+interrupted, or reviewable job.
+
 ### What StructuredProcessRunner is
 
 `StructuredProcessRunner` is ordinary Rust code that supervises a child process.
@@ -740,7 +917,8 @@ It receives a typed specification rather than a shell command string:
 
 ```text
 ProcessSpec
-├── approved_runtime_id
+├── job_id and pinned configuration/policy digest
+├── approved_runtime_id and adapter version
 ├── executable and fixed adapter-owned arguments
 ├── structured prompt on stdin
 ├── isolated worktree cwd
@@ -959,6 +1137,8 @@ and policy version.
 SQLite is the local source of truth for configuration and recoverable workflow
 state. Ordered migrations manage schema changes. Important records include:
 
+- setup drafts, immutable installation-configuration versions, step outcomes,
+  and rebuildable capability-readiness results;
 - versioned agents, skills, policy profiles, and runtime bindings;
 - connection metadata and opaque secret references;
 - MCP entries, review records, versions, grants, and activations;
@@ -972,6 +1152,24 @@ state. Ordered migrations manage schema changes. Important records include:
 Operational events are append-only and have stable IDs, actor, timestamp,
 correlation ID, object version/digest, and redacted payload. Mutable views such
 as “current agent version” are projections over versioned records.
+
+Setup events include draft creation and resume, path and category choices,
+template versions, validation and connection-test outcomes, opaque secret
+reference creation without secret values, the final review digest, apply or
+reject decisions, supersession, and readiness changes. An applied installation
+configuration is immutable. Editing it creates a new draft and, when approved,
+a new version rather than mutating history.
+
+`ApplyInstallationConfiguration` is uniquely keyed by draft ID and canonical
+review digest, requires that digest to be the draft's current review digest, and
+permits at most one applied configuration per draft. Every draft edit clears
+the earlier review authorization. Creation of the immutable version,
+active-version pointer update, draft transition, audit event, and
+readiness-projection update occur in one SQLite transaction. Readiness remains
+rebuildable from the committed version and events. A retry after an uncertain
+outcome returns the already-committed version or performs the transition once;
+it cannot activate a superseded review or create another version for the same
+draft.
 
 For a room, the numbered append-only event stream is authoritative. It includes
 the proposal and pinned versions, state transitions, user messages and targets,
@@ -1046,12 +1244,24 @@ labels. Logs redact known secret values, authorization headers, environment
 values, and raw credential files. Database and exported audit files use
 owner-only filesystem permissions by default.
 
+The secret broker supports purpose-bound idempotency receipts and deletion by
+opaque receipt/reference. An interrupted entry stays quarantined until the
+broker confirms the original item or confirms its deletion/absence. The user may
+retry through a new session, but that never clears the old quarantine; each
+opaque receipt must be reconciled independently. The application never drops
+only its reference while a broker item might remain orphaned.
+
 ## 16. Failure behavior
 
 Failing safely is part of the interface:
 
 | Failure | Required behavior |
 |---|---|
+| Quit, crash, or power loss during setup | Resume the last durable `SetupDraft`; never apply an incomplete draft or blindly repeat a successful secret write |
+| Draft changes after final review | Invalidate the earlier review authorization, return to drafting/review, and reject every delayed apply carrying the superseded digest |
+| Crash before, during, or after configuration apply | Roll back the proposed transition—preserving the prior active version, or none on first install—or reconcile by draft ID plus current review digest and return the same applied version; never duplicate a version or leave an ambiguous pointer |
+| Provider or runtime test fails during setup | Mark only the dependent capability `Unavailable`, preserve a redacted error and remediation, and allow unrelated ready capabilities to continue |
+| Pending secret write cannot be reconciled | Quarantine the opaque pending reference; retry entry or request broker deletion, and remove local state only after confirmed deletion/absence; never display or infer the secret value |
 | Provider timeout or interrupted stream | Stop at its deadline, expose any draft only as `PartialMessage`, exclude it from context, and require retry or skip |
 | Malformed normal synthesis or exhausted closing call | Build a clearly labeled `PartialRoomResult` deterministically from committed structured material; make no further model call |
 | Graceful TUI exit | Record pause, cancel/join background work, keep `Pausing` visible while only the in-flight turn drains to its existing deadline, checkpoint, restore terminal state, and exit |
@@ -1091,6 +1301,19 @@ and terminal escape sequences are removed or visibly escaped so model output
 cannot rewrite the screen, spoof an approval, alter the title/clipboard, or
 inject input.
 
+Setup is not an authority shortcut. Quick Start is versioned built-in input to
+the same validators as Customize; it cannot approve an MCP entry, create a grant
+without the user's exact choice, extract a runtime-managed login, or enable
+provider fallback. During credential entry, the value goes directly to the
+secret broker through a one-use, expiring, purpose-bound `SecretInputSession`;
+the application receives only an opaque reference and safe label. Both TUI and
+fallback mode must pass the same policy command before opening that channel.
+The fallback adapter uses a non-echoing interactive prompt or refuses the
+operation, so parity never requires putting a secret in ordinary command text.
+That dedicated prompt bypasses composer/history code and zeroizes its mutable
+application buffer on every success, rejection, cancellation, failure, and
+unwind/drop path.
+
 Version 1 trusts the local operating-system account, compiled application,
 qualified runtime binary and adapter, and operating-system sandbox backend as
 enforcement components. It does not claim to defend against an
@@ -1112,6 +1335,14 @@ Implementation phases must include tests at the boundary being introduced:
 - deterministic terminal snapshots across supported minimum widths, resize,
   dark/high-contrast, and monochrome modes, plus panic/signal terminal-restore
   tests;
+- first-run tests for Quick Start and Customize, per-step save/resume,
+  back/switch/skip behavior, exact review and apply, immutable configuration
+  versions, empty-by-default MCP grants, setup/Settings/fallback parity, secret
+  channel policy/non-echo/refusal, buffer zeroization on every exit path, and
+  redaction; the minimum apply predicate; rejection of superseded review
+  digests; capability-specific readiness; crash recovery around secret writes;
+  and before/during/after-commit apply recovery returning the same version while
+  preserving any prior active version;
 - room-ordering tests for one visible speaker, concurrent background status,
   event-ID/FIFO queued-human priority, stable `@all` ordering, Chief-default
   routing, interruption and replanning of sealed first-pass batches,
@@ -1154,6 +1385,8 @@ The following are deliberate extensions, not missing foundation work:
 - multi-user accounts, remote hosting, and team authorization;
 - community MCP installation and arbitrary executable skills;
 - dynamically loaded domain-code plugins;
+- cloud-synchronized or shared setup profiles, automatic credential import, and
+  community-provided Quick Start templates;
 - broker write access, order staging, or order execution;
 - automatic runtime switching by an agent;
 - unrestricted peer-to-peer agent messaging;
