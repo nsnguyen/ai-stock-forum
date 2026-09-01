@@ -25,8 +25,8 @@ use ai_stock_forum::{
     runtime::{ApplicationRuntime, CommandExecutor, RuntimeError},
     setup::SetupStatus,
     ui::command::{
-        parse_line, BoundedLineReader, FallbackHost, FallbackRunner, ParsedLine, TextRenderer,
-        UiError,
+        parse_line, BoundedLineReader, BufferedLineSource, FallbackHost, FallbackRunner,
+        ParsedLine, TextRenderer, UiError,
     },
 };
 use crossbeam_channel::{bounded, never, Receiver, Sender};
@@ -207,7 +207,7 @@ fn renderer_bounds_and_escapes_audit_fields_without_rendering_event_json() {
     assert!(text.contains("#7"));
     assert!(!text.contains('\u{1b}'));
     assert_eq!(text.matches('\n').count(), 2);
-    assert!(!text.contains(&id(301).to_string()));
+    assert!(text.contains(&id(301).to_string()));
     assert!(!text.contains("payload_json"));
     assert!(text.len() <= 700);
 }
@@ -370,7 +370,7 @@ impl Write for PanickingWriter {
 fn host_finishes_with_application_error_after_input_write_and_panic_failures() {
     let (runtime, finished) = recording_runtime();
     let result = FallbackHost::new(runtime, false, false).run(
-        FailingReader,
+        BufferedLineSource::new(FailingReader),
         SharedWriter::default(),
         never(),
     );
@@ -379,7 +379,7 @@ fn host_finishes_with_application_error_after_input_write_and_panic_failures() {
 
     let (runtime, finished) = recording_runtime();
     let result = FallbackHost::new(runtime, false, false).run(
-        Cursor::new(b"/help\n".to_vec()),
+        BufferedLineSource::new(Cursor::new(b"/help\n".to_vec())),
         FailingWriter,
         never(),
     );
@@ -388,7 +388,7 @@ fn host_finishes_with_application_error_after_input_write_and_panic_failures() {
 
     let (runtime, finished) = recording_runtime();
     let result = FallbackHost::new(runtime, false, false).run(
-        Cursor::new(b"/help\n".to_vec()),
+        BufferedLineSource::new(Cursor::new(b"/help\n".to_vec())),
         PanickingWriter,
         never(),
     );
@@ -404,7 +404,11 @@ fn host_finishes_quit_eof_and_interrupt_with_exact_reasons() {
     ] {
         let (runtime, finished) = recording_runtime();
         let reason = FallbackHost::new(runtime, false, false)
-            .run(Cursor::new(input.to_vec()), SharedWriter::default(), never())
+            .run(
+                BufferedLineSource::new(Cursor::new(input.to_vec())),
+                SharedWriter::default(),
+                never(),
+            )
             .unwrap();
         assert_eq!(reason, expected);
         assert_eq!(receive(&finished), expected);
@@ -415,7 +419,7 @@ fn host_finishes_quit_eof_and_interrupt_with_exact_reasons() {
     interrupt_sender.send(()).unwrap();
     let reason = FallbackHost::new(runtime, false, false)
         .run(
-            Cursor::new(b"/help\n".to_vec()),
+            BufferedLineSource::new(Cursor::new(b"/help\n".to_vec())),
             SharedWriter::default(),
             interrupt_receiver,
         )
@@ -498,7 +502,7 @@ fn host_redacts_worker_failure_and_attempts_shutdown_without_deadlock() {
     let runtime = ApplicationRuntime::spawn(PanicExecutor, 1).unwrap();
     let writer = SharedWriter::default();
     let result = FallbackHost::new(runtime, false, false).run(
-        Cursor::new(b"/help\n".to_vec()),
+        BufferedLineSource::new(Cursor::new(b"/help\n".to_vec())),
         writer.clone(),
         never(),
     );
@@ -506,9 +510,7 @@ fn host_redacts_worker_failure_and_attempts_shutdown_without_deadlock() {
         result,
         Err(UiError::Runtime(RuntimeError::WorkerPanicked))
     ));
-    let text = writer.text();
-    assert_eq!(text, "Application worker stopped unexpectedly.\n");
-    assert!(!text.contains("secret"));
+    assert!(writer.text().is_empty());
 }
 
 fn binary_output(home: &Path, xdg_data: &Path, input: &[u8]) -> Output {

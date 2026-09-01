@@ -20,8 +20,9 @@ thiserror = "2.0.20"
 uuid = { version = "1.26.0", features = ["v4", "serde"] }
 
 [dev-dependencies]
-libc = "0.2.189"
 tempfile = "3"
+wait-timeout = "0.2.1"
 
 [target."cfg(unix)".dependencies]
+libc = "0.2.189"
 rustix = { version = "1.1.4", features = ["fs"] }

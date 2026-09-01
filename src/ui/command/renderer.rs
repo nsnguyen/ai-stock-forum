@@ -44,10 +44,16 @@ impl TextRenderer {
                         Actor::System => "system",
                     };
                     let kind = escaped_bounded(&entry.kind, 64);
+                    let summary = escaped_bounded(&entry.summary, 256);
                     writeln!(
                         writer,
-                        "  #{} {} {} {}",
-                        entry.sequence, entry.occurred_at_ms, actor, kind
+                        "  #{} {} {} {} {} {}",
+                        entry.sequence,
+                        entry.occurred_at_ms,
+                        actor,
+                        kind,
+                        entry.correlation_id,
+                        summary,
                     )?;
                 }
                 Ok(())
@@ -138,6 +144,9 @@ impl TextRenderer {
             }
             super::UiError::ReaderThread => {
                 writer.write_all(b"Input worker stopped unexpectedly.\n")
+            }
+            super::UiError::LineSourceUnavailable => {
+                writer.write_all(b"Terminal input is unavailable on this platform.\n")
             }
             super::UiError::Panicked => {
                 writer.write_all(b"Command host stopped unexpectedly.\n")

@@ -356,10 +356,34 @@ impl ApplicationRuntime {
     }
 
     pub fn spawn_application(service: ApplicationService, capacity: usize) -> Result<Self, RuntimeError> {
-        Self::spawn_with_initializer(capacity, Arc::new(SystemThreadSpawner), move || {
-            let worker = service.worker().map_err(|_| RuntimeError::WorkerStartup)?;
-            Ok(Box::new(ServiceWorker { service, worker }))
-        })
+        Self::spawn_application_with_thread_spawner(
+            service,
+            capacity,
+            Arc::new(SystemThreadSpawner),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn spawn_application_with_thread_spawner(
+        mut service: ApplicationService,
+        capacity: usize,
+        spawner: Arc<dyn RuntimeThreadSpawner>,
+    ) -> Result<Self, RuntimeError> {
+        let worker = match service.worker() {
+            Ok(worker) => worker,
+            Err(_) => {
+                let _ = catch_unwind(AssertUnwindSafe(|| {
+                    service.finish(ShutdownReason::ApplicationError)
+                }));
+                return Err(RuntimeError::WorkerStartup);
+            }
+        };
+        let executor = ServiceWorker {
+            service,
+            worker,
+            finished: false,
+        };
+        Self::spawn_with_initializer(capacity, spawner, move || Ok(Box::new(executor)))
     }
 
     #[doc(hidden)]
@@ -487,11 +511,31 @@ impl Drop for ApplicationRuntime {
     }
 }
 
-struct ServiceWorker { service: ApplicationService, worker: ApplicationWorker }
+struct ServiceWorker {
+    service: ApplicationService,
+    worker: ApplicationWorker,
+    finished: bool,
+}
 
 impl CommandExecutor for ServiceWorker {
     fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError> { self.worker.execute_user(command) }
-    fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> { self.service.finish(reason) }
+    fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
+        let result = self.service.finish(reason);
+        if result.is_ok() {
+            self.finished = true;
+        }
+        result
+    }
+}
+
+impl Drop for ServiceWorker {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                self.service.finish(ShutdownReason::ApplicationError)
+            }));
+        }
+    }
 }
 
 fn worker_entry(
@@ -539,6 +583,9 @@ fn execute_request(executor: &mut dyn CommandExecutor, request: Request, shared:
     match catch_unwind(AssertUnwindSafe(|| executor.execute_user(command))) {
         Ok(result) => { let _ = response.send(result.map_err(RuntimeError::Application)); }
         Err(payload) => {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                executor.finish(ShutdownReason::ApplicationError)
+            }));
             shared.publish_exited(Err(RuntimeError::WorkerPanicked));
             let _ = response.send(Err(RuntimeError::WorkerPanicked));
             resume_unwind(payload);

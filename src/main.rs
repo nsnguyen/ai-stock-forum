@@ -5,7 +5,7 @@ use ai_stock_forum::{
     config::{AppPaths, StartupError},
     domain::{SystemClock, UuidGenerator},
     runtime::{ApplicationRuntime, RuntimeError, DEFAULT_QUEUE_CAPACITY},
-    ui::command::{run_stdio, TextRenderer, UiError},
+    ui::command::{run_stdio, StdioResources, TextRenderer, UiError},
 };
 
 enum MainError {
@@ -31,6 +31,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), MainError> {
+    let stdio = StdioResources::initialize().map_err(MainError::Ui)?;
     let paths = AppPaths::discover().map_err(MainError::Startup)?;
     let service = ApplicationService::bootstrap(
         &paths,
@@ -41,6 +42,6 @@ fn run() -> Result<(), MainError> {
     let previous_session_interrupted = service.previous_session_interrupted();
     let runtime = ApplicationRuntime::spawn_application(service, DEFAULT_QUEUE_CAPACITY)
         .map_err(MainError::Runtime)?;
-    run_stdio(runtime, previous_session_interrupted).map_err(MainError::Ui)?;
+    run_stdio(runtime, previous_session_interrupted, stdio).map_err(MainError::Ui)?;
     Ok(())
 }
