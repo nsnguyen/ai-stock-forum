@@ -17,6 +17,46 @@ pub(super) enum ReadErrorDisposition {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReadPhase {
+    IdleWaiting,
+    AboutToRead,
+    ReadActive,
+    Exited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CancelAttempt {
+    Succeeded,
+    NotFound,
+    Failed(u32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CancelDecision {
+    Complete,
+    Retry,
+    Failed(u32),
+}
+
+pub(super) fn cancellation_decision(
+    phase: ReadPhase,
+    attempt: CancelAttempt,
+) -> CancelDecision {
+    match attempt {
+        CancelAttempt::Failed(error) => CancelDecision::Failed(error),
+        CancelAttempt::Succeeded => CancelDecision::Complete,
+        CancelAttempt::NotFound => match phase {
+            ReadPhase::AboutToRead | ReadPhase::ReadActive => CancelDecision::Retry,
+            ReadPhase::IdleWaiting | ReadPhase::Exited => CancelDecision::Complete,
+        },
+    }
+}
+
+pub(super) fn may_begin_read(cancellation_requested: bool) -> bool {
+    !cancellation_requested
+}
+
 pub(super) fn classify_read_error(
     error_code: u32,
     cancellation_requested: bool,
@@ -61,6 +101,40 @@ mod tests {
         assert_eq!(
             classify_read_error(5, false),
             ReadErrorDisposition::Error
+        );
+    }
+
+    #[test]
+    fn cancel_before_pending_retries_until_read_or_exit_acknowledges() {
+        assert_eq!(
+            cancellation_decision(ReadPhase::AboutToRead, CancelAttempt::NotFound),
+            CancelDecision::Retry
+        );
+        assert_eq!(
+            cancellation_decision(ReadPhase::ReadActive, CancelAttempt::NotFound),
+            CancelDecision::Retry
+        );
+        assert_eq!(
+            cancellation_decision(ReadPhase::Exited, CancelAttempt::NotFound),
+            CancelDecision::Complete
+        );
+        assert_eq!(
+            cancellation_decision(ReadPhase::IdleWaiting, CancelAttempt::NotFound),
+            CancelDecision::Complete
+        );
+        assert_eq!(
+            cancellation_decision(ReadPhase::ReadActive, CancelAttempt::Succeeded),
+            CancelDecision::Complete
+        );
+    }
+
+    #[test]
+    fn persistent_cancellation_prevents_another_read_and_preserves_real_errors() {
+        assert!(!may_begin_read(true));
+        assert!(may_begin_read(false));
+        assert_eq!(
+            cancellation_decision(ReadPhase::ReadActive, CancelAttempt::Failed(5)),
+            CancelDecision::Failed(5)
         );
     }
 }

@@ -28,7 +28,10 @@ use super::{
     BoundedLineReader, ParsedLine, RawLine, TextRenderer,
 };
 #[cfg(windows)]
-use super::windows::{classify_read_error, ReadErrorDisposition};
+use super::windows::{
+    cancellation_decision, classify_read_error, may_begin_read, CancelAttempt, CancelDecision,
+    ReadErrorDisposition, ReadPhase,
+};
 
 #[derive(Debug, Error)]
 pub enum UiError {
@@ -50,6 +53,10 @@ pub enum UiError {
 
 pub trait LineSourceCancellation: Send + Sync + 'static {
     fn cancel(&self);
+
+    fn failure(&self) -> Option<io::Error> {
+        None
+    }
 }
 
 pub enum LineSourceEvent {
@@ -230,6 +237,7 @@ mod windows_api {
     pub const INFINITE: u32 = u32::MAX;
     pub const THREAD_TERMINATE: u32 =
         windows_sys::Win32::System::Threading::THREAD_TERMINATE;
+    pub const ERROR_NOT_FOUND: u32 = 1168;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -248,6 +256,7 @@ mod windows_api {
         ) -> Handle;
         pub fn GetCurrentThreadId() -> u32;
         pub fn CancelSynchronousIo(thread: Handle) -> i32;
+        pub fn CancelIoEx(file: Handle, overlapped: *mut c_void) -> i32;
         pub fn WaitForMultipleObjects(
             count: u32,
             handles: *const Handle,
@@ -268,17 +277,26 @@ mod windows_api {
 #[cfg(windows)]
 struct WindowsCancellation {
     event: windows_api::Handle,
-    reader_thread: std::sync::Mutex<Option<windows_api::Handle>>,
+    input: windows_api::Handle,
+    state: std::sync::Mutex<WindowsReadState>,
+    phase_changed: std::sync::Condvar,
     cancelled: AtomicBool,
+}
+
+#[cfg(windows)]
+struct WindowsReadState {
+    reader_thread: Option<windows_api::Handle>,
+    phase: ReadPhase,
+    cancel_error: Option<u32>,
 }
 
 #[cfg(windows)]
 impl WindowsCancellation {
     fn register_current_thread(&self) -> io::Result<()> {
-        let mut reader_thread = self.reader_thread.lock().map_err(|_| {
+        let mut state = self.state.lock().map_err(|_| {
             io::Error::new(io::ErrorKind::Other, "input cancellation state is unavailable")
         })?;
-        if reader_thread.is_none() {
+        if state.reader_thread.is_none() {
             let handle = unsafe {
                 windows_api::OpenThread(
                     windows_api::THREAD_TERMINATE,
@@ -289,18 +307,151 @@ impl WindowsCancellation {
             if handle == 0 {
                 return Err(io::Error::last_os_error());
             }
-            *reader_thread = Some(handle);
-            if self.cancelled.load(Ordering::SeqCst) {
-                unsafe {
-                    windows_api::CancelSynchronousIo(handle);
-                }
-            }
+            state.reader_thread = Some(handle);
         }
         Ok(())
     }
 
     fn was_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+
+    fn begin_read(&self) -> io::Result<bool> {
+        {
+            let mut state = self.state.lock().map_err(|_| {
+                io::Error::new(io::ErrorKind::Other, "input read state is unavailable")
+            })?;
+            if !may_begin_read(self.was_cancelled()) {
+                return Ok(false);
+            }
+            state.phase = ReadPhase::AboutToRead;
+            self.phase_changed.notify_all();
+        }
+
+        let mut state = self.state.lock().map_err(|_| {
+            io::Error::new(io::ErrorKind::Other, "input read state is unavailable")
+        })?;
+        if !may_begin_read(self.was_cancelled()) {
+            state.phase = ReadPhase::IdleWaiting;
+            self.phase_changed.notify_all();
+            return Ok(false);
+        }
+        state.phase = ReadPhase::ReadActive;
+        self.phase_changed.notify_all();
+        drop(state);
+
+        if !may_begin_read(self.was_cancelled()) {
+            self.end_read();
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn end_read(&self) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if state.phase != ReadPhase::Exited {
+            state.phase = ReadPhase::IdleWaiting;
+            self.phase_changed.notify_all();
+        }
+    }
+
+    fn mark_exited(&self) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if state.phase != ReadPhase::Exited {
+            state.phase = ReadPhase::Exited;
+            self.phase_changed.notify_all();
+        }
+    }
+
+    fn cancellation_attempt(&self, reader_thread: windows_api::Handle) -> CancelAttempt {
+        if unsafe { windows_api::CancelSynchronousIo(reader_thread) } != 0 {
+            return CancelAttempt::Succeeded;
+        }
+        let error = io::Error::last_os_error()
+            .raw_os_error()
+            .map(|code| code as u32)
+            .unwrap_or(0);
+        if error == windows_api::ERROR_NOT_FOUND {
+            CancelAttempt::NotFound
+        } else {
+            CancelAttempt::Failed(error)
+        }
+    }
+
+    fn cancel_fallback(&self) -> CancelAttempt {
+        if unsafe { windows_api::CancelIoEx(self.input, std::ptr::null_mut()) } != 0 {
+            return CancelAttempt::Succeeded;
+        }
+        let error = io::Error::last_os_error()
+            .raw_os_error()
+            .map(|code| code as u32)
+            .unwrap_or(0);
+        if error == windows_api::ERROR_NOT_FOUND {
+            CancelAttempt::NotFound
+        } else {
+            CancelAttempt::Failed(error)
+        }
+    }
+
+    fn cancel_pending_read(&self) {
+        loop {
+            let (phase, reader_thread) = {
+                let state = match self.state.lock() {
+                    Ok(state) => state,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                match state.phase {
+                    ReadPhase::IdleWaiting | ReadPhase::Exited => return,
+                    ReadPhase::AboutToRead | ReadPhase::ReadActive => {
+                        (state.phase, state.reader_thread)
+                    }
+                }
+            };
+
+            let attempt = match reader_thread {
+                Some(reader_thread) => self.cancellation_attempt(reader_thread),
+                None => CancelAttempt::Failed(6),
+            };
+            match cancellation_decision(phase, attempt) {
+                CancelDecision::Complete => return,
+                CancelDecision::Failed(error) => {
+                    let mut state = match self.state.lock() {
+                        Ok(state) => state,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    state.cancel_error.get_or_insert(error);
+                    drop(state);
+                    if matches!(self.cancel_fallback(), CancelAttempt::Succeeded) {
+                        return;
+                    }
+                }
+                CancelDecision::Retry => {}
+            }
+
+            let state = match self.state.lock() {
+                Ok(state) => state,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if matches!(state.phase, ReadPhase::IdleWaiting | ReadPhase::Exited) {
+                return;
+            }
+            match self
+                .phase_changed
+                .wait_timeout(state, std::time::Duration::from_millis(1))
+            {
+                Ok((state, _)) => drop(state),
+                Err(poisoned) => {
+                    let (state, _) = poisoned.into_inner();
+                    drop(state);
+                }
+            }
+        }
     }
 }
 
@@ -311,27 +462,29 @@ impl LineSourceCancellation for WindowsCancellation {
         unsafe {
             windows_api::SetEvent(self.event);
         }
-        let reader_thread = match self.reader_thread.lock() {
-            Ok(reader_thread) => reader_thread,
+        self.cancel_pending_read();
+    }
+
+    fn failure(&self) -> Option<io::Error> {
+        let state = match self.state.lock() {
+            Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if let Some(reader_thread) = *reader_thread {
-            unsafe {
-                windows_api::CancelSynchronousIo(reader_thread);
-            }
-        }
+        state
+            .cancel_error
+            .map(|code| io::Error::from_raw_os_error(code as i32))
     }
 }
 
 #[cfg(windows)]
 impl Drop for WindowsCancellation {
     fn drop(&mut self) {
-        let reader_thread = match self.reader_thread.get_mut() {
-            Ok(reader_thread) => reader_thread,
+        let state = match self.state.get_mut() {
+            Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
         unsafe {
-            if let Some(reader_thread) = reader_thread.take() {
+            if let Some(reader_thread) = state.reader_thread.take() {
                 windows_api::CloseHandle(reader_thread);
             }
             windows_api::CloseHandle(self.event);
@@ -365,7 +518,13 @@ impl WindowsStdinLineSource {
             input,
             cancellation: Arc::new(WindowsCancellation {
                 event,
-                reader_thread: std::sync::Mutex::new(None),
+                input,
+                state: std::sync::Mutex::new(WindowsReadState {
+                    reader_thread: None,
+                    phase: ReadPhase::IdleWaiting,
+                    cancel_error: None,
+                }),
+                phase_changed: std::sync::Condvar::new(),
                 cancelled: AtomicBool::new(false),
             }),
             accumulator: LineAccumulator::new(),
@@ -431,7 +590,7 @@ impl CancellableLineSource for WindowsStdinLineSource {
         }
 
         loop {
-            let handles = [self.input, self.cancellation.event];
+            let handles = [self.cancellation.event, self.input];
             match unsafe {
                 windows_api::WaitForMultipleObjects(
                     handles.len() as u32,
@@ -441,12 +600,17 @@ impl CancellableLineSource for WindowsStdinLineSource {
                 )
             } {
                 windows_api::WAIT_OBJECT_0 => {
-                    if let Some(event) = self.read_ready_input()? {
-                        return Ok(event);
-                    }
+                    return Ok(LineSourceEvent::Cancelled);
                 }
                 result if result == windows_api::WAIT_OBJECT_0 + 1 => {
-                    return Ok(LineSourceEvent::Cancelled);
+                    if !self.cancellation.begin_read()? {
+                        return Ok(LineSourceEvent::Cancelled);
+                    }
+                    let event = self.read_ready_input();
+                    self.cancellation.end_read();
+                    if let Some(event) = event? {
+                        return Ok(event);
+                    }
                 }
                 windows_api::WAIT_FAILED => return Err(io::Error::last_os_error()),
                 _ => {
@@ -457,6 +621,13 @@ impl CancellableLineSource for WindowsStdinLineSource {
                 }
             }
         }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsStdinLineSource {
+    fn drop(&mut self) {
+        self.cancellation.mark_exited();
     }
 }
 
@@ -634,10 +805,14 @@ impl FallbackHost {
         }));
         cancellation.cancel();
         let source_joined = source_thread.join().is_ok();
+        let cancellation_failed = cancellation.failure().is_some();
 
         let (reason, body_error) = match body {
-            Ok(Ok(reason)) if source_joined => (reason, None),
-            Ok(Ok(_)) => (ShutdownReason::ApplicationError, Some(UiError::ReaderThread)),
+            Ok(Ok(reason)) if source_joined && !cancellation_failed => (reason, None),
+            Ok(Ok(_)) if !source_joined => {
+                (ShutdownReason::ApplicationError, Some(UiError::ReaderThread))
+            }
+            Ok(Ok(_)) => (ShutdownReason::ApplicationError, Some(UiError::Read)),
             Ok(Err(error)) => (ShutdownReason::ApplicationError, Some(error)),
             Err(_) => (ShutdownReason::ApplicationError, Some(UiError::Panicked)),
         };

@@ -22,6 +22,22 @@ fn windows_source_cancels_active_synchronous_reads_with_an_owned_thread_handle()
 }
 
 #[test]
+fn windows_cancel_before_pending_uses_a_persistent_acknowledged_retry_protocol() {
+    let runner = repository_file("src/ui/command/runner.rs");
+    let state = repository_file("src/ui/command/windows.rs");
+
+    for phase in ["IdleWaiting", "AboutToRead", "ReadActive", "Exited"] {
+        assert!(state.contains(phase), "missing read phase: {phase}");
+    }
+    assert!(runner.contains("phase_changed: std::sync::Condvar"));
+    assert!(runner.contains("ERROR_NOT_FOUND"));
+    assert!(runner.contains("mark_exited"));
+    assert!(runner.contains("[self.cancellation.event, self.input]"));
+    assert!(runner.contains("if !self.cancellation.begin_read()?"));
+    assert!(runner.contains("self.cancellation.end_read()"));
+}
+
+#[test]
 fn windows_read_errors_have_explicit_cancel_eof_and_error_dispositions() {
     let mapping = repository_file("src/ui/command/windows.rs");
 
