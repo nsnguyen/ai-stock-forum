@@ -39,3 +39,63 @@ Two intermediate focused runs informed minimal corrections: the first exposed an
 ## Concerns
 
 None outstanding for Task 6. The migration test database fixtures are isolated with `tempfile`; future task work should retain the startup compatibility checks before introducing repositories that mutate `event_stream`.
+
+## Fix round 1
+
+### Implementation commit
+
+`bb997022f064900b638b33ab3ea4a15d25851767` - `fix: harden sqlite startup checks`
+
+### Changed files
+
+- `src/config/mod.rs`
+- `src/config/paths.rs`
+- `src/persistence/database.rs`
+- `tests/migration_contract.rs`
+
+### Controller ruling and residual risk
+
+The approved Phase 0 boundary is descriptor-anchored/no-follow creation and
+validation from Task 5, a private `0700` state directory and `0600` database,
+and `SQLITE_OPEN_NOFOLLOW` for SQLite's terminal database component. The
+implementation does not claim same-UID intermediate-component replacement
+resistance at SQLite-open time and does not implement a custom SQLite VFS.
+
+Residual risk: a malicious process running as the same OS user could race an
+intermediate path and redirect SQLite/WAL operations. A custom SQLite VFS is
+outside the approved Phase 0 plan and current `rusqlite` surface.
+
+On macOS, SQLite's no-follow check also rejects the operating system's
+`/var -> /private/var` alias. `AppPaths::sqlite_open_path` normalizes only that
+well-known alias before SQLite opens; it does not change permissions or claim
+to eliminate the residual intermediate-path risk.
+
+### Fix details
+
+- `Database::open` retains Task 5's descriptor-safe path creation/validation,
+  opens SQLite with `SQLITE_OPEN_NOFOLLOW | SQLITE_OPEN_EXRESCODE`, and maps
+  only SQLite's `SQLITE_CANTOPEN_SYMLINK` extended result to the stable
+  `database_terminal_path_rejected` startup error.
+- SQLite connection startup reads back and requires `foreign_keys = 1`,
+  `journal_mode = wal`, `synchronous = FULL` (SQLite value `2`), and
+  `busy_timeout = 5000`; a mismatch returns `database_pragma_mismatch`.
+- Applied migration records must be exactly contiguous from `1` through
+  `user_version`, with the exact compiled checksum for each version. Checksum,
+  hole, ahead-record, and count/version disagreement all return
+  `database_migration_state_invalid` before pending migrations run.
+- Migration execution remains one immediate transaction. A narrow injected
+  failing SQL migration proves that schema creation and application/user version
+  updates roll back together.
+
+### TDD and verification evidence
+
+| Stage | Command | Result |
+| --- | --- | --- |
+| RED | `cargo test --lib --test migration_contract --locked` | Failed as expected before the new seams existed: missing `verify_connection_pragmas`, `open_with_before_sqlite_open`, and `run_migrations_with`. |
+| GREEN | `cargo test --lib --test migration_contract --locked` | Passed: 3 internal persistence tests and 12 migration contract tests, 0 failures. |
+| Full suite | `cargo test --workspace --all-targets --locked` | Passed: 61 tests, 0 failures. |
+
+The focused tests cover deterministic terminal replacement at the SQLite-open
+boundary, pragma mismatch/readback, exact schema columns, constraints, foreign
+keys, indexes, immutable triggers, migration row/checksum and inconsistent
+states, immediate-transaction rollback, and Unix database mode correction.
