@@ -2,9 +2,17 @@
 
 ## Commit
 
-Task 13 documentation and contract-test commit:
+Original Task 13 documentation and contract-test commit:
 
 `eca7622f75134ab0a483c1cbb457587ac0bddd3e`
+
+Original evidence report commit:
+
+`9acd4cb58fd0e4099a92573c4cc6ecc98a6f659c`
+
+Fix round 1 implementation commit:
+
+`270fa4f47f52f01abd871e6ff44358e7c8e3ba57`
 
 ## Changed files
 
@@ -62,3 +70,44 @@ preserved.
   and other later-phase capabilities remain explicitly deferred.
 - The documentation contract checks the required precedence markers and core
   README anchors; the full suite supplies the implementation behavior evidence.
+
+## Fix round 1 evidence
+
+The strengthened contract was written first and run before documentation
+updates.
+
+### RED
+
+Command:
+
+`cargo test --test documentation_contract --locked`
+
+Result: expected failure, `1 passed; 2 failed`. The new README canonical-link
+assertion and canonical-design receipt-inventory assertion failed because the
+old documentation had not yet been updated; the existing legacy-banner test
+passed.
+
+### GREEN
+
+Command:
+
+`cargo test --test documentation_contract --locked`
+
+Result: pass, `3 passed; 0 failed`.
+
+### Full suite
+
+Command:
+
+`cargo test --workspace --all-targets --locked`
+
+Result: pass. All unit and integration test targets completed successfully
+with no failures.
+
+The README now has the exact canonical design link, platform-specific state,
+database, and lock locations, schema versions, six CLI forms with effects and
+continuation, precise privacy behavior, receipt/event roles, and non-goals.
+The canonical design now records immutable command receipts and ordered event
+references in schema version 1 before release, including the pre-receipt
+development-database compatibility ruling. The contract rejects the stale
+approved-spec link, absolute local paths, and prototype run directions.
