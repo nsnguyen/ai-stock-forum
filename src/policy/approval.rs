@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::domain::{Actor, ApprovalId, ObjectRef};
@@ -29,23 +29,79 @@ impl ApprovalStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ApprovalResolution {
-    pub status: ApprovalStatus,
-    pub actor: Actor,
-    pub resolved_at_millis: i64,
+    status: ApprovalStatus,
+    actor: Actor,
+    resolved_at_millis: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl ApprovalResolution {
+    pub fn new(
+        status: ApprovalStatus,
+        actor: Actor,
+        resolved_at_millis: i64,
+    ) -> Result<Self, ApprovalError> {
+        if !status.is_terminal() {
+            return Err(ApprovalError::ResolutionMustBeTerminal);
+        }
+
+        Ok(Self {
+            status,
+            actor,
+            resolved_at_millis,
+        })
+    }
+
+    pub fn status(&self) -> ApprovalStatus {
+        self.status
+    }
+
+    pub fn actor(&self) -> &Actor {
+        &self.actor
+    }
+
+    pub fn resolved_at_millis(&self) -> i64 {
+        self.resolved_at_millis
+    }
+}
+
+#[derive(Deserialize)]
+struct ApprovalResolutionWire {
+    status: ApprovalStatus,
+    actor: Actor,
+    resolved_at_millis: i64,
+}
+
+impl TryFrom<ApprovalResolutionWire> for ApprovalResolution {
+    type Error = ApprovalError;
+
+    fn try_from(wire: ApprovalResolutionWire) -> Result<Self, Self::Error> {
+        Self::new(wire.status, wire.actor, wire.resolved_at_millis)
+    }
+}
+
+impl<'de> Deserialize<'de> for ApprovalResolution {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        ApprovalResolutionWire::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ApprovalRecord {
-    pub approval_id: ApprovalId,
-    pub action: ApprovalAction,
-    pub object: ObjectRef,
-    pub actor: Actor,
-    pub status: ApprovalStatus,
-    pub created_at_millis: i64,
-    pub expires_at_millis: Option<i64>,
-    pub resolution: Option<ApprovalResolution>,
+    approval_id: ApprovalId,
+    action: ApprovalAction,
+    object: ObjectRef,
+    actor: Actor,
+    status: ApprovalStatus,
+    created_at_millis: i64,
+    expires_at_millis: Option<i64>,
+    resolution: Option<ApprovalResolution>,
 }
 
 impl ApprovalRecord {
@@ -60,6 +116,81 @@ impl ApprovalRecord {
             status: ApprovalStatus::Pending,
             resolution: None,
         }
+    }
+
+    pub fn approval_id(&self) -> ApprovalId {
+        self.approval_id
+    }
+
+    pub fn action(&self) -> ApprovalAction {
+        self.action
+    }
+
+    pub fn object(&self) -> &ObjectRef {
+        &self.object
+    }
+
+    pub fn actor(&self) -> &Actor {
+        &self.actor
+    }
+
+    pub fn status(&self) -> ApprovalStatus {
+        self.status
+    }
+
+    pub fn created_at_millis(&self) -> i64 {
+        self.created_at_millis
+    }
+
+    pub fn expires_at_millis(&self) -> Option<i64> {
+        self.expires_at_millis
+    }
+
+    pub fn resolution(&self) -> Option<&ApprovalResolution> {
+        self.resolution.as_ref()
+    }
+}
+
+#[derive(Deserialize)]
+struct ApprovalRecordWire {
+    approval_id: ApprovalId,
+    action: ApprovalAction,
+    object: ObjectRef,
+    actor: Actor,
+    status: ApprovalStatus,
+    created_at_millis: i64,
+    expires_at_millis: Option<i64>,
+    resolution: Option<ApprovalResolution>,
+}
+
+impl TryFrom<ApprovalRecordWire> for ApprovalRecord {
+    type Error = ApprovalError;
+
+    fn try_from(wire: ApprovalRecordWire) -> Result<Self, Self::Error> {
+        validate_persisted_state(wire.status, wire.resolution.as_ref())?;
+        validate_expiry(wire.created_at_millis, wire.expires_at_millis)?;
+
+        Ok(Self {
+            approval_id: wire.approval_id,
+            action: wire.action,
+            object: wire.object,
+            actor: wire.actor,
+            status: wire.status,
+            created_at_millis: wire.created_at_millis,
+            expires_at_millis: wire.expires_at_millis,
+            resolution: wire.resolution,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ApprovalRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        ApprovalRecordWire::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -119,18 +250,8 @@ impl ApprovalRecordBuilder {
             .created_at_millis
             .ok_or(ApprovalError::MissingCreationTimestamp)?;
 
-        if self.status != ApprovalStatus::Pending {
-            return Err(ApprovalError::InitialStatusMustBePending);
-        }
-        if self.resolution.is_some() {
-            return Err(ApprovalError::InitialResolutionNotAllowed);
-        }
-        if self
-            .expires_at_millis
-            .is_some_and(|expiry| expiry <= created_at_millis)
-        {
-            return Err(ApprovalError::ExpiryMustFollowCreation);
-        }
+        validate_pending_creation(self.status, self.resolution.as_ref())?;
+        validate_expiry(created_at_millis, self.expires_at_millis)?;
 
         Ok(ApprovalRecord {
             approval_id,
@@ -143,6 +264,44 @@ impl ApprovalRecordBuilder {
             resolution: self.resolution,
         })
     }
+}
+
+fn validate_pending_creation(
+    status: ApprovalStatus,
+    resolution: Option<&ApprovalResolution>,
+) -> Result<(), ApprovalError> {
+    if status != ApprovalStatus::Pending {
+        return Err(ApprovalError::InitialStatusMustBePending);
+    }
+    if resolution.is_some() {
+        return Err(ApprovalError::InitialResolutionNotAllowed);
+    }
+
+    Ok(())
+}
+
+fn validate_persisted_state(
+    status: ApprovalStatus,
+    resolution: Option<&ApprovalResolution>,
+) -> Result<(), ApprovalError> {
+    match (status, resolution) {
+        (ApprovalStatus::Pending, None) => Ok(()),
+        (ApprovalStatus::Pending, Some(_)) => Err(ApprovalError::PendingRecordHasResolution),
+        (_, None) => Err(ApprovalError::TerminalRecordMissingResolution),
+        (status, Some(resolution)) if status == resolution.status() => Ok(()),
+        (_, Some(_)) => Err(ApprovalError::ResolutionStatusMismatch),
+    }
+}
+
+fn validate_expiry(
+    created_at_millis: i64,
+    expires_at_millis: Option<i64>,
+) -> Result<(), ApprovalError> {
+    if expires_at_millis.is_some_and(|expiry| expiry <= created_at_millis) {
+        return Err(ApprovalError::ExpiryMustFollowCreation);
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Error)]
@@ -159,6 +318,14 @@ pub enum ApprovalError {
     InitialStatusMustBePending,
     #[error("approval records cannot be created with a resolution")]
     InitialResolutionNotAllowed,
+    #[error("approval resolution status must be terminal")]
+    ResolutionMustBeTerminal,
+    #[error("pending approval records cannot carry a resolution")]
+    PendingRecordHasResolution,
+    #[error("terminal approval records require a matching resolution")]
+    TerminalRecordMissingResolution,
+    #[error("approval resolution status must match record status")]
+    ResolutionStatusMismatch,
     #[error("approval expiry must be later than creation")]
     ExpiryMustFollowCreation,
 }
