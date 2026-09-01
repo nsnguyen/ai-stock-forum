@@ -222,3 +222,5 @@ __marimo__/
 
 # Local isolated implementation worktrees
 .worktrees/
+/target/
+/.ai-stock-forum/
