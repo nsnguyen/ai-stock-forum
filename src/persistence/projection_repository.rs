@@ -14,10 +14,22 @@ pub struct ProjectionRepository;
 
 impl ProjectionRepository {
     pub fn load(connection: &Connection) -> Result<ProjectionState, RecoveryError> {
+        Self::load_with_before_projection_rows(connection, || {})
+    }
+
+    #[doc(hidden)]
+    pub fn load_with_before_projection_rows<F>(
+        connection: &Connection,
+        before_projection_rows: F,
+    ) -> Result<ProjectionState, RecoveryError>
+    where
+        F: FnOnce(),
+    {
         let transaction = connection
             .unchecked_transaction()
             .map_err(|_| RecoveryError::QueryFailed)?;
         let expected = reduce_verified_stream(&transaction)?;
+        before_projection_rows();
         let result = match read_projection_rows(&transaction)? {
             None if expected == ProjectionState::default() => Ok(expected),
             None => Err(RecoveryError::InvalidEventRecord),
