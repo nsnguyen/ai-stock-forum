@@ -1,5 +1,11 @@
 # AI Stock Forum Delivery Roadmap
 
+> **SUPERSEDED - DO NOT EXECUTE**
+>
+> This document describes the retired Python/React/Hermes architecture. The
+> canonical Rust design is [architecture.md](../../../architecture.md) and the
+> active delivery roadmap is [phases.md](../../../phases.md).
+
 **Status:** Approved design translated into gated implementation phases
 
 **Source of truth:** [AI Stock Forum design specification](../specs/2026-08-08-ai-stock-forum-design.md)
