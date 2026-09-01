@@ -24,7 +24,10 @@ pub use outcome::{
     AuditTailView, CommandOutcome, CommandView, HelpView, InputRejectedView, SetupStatusView,
     ShutdownDisposition, ShutdownView, StatusView,
 };
-pub use service::{ApplicationService, AuthorizationDecision, CommandPolicy};
+pub use service::{
+    ApplicationService, AuthorizationDecision, CommandPolicy, CommandTransactionHook,
+    NoopCommandTransactionHook,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum AppError {
@@ -41,4 +44,6 @@ pub enum AppError {
     ApprovalRequired { capability: Capability },
     #[error("command ID conflicts with a different request")]
     CommandConflict,
+    #[error("application lifecycle is already finished")]
+    LifecycleFinished,
 }

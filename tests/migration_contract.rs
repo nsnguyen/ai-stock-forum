@@ -12,6 +12,8 @@ fn fresh_database_has_the_complete_phase_zero_schema() {
     assert_eq!(database.schema_version(), LATEST_SCHEMA_VERSION);
     for table in [
         "event_stream",
+        "command_receipts",
+        "command_event_refs",
         "installation_projection",
         "process_session_projection",
         "projection_metadata",
@@ -148,6 +150,8 @@ fn migration_records_and_complete_schema_are_exact() {
 
     for (table, expected_columns) in [
         ("event_stream", vec!["sequence", "event_id", "event_schema_version", "event_type", "actor_kind", "actor_id", "occurred_at_ms", "correlation_id", "causation_id", "object_kind", "object_id", "object_version", "object_digest", "previous_event_digest", "payload_json", "event_digest"]),
+        ("command_receipts", vec!["command_id", "command_fingerprint", "request_json", "capability", "policy_decision", "outcome_json"]),
+        ("command_event_refs", vec!["command_id", "event_ordinal", "event_id"]),
         ("installation_projection", vec!["singleton", "installation_id", "created_event_id", "created_at_ms"]),
         ("process_session_projection", vec!["session_id", "started_event_id", "started_at_ms", "ended_event_id", "ended_at_ms", "end_reason"]),
         ("projection_metadata", vec!["singleton", "last_event_sequence", "last_event_digest", "projection_digest"]),
@@ -170,6 +174,7 @@ fn migration_records_and_complete_schema_are_exact() {
     for index in [
         "event_stream_correlation_idx",
         "event_stream_type_idx",
+        "command_event_refs_event_idx",
         "setup_drafts_state_idx",
         "approval_records_status_idx",
     ] {
@@ -185,6 +190,10 @@ fn migration_records_and_complete_schema_are_exact() {
     for trigger in [
         "event_stream_no_update",
         "event_stream_no_delete",
+        "command_receipts_no_update",
+        "command_receipts_no_delete",
+        "command_event_refs_no_update",
+        "command_event_refs_no_delete",
         "installation_configuration_versions_no_update",
         "installation_configuration_versions_no_delete",
     ] {
@@ -199,6 +208,8 @@ fn migration_records_and_complete_schema_are_exact() {
 
     for (table, child_column, parent_table, parent_column) in [
         ("installation_projection", "created_event_id", "event_stream", "event_id"),
+        ("command_event_refs", "command_id", "command_receipts", "command_id"),
+        ("command_event_refs", "event_id", "event_stream", "event_id"),
         ("process_session_projection", "started_event_id", "event_stream", "event_id"),
         ("process_session_projection", "ended_event_id", "event_stream", "event_id"),
         ("installation_configuration_versions", "source_draft_id", "setup_drafts", "draft_id"),
@@ -234,6 +245,13 @@ fn migration_records_and_complete_schema_are_exact() {
     assert!(event_sql.contains("CHECK (json_valid(payload_json))"));
     assert!(event_sql.contains("CHECK (object_version IS NULL OR object_version > 0)"));
     assert!(event_sql.ends_with(" STRICT"));
+
+    let receipt_sql: String = connection
+        .query_row("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'command_receipts'", [], |row| row.get(0))
+        .unwrap();
+    assert!(receipt_sql.contains("CHECK (json_valid(request_json))"));
+    assert!(receipt_sql.contains("CHECK (json_valid(outcome_json))"));
+    assert!(receipt_sql.ends_with(" STRICT"));
 }
 
 #[test]
@@ -262,6 +280,31 @@ fn schema_constraints_foreign_keys_and_immutable_triggers_are_enforced() {
         .is_ok());
     assert!(connection
         .execute("UPDATE event_stream SET event_type = 'changed' WHERE sequence = 1", [])
+        .is_err());
+
+    connection
+        .execute(
+            "INSERT INTO command_receipts (command_id, command_fingerprint, request_json, capability, policy_decision, outcome_json) VALUES ('command-1', ?1, '{}', 'help_read', 'granted', '{}')",
+            ["a".repeat(64)],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO command_event_refs (command_id, event_ordinal, event_id) VALUES ('command-1', 0, 'event-1')",
+            [],
+        )
+        .unwrap();
+    assert!(connection
+        .execute("UPDATE command_receipts SET capability = 'status_read' WHERE command_id = 'command-1'", [])
+        .is_err());
+    assert!(connection
+        .execute("DELETE FROM command_receipts WHERE command_id = 'command-1'", [])
+        .is_err());
+    assert!(connection
+        .execute("UPDATE command_event_refs SET event_ordinal = 1 WHERE command_id = 'command-1'", [])
+        .is_err());
+    assert!(connection
+        .execute("DELETE FROM command_event_refs WHERE command_id = 'command-1'", [])
         .is_err());
     assert!(connection
         .execute("DELETE FROM event_stream WHERE sequence = 1", [])
@@ -434,12 +477,15 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
         objects,
         vec![
             ("index".to_owned(), "approval_records_status_idx".to_owned()),
+            ("index".to_owned(), "command_event_refs_event_idx".to_owned()),
             ("index".to_owned(), "event_stream_correlation_idx".to_owned()),
             ("index".to_owned(), "event_stream_type_idx".to_owned()),
             ("index".to_owned(), "setup_drafts_state_idx".to_owned()),
             ("table".to_owned(), "active_installation_configuration".to_owned()),
             ("table".to_owned(), "approval_records".to_owned()),
             ("table".to_owned(), "capability_readiness".to_owned()),
+            ("table".to_owned(), "command_event_refs".to_owned()),
+            ("table".to_owned(), "command_receipts".to_owned()),
             ("table".to_owned(), "event_stream".to_owned()),
             ("table".to_owned(), "installation_configuration_versions".to_owned()),
             ("table".to_owned(), "installation_projection".to_owned()),
@@ -448,6 +494,10 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
             ("table".to_owned(), "schema_migrations".to_owned()),
             ("table".to_owned(), "setup_drafts".to_owned()),
             ("table".to_owned(), "setup_step_outcomes".to_owned()),
+            ("trigger".to_owned(), "command_event_refs_no_delete".to_owned()),
+            ("trigger".to_owned(), "command_event_refs_no_update".to_owned()),
+            ("trigger".to_owned(), "command_receipts_no_delete".to_owned()),
+            ("trigger".to_owned(), "command_receipts_no_update".to_owned()),
             ("trigger".to_owned(), "event_stream_no_delete".to_owned()),
             ("trigger".to_owned(), "event_stream_no_update".to_owned()),
             ("trigger".to_owned(), "installation_configuration_versions_no_delete".to_owned()),
@@ -466,6 +516,19 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
             column("object_id", "TEXT", false, 0), column("object_version", "INTEGER", false, 0),
             column("object_digest", "TEXT", false, 0), column("previous_event_digest", "TEXT", false, 0),
             column("payload_json", "TEXT", true, 0), column("event_digest", "TEXT", true, 0),
+        ]),
+        ("command_receipts", &[
+            column("command_id", "TEXT", true, 1),
+            column("command_fingerprint", "TEXT", true, 0),
+            column("request_json", "TEXT", true, 0),
+            column("capability", "TEXT", true, 0),
+            column("policy_decision", "TEXT", true, 0),
+            column("outcome_json", "TEXT", true, 0),
+        ]),
+        ("command_event_refs", &[
+            column("command_id", "TEXT", true, 1),
+            column("event_ordinal", "INTEGER", true, 2),
+            column("event_id", "TEXT", true, 0),
         ]),
         ("installation_projection", &[column("singleton", "INTEGER", false, 1), column("installation_id", "TEXT", true, 0), column("created_event_id", "TEXT", true, 0), column("created_at_ms", "INTEGER", true, 0)]),
         ("process_session_projection", &[column("session_id", "TEXT", true, 1), column("started_event_id", "TEXT", true, 0), column("started_at_ms", "INTEGER", true, 0), column("ended_event_id", "TEXT", false, 0), column("ended_at_ms", "INTEGER", false, 0), column("end_reason", "TEXT", false, 0)]),
@@ -512,6 +575,8 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
         ("active_installation_configuration", "configuration_id", "installation_configuration_versions", "configuration_id"),
         ("approval_records", "resolution_event_id", "event_stream", "event_id"),
         ("capability_readiness", "configuration_id", "installation_configuration_versions", "configuration_id"),
+        ("command_event_refs", "command_id", "command_receipts", "command_id"),
+        ("command_event_refs", "event_id", "event_stream", "event_id"),
         ("installation_configuration_versions", "created_event_id", "event_stream", "event_id"),
         ("installation_configuration_versions", "source_draft_id", "setup_drafts", "draft_id"),
         ("installation_projection", "created_event_id", "event_stream", "event_id"),
@@ -528,6 +593,9 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
         semantic_index("event_stream", "c", false, false, &["event_type", "sequence"]),
         semantic_index("event_stream", "u", true, false, &["event_id"]),
         semantic_index("event_stream", "u", true, false, &["event_digest"]),
+        semantic_index("command_receipts", "pk", true, false, &["command_id"]),
+        semantic_index("command_event_refs", "pk", true, false, &["command_id", "event_ordinal"]),
+        semantic_index("command_event_refs", "c", true, false, &["event_id"]),
         semantic_index("installation_projection", "u", true, false, &["installation_id"]),
         semantic_index("process_session_projection", "pk", true, false, &["session_id"]),
         semantic_index("setup_drafts", "c", false, false, &["state", "updated_at_ms"]),
@@ -543,16 +611,22 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
     for (name, table, columns) in [
         ("event_stream_correlation_idx", "event_stream", &["correlation_id", "sequence"][..]),
         ("event_stream_type_idx", "event_stream", &["event_type", "sequence"][..]),
+        ("command_event_refs_event_idx", "command_event_refs", &["event_id"][..]),
         ("setup_drafts_state_idx", "setup_drafts", &["state", "updated_at_ms"][..]),
         ("approval_records_status_idx", "approval_records", &["status", "created_at_ms"][..]),
     ] {
         let sql: String = connection.query_row("SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?1", [name], |row| row.get(0)).unwrap();
-        assert_eq!(normalize_sql(&sql), normalize_sql(&format!("create index {name} on {table}({})", columns.join(", "))));
+        let unique = if name == "command_event_refs_event_idx" { "unique " } else { "" };
+        assert_eq!(normalize_sql(&sql), normalize_sql(&format!("create {unique}index {name} on {table}({})", columns.join(", "))));
     }
 
     for (name, expected_sql) in [
         ("event_stream_no_update", "create trigger event_stream_no_update before update on event_stream begin select raise(abort, 'event_stream is append-only'); end"),
         ("event_stream_no_delete", "create trigger event_stream_no_delete before delete on event_stream begin select raise(abort, 'event_stream is append-only'); end"),
+        ("command_receipts_no_update", "create trigger command_receipts_no_update before update on command_receipts begin select raise(abort, 'command receipts are immutable'); end"),
+        ("command_receipts_no_delete", "create trigger command_receipts_no_delete before delete on command_receipts begin select raise(abort, 'command receipts are immutable'); end"),
+        ("command_event_refs_no_update", "create trigger command_event_refs_no_update before update on command_event_refs begin select raise(abort, 'command event refs are immutable'); end"),
+        ("command_event_refs_no_delete", "create trigger command_event_refs_no_delete before delete on command_event_refs begin select raise(abort, 'command event refs are immutable'); end"),
         ("installation_configuration_versions_no_update", "create trigger installation_configuration_versions_no_update before update on installation_configuration_versions begin select raise(abort, 'installation configuration versions are immutable'); end"),
         ("installation_configuration_versions_no_delete", "create trigger installation_configuration_versions_no_delete before delete on installation_configuration_versions begin select raise(abort, 'installation configuration versions are immutable'); end"),
     ] {
@@ -564,6 +638,11 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
 fn assert_every_task_six_constraint_is_enforced() {
     for statement in [
         "INSERT INTO schema_migrations (version, checksum) VALUES (0, 'x')",
+        "INSERT INTO command_receipts (command_id, command_fingerprint, request_json, capability, policy_decision, outcome_json) VALUES ('command-bad-fingerprint', 'short', '{}', 'help_read', 'granted', '{}')",
+        "INSERT INTO command_receipts (command_id, command_fingerprint, request_json, capability, policy_decision, outcome_json) VALUES ('command-bad-request', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'not-json', 'help_read', 'granted', '{}')",
+        "INSERT INTO command_receipts (command_id, command_fingerprint, request_json, capability, policy_decision, outcome_json) VALUES ('command-bad-capability', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}', 'unknown', 'granted', '{}')",
+        "INSERT INTO command_receipts (command_id, command_fingerprint, request_json, capability, policy_decision, outcome_json) VALUES ('command-bad-policy', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}', 'help_read', 'unknown', '{}')",
+        "INSERT INTO command_receipts (command_id, command_fingerprint, request_json, capability, policy_decision, outcome_json) VALUES ('command-bad-outcome', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}', 'help_read', 'granted', 'not-json')",
         "INSERT INTO event_stream (sequence, event_id, event_schema_version, event_type, actor_kind, occurred_at_ms, correlation_id, payload_json, event_digest) VALUES (2, 'event-2', 0, 'created', 'system', 2, 'corr-2', '{}', 'digest-2')",
         "INSERT INTO event_stream (sequence, event_id, event_schema_version, event_type, actor_kind, occurred_at_ms, correlation_id, object_version, payload_json, event_digest) VALUES (2, 'event-2', 1, 'created', 'system', 2, 'corr-2', 0, '{}', 'digest-2')",
         "INSERT INTO event_stream (sequence, event_id, event_schema_version, event_type, actor_kind, occurred_at_ms, correlation_id, payload_json, event_digest) VALUES (2, 'event-2', 1, 'created', 'system', 2, 'corr-2', 'not-json', 'digest-2')",
@@ -603,6 +682,11 @@ fn assert_every_task_six_constraint_is_enforced() {
     ] { assert_rejected_after(seed_complete, statement); }
 
     assert_rejected_after(seed_event, "INSERT INTO installation_projection (singleton, installation_id, created_event_id, created_at_ms) VALUES (1, 'installation-missing', 'missing-event', 1)");
+    assert_rejected_after(seed_receipt_without_ref, "INSERT INTO command_event_refs (command_id, event_ordinal, event_id) VALUES ('command-1', -1, 'event-1')");
+    assert_rejected_after(seed_event, "INSERT INTO command_event_refs (command_id, event_ordinal, event_id) VALUES ('missing-command', 0, 'event-1')");
+    assert_rejected_after(seed_receipt_without_ref, "INSERT INTO command_event_refs (command_id, event_ordinal, event_id) VALUES ('command-1', 0, 'missing-event')");
+    assert_rejected_after(seed_receipt_without_ref, "INSERT INTO command_receipts (command_id, command_fingerprint, request_json, capability, policy_decision, outcome_json) VALUES ('command-1', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '{}', 'status_read', 'denied', '{}')");
+    assert_rejected_after(seed_two_receipts_one_ref, "INSERT INTO command_event_refs (command_id, event_ordinal, event_id) VALUES ('command-2', 0, 'event-1')");
     assert_rejected_after(seed_event, "INSERT INTO process_session_projection (session_id, started_event_id, started_at_ms) VALUES ('session-missing-start', 'missing-event', 1)");
     assert_rejected_after(seed_event, "INSERT INTO process_session_projection (session_id, started_event_id, started_at_ms, ended_event_id, ended_at_ms, end_reason) VALUES ('session-missing-end', 'event-1', 1, 'missing-event', 2, 'quit')");
     assert_rejected_after(seed_event, "INSERT INTO installation_configuration_versions (configuration_id, version, source_draft_id, review_digest, object_digest, payload_json, created_event_id, created_at_ms) VALUES ('config-missing-source', 1, 'missing-draft', 'review', 'object', '{}', 'event-1', 1)");
@@ -617,6 +701,10 @@ fn assert_every_task_six_constraint_is_enforced() {
     assert_rejected_after(seed_complete, "DELETE FROM event_stream WHERE sequence = 1");
     assert_rejected_after(seed_complete, "UPDATE installation_configuration_versions SET review_digest = 'changed' WHERE configuration_id = 'configuration-1'");
     assert_rejected_after(seed_complete, "DELETE FROM installation_configuration_versions WHERE configuration_id = 'configuration-1'");
+    assert_rejected_after(seed_receipt, "UPDATE command_receipts SET capability = 'status_read' WHERE command_id = 'command-1'");
+    assert_rejected_after(seed_receipt, "DELETE FROM command_receipts WHERE command_id = 'command-1'");
+    assert_rejected_after(seed_receipt, "UPDATE command_event_refs SET event_ordinal = 1 WHERE command_id = 'command-1'");
+    assert_rejected_after(seed_receipt, "DELETE FROM command_event_refs WHERE command_id = 'command-1'");
 
     let (_temp, database) = fresh_database();
     let connection = database.connection();
@@ -655,6 +743,33 @@ fn assert_semantic_index_set(
 }
 
 fn assert_every_enumerated_check_value_is_accepted() {
+    let (_temp, database) = fresh_database();
+    let connection = database.connection();
+    for (index, capability) in [
+        "help_read", "status_read", "setup_status_read", "audit_read", "shutdown",
+        "discussion_run", "mcp_use", "engineering_job_run", "git_merge", "git_push",
+        "finance_recommendation",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        connection.execute(
+            "INSERT INTO command_receipts (command_id, command_fingerprint, request_json, capability, policy_decision, outcome_json) VALUES (?1, ?2, '{}', ?3, 'granted', '{}')",
+            rusqlite::params![format!("capability-{index}"), format!("{index:064x}"), capability],
+        ).unwrap();
+    }
+    let (_temp, database) = fresh_database();
+    let connection = database.connection();
+    for (index, decision) in ["granted", "denied", "denied_by_default", "approval_required"]
+        .into_iter()
+        .enumerate()
+    {
+        connection.execute(
+            "INSERT INTO command_receipts (command_id, command_fingerprint, request_json, capability, policy_decision, outcome_json) VALUES (?1, ?2, '{}', 'help_read', ?3, '{}')",
+            rusqlite::params![format!("decision-{index}"), format!("{index:064x}"), decision],
+        ).unwrap();
+    }
+
     let (_temp, database) = fresh_database();
     let connection = database.connection();
     for (index, state) in ["drafting", "reviewed", "applied", "superseded"].into_iter().enumerate() {
@@ -723,6 +838,30 @@ fn seed_complete(connection: &rusqlite::Connection) {
     connection.execute("INSERT INTO setup_step_outcomes (draft_id, step_key, attempt, status, occurred_at_ms) VALUES ('draft-1', 'step-1', 1, 'passed', 1)", []).unwrap();
     connection.execute("INSERT INTO capability_readiness (configuration_id, capability, status, checked_at_ms, projection_digest) VALUES ('configuration-1', 'capability-1', 'ready', 1, 'projection-1')", []).unwrap();
     connection.execute("INSERT INTO approval_records (approval_id, action_kind, object_kind, object_id, object_version, object_digest, actor_kind, status, created_at_ms) VALUES ('approval-1', 'apply', 'configuration', 'configuration-1', 1, 'object-1', 'system', 'pending', 1)", []).unwrap();
+}
+
+fn seed_receipt_without_ref(connection: &rusqlite::Connection) {
+    seed_event(connection);
+    connection.execute(
+        "INSERT INTO command_receipts (command_id, command_fingerprint, request_json, capability, policy_decision, outcome_json) VALUES ('command-1', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}', 'help_read', 'granted', '{}')",
+        [],
+    ).unwrap();
+}
+
+fn seed_receipt(connection: &rusqlite::Connection) {
+    seed_receipt_without_ref(connection);
+    connection.execute(
+        "INSERT INTO command_event_refs (command_id, event_ordinal, event_id) VALUES ('command-1', 0, 'event-1')",
+        [],
+    ).unwrap();
+}
+
+fn seed_two_receipts_one_ref(connection: &rusqlite::Connection) {
+    seed_receipt(connection);
+    connection.execute(
+        "INSERT INTO command_receipts (command_id, command_fingerprint, request_json, capability, policy_decision, outcome_json) VALUES ('command-2', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '{}', 'help_read', 'granted', '{}')",
+        [],
+    ).unwrap();
 }
 
 fn normalize_sql(sql: &str) -> Vec<String> {

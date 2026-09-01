@@ -30,6 +30,53 @@ END;
 CREATE INDEX event_stream_correlation_idx ON event_stream(correlation_id, sequence);
 CREATE INDEX event_stream_type_idx ON event_stream(event_type, sequence);
 
+CREATE TABLE command_receipts (
+    command_id TEXT PRIMARY KEY,
+    command_fingerprint TEXT NOT NULL CHECK (
+        length(command_fingerprint) = 64
+        AND command_fingerprint NOT GLOB '*[^0-9a-f]*'
+    ),
+    request_json TEXT NOT NULL CHECK (json_valid(request_json)),
+    capability TEXT NOT NULL CHECK (capability IN (
+        'help_read', 'status_read', 'setup_status_read', 'audit_read', 'shutdown',
+        'discussion_run', 'mcp_use', 'engineering_job_run', 'git_merge', 'git_push',
+        'finance_recommendation'
+    )),
+    policy_decision TEXT NOT NULL CHECK (policy_decision IN (
+        'granted', 'denied', 'denied_by_default', 'approval_required'
+    )),
+    outcome_json TEXT NOT NULL CHECK (json_valid(outcome_json))
+) STRICT;
+
+CREATE TRIGGER command_receipts_no_update
+BEFORE UPDATE ON command_receipts BEGIN
+    SELECT RAISE(ABORT, 'command receipts are immutable');
+END;
+
+CREATE TRIGGER command_receipts_no_delete
+BEFORE DELETE ON command_receipts BEGIN
+    SELECT RAISE(ABORT, 'command receipts are immutable');
+END;
+
+CREATE TABLE command_event_refs (
+    command_id TEXT NOT NULL REFERENCES command_receipts(command_id),
+    event_ordinal INTEGER NOT NULL CHECK (event_ordinal >= 0),
+    event_id TEXT NOT NULL REFERENCES event_stream(event_id),
+    PRIMARY KEY (command_id, event_ordinal)
+) STRICT;
+
+CREATE UNIQUE INDEX command_event_refs_event_idx ON command_event_refs(event_id);
+
+CREATE TRIGGER command_event_refs_no_update
+BEFORE UPDATE ON command_event_refs BEGIN
+    SELECT RAISE(ABORT, 'command event refs are immutable');
+END;
+
+CREATE TRIGGER command_event_refs_no_delete
+BEFORE DELETE ON command_event_refs BEGIN
+    SELECT RAISE(ABORT, 'command event refs are immutable');
+END;
+
 CREATE TABLE installation_projection (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     installation_id TEXT NOT NULL UNIQUE,

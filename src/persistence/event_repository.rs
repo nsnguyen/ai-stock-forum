@@ -53,6 +53,13 @@ impl RecoveryError {
 pub struct EventRepository;
 
 impl EventRepository {
+    pub fn load_by_event_id(
+        transaction: &ImmediateTransaction<'_>,
+        event_id: EventId,
+    ) -> Result<Option<EventEnvelope>, PersistenceError> {
+        load_by_event_id(transaction, event_id)
+    }
+
     /// Appends exactly one event. Event-ID replay is repository scope only; command and batch
     /// idempotency are deferred to the application-service task.
     pub fn append(

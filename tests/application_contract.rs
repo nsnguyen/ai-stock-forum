@@ -1,6 +1,9 @@
 mod support;
 
-use std::sync::Arc;
+use std::{
+    sync::{Arc, Barrier},
+    thread,
+};
 
 use ai_stock_forum::{
     app::{
@@ -167,6 +170,24 @@ fn denied_commands_are_typed_inert_and_consume_no_clock_or_ids() {
     assert_eq!(app.ids.calls(), ids_before);
     assert_eq!(app.count_rows("event_stream"), events_before);
     assert_eq!(app.persisted_last_sequence(), sequence_before);
+    assert_eq!(app.count_rows("command_receipts"), 6);
+    assert_eq!(app.count_rows("command_event_refs"), 0);
+
+    policy.set_decision(AuthorizationDecision::Granted);
+    let policy_before = policy.calls();
+    for (offset, (command, capability, _)) in commands().into_iter().enumerate() {
+        assert_eq!(
+            app.execute(envelope(300 + offset as u128, 400 + offset as u128, command))
+                .unwrap_err(),
+            AppError::CapabilityDenied {
+                capability,
+                decision: PolicyDecision::Denied,
+            }
+        );
+    }
+    assert_eq!(policy.calls(), policy_before);
+    assert_eq!(app.clock.calls(), clock_before);
+    assert_eq!(app.ids.calls(), ids_before);
 }
 
 #[test]
@@ -191,6 +212,21 @@ fn approval_required_commands_are_typed_inert_and_consume_no_clock_or_ids() {
     assert_eq!(app.ids.calls(), ids_before);
     assert_eq!(app.count_rows("event_stream"), events_before);
     assert_eq!(app.persisted_last_sequence(), sequence_before);
+    assert_eq!(app.count_rows("command_receipts"), 6);
+    assert_eq!(app.count_rows("command_event_refs"), 0);
+
+    policy.set_decision(AuthorizationDecision::Granted);
+    let policy_before = policy.calls();
+    for (offset, (command, capability, _)) in commands().into_iter().enumerate() {
+        assert_eq!(
+            app.execute(envelope(500 + offset as u128, 600 + offset as u128, command))
+                .unwrap_err(),
+            AppError::ApprovalRequired { capability }
+        );
+    }
+    assert_eq!(policy.calls(), policy_before);
+    assert_eq!(app.clock.calls(), clock_before);
+    assert_eq!(app.ids.calls(), ids_before);
 }
 
 #[test]
@@ -212,6 +248,7 @@ fn command_retry_returns_the_exact_outcome_without_duplicate_events_or_dependenc
     assert_eq!(app.clock.calls(), clock_before);
     assert_eq!(app.ids.calls(), ids_before);
     assert_eq!(policy.calls(), policy_before);
+    assert_eq!(app.count_rows("command_receipts"), 2);
 }
 
 #[test]
@@ -242,18 +279,32 @@ fn same_command_id_with_different_request_conflicts_deterministically() {
     assert_eq!(app.clock.calls(), clock_before);
     assert_eq!(app.ids.calls(), ids_before);
     assert_eq!(policy.calls(), policy_before);
+    assert_eq!(app.count_rows("command_receipts"), 1);
 }
 
 #[test]
-fn execution_reloads_authoritative_projection_instead_of_using_stale_boot_state() {
-    let mut app = support::app();
-    let before = app.persisted_last_sequence();
-    app.append_external_help_event();
+fn authoritative_events_ahead_of_projection_are_rejected_without_mutation_or_dependencies() {
+    let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
+    let mut app = support::app_with_policy(Arc::new(policy.clone()));
+    let projection_before = app.persisted_last_sequence();
+    app.append_authoritative_help_event_without_projection();
+    let event_sequence = app.max_event_sequence();
+    let receipts_before = app.count_rows("command_receipts");
+    let clock_before = app.clock.calls();
+    let ids_before = app.ids.calls();
+    let policy_before = policy.calls();
 
-    let outcome = app.execute_user(ApplicationCommand::ShowStatus).unwrap();
+    assert!(matches!(
+        app.execute(envelope(850, 851, ApplicationCommand::ShowStatus)),
+        Err(AppError::Recovery(_))
+    ));
 
-    assert_eq!(outcome.committed_events[0].sequence, before + 2);
-    assert_eq!(app.persisted_last_sequence(), before + 2);
+    assert_eq!(app.persisted_last_sequence(), projection_before);
+    assert_eq!(app.max_event_sequence(), event_sequence);
+    assert_eq!(app.count_rows("command_receipts"), receipts_before);
+    assert_eq!(app.clock.calls(), clock_before);
+    assert_eq!(app.ids.calls(), ids_before);
+    assert_eq!(policy.calls(), policy_before);
 }
 
 #[test]
@@ -269,6 +320,176 @@ fn projection_failure_rolls_back_event_projection_and_command_receipt() {
     ));
     assert_eq!(app.count_rows("event_stream"), events_before);
     assert_eq!(app.persisted_last_sequence(), sequence_before);
+    assert_eq!(app.count_rows("command_receipts"), 0);
+}
+
+#[test]
+fn receipt_and_outcome_failures_roll_back_every_command_effect() {
+    for failure in [
+        support::HookFailure::OutcomeMaterialization,
+        support::HookFailure::ReceiptWrite,
+    ] {
+        let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
+        let hook = Arc::new(support::TestCommandHook::failing(failure));
+        let mut app = support::app_with_policy_and_hook(Arc::new(policy.clone()), hook);
+        let events_before = app.count_rows("event_stream");
+        let sequence_before = app.persisted_last_sequence();
+        let clock_before = app.clock.calls();
+        let ids_before = app.ids.calls();
+
+        assert!(matches!(
+            app.execute(envelope(1_000 + failure as u128, 1_100, ApplicationCommand::ShowStatus)),
+            Err(AppError::Persistence(_))
+        ));
+        assert_eq!(app.count_rows("event_stream"), events_before);
+        assert_eq!(app.persisted_last_sequence(), sequence_before);
+        assert_eq!(app.count_rows("command_receipts"), 0);
+        assert_eq!(app.count_rows("command_event_refs"), 0);
+        assert_eq!(app.clock.calls() - clock_before, 1);
+        assert_eq!(app.ids.calls() - ids_before, 1);
+        assert_eq!(policy.calls(), 1);
+    }
+}
+
+#[test]
+fn durable_receipt_is_canonical_complete_and_orders_event_refs() {
+    let mut app = support::app();
+    let command = envelope(1_200, 1_201, ApplicationCommand::ShowStatus);
+    let outcome = app.execute(command.clone()).unwrap();
+    let (fingerprint, request_json, capability, decision, outcome_json) =
+        app.receipt_row(command.command_id);
+
+    assert_eq!(
+        ai_stock_forum::domain::sha256(request_json.as_bytes()).as_str(),
+        fingerprint
+    );
+    assert_eq!(capability, "status_read");
+    assert_eq!(decision, "granted");
+    for json in [&request_json, &outcome_json] {
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            ai_stock_forum::domain::canonical_json_bytes(&value).unwrap(),
+            json.as_bytes()
+        );
+    }
+    assert!(outcome_json.contains(&outcome.command_id.to_string()));
+    assert_eq!(app.event_ref_ordinals(command.command_id), vec![0]);
+}
+
+#[test]
+fn malformed_multi_event_order_is_rejected_before_dependencies() {
+    let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
+    let mut app = support::app_with_policy(Arc::new(policy.clone()));
+    let command = envelope(1_300, 1_301, ApplicationCommand::ShowHelp);
+    app.execute(command.clone()).unwrap();
+    app.shift_event_ref_to_ordinal_one(command.command_id);
+    let clock_before = app.clock.calls();
+    let ids_before = app.ids.calls();
+    let policy_before = policy.calls();
+
+    assert!(matches!(
+        app.execute(command),
+        Err(AppError::Persistence(_))
+    ));
+    assert_eq!(app.clock.calls(), clock_before);
+    assert_eq!(app.ids.calls(), ids_before);
+    assert_eq!(policy.calls(), policy_before);
+}
+
+#[test]
+fn finished_service_rejects_commands_before_policy_ids_clock_or_writes() {
+    let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
+    let mut app = support::app_with_policy(Arc::new(policy.clone()));
+    app.finish(ShutdownReason::UserQuit).unwrap();
+    let receipts_before = app.count_rows("command_receipts");
+    let events_before = app.count_rows("event_stream");
+    let clock_before = app.clock.calls();
+    let ids_before = app.ids.calls();
+    let policy_before = policy.calls();
+
+    assert_eq!(
+        app.execute_user(ApplicationCommand::ShowStatus).unwrap_err(),
+        AppError::LifecycleFinished
+    );
+    assert_eq!(app.count_rows("command_receipts"), receipts_before);
+    assert_eq!(app.count_rows("event_stream"), events_before);
+    assert_eq!(app.clock.calls(), clock_before);
+    assert_eq!(app.ids.calls(), ids_before);
+    assert_eq!(policy.calls(), policy_before);
+}
+
+#[test]
+fn concurrent_same_command_uses_one_receipt_and_returns_one_exact_outcome() {
+    let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
+    let app = support::app_with_policy(Arc::new(policy.clone()));
+    let mut first = app.peer();
+    let mut second = app.peer();
+    let command = envelope(1_400, 1_401, ApplicationCommand::ShowStatus);
+    let barrier = Arc::new(Barrier::new(3));
+    let first_barrier = barrier.clone();
+    let first_command = command.clone();
+    let first_handle = thread::spawn(move || {
+        first_barrier.wait();
+        first.execute(first_command)
+    });
+    let second_barrier = barrier.clone();
+    let second_handle = thread::spawn(move || {
+        second_barrier.wait();
+        second.execute(command)
+    });
+    let events_before = app.count_rows("event_stream");
+    let clock_before = app.clock.calls();
+    let ids_before = app.ids.calls();
+    barrier.wait();
+
+    let first = first_handle.join().unwrap().unwrap();
+    let second = second_handle.join().unwrap().unwrap();
+    assert_eq!(first, second);
+    assert_eq!(app.count_rows("command_receipts"), 1);
+    assert_eq!(app.count_rows("command_event_refs"), 1);
+    assert_eq!(app.count_rows("event_stream"), events_before + 1);
+    assert_eq!(app.clock.calls() - clock_before, 1);
+    assert_eq!(app.ids.calls() - ids_before, 1);
+    assert_eq!(policy.calls(), 1);
+}
+
+#[test]
+fn concurrent_conflicting_command_has_one_winner_and_one_deterministic_conflict() {
+    let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
+    let app = support::app_with_policy(Arc::new(policy.clone()));
+    let mut first = app.peer();
+    let mut second = app.peer();
+    let barrier = Arc::new(Barrier::new(3));
+    let first_barrier = barrier.clone();
+    let first_handle = thread::spawn(move || {
+        first_barrier.wait();
+        first.execute(envelope(1_500, 1_501, ApplicationCommand::ShowHelp))
+    });
+    let second_barrier = barrier.clone();
+    let second_handle = thread::spawn(move || {
+        second_barrier.wait();
+        second.execute(envelope(1_500, 1_502, ApplicationCommand::ShowStatus))
+    });
+    let events_before = app.count_rows("event_stream");
+    let clock_before = app.clock.calls();
+    let ids_before = app.ids.calls();
+    barrier.wait();
+
+    let results = [first_handle.join().unwrap(), second_handle.join().unwrap()];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(AppError::CommandConflict)))
+            .count(),
+        1
+    );
+    assert_eq!(app.count_rows("command_receipts"), 1);
+    assert_eq!(app.count_rows("command_event_refs"), 1);
+    assert_eq!(app.count_rows("event_stream"), events_before + 1);
+    assert_eq!(app.clock.calls() - clock_before, 1);
+    assert_eq!(app.ids.calls() - ids_before, 1);
+    assert_eq!(policy.calls(), 1);
 }
 
 #[test]

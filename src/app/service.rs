@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
 use crate::{
     app::{
         AppError, ApplicationCommand, ApplicationEvent, AuditTailView, CommandEnvelope,
@@ -9,9 +11,13 @@ use crate::{
     audit::AuditEntry,
     config::{AppPaths, StartupError},
     domain::{
-        Actor, CausationId, Clock, CommandId, CorrelationId, EventId, IdGenerator,
+        canonical_json_bytes, sha256, Actor, CausationId, Clock, CommandId, CorrelationId,
+        EventId, IdGenerator, Sha256Digest,
     },
-    persistence::{Database, EventRepository, ProjectionRepository, RecoveryError},
+    persistence::{
+        CommandReceiptRecord, CommandReceiptRepository, Database, EventRepository,
+        ImmediateTransaction, PersistenceError, ProjectionRepository, RecoveryError,
+    },
     policy::{evaluate, Capability, Effect, PolicyDecision, PolicyRule},
     recovery::{reduce, BootstrapState, ProjectionState, RecoveryCoordinator},
 };
@@ -25,6 +31,36 @@ pub enum AuthorizationDecision {
 
 pub trait CommandPolicy: Send + Sync {
     fn authorize(&self, capability: Capability) -> AuthorizationDecision;
+}
+
+pub trait CommandTransactionHook: Send + Sync {
+    fn before_outcome_materialization(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError>;
+
+    fn before_receipt_write(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError>;
+}
+
+pub struct NoopCommandTransactionHook;
+
+impl CommandTransactionHook for NoopCommandTransactionHook {
+    fn before_outcome_materialization(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn before_receipt_write(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
 }
 
 struct PhaseZeroPolicy {
@@ -56,12 +92,90 @@ impl CommandPolicy for PhaseZeroPolicy {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandRequest {
+    correlation_id: CorrelationId,
+    actor: Actor,
+    command: ApplicationCommand,
+}
+
+impl From<&CommandEnvelope> for CommandRequest {
+    fn from(envelope: &CommandEnvelope) -> Self {
+        Self {
+            correlation_id: envelope.correlation_id,
+            actor: envelope.actor.clone(),
+            command: envelope.command.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoredPolicyDecision {
+    Granted,
+    Denied,
+    DeniedByDefault,
+    ApprovalRequired,
+}
+
+impl StoredPolicyDecision {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Granted => "granted",
+            Self::Denied => "denied",
+            Self::DeniedByDefault => "denied_by_default",
+            Self::ApprovalRequired => "approval_required",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, AppError> {
+        match value {
+            "granted" => Ok(Self::Granted),
+            "denied" => Ok(Self::Denied),
+            "denied_by_default" => Ok(Self::DeniedByDefault),
+            "approval_required" => Ok(Self::ApprovalRequired),
+            _ => Err(invalid_receipt()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredExecution {
+    Success { outcome: CommandOutcome },
+    CapabilityDenied {
+        capability: Capability,
+        decision: PolicyDecision,
+    },
+    ApprovalRequired { capability: Capability },
+}
+
+impl StoredExecution {
+    fn into_result(self) -> Result<CommandOutcome, AppError> {
+        match self {
+            Self::Success { outcome } => Ok(outcome),
+            Self::CapabilityDenied {
+                capability,
+                decision,
+            } => Err(AppError::CapabilityDenied {
+                capability,
+                decision,
+            }),
+            Self::ApprovalRequired { capability } => {
+                Err(AppError::ApprovalRequired { capability })
+            }
+        }
+    }
+}
+
 pub struct ApplicationService {
     database: Database,
-    state: BootstrapState,
+    state: Option<BootstrapState>,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGenerator>,
     policy: Arc<dyn CommandPolicy>,
+    hook: Arc<dyn CommandTransactionHook>,
+    finished: bool,
 }
 
 impl ApplicationService {
@@ -70,7 +184,13 @@ impl ApplicationService {
         clock: Arc<dyn Clock>,
         ids: Arc<dyn IdGenerator>,
     ) -> Result<Self, StartupError> {
-        Self::bootstrap_with_policy(paths, clock, ids, Arc::new(PhaseZeroPolicy::default()))
+        Self::bootstrap_with_dependencies(
+            paths,
+            clock,
+            ids,
+            Arc::new(PhaseZeroPolicy::default()),
+            Arc::new(NoopCommandTransactionHook),
+        )
     }
 
     #[doc(hidden)]
@@ -79,6 +199,23 @@ impl ApplicationService {
         clock: Arc<dyn Clock>,
         ids: Arc<dyn IdGenerator>,
         policy: Arc<dyn CommandPolicy>,
+    ) -> Result<Self, StartupError> {
+        Self::bootstrap_with_dependencies(
+            paths,
+            clock,
+            ids,
+            policy,
+            Arc::new(NoopCommandTransactionHook),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn bootstrap_with_dependencies(
+        paths: &AppPaths,
+        clock: Arc<dyn Clock>,
+        ids: Arc<dyn IdGenerator>,
+        policy: Arc<dyn CommandPolicy>,
+        hook: Arc<dyn CommandTransactionHook>,
     ) -> Result<Self, StartupError> {
         let mut database = Database::open(paths)?;
         let state = RecoveryCoordinator::bootstrap(
@@ -89,10 +226,31 @@ impl ApplicationService {
         )?;
         Ok(Self {
             database,
-            state,
+            state: Some(state),
             clock,
             ids,
             policy,
+            hook,
+            finished: false,
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn open_peer_for_test(
+        paths: &AppPaths,
+        clock: Arc<dyn Clock>,
+        ids: Arc<dyn IdGenerator>,
+        policy: Arc<dyn CommandPolicy>,
+        hook: Arc<dyn CommandTransactionHook>,
+    ) -> Result<Self, StartupError> {
+        Ok(Self {
+            database: Database::open(paths)?,
+            state: None,
+            clock,
+            ids,
+            policy,
+            hook,
+            finished: false,
         })
     }
 
@@ -100,6 +258,7 @@ impl ApplicationService {
         &mut self,
         command: ApplicationCommand,
     ) -> Result<CommandOutcome, AppError> {
+        self.ensure_running()?;
         self.execute(CommandEnvelope {
             command_id: CommandId::from_uuid(self.ids.next_uuid()),
             correlation_id: CorrelationId::from_uuid(self.ids.next_uuid()),
@@ -109,155 +268,315 @@ impl ApplicationService {
     }
 
     pub fn execute(&mut self, envelope: CommandEnvelope) -> Result<CommandOutcome, AppError> {
-        let command_event = event_for_command(&envelope.command);
-        let causation_id = CausationId::from_uuid(envelope.command_id.as_uuid());
+        self.ensure_running()?;
+        let request = CommandRequest::from(&envelope);
+        let request_json = encode_canonical(&request)?;
+        let command_fingerprint = sha256(request_json.as_bytes());
         let transaction = self.database.immediate_transaction()?;
 
-        if let Some(existing) = EventRepository::load_by_causation_id(&transaction, causation_id)? {
-            if !matches_request(&existing, &envelope, &command_event) {
-                return Err(AppError::CommandConflict);
-            }
+        if let Some(receipt) = CommandReceiptRepository::load(&transaction, envelope.command_id)? {
+            let stored = validate_receipt(
+                &transaction,
+                &receipt,
+                &request,
+                &request_json,
+                &command_fingerprint,
+            )?;
             transaction.commit()?;
-            return self.outcome_from_event(envelope.command_id, existing);
-        }
-
-        let capability = envelope.command.required_capability();
-        match self.policy.authorize(capability) {
-            AuthorizationDecision::Granted => {}
-            AuthorizationDecision::Denied(decision) => {
-                return Err(AppError::CapabilityDenied {
-                    capability,
-                    decision,
-                });
-            }
-            AuthorizationDecision::ApprovalRequired => {
-                return Err(AppError::ApprovalRequired { capability });
-            }
+            return stored.into_result();
         }
 
         let mut projection = ProjectionRepository::load_in(&transaction)?;
-        let pending = PendingEvent {
-            event_id: EventId::from_uuid(self.ids.next_uuid()),
-            event_schema_version: EVENT_SCHEMA_VERSION,
-            actor: envelope.actor,
-            occurred_at_ms: self.clock.now_millis(),
-            correlation_id: envelope.correlation_id,
-            causation_id: Some(causation_id),
-            object: None,
-            event: command_event,
+        let capability = request.command.required_capability();
+        let (policy_decision, stored, events) = match self.policy.authorize(capability) {
+            AuthorizationDecision::Granted => {
+                let pending = PendingEvent {
+                    event_id: EventId::from_uuid(self.ids.next_uuid()),
+                    event_schema_version: EVENT_SCHEMA_VERSION,
+                    actor: request.actor.clone(),
+                    occurred_at_ms: self.clock.now_millis(),
+                    correlation_id: request.correlation_id,
+                    causation_id: Some(CausationId::from_uuid(envelope.command_id.as_uuid())),
+                    object: None,
+                    event: event_for_command(&request.command),
+                };
+                let committed = EventRepository::append(&transaction, pending)?;
+                reduce(&mut projection, &committed)?;
+                ProjectionRepository::store(&transaction, &projection)?;
+                self.hook
+                    .before_outcome_materialization(transaction.transaction())?;
+                let events = vec![committed];
+                let outcome = materialize_success(
+                    &transaction,
+                    envelope.command_id,
+                    &request,
+                    &events,
+                    &projection,
+                )?;
+                (
+                    StoredPolicyDecision::Granted,
+                    StoredExecution::Success { outcome },
+                    events,
+                )
+            }
+            AuthorizationDecision::Denied(PolicyDecision::Denied) => (
+                StoredPolicyDecision::Denied,
+                StoredExecution::CapabilityDenied {
+                    capability,
+                    decision: PolicyDecision::Denied,
+                },
+                Vec::new(),
+            ),
+            AuthorizationDecision::Denied(PolicyDecision::DeniedByDefault) => (
+                StoredPolicyDecision::DeniedByDefault,
+                StoredExecution::CapabilityDenied {
+                    capability,
+                    decision: PolicyDecision::DeniedByDefault,
+                },
+                Vec::new(),
+            ),
+            AuthorizationDecision::Denied(PolicyDecision::Granted) => {
+                return Err(invalid_receipt());
+            }
+            AuthorizationDecision::ApprovalRequired => (
+                StoredPolicyDecision::ApprovalRequired,
+                StoredExecution::ApprovalRequired { capability },
+                Vec::new(),
+            ),
         };
-        let committed = EventRepository::append(&transaction, pending)?;
-        reduce(&mut projection, &committed)?;
-        ProjectionRepository::store(&transaction, &projection)?;
+        if events.is_empty() {
+            self.hook
+                .before_outcome_materialization(transaction.transaction())?;
+        }
+        let outcome_json = encode_canonical(&stored)?;
+        self.hook.before_receipt_write(transaction.transaction())?;
+        CommandReceiptRepository::insert(
+            &transaction,
+            &CommandReceiptRecord {
+                command_id: envelope.command_id,
+                command_fingerprint,
+                request_json,
+                capability: capability_name(capability).to_owned(),
+                policy_decision: policy_decision.as_str().to_owned(),
+                outcome_json,
+                event_ids: events.iter().map(|event| event.event_id).collect(),
+            },
+        )?;
         transaction.commit()?;
-
-        self.outcome_from_event(envelope.command_id, committed)
+        stored.into_result()
     }
 
     pub fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
+        if self.finished {
+            return Ok(());
+        }
+        let state = self.state.as_mut().ok_or(AppError::LifecycleFinished)?;
         RecoveryCoordinator::finish_session(
             &mut self.database,
-            &mut self.state,
+            state,
             reason,
             self.clock.as_ref(),
             self.ids.as_ref(),
         )?;
+        self.finished = true;
         Ok(())
     }
 
-    pub const fn installation_id(&self) -> crate::domain::InstallationId {
-        self.state.installation_id()
+    pub fn installation_id(&self) -> crate::domain::InstallationId {
+        self.state
+            .as_ref()
+            .expect("bootstrap service owns lifecycle state")
+            .installation_id()
     }
 
-    pub const fn session_id(&self) -> crate::domain::SessionId {
-        self.state.session_id()
+    pub fn session_id(&self) -> crate::domain::SessionId {
+        self.state
+            .as_ref()
+            .expect("bootstrap service owns lifecycle state")
+            .session_id()
     }
 
-    fn outcome_from_event(
-        &self,
-        command_id: CommandId,
-        event: crate::app::EventEnvelope,
-    ) -> Result<CommandOutcome, AppError> {
-        let projection = ProjectionRepository::load_at(self.database.connection(), event.sequence)?;
-        let (view, shutdown) = self.view_from_event(&event, &projection)?;
-        Ok(CommandOutcome {
-            command_id,
-            correlation_id: event.correlation_id,
-            committed_events: vec![event],
-            view,
-            shutdown,
-        })
+    fn ensure_running(&self) -> Result<(), AppError> {
+        if self.finished {
+            Err(AppError::LifecycleFinished)
+        } else {
+            Ok(())
+        }
     }
+}
 
-    fn view_from_event(
-        &self,
-        event: &crate::app::EventEnvelope,
-        projection: &ProjectionState,
-    ) -> Result<(CommandView, ShutdownDisposition), AppError> {
-        let result = match &event.event {
-            ApplicationEvent::HelpViewed => (
-                CommandView::Help(HelpView),
-                ShutdownDisposition::Continue,
-            ),
-            ApplicationEvent::StatusViewed => {
-                let installation_id = projection
-                    .installation
-                    .as_ref()
-                    .ok_or(RecoveryError::InvalidEventRecord)?
-                    .installation_id;
-                let session_id = projection
-                    .sessions
-                    .values()
-                    .find(|session| session.ended.is_none())
-                    .ok_or(RecoveryError::InvalidEventRecord)?
-                    .session_id;
-                (
-                    CommandView::Status(StatusView {
-                        installation_id,
-                        session_id,
-                    }),
-                    ShutdownDisposition::Continue,
-                )
-            }
-            ApplicationEvent::SetupStatusViewed => (
-                CommandView::SetupStatus(SetupStatusView {
-                    status: projection.setup_status.clone(),
-                }),
-                ShutdownDisposition::Continue,
-            ),
-            ApplicationEvent::AuditTailViewed { limit } => {
-                let entries = EventRepository::tail_through(
-                    self.database.connection(),
-                    *limit,
-                    event.sequence,
-                )?
+fn validate_receipt(
+    transaction: &ImmediateTransaction<'_>,
+    receipt: &CommandReceiptRecord,
+    request: &CommandRequest,
+    request_json: &str,
+    command_fingerprint: &Sha256Digest,
+) -> Result<StoredExecution, AppError> {
+    let stored_request: CommandRequest = decode_canonical(&receipt.request_json)?;
+    if receipt.command_fingerprint != sha256(receipt.request_json.as_bytes()) {
+        return Err(invalid_receipt());
+    }
+    if &stored_request != request
+        || receipt.request_json != request_json
+        || &receipt.command_fingerprint != command_fingerprint
+    {
+        return Err(AppError::CommandConflict);
+    }
+    let capability = parse_capability(&receipt.capability)?;
+    if capability != stored_request.command.required_capability() {
+        return Err(invalid_receipt());
+    }
+    let policy_decision = StoredPolicyDecision::parse(&receipt.policy_decision)?;
+    let stored: StoredExecution = decode_canonical(&receipt.outcome_json)?;
+    match (&stored, policy_decision) {
+        (StoredExecution::Success { outcome }, StoredPolicyDecision::Granted) => {
+            let events = receipt
+                .event_ids
                 .iter()
-                .map(AuditEntry::from_event)
-                .collect();
-                (
-                    CommandView::AuditTail(AuditTailView {
-                        limit: *limit,
-                        entries,
-                    }),
-                    ShutdownDisposition::Continue,
-                )
+                .map(|event_id| {
+                    EventRepository::load_by_event_id(transaction, *event_id)?
+                        .ok_or_else(invalid_receipt)
+                })
+                .collect::<Result<Vec<_>, AppError>>()?;
+            let last = events.last().ok_or_else(invalid_receipt)?;
+            let projection = ProjectionRepository::load_at(
+                transaction.transaction(),
+                last.sequence,
+            )?;
+            let expected = materialize_success(
+                transaction,
+                receipt.command_id,
+                &stored_request,
+                &events,
+                &projection,
+            )?;
+            if outcome != &expected {
+                return Err(invalid_receipt());
             }
-            ApplicationEvent::CommandRejected { rejection } => (
-                CommandView::InputRejected(InputRejectedView {
-                    rejection: rejection.clone(),
+        }
+        (
+            StoredExecution::CapabilityDenied {
+                capability: outcome_capability,
+                decision,
+            },
+            StoredPolicyDecision::Denied,
+        ) if receipt.event_ids.is_empty()
+            && *outcome_capability == capability
+            && *decision == PolicyDecision::Denied => {}
+        (
+            StoredExecution::CapabilityDenied {
+                capability: outcome_capability,
+                decision,
+            },
+            StoredPolicyDecision::DeniedByDefault,
+        ) if receipt.event_ids.is_empty()
+            && *outcome_capability == capability
+            && *decision == PolicyDecision::DeniedByDefault => {}
+        (
+            StoredExecution::ApprovalRequired {
+                capability: outcome_capability,
+            },
+            StoredPolicyDecision::ApprovalRequired,
+        ) if receipt.event_ids.is_empty() && *outcome_capability == capability => {}
+        _ => return Err(invalid_receipt()),
+    }
+    Ok(stored)
+}
+
+fn materialize_success(
+    transaction: &ImmediateTransaction<'_>,
+    command_id: CommandId,
+    request: &CommandRequest,
+    events: &[crate::app::EventEnvelope],
+    projection: &ProjectionState,
+) -> Result<CommandOutcome, AppError> {
+    let [event] = events else {
+        return Err(invalid_receipt());
+    };
+    if event.actor != request.actor
+        || event.correlation_id != request.correlation_id
+        || event.causation_id != Some(CausationId::from_uuid(command_id.as_uuid()))
+        || event.object.is_some()
+    {
+        return Err(invalid_receipt());
+    }
+    let (view, shutdown) = match (&request.command, &event.event) {
+        (ApplicationCommand::ShowHelp, ApplicationEvent::HelpViewed) => (
+            CommandView::Help(HelpView),
+            ShutdownDisposition::Continue,
+        ),
+        (ApplicationCommand::ShowStatus, ApplicationEvent::StatusViewed) => {
+            let installation_id = projection
+                .installation
+                .as_ref()
+                .ok_or(RecoveryError::InvalidEventRecord)?
+                .installation_id;
+            let session_id = projection
+                .sessions
+                .values()
+                .find(|session| session.ended.is_none())
+                .ok_or(RecoveryError::InvalidEventRecord)?
+                .session_id;
+            (
+                CommandView::Status(StatusView {
+                    installation_id,
+                    session_id,
                 }),
                 ShutdownDisposition::Continue,
-            ),
-            ApplicationEvent::ShutdownRequested => (
-                CommandView::Shutdown(ShutdownView {
-                    disposition: ShutdownDisposition::Requested,
+            )
+        }
+        (ApplicationCommand::ShowSetupStatus, ApplicationEvent::SetupStatusViewed) => (
+            CommandView::SetupStatus(SetupStatusView {
+                status: projection.setup_status.clone(),
+            }),
+            ShutdownDisposition::Continue,
+        ),
+        (
+            ApplicationCommand::ShowAuditTail { limit: requested },
+            ApplicationEvent::AuditTailViewed { limit: committed },
+        ) if requested == committed => {
+            let entries = EventRepository::tail_through(
+                transaction.transaction(),
+                *requested,
+                event.sequence,
+            )?
+            .iter()
+            .map(AuditEntry::from_event)
+            .collect();
+            (
+                CommandView::AuditTail(AuditTailView {
+                    limit: *requested,
+                    entries,
                 }),
-                ShutdownDisposition::Requested,
-            ),
-            _ => return Err(RecoveryError::InvalidEventRecord.into()),
-        };
-        Ok(result)
-    }
+                ShutdownDisposition::Continue,
+            )
+        }
+        (
+            ApplicationCommand::RejectInput(requested),
+            ApplicationEvent::CommandRejected {
+                rejection: committed,
+            },
+        ) if requested == committed => (
+            CommandView::InputRejected(InputRejectedView {
+                rejection: committed.clone(),
+            }),
+            ShutdownDisposition::Continue,
+        ),
+        (ApplicationCommand::RequestShutdown, ApplicationEvent::ShutdownRequested) => (
+            CommandView::Shutdown(ShutdownView {
+                disposition: ShutdownDisposition::Requested,
+            }),
+            ShutdownDisposition::Requested,
+        ),
+        _ => return Err(invalid_receipt()),
+    };
+    Ok(CommandOutcome {
+        command_id,
+        correlation_id: request.correlation_id,
+        committed_events: events.to_vec(),
+        view,
+        shutdown,
+    })
 }
 
 fn event_for_command(command: &ApplicationCommand) -> ApplicationEvent {
@@ -275,15 +594,62 @@ fn event_for_command(command: &ApplicationCommand) -> ApplicationEvent {
     }
 }
 
-fn matches_request(
-    existing: &crate::app::EventEnvelope,
-    request: &CommandEnvelope,
-    command_event: &ApplicationEvent,
-) -> bool {
-    existing.actor == request.actor
-        && existing.correlation_id == request.correlation_id
-        && existing.causation_id
-            == Some(CausationId::from_uuid(request.command_id.as_uuid()))
-        && existing.object.is_none()
-        && &existing.event == command_event
+fn encode_canonical<T: Serialize>(value: &T) -> Result<String, AppError> {
+    String::from_utf8(
+        canonical_json_bytes(value).map_err(|_| PersistenceError::InvalidEventRecord)?,
+    )
+    .map_err(|_| invalid_receipt())
+}
+
+fn decode_canonical<T>(json: &str) -> Result<T, AppError>
+where
+    T: DeserializeOwned,
+{
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|_| invalid_receipt())?;
+    let canonical = String::from_utf8(
+        canonical_json_bytes(&value).map_err(|_| PersistenceError::InvalidEventRecord)?,
+    )
+    .map_err(|_| invalid_receipt())?;
+    if canonical != json {
+        return Err(invalid_receipt());
+    }
+    serde_json::from_value(value).map_err(|_| invalid_receipt())
+}
+
+fn capability_name(capability: Capability) -> &'static str {
+    match capability {
+        Capability::HelpRead => "help_read",
+        Capability::StatusRead => "status_read",
+        Capability::SetupStatusRead => "setup_status_read",
+        Capability::AuditRead => "audit_read",
+        Capability::Shutdown => "shutdown",
+        Capability::DiscussionRun => "discussion_run",
+        Capability::McpUse => "mcp_use",
+        Capability::EngineeringJobRun => "engineering_job_run",
+        Capability::GitMerge => "git_merge",
+        Capability::GitPush => "git_push",
+        Capability::FinanceRecommendation => "finance_recommendation",
+    }
+}
+
+fn parse_capability(value: &str) -> Result<Capability, AppError> {
+    match value {
+        "help_read" => Ok(Capability::HelpRead),
+        "status_read" => Ok(Capability::StatusRead),
+        "setup_status_read" => Ok(Capability::SetupStatusRead),
+        "audit_read" => Ok(Capability::AuditRead),
+        "shutdown" => Ok(Capability::Shutdown),
+        "discussion_run" => Ok(Capability::DiscussionRun),
+        "mcp_use" => Ok(Capability::McpUse),
+        "engineering_job_run" => Ok(Capability::EngineeringJobRun),
+        "git_merge" => Ok(Capability::GitMerge),
+        "git_push" => Ok(Capability::GitPush),
+        "finance_recommendation" => Ok(Capability::FinanceRecommendation),
+        _ => Err(invalid_receipt()),
+    }
+}
+
+fn invalid_receipt() -> AppError {
+    AppError::Persistence(PersistenceError::InvalidEventRecord)
 }

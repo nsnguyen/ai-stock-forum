@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     app::{ApplicationEvent, EventEnvelope, InputRejectionCategory, SafeToken},
@@ -7,7 +7,8 @@ use crate::{
 
 pub const MODULE_NAME: &str = "audit";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuditEntry {
     pub sequence: u64,
     pub occurred_at_ms: i64,

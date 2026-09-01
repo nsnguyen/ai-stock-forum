@@ -50,7 +50,8 @@ pub enum AuditLimitError {
     OutOfRange,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ApplicationCommand {
     ShowHelp,
     ShowStatus,
@@ -78,7 +79,8 @@ impl ApplicationCommand {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommandEnvelope {
     pub command_id: CommandId,
     pub correlation_id: CorrelationId,
@@ -147,6 +149,7 @@ impl<'de> Deserialize<'de> for SafeToken {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InputRejection {
     pub category: InputRejectionCategory,
     pub safe_token: Option<SafeToken>,
