@@ -274,11 +274,33 @@ path, process launch, or network operation.
 | --- | --- | ---: | --- |
 | Common credential forms | `rg -n --with-filename --no-ignore --hidden --glob '!.git' --glob '!.git/**' --glob '!target/**' -e '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----' -e '\b(?:AKIA|ASIA)[0-9A-Z]{16}\b' -e '\bgithub_pat_[A-Za-z0-9_]{20,}\b' -e '\bgh[pousr]_[A-Za-z0-9_]{20,}\b' -e '\bsk-proj-[A-Za-z0-9_-]{16,}\b' -e '\bsk-(?:live|test)_[A-Za-z0-9]{16,}\b' -e '\bxox[baprs]-[A-Za-z0-9-]{16,}\b' -e '\bAIza[0-9A-Za-z_-]{30,}\b' .` | 1 | 0 matches across non-`.git`, non-`target` files, including ignored evidence directories. Covers PEM private keys, AWS AKIA/ASIA, GitHub classic/fine-grained tokens, `sk-proj-`, Stripe-style, Slack, and Google API-key forms. |
 | Local absolute path forms | `rg -n --with-filename --no-ignore --hidden --glob '!.git' --glob '!.git/**' --glob '!target/**' -e '/Users/' -e '/home/' -e '/tmp/' -e '/private/tmp/' -e '/var/folders/' -e '[A-Za-z]:[\\/]+Users[\\/]' -e '\\\\[A-Za-z0-9._-]+\\[A-Za-z0-9.$_-]+' .` | 0 | 36 filename-bearing matches: 6 approved plan install commands, 2 negative documentation assertions, and 28 historical `.superpowers` briefs/reports/diffs/progress records. No `src`, migration, manifest, or lockfile match; no `/var/folders`, drive-user, or UNC match. These are documented fixtures/history, not production path leakage. |
-| Networking/process APIs | `rg -n --with-filename -e '\bstd::net\b' -e '\bToSocketAddrs\b' -e '\b(TcpStream|TcpListener|UdpSocket)\b' -e '\bstd::process::Command\b' -e '\bCommand::new\s*\(' -e '\b(libc::(socket|connect|bind|listen|accept|getaddrinfo|send|recv)|socket2::|reqwest::|hyper::|ureq::|curl::)' src` | 0 | One match: `src/panic_boundary.rs:66`, inside `#[cfg(test)]`, launches the current test executable to validate panic redaction. No production networking API match. |
+| Present compiled-target inventory | `for scan_path in build.rs examples benches; do if test -e "$scan_path"; then printf 'present: %s\n' "$scan_path"; else printf 'absent: %s\n' "$scan_path"; fi; done` | 0 | `build.rs`, `examples`, and `benches` were absent. Therefore `src` and `tests` are the complete present compiled project-target roots. |
+| Networking/process APIs in all present compiled targets | `rg -n --with-filename -e '\bstd::net\b' -e '\bToSocketAddrs\b' -e '\b(TcpStream|TcpListener|UdpSocket)\b' -e '\bstd::process\b' -e '\bCommand::new\s*\(' -e '\b(libc::(socket|connect|bind|listen|accept|getaddrinfo|send|recv)|socket2::|reqwest::|hyper::|ureq::|curl::)' src tests` | 0 | 6 filename-bearing matches: 4 process launches and 2 child-probe exits, classified below. There were 0 networking API matches. |
+| Forbidden literal process-launch arguments | `rg -n --with-filename -i -U '(?:std::process::)?Command::new\s*\(\s*"(?:python3?|node|npm|npx|deno|bun|bash|sh|zsh|fish|cmd(?:\.exe)?|powershell|pwsh|osascript|open|xdg-open|google-chrome|chrome|chromium|firefox|safari|curl|wget|ssh|nc|netcat|socat|telnet|docker|podman|systemctl|launchctl|daemon)"\s*\)' src tests` | 1 | 0 literal launch-argument matches. Dynamic launch arguments were separately classified from their source expressions below. |
+| Forbidden executable-name source indicators | `rg -n --with-filename -i '\b(python3?|node|npm|npx|deno|bun|bash|zsh|fish|powershell|pwsh|osascript|xdg-open|google-chrome|chrome|chromium|firefox|safari|curl|wget|ssh|netcat|socat|telnet|docker|podman|systemctl|launchctl|daemon)\b' src tests` | 0 | 2 matches, both in `tests/documentation_contract.rs`: negative README assertions rejecting `npm run` and `podman`. Neither is a launch site. |
 | Debug/TODO/mock markers | `rg -n --with-filename -i -e '\b(dbg!|todo!|unimplemented!)' -e '\b(TODO|FIXME|HACK|XXX)\b' -e '\b(mock|fake|stub)(ed|s|ing)?\b' src` | 1 | 0 production source matches. |
 | Known networking/runtime dependencies | `rg -n --with-filename '^name = "(reqwest|hyper|hyper-util|ureq|curl|isahc|surf|tonic|axum|actix-web|rocket|warp|tokio|async-std|smol|socket2|mio|rustls|native-tls|openssl|oauth2|aws-config|aws-sdk-[^"]+)"$' Cargo.lock` | 1 | 0 matches. This named-family scan is supplemented by the complete Cargo inventory, not treated as exhaustive alone. |
 | Existing allowances | `rg -n --with-filename '#!?\[allow' src tests` | 0 | 3 existing lines: test-only shared-support `dead_code`, plus two function-local `clippy::too_many_arguments` constructor allowances. |
-| New allowances | `git diff -U0 -- src tests \| rg -n '^\+.*#.*\[allow'` | 1 | 0 added allowance lines. |
+| New allowances across committed Task 14 implementation | `git diff -U0 2f432ad925850a41ecebbdfd8386008a7db84c70..cb93641ff94e4956a875304c2ed193e4a1687e46 -- src tests \| rg -n '^\+.*#.*\[allow'` | 1 | 0 added allowance lines in the explicit base-to-implementation range. Exit 1 is ripgrep's no-match result. |
+
+Process API classification:
+
+- `src/panic_boundary.rs:66` launches `std::env::current_exe()` with an exact
+  Rust test name and `--nocapture`; it re-executes the current test harness for
+  panic-redaction validation. Its child branch calls `std::process::exit(0)` at
+  line 63 after writing the expected safe line.
+- `tests/fallback_contract.rs:482` likewise launches
+  `std::env::current_exe()` with an exact Rust test name and `--nocapture` for
+  panic-redaction validation. Its child branch calls `std::process::exit(0)` at
+  line 479.
+- `tests/fallback_contract.rs:618` and
+  `tests/fallback_fix_round_contract.rs:569` launch only
+  `env!("CARGO_BIN_EXE_ai-stock-forum")`, Cargo's path to this project's built
+  Rust binary, with isolated `HOME` and `XDG_DATA_HOME` test environments.
+- None of the four launch arguments names or constructs Python, Node, a
+  browser, daemon, shell, network client, or another external executable.
+  This is source-level evidence over every currently present compiled target,
+  not an OS sandbox or a proof against executable names synthesized at runtime.
 
 Allowance scope and rationale:
 
