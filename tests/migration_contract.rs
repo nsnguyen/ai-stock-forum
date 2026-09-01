@@ -360,6 +360,16 @@ fn every_enumerated_check_value_is_accepted() {
     assert_every_enumerated_check_value_is_accepted();
 }
 
+#[test]
+fn sql_token_normalization_preserves_literal_case_but_ignores_sql_formatting() {
+    assert_ne!(normalize_sql("SELECT 'Append-Only'"), normalize_sql("select 'append-only'"));
+    assert_eq!(
+        normalize_sql("CREATE TRIGGER sample BEFORE UPDATE ON item BEGIN SELECT RAISE(ABORT, 'Append-Only'); END"),
+        normalize_sql("create trigger SAMPLE before update on ITEM begin select raise ( abort , 'Append-Only' ) ; end"),
+    );
+    assert_eq!(normalize_sql("SELECT 'it''s safe'"), normalize_sql("select 'it''s safe'"));
+}
+
 #[derive(Clone, Copy)]
 struct ExpectedColumn {
     name: &'static str,
@@ -728,7 +738,7 @@ fn normalize_sql(sql: &str) -> Vec<String> {
                     if characters.peek() == Some(&'\'') { quoted.push(characters.next().unwrap()); } else { break; }
                 }
             }
-            tokens.push(quoted.to_ascii_lowercase());
+            tokens.push(quoted);
         } else if character.is_ascii_alphanumeric() || character == '_' {
             let mut word = character.to_string();
             while let Some(next) = characters.peek() {
