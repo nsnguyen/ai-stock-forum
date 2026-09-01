@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 use crate::domain::{sha256, Actor, CommandId, CorrelationId, Sha256Digest};
+use crate::policy::Capability;
 
 pub const MAX_INPUT_BYTES: usize = 4096;
 pub const DEFAULT_AUDIT_LIMIT: u16 = 20;
@@ -44,6 +45,16 @@ impl ApplicationCommand {
         Ok(Self::ShowAuditTail {
             limit: AuditLimit::new(limit)?,
         })
+    }
+
+    pub fn required_capability(&self) -> Capability {
+        match self {
+            Self::ShowHelp | Self::RejectInput(_) => Capability::HelpRead,
+            Self::ShowStatus => Capability::StatusRead,
+            Self::ShowSetupStatus => Capability::SetupStatusRead,
+            Self::ShowAuditTail { .. } => Capability::AuditRead,
+            Self::RequestShutdown => Capability::Shutdown,
+        }
     }
 }
 
