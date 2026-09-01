@@ -171,3 +171,66 @@ The Unix SIGINT binary test starts the real executable with stdin held open, wai
 
 - The installed Rust toolchain does not include `x86_64-pc-windows-gnu`, so a Windows cross-target compile could not be executed (`WINDOWS_TARGET_NOT_INSTALLED`). The Windows implementation is target-isolated, dependency-free kernel32 FFI; Unix and portable behavior are covered by the full suite.
 - No GUI/TUI, network, broker, credential, README, or legacy-warning behavior was added.
+
+## Fix round 3 (final)
+
+### Implementation commit
+
+- `eb8161c2883b32f0709061950dcd89877acc8760` (`fix(task-12): cancel Windows stdin reads safely`)
+
+### Changed files
+
+- `Cargo.toml`
+- `Cargo.lock`
+- `src/ui/command/mod.rs`
+- `src/ui/command/runner.rs`
+- `src/ui/command/windows.rs`
+- `tests/fallback_contract.rs`
+- `tests/windows_source_static_contract.rs`
+
+### RED evidence
+
+- `cargo test --locked --test windows_source_static_contract`
+  - 4 failed as expected: no `OpenThread`/`CancelSynchronousIo` thread-HANDLE path, no Windows read-error classifier, no target-scoped `windows-sys` declaration, and POSIX state binary tests lacked Unix gating.
+
+### Focused GREEN evidence
+
+- `cargo test --locked --lib ui::command::windows::tests`
+  - 3 passed: cancellation-sensitive `ERROR_OPERATION_ABORTED`, EOF classification for `ERROR_BROKEN_PIPE` and `ERROR_HANDLE_EOF`, and genuine-error preservation.
+- `cargo test --locked --test windows_source_static_contract`
+  - 4 passed: synchronous-read cancellation API/HANDLE ownership, explicit error dispositions, target-scoped cfg/features, and Unix-only HOME/XDG binary tests.
+
+### Full-suite evidence
+
+- `cargo test --locked`
+  - 205 passed, 0 failed across unit, integration, binary, static-contract, and documentation targets.
+- `git diff --check`
+  - Passed before the implementation commit.
+
+### Windows synchronous-read cancellation design
+
+- `WindowsCancellation` owns the manual-reset cancellation event, an atomic cancellation flag, and a mutex-protected optional real source-thread HANDLE.
+- On its first `next_line`, the source opens its current thread with `OpenThread(THREAD_TERMINATE, false, GetCurrentThreadId())`. The mutex serializes registration with cancellation.
+- Cancellation first stores the flag, signals the event to wake `WaitForMultipleObjects`, then invokes `CancelSynchronousIo` when the reader HANDLE is registered. This wakes a console line-mode `ReadFile` that became blocking after the input HANDLE was signaled by partial input.
+- The register/cancel ordering is race-safe: cancel-before-register leaves the flag set and registration immediately invokes `CancelSynchronousIo`; register-before-cancel publishes the HANDLE before cancellation acquires the mutex and invokes it.
+- `ERROR_OPERATION_ABORTED` maps to `LineSourceEvent::Cancelled` only when cancellation was requested. An unrelated operation-aborted result remains a genuine typed read error.
+- The source thread drops its `Arc` before join completes, while the host retains the cancellation `Arc` through cancellation and join. The final `WindowsCancellation::drop` therefore runs after join and closes the optional reader thread HANDLE and event HANDLE exactly once. The borrowed standard-input HANDLE is not closed.
+- Target-scoped `windows-sys 0.61.2` features declare the Foundation, FileSystem, Console, IO, and Threading API surface only for `cfg(windows)`.
+
+### Windows EOF/error mapping
+
+- A zero-byte successful `ReadFile`, `ERROR_BROKEN_PIPE`, and `ERROR_HANDLE_EOF` all finish the bounded `LineAccumulator`, preserving any final partial logical line and then producing EOF/input-closed.
+- `ERROR_OPERATION_ABORTED` during requested cancellation produces clean source cancellation.
+- Every other `ReadFile` failure preserves the original `io::Error`, which the host maps to the existing typed input-read failure.
+- The shared `LineAccumulator` remains authoritative for bounded prefix retention, full-line byte count/digest, CR/LF handling, and EOF partial-line behavior.
+
+### Binary test gating
+
+- Binary smoke, startup-redaction, previous-session-warning, quit/EOF persistence, and SIGINT persistence tests that isolate state through HOME/XDG are Unix-gated.
+- No Windows binary test can touch a real Known Folder state directory. Windows coverage is provided by host-independent executable error-mapping tests plus target-specific static API/cfg/dependency contracts until an actual Windows target check can be added later.
+
+### Concerns and limitations
+
+- Per the round-3 instruction, no Windows cross-compile was attempted and none is claimed. A Windows target compile/runtime check remains appropriate for Task 14 when a Windows toolchain is available.
+- Microsoft documents that `CancelSynchronousIo` requires a thread HANDLE with `THREAD_TERMINATE` and reports cancelled operations with `ERROR_OPERATION_ABORTED`; the implementation follows that contract.
+- No parser, renderer, runtime, composition-root, database, README, legacy-warning, GUI/TUI, network, broker, or credential behavior changed.
