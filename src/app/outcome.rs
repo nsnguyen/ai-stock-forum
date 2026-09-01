@@ -1,4 +1,4 @@
-use crate::app::{AuditLimit, InputRejection};
+use crate::{app::{AuditLimit, InputRejection}, audit::AuditEntry};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelpView;
@@ -12,6 +12,7 @@ pub struct SetupStatusView;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditTailView {
     pub limit: AuditLimit,
+    pub entries: Vec<AuditEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

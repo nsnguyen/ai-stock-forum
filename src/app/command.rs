@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::domain::{sha256, Actor, CommandId, CorrelationId, Sha256Digest};
 use crate::policy::Capability;
@@ -7,7 +7,7 @@ pub const MAX_INPUT_BYTES: usize = 4096;
 pub const DEFAULT_AUDIT_LIMIT: u16 = 20;
 pub const MAX_AUDIT_LIMIT: u16 = 100;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct AuditLimit(u16);
 
@@ -66,14 +66,15 @@ pub struct CommandEnvelope {
     pub command: ApplicationCommand,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InputRejectionCategory {
     InvalidEncoding,
     Oversized,
     Malformed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputRejection {
     pub category: InputRejectionCategory,
     pub safe_token: Option<String>,

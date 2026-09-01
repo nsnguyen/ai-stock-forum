@@ -21,6 +21,12 @@ pub enum PersistenceError {
     QueryFailed,
     #[error("database migration record is invalid")]
     InvalidMigrationRecord,
+    #[error("event record is invalid")]
+    InvalidEventRecord,
+    #[error("event schema version is unsupported")]
+    UnsupportedEventSchema,
+    #[error("event id conflicts with an existing event")]
+    IdempotencyConflict,
 }
 
 pub struct Database {
