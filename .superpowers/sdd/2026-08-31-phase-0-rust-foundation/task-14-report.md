@@ -76,7 +76,7 @@ by implementation commit `cb93641ff94e4956a875304c2ed193e4a1687e46`.
 | Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | 0 | Finished with no warnings. |
 | Full locked all-target suite | `cargo test --workspace --all-targets --locked` | 0 | 212 passed, 0 failed across 20 target runners. |
 | Locked build | `cargo build --workspace --locked` | 0 | Dev build finished successfully. |
-| Offline full suite | `cargo test --workspace --all-targets --locked --offline` | 0 | 212 passed, 0 failed across 20 target runners without network access. |
+| Offline full suite | `cargo test --workspace --all-targets --locked --offline` | 0 | 212 passed, 0 failed across 20 target runners; Cargo was constrained from registry/index/package network access, while test runtime networking was not sandboxed or independently observed. |
 | Explicit binary smoke | `cargo test --test fallback_contract binary_smoke_quit_and_eof_exit_successfully --locked` | 0 | 1 passed, 0 failed; real binary quit and EOF subprocess paths succeeded. |
 
 The full fallback suite additionally passed real-binary startup-failure
@@ -190,8 +190,10 @@ Formatter-only files normalized by pinned `rustfmt 1.9.0-stable`:
   because the required pinned formatter rejected the complete inherited slice.
   Formatting, warnings-denied Clippy, locked tests/build, and offline tests all
   passed after normalization.
-- No network, provider, broker, paid service, Python, Node, browser, daemon,
-  external account, or external-action dependency was exercised or required.
+- Source scans found no intended production networking APIs and no launches of
+  Python, Node, browsers, daemons, shells, or network clients. Test binaries
+  were not network-sandboxed or independently observed, so runtime network
+  non-use is not claimed.
 
 ## Acceptance-review fix wave
 
