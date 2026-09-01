@@ -3,12 +3,14 @@
 use ai_stock_forum::{
     app::{
         ApplicationEvent, ApplicationService, ApplicationWorker, AuthorizationDecision,
-        CommandPolicy, CommandTransactionHook, PendingEvent, EVENT_SCHEMA_VERSION,
+        CommandPolicy, CommandTransactionHook, PendingEvent, ShutdownReason,
+        EVENT_SCHEMA_VERSION,
     },
     config::AppPaths,
     domain::{Actor, Clock, CorrelationId, EventId, IdGenerator},
     persistence::{Database, EventRepository, PersistenceError},
     policy::Capability,
+    runtime::{ApplicationRuntime, RuntimeClient},
 };
 use rusqlite::Connection;
 use std::{
@@ -20,6 +22,53 @@ use std::{
 };
 use tempfile::TempDir;
 use uuid::Uuid;
+
+pub struct RuntimeFixture {
+    _temporary_directory: TempDir,
+    paths: AppPaths,
+    session_id: ai_stock_forum::domain::SessionId,
+    runtime: ApplicationRuntime,
+}
+
+impl RuntimeFixture {
+    pub fn client(&self) -> RuntimeClient {
+        self.runtime.client()
+    }
+
+    pub fn finish_and_join(&self, reason: ShutdownReason) {
+        self.runtime.finish_and_join(reason).unwrap();
+    }
+
+    pub fn last_shutdown_reason(&self) -> Option<String> {
+        Connection::open(self.paths.database_path())
+            .unwrap()
+            .query_row(
+                "SELECT end_reason FROM process_session_projection WHERE session_id = ?1",
+                [self.session_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+}
+
+pub fn runtime() -> RuntimeFixture {
+    let temporary_directory = tempfile::tempdir().unwrap();
+    let paths = AppPaths::for_test(temporary_directory.path());
+    let service = ApplicationService::bootstrap(
+        &paths,
+        Arc::new(TestClock::new()),
+        Arc::new(TestIds::new()),
+    )
+    .unwrap();
+    let session_id = service.session_id();
+    let runtime = ApplicationRuntime::spawn_application(service, 32).unwrap();
+    RuntimeFixture {
+        _temporary_directory: temporary_directory,
+        paths,
+        session_id,
+        runtime,
+    }
+}
 
 pub struct DatabaseFixture {
     _temporary_directory: TempDir,

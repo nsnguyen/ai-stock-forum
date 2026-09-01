@@ -321,6 +321,10 @@ impl ApplicationService {
     pub fn session_id(&self) -> crate::domain::SessionId {
         self.state.session_id()
     }
+
+    pub const fn previous_session_interrupted(&self) -> bool {
+        self.state.previous_session_interrupted()
+    }
 }
 
 impl ApplicationWorker {

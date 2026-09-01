@@ -9,6 +9,7 @@ license = "UNLICENSED"
 
 [dependencies]
 crossbeam-channel = "0.5.16"
+ctrlc = "3.5.2"
 directories = "6.0.0"
 hex = "0.4.3"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
