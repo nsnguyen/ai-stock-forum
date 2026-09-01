@@ -1,6 +1,6 @@
 use crate::{
     app::{AppError, ApplicationEvent, EventEnvelope, PendingEvent, ShutdownReason, EVENT_SCHEMA_VERSION},
-    config::StartupError,
+    config::{ProcessGuard, StartupError},
     domain::{Actor, Clock, CorrelationId, EventId, IdGenerator, InstallationId, SessionId},
     persistence::{Database, EventRepository, ImmediateTransaction, PersistenceError, ProjectionRepository, RecoveryError},
 };
@@ -27,12 +27,13 @@ impl RecoveryHook for NoopRecoveryHook {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct BootstrapState {
     pub installation_id: InstallationId,
     pub session_id: SessionId,
     pub projection: ProjectionState,
     pub previous_session_interrupted: bool,
+    pub process_guard: ProcessGuard,
 }
 
 pub struct RecoveryCoordinator;
@@ -44,11 +45,12 @@ impl RecoveryCoordinator {
         ids: &dyn IdGenerator,
         hooks: &[Box<dyn RecoveryHook>],
     ) -> Result<BootstrapState, StartupError> {
+        let process_guard = database.acquire_process_guard()?;
         EventRepository::verify(database.connection()).map_err(startup_from_recovery)?;
         let events = EventRepository::load_all(database.connection()).map_err(startup_from_recovery)?;
         let mut state = match ProjectionRepository::load(database.connection()) {
             Ok(state) => state,
-            Err(RecoveryError::InvalidEventRecord) if !events.is_empty() => {
+            Err(RecoveryError::InvalidEventRecord) => {
                 rebuild_and_record(database, &events, clock, ids)?
             }
             Err(error) => return Err(startup_from_recovery(error)),
@@ -110,6 +112,7 @@ impl RecoveryCoordinator {
             session_id,
             projection: state,
             previous_session_interrupted: previous_session_interrupted.is_some(),
+            process_guard,
         })
     }
 
@@ -121,20 +124,22 @@ impl RecoveryCoordinator {
         clock: &dyn Clock,
         ids: &dyn IdGenerator,
     ) -> Result<Vec<EventEnvelope>, AppError> {
-        let session = state
+        let transaction = database.immediate_transaction()?;
+        let mut next = ProjectionRepository::load_in(&transaction)?;
+        let session = next
             .sessions
             .get(&session_id)
             .ok_or(RecoveryError::InvalidEventRecord)?;
         if let Some(end) = &session.ended {
-            let existing = EventRepository::load_all(database.connection())?
+            let existing = EventRepository::load_all(transaction.transaction())?
                 .into_iter()
                 .find(|event| event.event_id == end.ended_event_id)
                 .ok_or(RecoveryError::InvalidEventRecord)?;
+            transaction.commit()?;
+            *state = next;
             return Ok(vec![existing]);
         }
 
-        let transaction = database.immediate_transaction()?;
-        let mut next = state.clone();
         let event = append_and_project(
             &transaction,
             &mut next,
@@ -214,6 +219,11 @@ fn startup_from_recovery(error: RecoveryError) -> StartupError {
     StartupError::EventStreamRecovery(error)
 }
 
-fn startup_from_persistence(_error: PersistenceError) -> StartupError {
-    StartupError::DatabaseUnavailable
+fn startup_from_persistence(error: PersistenceError) -> StartupError {
+    match error {
+        PersistenceError::ProjectionStateConflict => {
+            StartupError::EventStreamRecovery(RecoveryError::InvalidEventRecord)
+        }
+        other => StartupError::Persistence(other),
+    }
 }

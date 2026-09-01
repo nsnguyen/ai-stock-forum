@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use rusqlite::{
     Connection, Error as SqliteError, ErrorCode, OpenFlags, Transaction, TransactionBehavior,
@@ -6,7 +6,7 @@ use rusqlite::{
 use thiserror::Error;
 
 use crate::{
-    config::{AppPaths, StartupError},
+    config::{AppPaths, ProcessGuard, StartupError},
     domain::Sha256Digest,
 };
 
@@ -42,6 +42,7 @@ pub enum PersistenceError {
 pub struct Database {
     connection: Connection,
     schema_version: u32,
+    state_dir: PathBuf,
 }
 
 pub struct ImmediateTransaction<'connection> {
@@ -104,6 +105,7 @@ impl Database {
         Ok(Self {
             connection,
             schema_version: LATEST_SCHEMA_VERSION,
+            state_dir: paths.state_dir().to_path_buf(),
         })
     }
 
@@ -124,6 +126,10 @@ impl Database {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map(|transaction| ImmediateTransaction { transaction })
             .map_err(persistence_error)
+    }
+
+    pub fn acquire_process_guard(&self) -> Result<ProcessGuard, StartupError> {
+        ProcessGuard::acquire(&self.state_dir)
     }
 
     pub fn has_table(&self, name: &str) -> Result<bool, PersistenceError> {

@@ -17,6 +17,16 @@ impl ProjectionRepository {
         Self::load_with_before_projection_rows(connection, || {})
     }
 
+    pub fn load_in(transaction: &ImmediateTransaction<'_>) -> Result<ProjectionState, RecoveryError> {
+        let expected = reduce_verified_stream(transaction.transaction())?;
+        match read_projection_rows(transaction.transaction())? {
+            None if expected == ProjectionState::default() => Ok(expected),
+            None => Err(RecoveryError::InvalidEventRecord),
+            Some(persisted) if persisted == expected => Ok(persisted),
+            Some(_) => Err(RecoveryError::InvalidEventRecord),
+        }
+    }
+
     #[doc(hidden)]
     pub fn load_with_before_projection_rows<F>(
         connection: &Connection,

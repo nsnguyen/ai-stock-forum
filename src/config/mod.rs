@@ -1,12 +1,14 @@
 //! Application state path discovery and permission enforcement.
 
 mod paths;
+mod process_guard;
 
 pub use paths::AppPaths;
+pub use process_guard::ProcessGuard;
 
 use thiserror::Error;
 
-use crate::persistence::RecoveryError;
+use crate::persistence::{PersistenceError, RecoveryError};
 
 pub const MODULE_NAME: &str = "config";
 
@@ -32,8 +34,12 @@ pub enum StartupError {
     DatabasePragmaMismatch,
     #[error("database terminal path was rejected")]
     DatabaseTerminalPathRejected,
+    #[error("another application process is already running")]
+    AlreadyRunning,
     #[error("event stream recovery failed: {0}")]
     EventStreamRecovery(RecoveryError),
+    #[error("bootstrap persistence failed: {0}")]
+    Persistence(PersistenceError),
 }
 
 impl StartupError {
@@ -49,7 +55,20 @@ impl StartupError {
             Self::DatabaseMigrationState => "database_migration_state_invalid",
             Self::DatabasePragmaMismatch => "database_pragma_mismatch",
             Self::DatabaseTerminalPathRejected => "database_terminal_path_rejected",
+            Self::AlreadyRunning => "already_running",
             Self::EventStreamRecovery(error) => error.code(),
+            Self::Persistence(error) => match error {
+                PersistenceError::QueryFailed => "database_write_failed",
+                PersistenceError::InvalidMigrationRecord => "invalid_migration_record",
+                PersistenceError::InvalidEventRecord => "invalid_event_record",
+                PersistenceError::UnsupportedEventSchema => "unsupported_event_schema",
+                PersistenceError::IdempotencyConflict => "event_id_conflict",
+                PersistenceError::Contention => "database_write_contended",
+                PersistenceError::ImmutableEventStream => "event_stream_immutable",
+                PersistenceError::PreviousEventDigestMismatch => "previous_event_digest_mismatch",
+                PersistenceError::EventDigestMismatch => "event_digest_mismatch",
+                PersistenceError::ProjectionStateConflict => "projection_state_conflict",
+            },
         }
     }
 }
