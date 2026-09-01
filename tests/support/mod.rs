@@ -68,6 +68,14 @@ pub fn runtime() -> RuntimeFixture {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedEvent {
+    pub sequence: u64,
+    pub event_id: EventId,
+    pub kind: String,
+    pub payload_json: String,
+}
+
 pub struct PersistentFixture {
     _temporary_directory: TempDir,
     paths: AppPaths,
@@ -92,14 +100,62 @@ impl PersistentFixture {
             .installation_id
     }
 
-    pub fn event_count_all(&self) -> i64 {
-        self.count_rows("event_stream")
+    pub fn events(&self) -> Vec<PersistedEvent> {
+        let database = Database::open(&self.paths).unwrap();
+        let mut statement = database
+            .connection()
+            .prepare(
+                "SELECT sequence, event_id, event_type, payload_json
+                 FROM event_stream ORDER BY sequence",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .unwrap()
+            .map(|row| {
+                let (sequence, event_id, kind, payload_json) = row.unwrap();
+                PersistedEvent {
+                    sequence: u64::try_from(sequence).unwrap(),
+                    event_id: event_id.parse().unwrap(),
+                    kind,
+                    payload_json,
+                }
+            })
+            .collect()
+    }
+
+    pub fn event_count(&self, kind: &str) -> i64 {
+        Database::open(&self.paths)
+            .unwrap()
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM event_stream WHERE event_type = ?1",
+                [kind],
+                |row| row.get(0),
+            )
+            .unwrap()
     }
 
     pub fn count_rows(&self, table: &str) -> i64 {
         assert!(matches!(
             table,
-            "event_stream" | "setup_drafts" | "installation_configuration_versions"
+            "event_stream"
+                | "installation_projection"
+                | "process_session_projection"
+                | "projection_metadata"
+                | "setup_drafts"
+                | "installation_configuration_versions"
+                | "active_installation_configuration"
+                | "setup_step_outcomes"
+                | "capability_readiness"
+                | "approval_records"
         ));
         Database::open(&self.paths)
             .unwrap()
@@ -110,21 +166,166 @@ impl PersistentFixture {
             .unwrap()
     }
 
+    pub fn table_exists(&self, table: &str) -> bool {
+        Database::open(&self.paths)
+            .unwrap()
+            .connection()
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1
+                )",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    pub fn remove_recoverable_projection_state(&self) {
+        let connection = Connection::open(self.paths.database_path()).unwrap();
+        let transaction = connection.unchecked_transaction().unwrap();
+        transaction
+            .execute_batch(
+                "DELETE FROM projection_metadata;
+                 DELETE FROM process_session_projection;
+                 DELETE FROM installation_projection;",
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+
     pub fn verify_event_stream(&self) -> Result<(), RecoveryError> {
         let database = Database::open(&self.paths).unwrap();
         EventRepository::verify(database.connection())
     }
 
-    pub fn assert_projection_matches_replay(&self) {
+    pub fn assert_projection_rows_match_event_stream(&self) {
         let database = Database::open(&self.paths).unwrap();
-        let events = EventRepository::load_all(database.connection()).unwrap();
-        let mut replayed = ai_stock_forum::recovery::ProjectionState::default();
-        for event in &events {
-            ai_stock_forum::recovery::reduce(&mut replayed, event).unwrap();
+        let connection = database.connection();
+        let (last_sequence, last_digest): (i64, String) = connection
+            .query_row(
+                "SELECT sequence, event_digest FROM event_stream
+                 ORDER BY sequence DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let (projected_sequence, projected_digest): (i64, Option<String>) = connection
+            .query_row(
+                "SELECT last_event_sequence, last_event_digest
+                 FROM projection_metadata WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(projected_sequence, last_sequence);
+        assert_eq!(projected_digest.as_deref(), Some(last_digest.as_str()));
+
+        let (installation_id, created_event_id, created_at_ms, event_kind, payload_json, event_at):
+            (String, String, i64, String, String, i64) = connection
+                .query_row(
+                    "SELECT p.installation_id, p.created_event_id, p.created_at_ms,
+                            e.event_type, e.payload_json, e.occurred_at_ms
+                     FROM installation_projection p
+                     JOIN event_stream e ON e.event_id = p.created_event_id
+                     WHERE p.singleton = 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+                .unwrap();
+        assert_eq!(event_kind, "installation_initialized");
+        assert_eq!(created_at_ms, event_at);
+        assert_eq!(
+            payload_field(&payload_json, "installation_id"),
+            installation_id
+        );
+        assert!(self.events().iter().any(|event| {
+            event.event_id.to_string() == created_event_id
+                && event.kind == "installation_initialized"
+        }));
+
+        let started_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM event_stream WHERE event_type = 'process_session_started'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut statement = connection
+            .prepare(
+                "SELECT session_id, started_event_id, started_at_ms,
+                        ended_event_id, ended_at_ms, end_reason
+                 FROM process_session_projection ORDER BY started_at_ms",
+            )
+            .unwrap();
+        let sessions = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        assert_eq!(i64::try_from(sessions.len()).unwrap(), started_count);
+        for (session_id, started_event_id, started_at_ms, ended_event_id, ended_at_ms, reason) in
+            sessions
+        {
+            let (started_kind, started_payload, event_started_at): (String, String, i64) =
+                connection
+                    .query_row(
+                        "SELECT event_type, payload_json, occurred_at_ms
+                         FROM event_stream WHERE event_id = ?1",
+                        [&started_event_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .unwrap();
+            assert_eq!(started_kind, "process_session_started");
+            assert_eq!(payload_field(&started_payload, "session_id"), session_id);
+            assert_eq!(started_at_ms, event_started_at);
+
+            let ended_event_id = ended_event_id.expect("finished acceptance session");
+            let ended_at_ms = ended_at_ms.expect("finished acceptance session");
+            let reason = reason.expect("finished acceptance session");
+            let (ended_kind, ended_payload, event_ended_at): (String, String, i64) = connection
+                .query_row(
+                    "SELECT event_type, payload_json, occurred_at_ms
+                     FROM event_stream WHERE event_id = ?1",
+                    [&ended_event_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(payload_field(&ended_payload, "session_id"), session_id);
+            assert_eq!(ended_at_ms, event_ended_at);
+            match ended_kind.as_str() {
+                "process_session_ended" => {
+                    assert_eq!(payload_field(&ended_payload, "reason"), reason)
+                }
+                "previous_session_interrupted" => assert_eq!(reason, "interrupted"),
+                _ => panic!("unexpected session terminal event {ended_kind}"),
+            }
         }
-        let persisted = ProjectionRepository::load(database.connection()).unwrap();
-        assert_eq!(persisted, replayed);
     }
+}
+
+fn payload_field(payload_json: &str, field: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(payload_json).unwrap()[field]
+        .as_str()
+        .unwrap()
+        .to_owned()
 }
 
 pub fn persistent_fixture() -> PersistentFixture {
