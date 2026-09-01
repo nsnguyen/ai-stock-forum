@@ -18,9 +18,10 @@ pub enum ApprovalAction {
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalStatus {
     Pending,
-    Approved,
+    Accepted,
     Rejected,
     Expired,
+    Cancelled,
 }
 
 impl ApprovalStatus {

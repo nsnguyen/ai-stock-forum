@@ -34,9 +34,10 @@ fn resolution(status: ApprovalStatus) -> ApprovalResolution {
     serde_json::from_value(json!({
         "status": match status {
             ApprovalStatus::Pending => "pending",
-            ApprovalStatus::Approved => "approved",
+            ApprovalStatus::Accepted => "accepted",
             ApprovalStatus::Rejected => "rejected",
             ApprovalStatus::Expired => "expired",
+            ApprovalStatus::Cancelled => "cancelled",
         },
         "actor": "Human",
         "resolved_at_millis": 150,
@@ -208,14 +209,14 @@ fn approval_builder_rejects_each_missing_required_fact() {
 fn approval_builder_rejects_non_pending_creation_and_invalid_expiry() {
     assert_eq!(
         builder()
-            .status(ApprovalStatus::Approved)
+            .status(ApprovalStatus::Accepted)
             .build()
             .unwrap_err(),
         ApprovalError::InitialStatusMustBePending
     );
     assert_eq!(
         builder()
-            .resolution(resolution(ApprovalStatus::Approved))
+            .resolution(resolution(ApprovalStatus::Accepted))
             .build()
             .unwrap_err(),
         ApprovalError::InitialResolutionNotAllowed
@@ -242,19 +243,48 @@ fn valid_approval_records_round_trip_through_serde() {
 }
 
 #[test]
-fn serde_accepts_a_terminal_record_with_a_matching_terminal_resolution() {
-    let mut encoded = record_json();
-    encoded["status"] = json!("approved");
-    encoded["resolution"] = serde_json::to_value(resolution(ApprovalStatus::Approved)).unwrap();
+fn approval_status_serde_uses_only_the_canonical_persisted_vocabulary() {
+    for (status, wire) in [
+        (ApprovalStatus::Pending, "pending"),
+        (ApprovalStatus::Accepted, "accepted"),
+        (ApprovalStatus::Rejected, "rejected"),
+        (ApprovalStatus::Expired, "expired"),
+        (ApprovalStatus::Cancelled, "cancelled"),
+    ] {
+        assert_eq!(serde_json::to_value(status).unwrap(), json!(wire));
+        assert_eq!(
+            serde_json::from_value::<ApprovalStatus>(json!(wire)).unwrap(),
+            status
+        );
+    }
 
-    let record = serde_json::from_value::<ApprovalRecord>(encoded.clone()).unwrap();
-    assert_eq!(serde_json::to_value(record).unwrap(), encoded);
+    assert!(serde_json::from_value::<ApprovalStatus>(json!("approved")).is_err());
+}
+
+#[test]
+fn serde_accepts_every_terminal_record_with_a_matching_terminal_resolution() {
+    for (status, wire) in [
+        (ApprovalStatus::Accepted, "accepted"),
+        (ApprovalStatus::Rejected, "rejected"),
+        (ApprovalStatus::Expired, "expired"),
+        (ApprovalStatus::Cancelled, "cancelled"),
+    ] {
+        assert!(status.is_terminal());
+        let mut encoded = record_json();
+        encoded["status"] = json!(wire);
+        encoded["resolution"] = serde_json::to_value(resolution(status)).unwrap();
+
+        let record = serde_json::from_value::<ApprovalRecord>(encoded.clone()).unwrap();
+        assert_eq!(record.status(), status);
+        assert_eq!(record.resolution().unwrap().status(), status);
+        assert_eq!(serde_json::to_value(record).unwrap(), encoded);
+    }
 }
 
 #[test]
 fn serde_rejects_a_pending_record_with_a_resolution() {
     let mut encoded = record_json();
-    encoded["resolution"] = serde_json::to_value(resolution(ApprovalStatus::Approved)).unwrap();
+    encoded["resolution"] = serde_json::to_value(resolution(ApprovalStatus::Accepted)).unwrap();
 
     assert!(serde_json::from_value::<ApprovalRecord>(encoded).is_err());
 }
@@ -262,7 +292,7 @@ fn serde_rejects_a_pending_record_with_a_resolution() {
 #[test]
 fn serde_rejects_a_terminal_record_without_a_resolution() {
     let mut encoded = record_json();
-    encoded["status"] = json!("approved");
+    encoded["status"] = json!("accepted");
 
     assert!(serde_json::from_value::<ApprovalRecord>(encoded).is_err());
 }
@@ -270,7 +300,7 @@ fn serde_rejects_a_terminal_record_without_a_resolution() {
 #[test]
 fn serde_rejects_a_terminal_record_with_a_mismatched_resolution() {
     let mut encoded = record_json();
-    encoded["status"] = json!("approved");
+    encoded["status"] = json!("accepted");
     encoded["resolution"] = serde_json::to_value(resolution(ApprovalStatus::Rejected)).unwrap();
 
     assert!(serde_json::from_value::<ApprovalRecord>(encoded).is_err());
@@ -279,7 +309,7 @@ fn serde_rejects_a_terminal_record_with_a_mismatched_resolution() {
 #[test]
 fn serde_rejects_a_pending_resolution() {
     let mut encoded = record_json();
-    encoded["status"] = json!("approved");
+    encoded["status"] = json!("accepted");
     encoded["resolution"] = json!({
         "status": "pending",
         "actor": "Human",

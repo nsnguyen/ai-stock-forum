@@ -2,6 +2,7 @@ use std::fs;
 
 use ai_stock_forum::config::AppPaths;
 use ai_stock_forum::persistence::{Database, LATEST_SCHEMA_VERSION};
+use ai_stock_forum::policy::ApprovalStatus;
 
 #[test]
 fn fresh_database_has_the_complete_phase_zero_schema() {
@@ -1696,6 +1697,89 @@ fn assert_every_enumerated_check_value_is_accepted() {
     connection.execute("INSERT INTO approval_records (approval_id, action_kind, object_kind, object_id, object_version, object_digest, actor_kind, status, created_at_ms) VALUES ('approval-pending', 'apply', 'configuration', 'configuration-1', 1, 'object', 'system', 'pending', 1)", []).unwrap();
     for status in ["accepted", "rejected", "expired", "cancelled"] {
         connection.execute("INSERT INTO approval_records (approval_id, action_kind, object_kind, object_id, object_version, object_digest, actor_kind, status, created_at_ms, resolved_at_ms, resolution_kind, resolution_event_id) VALUES (?1, 'apply', 'configuration', 'configuration-1', 1, 'object', 'system', ?2, 1, 2, 'resolved', 'event-1')", rusqlite::params![format!("approval-{status}"), status]).unwrap();
+    }
+}
+
+#[test]
+fn every_typed_approval_status_round_trips_through_real_sqlite() {
+    let (_temp, database) = fresh_database();
+    let connection = database.connection();
+    seed_event(connection);
+
+    for (index, (status, canonical, terminal)) in [
+        (ApprovalStatus::Pending, "pending", false),
+        (ApprovalStatus::Accepted, "accepted", true),
+        (ApprovalStatus::Rejected, "rejected", true),
+        (ApprovalStatus::Expired, "expired", true),
+        (ApprovalStatus::Cancelled, "cancelled", true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let wire = serde_json::to_value(status).unwrap();
+        assert_eq!(wire, serde_json::Value::String(canonical.to_owned()));
+        let status_text = wire.as_str().unwrap();
+        let resolved_at_ms = terminal.then_some(2_i64);
+        let resolution_kind = terminal.then_some(canonical);
+        let resolution_event_id = terminal.then_some("event-1");
+        let approval_id = format!("approval-round-trip-{index}");
+
+        connection
+            .execute(
+                "INSERT INTO approval_records (approval_id, action_kind, object_kind, object_id, object_version, object_digest, actor_kind, status, created_at_ms, expires_at_ms, resolved_at_ms, resolution_kind, resolution_event_id) VALUES (?1, 'git_push', 'git_commit', 'commit-1', 1, 'object-1', 'human', ?2, 1, 3, ?3, ?4, ?5)",
+                rusqlite::params![
+                    approval_id,
+                    status_text,
+                    resolved_at_ms,
+                    resolution_kind,
+                    resolution_event_id
+                ],
+            )
+            .unwrap();
+
+        let persisted = connection
+            .query_row(
+                "SELECT status FROM approval_records WHERE approval_id = ?1",
+                [approval_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let decoded =
+            serde_json::from_value::<ApprovalStatus>(serde_json::Value::String(persisted.clone()))
+                .unwrap();
+
+        assert_eq!(persisted, canonical);
+        assert_eq!(decoded, status);
+        assert_eq!(decoded.is_terminal(), terminal);
+    }
+}
+
+#[test]
+fn every_terminal_approval_status_requires_resolution_metadata_in_sqlite() {
+    let (_temp, database) = fresh_database();
+    let connection = database.connection();
+
+    for (index, status) in [
+        ApprovalStatus::Accepted,
+        ApprovalStatus::Rejected,
+        ApprovalStatus::Expired,
+        ApprovalStatus::Cancelled,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let wire = serde_json::to_value(status).unwrap();
+        let status_text = wire.as_str().unwrap();
+
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO approval_records (approval_id, action_kind, object_kind, object_id, object_version, object_digest, actor_kind, status, created_at_ms) VALUES (?1, 'git_push', 'git_commit', 'commit-1', 1, 'object-1', 'human', ?2, 1)",
+                    rusqlite::params![format!("approval-unresolved-{index}"), status_text],
+                )
+                .is_err(),
+            "terminal status {status_text} must require resolution metadata"
+        );
     }
 }
 
