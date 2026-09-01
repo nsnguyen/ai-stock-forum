@@ -380,3 +380,30 @@ FFI-mediated external action.
 - The final report commit follows tested implementation head
   `cb93641ff94e4956a875304c2ed193e4a1687e46`; its exact hash is returned in the
   handoff because a commit cannot embed its own identifier.
+
+## Whole-branch approval status persistence review fix
+
+The final whole-branch approval status correction is implementation commit
+`39ed43941e0e3cea0e1d25b264666472a89e3e0d` (`fix: align approval status persistence contract`).
+The 212-test matrices above remain exact historical evidence for
+`cb93641ff94e4956a875304c2ed193e4a1687e46`; the current branch aggregate is
+superseded by the evidence below.
+
+### Strict TDD evidence
+
+| Stage | Exact command | Exit | Exact outcome |
+| --- | --- | ---: | --- |
+| RED | `cargo test --test policy_contract --test migration_contract --locked` | 101 | 13 `E0599` diagnostics proved that the canonical `Accepted` and `Cancelled` variants were absent. |
+| GREEN | `cargo test --test policy_contract --test migration_contract --locked` | 0 | 37 passed, 0 failed: migration 19/19 and policy 18/18. |
+
+### Current verification
+
+| Gate | Exact command | Exit | Exact outcome |
+| --- | --- | ---: | --- |
+| Formatting | `cargo fmt --all --check` | 0 | No diff after applying the pinned formatter. |
+| Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | 0 | Finished with no warnings. |
+| Full locked all-target suite | `cargo test --workspace --all-targets --locked` | 0 | 215 passed, 0 failed across 20 target runners. |
+
+No offline suite was rerun for this review fix, and this section makes no
+runtime-network non-use claim. The earlier offline results and their explicit
+limitations remain historical evidence for the earlier tested implementation.
