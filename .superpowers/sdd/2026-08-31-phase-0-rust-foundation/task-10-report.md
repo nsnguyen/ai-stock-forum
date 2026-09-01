@@ -83,3 +83,109 @@ Result: exit 0; 137 passed, 0 failed, with no warnings.
   rejects a corrupt duplicate causation identity deterministically.
 - No runtime queue, terminal host, broker, network, credential, or approval execution
   behavior was added.
+
+## Fix round 1: durable command receipts
+
+### Implementation commit
+
+`bae433ff183fe614f879ae068078fde5580944a1` (`fix: persist transactional command receipts`)
+
+### Controller ruling applied
+
+The causation-derived receipt design was replaced. Command identity is now owned by a
+durable `command_receipts.command_id` primary key, including commands that commit zero
+events because policy denied them or requires approval. Event causation IDs remain in
+place for event-level semantics but are no longer the command-idempotency authority.
+
+### Exact schema design
+
+- `command_receipts` stores `command_id`, the lowercase SHA-256
+  `command_fingerprint`, canonical `request_json`, typed `capability`, typed
+  `policy_decision`, and canonical complete `outcome_json`.
+- `command_event_refs` stores zero or more event references under the receipt with a
+  non-negative `event_ordinal` and composite primary key
+  `(command_id, event_ordinal)`.
+- `command_event_refs_event_idx` uniquely assigns each command-created event to one
+  receipt. Foreign keys target both `command_receipts.command_id` and
+  `event_stream.event_id`.
+- Both tables are `STRICT`. JSON validity, fingerprint shape, capability values,
+  policy-decision values, and ordinal bounds are database constraints.
+- Update/delete triggers make receipts and ordered event references immutable.
+- The exact Task 6 schema oracle now covers every new table, column, declared type,
+  nullability, primary-key position, foreign key, semantic index, trigger SQL, check,
+  enumeration, uniqueness constraint, and immutable path.
+
+### Idempotency and transaction boundary
+
+1. Execution rejects a finished lifecycle before opening a transaction or consulting
+   policy, clocks, or IDs.
+2. One immediate transaction loads the primary-key receipt first. A canonical matching
+   request replays the validated durable typed result; a changed request returns
+   `CommandConflict`.
+3. With no receipt, the same transaction verifies authoritative event/projection state
+   before policy. Stale projection rows are rejected without mutation or dependency use.
+4. Granted commands allocate one event ID and one timestamp, append, reduce, persist
+   projection, materialize the bounded transaction-visible view, canonicalize the full
+   typed outcome, write the receipt and ordered refs, and commit.
+5. Denied and approval-required commands materialize canonical typed error outcomes and
+   write zero-event receipts in that transaction. They write no event, projection, or
+   approval row and consume no clock or generated event ID.
+6. After commit, result conversion is infallible; no database read, view construction,
+   JSON operation, or other fallible work remains.
+7. Receipt loading validates canonical request/outcome JSON, the fingerprint,
+   capability/policy facts, contiguous event ordinals, authoritative event envelopes,
+   and the complete typed outcome before replay.
+
+Barrier-synchronized tests use two SQLite connections. A same-command race produces
+one receipt/effect and two identical outcomes with one policy/clock/event-ID use. A
+same-ID conflicting-command race produces one winner and one deterministic
+`CommandConflict`, again with one durable receipt/effect.
+
+### TDD and verification evidence
+
+RED schema command:
+
+```text
+cargo test --test migration_contract --locked
+```
+
+Result: exit 101; 11 passed and 5 failed specifically because `command_receipts` and
+`command_event_refs` were absent from the database and exact schema oracle.
+
+RED application command:
+
+```text
+cargo test --test application_contract --locked
+```
+
+Result: exit 101; compilation failed on the intended missing
+`CommandTransactionHook` service contract.
+
+Focused GREEN:
+
+```text
+cargo test --test application_contract --locked
+cargo test --test migration_contract --locked
+```
+
+Results: 19 application tests passed and 16 migration tests passed; 0 failed.
+
+Full current suite:
+
+```text
+cargo test --locked
+```
+
+Result: 143 passed, 0 failed, with no warnings.
+
+### Prerelease migration compatibility
+
+Phase 0 is prerelease, so migration `0001_phase0.sql` was coherently extended in place.
+Its checksum therefore changed. Development databases created before this fix can fail
+startup with `database_migration_state_invalid`; those pre-fix databases are not a
+supported released format and should be recreated rather than migrated in place.
+
+### Scope
+
+No runtime queue, terminal host, broker, network, credential, approval execution, or
+other external-action behavior was added in this fix round.
