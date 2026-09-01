@@ -1,0 +1,70 @@
+use crate::app::{
+    ApplicationCommand, InputRejection, InputRejectionCategory, DEFAULT_AUDIT_LIMIT,
+    MAX_INPUT_BYTES,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParsedLine {
+    Command(ApplicationCommand),
+    Ignored,
+}
+
+pub fn parse_line(input: &[u8]) -> ParsedLine {
+    if input.len() > MAX_INPUT_BYTES {
+        return ParsedLine::Command(reject(
+            InputRejectionCategory::Oversized,
+            None,
+            input,
+        ));
+    }
+
+    let line = match std::str::from_utf8(input) {
+        Ok(line) => line,
+        Err(_) => {
+            return ParsedLine::Command(reject(
+                InputRejectionCategory::InvalidEncoding,
+                None,
+                input,
+            ));
+        }
+    };
+    let line = line.trim();
+
+    if line.is_empty() {
+        return ParsedLine::Ignored;
+    }
+
+    let command = match line.split_whitespace().collect::<Vec<_>>().as_slice() {
+        ["/help"] => ApplicationCommand::ShowHelp,
+        ["/status"] => ApplicationCommand::ShowStatus,
+        ["/setup", "status"] => ApplicationCommand::ShowSetupStatus,
+        ["/audit", "tail"] => ApplicationCommand::audit_tail(DEFAULT_AUDIT_LIMIT)
+            .expect("default audit limit is within the supported range"),
+        ["/audit", "tail", limit] => match limit.parse::<u16>() {
+            Ok(limit) => ApplicationCommand::audit_tail(limit)
+                .unwrap_or_else(|_| reject(InputRejectionCategory::Malformed, safe_token(line), input)),
+            Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
+        },
+        ["/quit"] => ApplicationCommand::RequestShutdown,
+        _ => reject(InputRejectionCategory::Malformed, safe_token(line), input),
+    };
+
+    ParsedLine::Command(command)
+}
+
+fn reject(
+    category: InputRejectionCategory,
+    safe_token: Option<String>,
+    input: &[u8],
+) -> ApplicationCommand {
+    ApplicationCommand::RejectInput(InputRejection::from_input(category, safe_token, input))
+}
+
+fn safe_token(line: &str) -> Option<String> {
+    line.split_whitespace().next().map(|token| {
+        token
+            .escape_default()
+            .take(64)
+            .collect::<String>()
+    })
+}
