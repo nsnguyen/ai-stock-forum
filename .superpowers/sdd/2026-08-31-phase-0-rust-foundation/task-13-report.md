@@ -111,3 +111,44 @@ The canonical design now records immutable command receipts and ordered event
 references in schema version 1 before release, including the pre-receipt
 development-database compatibility ruling. The contract rejects the stale
 approved-spec link, absolute local paths, and prototype run directions.
+
+## Fix round 2 evidence
+
+Fix round 2 implementation commit:
+
+`a85c49fe3582250954384f2bfaa0d4d7348e7cdc`
+
+### RED
+
+Command:
+
+`cargo test --test documentation_contract --locked`
+
+Result: expected failure, `2 passed; 1 failed`. The strengthened README
+contract rejected the old `%LOCALAPPDATA%` path before the documentation was
+corrected.
+
+### GREEN
+
+Command:
+
+`cargo test --test documentation_contract --locked`
+
+Result: pass, `3 passed; 0 failed`.
+
+### Full suite
+
+Command:
+
+`cargo test --workspace --all-targets --locked`
+
+Result: pass. All unit and integration test targets completed successfully
+with no failures.
+
+Round 2 documents the implemented Windows locations under `%APPDATA%`, not
+`%LOCALAPPDATA%`. It states the exact privacy split: persisted rejection
+metadata may include a bounded escaped first token, category, byte count, and
+SHA-256 digest; audit rendering may show only the category, bounded safe token,
+and byte count, never the digest or rejected full line; users must not enter
+secrets. The contract asserts every complete CLI behavior row, including
+`SetupStatusViewed` and exact `Shutting down.` output for `/quit`.
