@@ -98,6 +98,78 @@ fn ensure_rejects_a_database_symlink() {
     ));
 }
 
+#[cfg(unix)]
+#[test]
+fn ensure_rejects_an_intermediate_symlink_without_touching_its_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("target");
+    let intermediate = temp.path().join("intermediate");
+    let state = intermediate.join("state");
+    std::fs::create_dir(&target).unwrap();
+    std::os::unix::fs::symlink(&target, &intermediate).unwrap();
+
+    assert!(matches!(
+        AppPaths::for_test(&state).ensure(),
+        Err(StartupError::StateDirectoryUnavailable)
+    ));
+    assert!(!target.join("state").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_rejects_a_database_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    let paths = AppPaths::for_test(&state);
+    std::fs::create_dir(&state).unwrap();
+    std::fs::create_dir(paths.database_path()).unwrap();
+
+    assert!(matches!(
+        paths.ensure(),
+        Err(StartupError::StateDirectoryUnavailable)
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_rejects_a_fifo_database_path() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    let paths = AppPaths::for_test(&state);
+    std::fs::create_dir(&state).unwrap();
+    let database = CString::new(paths.database_path().as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(database.as_ptr(), 0o600) }, 0);
+
+    assert!(matches!(
+        paths.ensure(),
+        Err(StartupError::StateDirectoryUnavailable)
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_rejects_a_socket_database_path() {
+    use std::os::unix::net::UnixListener;
+
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    let paths = AppPaths::for_test(&state);
+    std::fs::create_dir(&state).unwrap();
+    let _listener = match UnixListener::bind(paths.database_path()) {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("could not create socket fixture: {error}"),
+    };
+
+    assert!(matches!(
+        paths.ensure(),
+        Err(StartupError::StateDirectoryUnavailable)
+    ));
+}
+
 #[test]
 fn state_errors_do_not_expose_file_contents() {
     let temp = tempfile::tempdir().unwrap();
