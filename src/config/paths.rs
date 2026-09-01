@@ -34,6 +34,15 @@ impl AppPaths {
         self.state_dir.join(DATABASE_FILENAME)
     }
 
+    pub(crate) fn sqlite_open_path(&self) -> PathBuf {
+        let path = self.database_path();
+        #[cfg(target_os = "macos")]
+        if path.starts_with(Path::new("/var")) {
+            return Path::new("/private").join(path.strip_prefix("/").unwrap_or(&path));
+        }
+        path
+    }
+
     pub fn ensure(&self) -> Result<(), StartupError> {
         #[cfg(unix)]
         {
@@ -44,6 +53,7 @@ impl AppPaths {
             ensure_portable(&self.state_dir)
         }
     }
+
 }
 
 #[cfg(unix)]

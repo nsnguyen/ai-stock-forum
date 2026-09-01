@@ -26,6 +26,10 @@ pub enum StartupError {
     DatabaseMigrationChecksumMismatch,
     #[error("database migration state is invalid")]
     DatabaseMigrationState,
+    #[error("database did not apply required connection settings")]
+    DatabasePragmaMismatch,
+    #[error("database terminal path was rejected")]
+    DatabaseTerminalPathRejected,
 }
 
 impl StartupError {
@@ -39,6 +43,8 @@ impl StartupError {
             Self::DatabaseSchemaNewer => "database_schema_newer",
             Self::DatabaseMigrationChecksumMismatch => "database_migration_checksum_mismatch",
             Self::DatabaseMigrationState => "database_migration_state_invalid",
+            Self::DatabasePragmaMismatch => "database_pragma_mismatch",
+            Self::DatabaseTerminalPathRejected => "database_terminal_path_rejected",
         }
     }
 }
