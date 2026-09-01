@@ -329,6 +329,37 @@ fn task_six_schema_contract_is_exact_and_every_constraint_is_enforced() {
     assert_every_task_six_constraint_is_enforced();
 }
 
+#[test]
+fn semantic_index_oracle_detects_an_extra_autoindex_constraint() {
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE oracle_fixture (
+                id TEXT PRIMARY KEY,
+                expected_unique TEXT UNIQUE,
+                unexpected_unique TEXT UNIQUE
+            ) STRICT;",
+        )
+        .unwrap();
+
+    let error = assert_semantic_index_set(
+        &connection,
+        &["oracle_fixture"],
+        &[
+            semantic_index("oracle_fixture", "pk", true, false, &["id"]),
+            semantic_index("oracle_fixture", "u", true, false, &["expected_unique"]),
+        ],
+    )
+    .unwrap_err();
+
+    assert!(error.contains("unexpected_unique"));
+}
+
+#[test]
+fn every_enumerated_check_value_is_accepted() {
+    assert_every_enumerated_check_value_is_accepted();
+}
+
 #[derive(Clone, Copy)]
 struct ExpectedColumn {
     name: &'static str,
@@ -336,6 +367,31 @@ struct ExpectedColumn {
     not_null: bool,
     default: Option<&'static str>,
     primary_key_position: i64,
+}
+
+#[derive(Clone, Copy)]
+struct SemanticIndex {
+    table: &'static str,
+    origin: &'static str,
+    unique: bool,
+    partial: bool,
+    columns: &'static [&'static str],
+}
+
+fn semantic_index(
+    table: &'static str,
+    origin: &'static str,
+    unique: bool,
+    partial: bool,
+    columns: &'static [&'static str],
+) -> SemanticIndex {
+    SemanticIndex {
+        table,
+        origin,
+        unique,
+        partial,
+        columns,
+    }
 }
 
 const fn column(
@@ -429,7 +485,7 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
         )).collect::<Vec<_>>();
         assert_eq!(actual, expected, "column contract for {table}");
         let sql: String = connection.query_row("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1", [*table], |row| row.get(0)).unwrap();
-        assert!(normalize_sql(&sql).ends_with(" strict"), "{table} must remain STRICT");
+        assert!(matches!(normalize_sql(&sql).last(), Some(token) if token == "strict"), "{table} must remain STRICT");
     }
 
     let mut foreign_keys = Vec::new();
@@ -456,19 +512,32 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
     expected_foreign_keys.sort();
     assert_eq!(foreign_keys, expected_foreign_keys);
 
+    let application_tables = expected_columns.iter().map(|(table, _)| *table).collect::<Vec<_>>();
+    assert_semantic_index_set(connection, &application_tables, &[
+        semantic_index("event_stream", "c", false, false, &["correlation_id", "sequence"]),
+        semantic_index("event_stream", "c", false, false, &["event_type", "sequence"]),
+        semantic_index("event_stream", "u", true, false, &["event_id"]),
+        semantic_index("event_stream", "u", true, false, &["event_digest"]),
+        semantic_index("installation_projection", "u", true, false, &["installation_id"]),
+        semantic_index("process_session_projection", "pk", true, false, &["session_id"]),
+        semantic_index("setup_drafts", "c", false, false, &["state", "updated_at_ms"]),
+        semantic_index("setup_drafts", "pk", true, false, &["draft_id"]),
+        semantic_index("installation_configuration_versions", "pk", true, false, &["configuration_id"]),
+        semantic_index("installation_configuration_versions", "u", true, false, &["source_draft_id", "review_digest"]),
+        semantic_index("installation_configuration_versions", "u", true, false, &["version"]),
+        semantic_index("setup_step_outcomes", "pk", true, false, &["draft_id", "step_key", "attempt"]),
+        semantic_index("capability_readiness", "pk", true, false, &["configuration_id", "capability"]),
+        semantic_index("approval_records", "c", false, false, &["status", "created_at_ms"]),
+        semantic_index("approval_records", "pk", true, false, &["approval_id"]),
+    ]).unwrap();
     for (name, table, columns) in [
         ("event_stream_correlation_idx", "event_stream", &["correlation_id", "sequence"][..]),
         ("event_stream_type_idx", "event_stream", &["event_type", "sequence"][..]),
         ("setup_drafts_state_idx", "setup_drafts", &["state", "updated_at_ms"][..]),
         ("approval_records_status_idx", "approval_records", &["status", "created_at_ms"][..]),
     ] {
-        let (unique, origin): (i64, String) = connection.query_row(&format!("SELECT \"unique\", origin FROM pragma_index_list('{table}') WHERE name = ?1"), [name], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
-        assert_eq!((unique, origin.as_str()), (0, "c"), "index metadata for {name}");
-        let mut statement = connection.prepare(&format!("SELECT name FROM pragma_index_xinfo('{name}') WHERE key = 1 ORDER BY seqno")).unwrap();
-        let actual = statement.query_map([], |row| row.get::<_, String>(0)).unwrap().map(Result::unwrap).collect::<Vec<_>>();
-        assert_eq!(actual, columns, "ordered index columns for {name}");
         let sql: String = connection.query_row("SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?1", [name], |row| row.get(0)).unwrap();
-        assert_eq!(normalize_sql(&sql), format!("create index {name} on {table}({})", columns.join(", ")));
+        assert_eq!(normalize_sql(&sql), normalize_sql(&format!("create index {name} on {table}({})", columns.join(", "))));
     }
 
     for (name, expected_sql) in [
@@ -478,7 +547,7 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
         ("installation_configuration_versions_no_delete", "create trigger installation_configuration_versions_no_delete before delete on installation_configuration_versions begin select raise(abort, 'installation configuration versions are immutable'); end"),
     ] {
         let sql: String = connection.query_row("SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?1", [name], |row| row.get(0)).unwrap();
-        assert_eq!(normalize_sql(&sql), expected_sql, "trigger definition for {name}");
+        assert_eq!(normalize_sql(&sql), normalize_sql(expected_sql), "trigger definition for {name}");
     }
 }
 
@@ -547,6 +616,67 @@ fn assert_every_task_six_constraint_is_enforced() {
     connection.pragma_update(None, "ignore_check_constraints", "OFF").unwrap();
 }
 
+fn assert_semantic_index_set(
+    connection: &rusqlite::Connection,
+    tables: &[&str],
+    expected: &[SemanticIndex],
+) -> Result<(), String> {
+    let mut actual = Vec::new();
+    for table in tables {
+        let mut statement = connection.prepare(&format!("PRAGMA index_list({table})")).map_err(|error| error.to_string())?;
+        let indexes = statement.query_map([], |row| Ok((
+            row.get::<_, String>(1)?, row.get::<_, i64>(2)? != 0, row.get::<_, String>(3)?, row.get::<_, i64>(4)? != 0,
+        ))).map_err(|error| error.to_string())?;
+        for index in indexes {
+            let (name, unique, origin, partial) = index.map_err(|error| error.to_string())?;
+            let escaped_name = name.replace('\'', "''");
+            let mut columns = connection.prepare(&format!("SELECT name FROM pragma_index_xinfo('{escaped_name}') WHERE key = 1 ORDER BY seqno")).map_err(|error| error.to_string())?;
+            let columns = columns.query_map([], |row| row.get::<_, String>(0)).map_err(|error| error.to_string())?.map(|column| column.map_err(|error| error.to_string())).collect::<Result<Vec<_>, _>>()?;
+            actual.push(((*table).to_owned(), origin, unique, partial, columns));
+        }
+    }
+    actual.sort();
+    let mut expected = expected.iter().map(|index| (
+        index.table.to_owned(), index.origin.to_owned(), index.unique, index.partial,
+        index.columns.iter().map(|column| (*column).to_owned()).collect::<Vec<_>>(),
+    )).collect::<Vec<_>>();
+    expected.sort();
+    if actual == expected { Ok(()) } else { Err(format!("semantic index mismatch: actual={actual:?}, expected={expected:?}")) }
+}
+
+fn assert_every_enumerated_check_value_is_accepted() {
+    let (_temp, database) = fresh_database();
+    let connection = database.connection();
+    for (index, state) in ["drafting", "reviewed", "applied", "superseded"].into_iter().enumerate() {
+        connection.execute("INSERT INTO setup_drafts (draft_id, schema_version, state, path, payload_json, created_at_ms, updated_at_ms) VALUES (?1, 1, ?2, 'quick_start', '{}', 1, 1)", rusqlite::params![format!("state-{index}"), state]).unwrap();
+    }
+    for (index, path) in ["quick_start", "customize"].into_iter().enumerate() {
+        connection.execute("INSERT INTO setup_drafts (draft_id, schema_version, state, path, payload_json, created_at_ms, updated_at_ms) VALUES (?1, 1, 'drafting', ?2, '{}', 1, 1)", rusqlite::params![format!("path-{index}"), path]).unwrap();
+    }
+
+    let (_temp, database) = fresh_database();
+    let connection = database.connection();
+    seed_draft(connection);
+    for (index, status) in ["passed", "failed", "skipped"].into_iter().enumerate() {
+        connection.execute("INSERT INTO setup_step_outcomes (draft_id, step_key, attempt, status, occurred_at_ms) VALUES ('draft-1', ?1, 1, ?2, 1)", rusqlite::params![format!("status-{index}"), status]).unwrap();
+    }
+
+    let (_temp, database) = fresh_database();
+    let connection = database.connection();
+    seed_configuration(connection);
+    for (index, status) in ["ready", "unavailable"].into_iter().enumerate() {
+        connection.execute("INSERT INTO capability_readiness (configuration_id, capability, status, checked_at_ms, projection_digest) VALUES ('configuration-1', ?1, ?2, 1, 'projection')", rusqlite::params![format!("readiness-{index}"), status]).unwrap();
+    }
+
+    let (_temp, database) = fresh_database();
+    let connection = database.connection();
+    seed_event(connection);
+    connection.execute("INSERT INTO approval_records (approval_id, action_kind, object_kind, object_id, object_version, object_digest, actor_kind, status, created_at_ms) VALUES ('approval-pending', 'apply', 'configuration', 'configuration-1', 1, 'object', 'system', 'pending', 1)", []).unwrap();
+    for status in ["accepted", "rejected", "expired", "cancelled"] {
+        connection.execute("INSERT INTO approval_records (approval_id, action_kind, object_kind, object_id, object_version, object_digest, actor_kind, status, created_at_ms, resolved_at_ms, resolution_kind, resolution_event_id) VALUES (?1, 'apply', 'configuration', 'configuration-1', 1, 'object', 'system', ?2, 1, 2, 'resolved', 'event-1')", rusqlite::params![format!("approval-{status}"), status]).unwrap();
+    }
+}
+
 fn fresh_database() -> (tempfile::TempDir, Database) {
     let temp = tempfile::tempdir().unwrap();
     let database = Database::open(&AppPaths::for_test(temp.path())).unwrap();
@@ -585,6 +715,27 @@ fn seed_complete(connection: &rusqlite::Connection) {
     connection.execute("INSERT INTO approval_records (approval_id, action_kind, object_kind, object_id, object_version, object_digest, actor_kind, status, created_at_ms) VALUES ('approval-1', 'apply', 'configuration', 'configuration-1', 1, 'object-1', 'system', 'pending', 1)", []).unwrap();
 }
 
-fn normalize_sql(sql: &str) -> String {
-    sql.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase()
+fn normalize_sql(sql: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut characters = sql.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character.is_whitespace() { continue; }
+        if character == '\'' {
+            let mut quoted = String::from("'");
+            while let Some(next) = characters.next() {
+                quoted.push(next);
+                if next == '\'' {
+                    if characters.peek() == Some(&'\'') { quoted.push(characters.next().unwrap()); } else { break; }
+                }
+            }
+            tokens.push(quoted.to_ascii_lowercase());
+        } else if character.is_ascii_alphanumeric() || character == '_' {
+            let mut word = character.to_string();
+            while let Some(next) = characters.peek() {
+                if next.is_ascii_alphanumeric() || *next == '_' { word.push(characters.next().unwrap()); } else { break; }
+            }
+            tokens.push(word.to_ascii_lowercase());
+        } else { tokens.push(character.to_string()); }
+    }
+    tokens
 }
