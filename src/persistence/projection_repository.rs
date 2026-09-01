@@ -27,6 +27,25 @@ impl ProjectionRepository {
         }
     }
 
+    pub fn load_at(
+        connection: &Connection,
+        through_sequence: u64,
+    ) -> Result<ProjectionState, RecoveryError> {
+        let events = verified_events(connection)?;
+        if events
+            .last()
+            .map_or(through_sequence != 0, |event| through_sequence > event.sequence)
+        {
+            return Err(RecoveryError::InvalidEventRecord);
+        }
+        reduce_events(
+            &events
+                .into_iter()
+                .take_while(|event| event.sequence <= through_sequence)
+                .collect::<Vec<_>>(),
+        )
+    }
+
     #[doc(hidden)]
     pub fn load_with_before_projection_rows<F>(
         connection: &Connection,

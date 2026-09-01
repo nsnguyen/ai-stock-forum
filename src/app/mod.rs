@@ -2,8 +2,11 @@
 mod command;
 mod event;
 mod outcome;
+mod service;
 
 use thiserror::Error;
+
+use crate::policy::{Capability, PolicyDecision};
 
 pub const MODULE_NAME: &str = "app";
 
@@ -18,9 +21,10 @@ pub use event::{
 };
 pub(crate) use event::envelope_from_pending;
 pub use outcome::{
-    AuditTailView, CommandView, HelpView, InputRejectedView, SetupStatusView, ShutdownDisposition,
-    ShutdownView, StatusView,
+    AuditTailView, CommandOutcome, CommandView, HelpView, InputRejectedView, SetupStatusView,
+    ShutdownDisposition, ShutdownView, StatusView,
 };
+pub use service::{ApplicationService, AuthorizationDecision, CommandPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum AppError {
@@ -28,4 +32,13 @@ pub enum AppError {
     Persistence(#[from] crate::persistence::PersistenceError),
     #[error("event recovery failed: {0}")]
     Recovery(#[from] crate::persistence::RecoveryError),
+    #[error("command capability is denied")]
+    CapabilityDenied {
+        capability: Capability,
+        decision: PolicyDecision,
+    },
+    #[error("command requires approval")]
+    ApprovalRequired { capability: Capability },
+    #[error("command ID conflicts with a different request")]
+    CommandConflict,
 }

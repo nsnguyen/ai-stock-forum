@@ -8,7 +8,7 @@ use crate::{
         envelope_from_pending, AuditLimit, EventEnvelope, EventEnvelopeWire, PendingEvent,
         EVENT_SCHEMA_VERSION,
     },
-    domain::{EventId, ObjectRef, ObjectVersion, Sha256Digest},
+    domain::{CausationId, EventId, ObjectRef, ObjectVersion, Sha256Digest},
 };
 
 use super::{ImmediateTransaction, PersistenceError};
@@ -135,6 +135,46 @@ impl EventRepository {
             [i64::from(limit.get())],
         )
         .map_err(persistence_from_recovery)
+    }
+
+    pub fn tail_through(
+        connection: &Connection,
+        limit: AuditLimit,
+        through_sequence: u64,
+    ) -> Result<Vec<EventEnvelope>, PersistenceError> {
+        let through_sequence = i64::try_from(through_sequence)
+            .map_err(|_| PersistenceError::InvalidEventRecord)?;
+        load_query(
+            connection,
+            &format!("SELECT {EVENT_COLUMNS} FROM (SELECT {EVENT_COLUMNS} FROM event_stream WHERE sequence <= ?1 ORDER BY sequence DESC LIMIT ?2) ORDER BY sequence"),
+            params![through_sequence, i64::from(limit.get())],
+        )
+        .map_err(persistence_from_recovery)
+    }
+
+    pub fn load_by_causation_id(
+        transaction: &ImmediateTransaction<'_>,
+        causation_id: CausationId,
+    ) -> Result<Option<EventEnvelope>, PersistenceError> {
+        let mut statement = transaction
+            .transaction()
+            .prepare(&format!(
+                "SELECT {EVENT_COLUMNS} FROM event_stream WHERE causation_id = ?1 ORDER BY sequence"
+            ))
+            .map_err(map_sqlite)?;
+        let mut rows = statement
+            .query([causation_id.to_string()])
+            .map_err(map_sqlite)?;
+        let first = rows
+            .next()
+            .map_err(map_sqlite)?
+            .map(decode_row)
+            .transpose()
+            .map_err(persistence_from_recovery)?;
+        if rows.next().map_err(map_sqlite)?.is_some() {
+            return Err(PersistenceError::InvalidEventRecord);
+        }
+        Ok(first)
     }
 
     pub fn verify(connection: &Connection) -> Result<(), RecoveryError> {
