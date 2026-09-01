@@ -23,6 +23,7 @@ pub enum SetupPath {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum SetupStatus {
     NotStarted,
     DraftSaved { draft_id: SetupDraftId },

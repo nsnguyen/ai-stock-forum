@@ -35,6 +35,8 @@ pub enum PersistenceError {
     PreviousEventDigestMismatch,
     #[error("event digest is invalid")]
     EventDigestMismatch,
+    #[error("projection state conflicts with the authoritative event stream")]
+    ProjectionStateConflict,
 }
 
 pub struct Database {

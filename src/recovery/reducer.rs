@@ -16,7 +16,6 @@ pub struct ProjectionState {
     pub setup_status: SetupStatus,
     pub last_sequence: u64,
     pub last_event_digest: Option<Sha256Digest>,
-    pub previous_session_interrupted: bool,
 }
 
 impl Default for ProjectionState {
@@ -27,7 +26,6 @@ impl Default for ProjectionState {
             setup_status: SetupStatus::NotStarted,
             last_sequence: 0,
             last_event_digest: None,
-            previous_session_interrupted: false,
         }
     }
 }
@@ -40,7 +38,6 @@ struct ProjectionStateWire {
     setup_status: SetupStatus,
     last_sequence: u64,
     last_event_digest: Option<Sha256Digest>,
-    previous_session_interrupted: bool,
 }
 
 impl<'de> Deserialize<'de> for ProjectionState {
@@ -55,7 +52,6 @@ impl<'de> Deserialize<'de> for ProjectionState {
             setup_status: wire.setup_status,
             last_sequence: wire.last_sequence,
             last_event_digest: wire.last_event_digest,
-            previous_session_interrupted: wire.previous_session_interrupted,
         };
         state.validate().map_err(serde::de::Error::custom)?;
         Ok(state)
@@ -63,6 +59,7 @@ impl<'de> Deserialize<'de> for ProjectionState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstallationProjection {
     pub installation_id: InstallationId,
     pub created_event_id: EventId,
@@ -70,6 +67,7 @@ pub struct InstallationProjection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionProjection {
     pub session_id: SessionId,
     pub started_event_id: EventId,
@@ -78,6 +76,7 @@ pub struct SessionProjection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionEndProjection {
     pub ended_event_id: EventId,
     pub ended_at_ms: i64,
@@ -100,6 +99,9 @@ impl ProjectionState {
         if (self.last_sequence == 0) != self.last_event_digest.is_none() {
             return Err(RecoveryError::InvalidEventRecord);
         }
+        if self.last_sequence == 0 && self.installation.is_some() {
+            return Err(RecoveryError::InvalidEventRecord);
+        }
         if self.installation.is_none() && !self.sessions.is_empty() {
             return Err(RecoveryError::InvalidEventRecord);
         }
@@ -107,6 +109,15 @@ impl ProjectionState {
             .sessions
             .iter()
             .any(|(session_id, projection)| session_id != &projection.session_id)
+        {
+            return Err(RecoveryError::InvalidEventRecord);
+        }
+        if self
+            .sessions
+            .values()
+            .filter(|projection| projection.ended.is_none())
+            .count()
+            > 1
         {
             return Err(RecoveryError::InvalidEventRecord);
         }
@@ -127,7 +138,11 @@ pub fn reduce(state: &mut ProjectionState, event: &EventEnvelope) -> Result<(), 
     if event.event_schema_version != EVENT_SCHEMA_VERSION {
         return Err(RecoveryError::UnsupportedEventSchema);
     }
-    if event.sequence != state.last_sequence + 1 {
+    let expected_sequence = state
+        .last_sequence
+        .checked_add(1)
+        .ok_or(RecoveryError::EventSequenceOverflow)?;
+    if event.sequence != expected_sequence {
         return Err(RecoveryError::EventSequenceGap);
     }
     if event.previous_event_digest != state.last_event_digest {
@@ -147,7 +162,10 @@ pub fn reduce(state: &mut ProjectionState, event: &EventEnvelope) -> Result<(), 
             });
         }
         ApplicationEvent::ProcessSessionStarted { session_id } => {
-            if next.installation.is_none() || next.sessions.contains_key(session_id) {
+            if next.installation.is_none()
+                || next.sessions.contains_key(session_id)
+                || next.sessions.values().any(|session| session.ended.is_none())
+            {
                 return Err(RecoveryError::InvalidEventRecord);
             }
             next.sessions.insert(
@@ -162,7 +180,6 @@ pub fn reduce(state: &mut ProjectionState, event: &EventEnvelope) -> Result<(), 
         }
         ApplicationEvent::PreviousSessionInterrupted { session_id } => {
             end_session(&mut next, *session_id, event, ShutdownReason::Interrupted)?;
-            next.previous_session_interrupted = true;
         }
         ApplicationEvent::ProcessSessionEnded { session_id, reason } => {
             end_session(&mut next, *session_id, event, *reason)?;
@@ -192,13 +209,19 @@ fn end_session(
     event: &EventEnvelope,
     reason: ShutdownReason,
 ) -> Result<(), RecoveryError> {
+    let open_sessions = state
+        .sessions
+        .values()
+        .filter(|session| session.ended.is_none())
+        .map(|session| session.session_id)
+        .collect::<Vec<_>>();
+    if open_sessions.as_slice() != [session_id] {
+        return Err(RecoveryError::InvalidEventRecord);
+    }
     let session = state
         .sessions
         .get_mut(&session_id)
         .ok_or(RecoveryError::InvalidEventRecord)?;
-    if session.ended.is_some() {
-        return Err(RecoveryError::InvalidEventRecord);
-    }
     session.ended = Some(SessionEndProjection {
         ended_event_id: event.event_id,
         ended_at_ms: event.occurred_at_ms,

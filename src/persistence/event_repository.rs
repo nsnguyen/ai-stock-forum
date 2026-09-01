@@ -19,6 +19,8 @@ const EVENT_COLUMNS: &str = "sequence, event_id, event_schema_version, event_typ
 pub enum RecoveryError {
     #[error("event sequence is not contiguous")]
     EventSequenceGap,
+    #[error("event sequence cannot advance beyond its maximum value")]
+    EventSequenceOverflow,
     #[error("event schema version is unsupported")]
     UnsupportedEventSchema,
     #[error("event record is invalid")]
@@ -37,6 +39,7 @@ impl RecoveryError {
     pub const fn code(self) -> &'static str {
         match self {
             Self::EventSequenceGap => "event_sequence_gap",
+            Self::EventSequenceOverflow => "event_sequence_overflow",
             Self::UnsupportedEventSchema => "unsupported_event_schema",
             Self::InvalidEventRecord => "invalid_event_record",
             Self::InvalidPredecessorShape => "invalid_predecessor_shape",
@@ -319,6 +322,8 @@ fn persistence_from_recovery(error: RecoveryError) -> PersistenceError {
         }
         RecoveryError::PreviousEventDigestMismatch => PersistenceError::PreviousEventDigestMismatch,
         RecoveryError::EventDigestMismatch => PersistenceError::EventDigestMismatch,
-        RecoveryError::EventSequenceGap | RecoveryError::QueryFailed => PersistenceError::QueryFailed,
+        RecoveryError::EventSequenceGap
+        | RecoveryError::EventSequenceOverflow
+        | RecoveryError::QueryFailed => PersistenceError::QueryFailed,
     }
 }
