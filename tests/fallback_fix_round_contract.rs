@@ -27,7 +27,7 @@ use ai_stock_forum::{
         ApplicationRuntime, CommandExecutor, RuntimeError, RuntimeThreadSpawner,
     },
     ui::command::{
-        BoundedLineReader, BufferedLineSource, FallbackHost, FallbackRunner, LineSource,
+        BoundedLineReader, CancellableLineSource, FallbackHost, FallbackRunner,
         LineSourceCancellation, LineSourceEvent, RawLine, TextRenderer, UiError,
     },
 };
@@ -154,7 +154,7 @@ struct CancellableSource {
     exited: Sender<()>,
 }
 
-impl LineSource for CancellableSource {
+impl CancellableLineSource for CancellableSource {
     fn cancellation(&self) -> Arc<dyn LineSourceCancellation> {
         self.cancel_signal.clone()
     }
@@ -257,7 +257,21 @@ fn disconnected_interrupt_channel_is_disabled_without_prompt_livelock() {
     .unwrap();
     let (_interrupt_sender, interrupts) = bounded::<()>(1);
     drop(_interrupt_sender);
-    let source = BufferedLineSource::new(Cursor::new(Vec::<u8>::new()));
+    struct EofSource;
+    struct EofCancellation;
+    impl LineSourceCancellation for EofCancellation {
+        fn cancel(&self) {}
+    }
+    impl CancellableLineSource for EofSource {
+        fn cancellation(&self) -> Arc<dyn LineSourceCancellation> {
+            Arc::new(EofCancellation)
+        }
+
+        fn next_line(&mut self) -> io::Result<LineSourceEvent> {
+            Ok(LineSourceEvent::Eof)
+        }
+    }
+    let source = EofSource;
     let output = Arc::new(Mutex::new(Vec::new()));
     let writer = SharedWriter(output.clone());
 
@@ -603,6 +617,11 @@ mod unix_binary {
             let output = run_line(&home, &xdg, input);
             assert!(output.status.success());
             assert_eq!(latest_reason(&state_path(&home, &xdg)), expected);
+            let next = run_line(&home, &xdg, b"/quit\n");
+            assert!(next.status.success());
+            assert!(!String::from_utf8(next.stdout)
+                .unwrap()
+                .contains("previous session ended unexpectedly"));
         }
     }
 

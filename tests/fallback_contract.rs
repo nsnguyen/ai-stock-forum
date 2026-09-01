@@ -25,13 +25,60 @@ use ai_stock_forum::{
     runtime::{ApplicationRuntime, CommandExecutor, RuntimeError},
     setup::SetupStatus,
     ui::command::{
-        parse_line, BoundedLineReader, BufferedLineSource, FallbackHost, FallbackRunner,
-        ParsedLine, TextRenderer, UiError,
+        parse_line, BoundedLineReader, CancellableLineSource, FallbackHost, FallbackRunner,
+        LineSourceCancellation, LineSourceEvent, ParsedLine, TextRenderer, UiError,
     },
 };
 use crossbeam_channel::{bounded, never, Receiver, Sender};
 use tempfile::TempDir;
 use uuid::Uuid;
+
+struct ScriptedCancellation(std::sync::atomic::AtomicBool);
+
+impl LineSourceCancellation for ScriptedCancellation {
+    fn cancel(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+struct ScriptedLineSource {
+    events: std::collections::VecDeque<std::io::Result<LineSourceEvent>>,
+    cancellation: std::sync::Arc<ScriptedCancellation>,
+}
+
+impl CancellableLineSource for ScriptedLineSource {
+    fn cancellation(&self) -> std::sync::Arc<dyn LineSourceCancellation> {
+        self.cancellation.clone()
+    }
+
+    fn next_line(&mut self) -> std::io::Result<LineSourceEvent> {
+        self.events.pop_front().unwrap_or(Ok(LineSourceEvent::Eof))
+    }
+}
+
+fn scripted_source<R: std::io::BufRead>(reader: R) -> ScriptedLineSource {
+    let mut reader = BoundedLineReader::new(reader);
+    let mut events = std::collections::VecDeque::new();
+    loop {
+        match reader.next_line() {
+            Ok(Some(line)) => events.push_back(Ok(LineSourceEvent::Line(line))),
+            Ok(None) => {
+                events.push_back(Ok(LineSourceEvent::Eof));
+                break;
+            }
+            Err(error) => {
+                events.push_back(Err(error));
+                break;
+            }
+        }
+    }
+    ScriptedLineSource {
+        events,
+        cancellation: std::sync::Arc::new(ScriptedCancellation(
+            std::sync::atomic::AtomicBool::new(false),
+        )),
+    }
+}
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -370,7 +417,7 @@ impl Write for PanickingWriter {
 fn host_finishes_with_application_error_after_input_write_and_panic_failures() {
     let (runtime, finished) = recording_runtime();
     let result = FallbackHost::new(runtime, false, false).run(
-        BufferedLineSource::new(FailingReader),
+        scripted_source(FailingReader),
         SharedWriter::default(),
         never(),
     );
@@ -379,7 +426,7 @@ fn host_finishes_with_application_error_after_input_write_and_panic_failures() {
 
     let (runtime, finished) = recording_runtime();
     let result = FallbackHost::new(runtime, false, false).run(
-        BufferedLineSource::new(Cursor::new(b"/help\n".to_vec())),
+        scripted_source(Cursor::new(b"/help\n".to_vec())),
         FailingWriter,
         never(),
     );
@@ -388,12 +435,57 @@ fn host_finishes_with_application_error_after_input_write_and_panic_failures() {
 
     let (runtime, finished) = recording_runtime();
     let result = FallbackHost::new(runtime, false, false).run(
-        BufferedLineSource::new(Cursor::new(b"/help\n".to_vec())),
+        scripted_source(Cursor::new(b"/help\n".to_vec())),
         PanickingWriter,
         never(),
     );
     assert!(matches!(result, Err(UiError::Panicked)));
     assert_eq!(receive(&finished), ShutdownReason::ApplicationError);
+}
+
+#[test]
+fn caught_host_writer_panic_subprocess_redacts_payload_and_emits_one_safe_line() {
+    const CHILD_ENV: &str = "AI_STOCK_FORUM_HOST_PANIC_CHILD";
+    const SECRET: &str = "credential=host-writer-secret-payload";
+    const SAFE_LINE: &str = "Command host stopped unexpectedly.\n";
+
+    if std::env::var_os(CHILD_ENV).is_some() {
+        struct SecretPanickingWriter;
+        impl Write for SecretPanickingWriter {
+            fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+                panic!("{SECRET}")
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (runtime, _finished) = recording_runtime();
+        let error = FallbackHost::new(runtime, false, false)
+            .run(
+                scripted_source(Cursor::new(b"/help\n".to_vec())),
+                SecretPanickingWriter,
+                never(),
+            )
+            .expect_err("writer panic must become a typed host error");
+        TextRenderer::render_ui_error(&error, &mut io::stderr()).unwrap();
+        std::process::exit(0);
+    }
+
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "caught_host_writer_panic_subprocess_redacts_payload_and_emits_one_safe_line",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr, SAFE_LINE);
+    assert!(!stderr.contains(SECRET));
 }
 
 #[test]
@@ -405,7 +497,7 @@ fn host_finishes_quit_eof_and_interrupt_with_exact_reasons() {
         let (runtime, finished) = recording_runtime();
         let reason = FallbackHost::new(runtime, false, false)
             .run(
-                BufferedLineSource::new(Cursor::new(input.to_vec())),
+                scripted_source(Cursor::new(input.to_vec())),
                 SharedWriter::default(),
                 never(),
             )
@@ -419,7 +511,7 @@ fn host_finishes_quit_eof_and_interrupt_with_exact_reasons() {
     interrupt_sender.send(()).unwrap();
     let reason = FallbackHost::new(runtime, false, false)
         .run(
-            BufferedLineSource::new(Cursor::new(b"/help\n".to_vec())),
+            scripted_source(Cursor::new(b"/help\n".to_vec())),
             SharedWriter::default(),
             interrupt_receiver,
         )
@@ -502,7 +594,7 @@ fn host_redacts_worker_failure_and_attempts_shutdown_without_deadlock() {
     let runtime = ApplicationRuntime::spawn(PanicExecutor, 1).unwrap();
     let writer = SharedWriter::default();
     let result = FallbackHost::new(runtime, false, false).run(
-        BufferedLineSource::new(Cursor::new(b"/help\n".to_vec())),
+        scripted_source(Cursor::new(b"/help\n".to_vec())),
         writer.clone(),
         never(),
     );
@@ -550,6 +642,10 @@ fn binary_smoke_quit_and_eof_exit_successfully() {
         let output = binary_output(&home, &xdg, input);
         assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
         assert!(!String::from_utf8_lossy(&output.stderr).contains("sqlite"));
+        let next = binary_output(&home, &xdg, b"/quit\n");
+        assert!(next.status.success());
+        assert!(!String::from_utf8_lossy(&next.stdout)
+            .contains("previous session ended unexpectedly"));
     }
 }
 

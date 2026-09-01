@@ -1,8 +1,7 @@
 use std::{
     io::{self, BufRead, Write},
-    panic::{catch_unwind, AssertUnwindSafe},
+    panic::{resume_unwind, AssertUnwindSafe},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, OnceLock,
     },
     thread,
@@ -16,6 +15,7 @@ use crate::{
         ApplicationCommand, InputRejection, InputRejectionCategory, ShutdownDisposition,
         ShutdownReason,
     },
+    panic_boundary::catch_sensitive_unwind,
     runtime::{ApplicationRuntime, RuntimeClient, RuntimeError},
 };
 
@@ -53,54 +53,9 @@ pub enum LineSourceEvent {
     Cancelled,
 }
 
-pub trait LineSource: Send + 'static {
+pub trait CancellableLineSource: Send + 'static {
     fn cancellation(&self) -> Arc<dyn LineSourceCancellation>;
     fn next_line(&mut self) -> io::Result<LineSourceEvent>;
-}
-
-struct AtomicCancellation {
-    cancelled: AtomicBool,
-}
-
-impl LineSourceCancellation for AtomicCancellation {
-    fn cancel(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
-    }
-}
-
-pub struct BufferedLineSource<R> {
-    reader: BoundedLineReader<R>,
-    cancellation: Arc<AtomicCancellation>,
-}
-
-impl<R: BufRead> BufferedLineSource<R> {
-    pub fn new(reader: R) -> Self {
-        Self {
-            reader: BoundedLineReader::new(reader),
-            cancellation: Arc::new(AtomicCancellation {
-                cancelled: AtomicBool::new(false),
-            }),
-        }
-    }
-}
-
-impl<R> LineSource for BufferedLineSource<R>
-where
-    R: BufRead + Send + 'static,
-{
-    fn cancellation(&self) -> Arc<dyn LineSourceCancellation> {
-        self.cancellation.clone()
-    }
-
-    fn next_line(&mut self) -> io::Result<LineSourceEvent> {
-        if self.cancellation.cancelled.load(Ordering::SeqCst) {
-            return Ok(LineSourceEvent::Cancelled);
-        }
-        match self.reader.next_line()? {
-            Some(line) => Ok(LineSourceEvent::Line(line)),
-            None => Ok(LineSourceEvent::Eof),
-        }
-    }
 }
 
 #[cfg(unix)]
@@ -118,7 +73,8 @@ impl LineSourceCancellation for UnixCancellation {
 }
 
 #[cfg(unix)]
-struct UnixStdinLineSource {
+pub struct UnixLineSource {
+    input_fd: std::os::fd::RawFd,
     cancel_reader: std::os::unix::net::UnixStream,
     cancellation: Arc<UnixCancellation>,
     accumulator: LineAccumulator,
@@ -127,11 +83,17 @@ struct UnixStdinLineSource {
 }
 
 #[cfg(unix)]
-impl UnixStdinLineSource {
-    fn new() -> io::Result<Self> {
+impl UnixLineSource {
+    fn stdin() -> io::Result<Self> {
+        Self::from_borrowed_fd(libc::STDIN_FILENO)
+    }
+
+    #[doc(hidden)]
+    pub fn from_borrowed_fd(input_fd: std::os::fd::RawFd) -> io::Result<Self> {
         let (cancel_reader, cancel_writer) = std::os::unix::net::UnixStream::pair()?;
         cancel_writer.set_nonblocking(true)?;
         Ok(Self {
+            input_fd,
             cancel_reader,
             cancellation: Arc::new(UnixCancellation {
                 writer: std::sync::Mutex::new(cancel_writer),
@@ -147,7 +109,7 @@ impl UnixStdinLineSource {
         let amount = loop {
             let amount = unsafe {
                 libc::read(
-                    libc::STDIN_FILENO,
+                    self.input_fd,
                     buffer.as_mut_ptr().cast(),
                     buffer.len(),
                 )
@@ -179,7 +141,7 @@ impl UnixStdinLineSource {
 }
 
 #[cfg(unix)]
-impl LineSource for UnixStdinLineSource {
+impl CancellableLineSource for UnixLineSource {
     fn cancellation(&self) -> Arc<dyn LineSourceCancellation> {
         self.cancellation.clone()
     }
@@ -197,7 +159,7 @@ impl LineSource for UnixStdinLineSource {
         loop {
             let mut descriptors = [
                 libc::pollfd {
-                    fd: libc::STDIN_FILENO,
+                    fd: self.input_fd,
                     events: libc::POLLIN,
                     revents: 0,
                 },
@@ -221,12 +183,194 @@ impl LineSource for UnixStdinLineSource {
                 }
                 return Err(error);
             }
-            if descriptors[1].revents != 0 {
+            if descriptors[1].revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "input cancellation poll failed",
+                ));
+            }
+            if descriptors[1].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
                 return Ok(LineSourceEvent::Cancelled);
             }
-            if descriptors[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+            if descriptors[0].revents & libc::POLLNVAL != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "terminal input descriptor is invalid",
+                ));
+            }
+            if descriptors[0].revents & libc::POLLERR != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "terminal input poll failed",
+                ));
+            }
+            if descriptors[0].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
                 if let Some(event) = self.read_ready_stdin()? {
                     return Ok(event);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+mod windows_api {
+    use std::ffi::c_void;
+
+    pub type Handle = isize;
+    pub const INVALID_HANDLE_VALUE: Handle = -1;
+    pub const STD_INPUT_HANDLE: u32 = u32::MAX - 9;
+    pub const WAIT_OBJECT_0: u32 = 0;
+    pub const WAIT_FAILED: u32 = u32::MAX;
+    pub const INFINITE: u32 = u32::MAX;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        pub fn GetStdHandle(kind: u32) -> Handle;
+        pub fn CreateEventW(
+            attributes: *const c_void,
+            manual_reset: i32,
+            initial_state: i32,
+            name: *const u16,
+        ) -> Handle;
+        pub fn SetEvent(event: Handle) -> i32;
+        pub fn WaitForMultipleObjects(
+            count: u32,
+            handles: *const Handle,
+            wait_all: i32,
+            milliseconds: u32,
+        ) -> u32;
+        pub fn ReadFile(
+            file: Handle,
+            buffer: *mut c_void,
+            bytes_to_read: u32,
+            bytes_read: *mut u32,
+            overlapped: *mut c_void,
+        ) -> i32;
+        pub fn CloseHandle(handle: Handle) -> i32;
+    }
+}
+
+#[cfg(windows)]
+struct WindowsCancellation {
+    event: windows_api::Handle,
+}
+
+#[cfg(windows)]
+impl LineSourceCancellation for WindowsCancellation {
+    fn cancel(&self) {
+        unsafe {
+            windows_api::SetEvent(self.event);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsCancellation {
+    fn drop(&mut self) {
+        unsafe {
+            windows_api::CloseHandle(self.event);
+        }
+    }
+}
+
+#[cfg(windows)]
+struct WindowsStdinLineSource {
+    input: windows_api::Handle,
+    cancellation: Arc<WindowsCancellation>,
+    accumulator: LineAccumulator,
+    ready: std::collections::VecDeque<RawLine>,
+    eof: bool,
+}
+
+#[cfg(windows)]
+impl WindowsStdinLineSource {
+    fn stdin() -> io::Result<Self> {
+        let input = unsafe { windows_api::GetStdHandle(windows_api::STD_INPUT_HANDLE) };
+        if input == 0 || input == windows_api::INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let event = unsafe {
+            windows_api::CreateEventW(std::ptr::null(), 1, 0, std::ptr::null())
+        };
+        if event == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            input,
+            cancellation: Arc::new(WindowsCancellation { event }),
+            accumulator: LineAccumulator::new(),
+            ready: std::collections::VecDeque::new(),
+            eof: false,
+        })
+    }
+
+    fn read_ready_input(&mut self) -> io::Result<Option<LineSourceEvent>> {
+        let mut buffer = [0_u8; 8192];
+        let mut amount = 0_u32;
+        let succeeded = unsafe {
+            windows_api::ReadFile(
+                self.input,
+                buffer.as_mut_ptr().cast(),
+                buffer.len() as u32,
+                &mut amount,
+                std::ptr::null_mut(),
+            )
+        };
+        if succeeded == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if amount == 0 {
+            self.eof = true;
+            return Ok(Some(match self.accumulator.finish_eof()? {
+                Some(line) => LineSourceEvent::Line(line),
+                None => LineSourceEvent::Eof,
+            }));
+        }
+        self.ready
+            .extend(self.accumulator.push_chunk(&buffer[..amount as usize])?);
+        Ok(self.ready.pop_front().map(LineSourceEvent::Line))
+    }
+}
+
+#[cfg(windows)]
+impl CancellableLineSource for WindowsStdinLineSource {
+    fn cancellation(&self) -> Arc<dyn LineSourceCancellation> {
+        self.cancellation.clone()
+    }
+
+    fn next_line(&mut self) -> io::Result<LineSourceEvent> {
+        if let Some(line) = self.ready.pop_front() {
+            return Ok(LineSourceEvent::Line(line));
+        }
+        if self.eof {
+            return Ok(LineSourceEvent::Eof);
+        }
+
+        loop {
+            let handles = [self.input, self.cancellation.event];
+            match unsafe {
+                windows_api::WaitForMultipleObjects(
+                    handles.len() as u32,
+                    handles.as_ptr(),
+                    0,
+                    windows_api::INFINITE,
+                )
+            } {
+                windows_api::WAIT_OBJECT_0 => {
+                    if let Some(event) = self.read_ready_input()? {
+                        return Ok(event);
+                    }
+                }
+                result if result == windows_api::WAIT_OBJECT_0 + 1 => {
+                    return Ok(LineSourceEvent::Cancelled);
+                }
+                windows_api::WAIT_FAILED => return Err(io::Error::last_os_error()),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        "terminal input wait failed",
+                    ));
                 }
             }
         }
@@ -236,7 +380,9 @@ impl LineSource for UnixStdinLineSource {
 pub struct StdioResources {
     interrupts: Receiver<()>,
     #[cfg(unix)]
-    source: UnixStdinLineSource,
+    source: UnixLineSource,
+    #[cfg(windows)]
+    source: WindowsStdinLineSource,
 }
 
 impl StdioResources {
@@ -244,10 +390,16 @@ impl StdioResources {
         let interrupts = interrupt_receiver()?;
         #[cfg(unix)]
         {
-            let source = UnixStdinLineSource::new().map_err(|_| UiError::LineSourceUnavailable)?;
+            let source = UnixLineSource::stdin().map_err(|_| UiError::LineSourceUnavailable)?;
             Ok(Self { interrupts, source })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let source = WindowsStdinLineSource::stdin()
+                .map_err(|_| UiError::LineSourceUnavailable)?;
+            Ok(Self { interrupts, source })
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = interrupts;
             Err(UiError::LineSourceUnavailable)
@@ -358,18 +510,23 @@ impl FallbackHost {
         interrupts: Receiver<()>,
     ) -> Result<ShutdownReason, UiError>
     where
-        S: LineSource,
+        S: CancellableLineSource,
         W: Write,
     {
         let cancellation = source.cancellation();
         let (line_sender, line_receiver) = bounded(1);
         let source_thread = match thread::Builder::new()
             .name("fallback-input".to_owned())
-            .spawn(move || loop {
-                let event = source.next_line();
-                let terminal = !matches!(event, Ok(LineSourceEvent::Line(_)));
-                if line_sender.send(event).is_err() || terminal {
-                    return;
+            .spawn(move || {
+                let result = catch_sensitive_unwind(AssertUnwindSafe(|| loop {
+                    let event = source.next_line();
+                    let terminal = !matches!(event, Ok(LineSourceEvent::Line(_)));
+                    if line_sender.send(event).is_err() || terminal {
+                        return;
+                    }
+                }));
+                if let Err(payload) = result {
+                    resume_unwind(payload);
                 }
             })
         {
@@ -383,7 +540,7 @@ impl FallbackHost {
         };
 
         let runner = FallbackRunner::new(self.runtime.client(), self.show_prompt);
-        let body = catch_unwind(AssertUnwindSafe(|| {
+        let body = catch_sensitive_unwind(AssertUnwindSafe(|| {
             run_host_loop(
                 &runner,
                 line_receiver,
@@ -483,7 +640,7 @@ pub fn run_stdio(
     previous_session_interrupted: bool,
     resources: StdioResources,
 ) -> Result<ShutdownReason, UiError> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         let stdout = io::stdout();
         FallbackHost::new(runtime, true, previous_session_interrupted).run(
@@ -492,7 +649,7 @@ pub fn run_stdio(
             resources.interrupts,
         )
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = resources;
         let _ = runtime.finish_and_join(ShutdownReason::ApplicationError);

@@ -2,7 +2,7 @@
 
 use std::{
     io,
-    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
+    panic::{resume_unwind, AssertUnwindSafe},
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
     time::Duration,
@@ -15,6 +15,7 @@ use crate::app::{
     AppError, ApplicationCommand, ApplicationService, ApplicationWorker, CommandOutcome,
     ShutdownReason,
 };
+use crate::panic_boundary::catch_sensitive_unwind;
 
 pub const MODULE_NAME: &str = "runtime";
 pub const DEFAULT_QUEUE_CAPACITY: usize = 32;
@@ -372,7 +373,7 @@ impl ApplicationRuntime {
         let worker = match service.worker() {
             Ok(worker) => worker,
             Err(_) => {
-                let _ = catch_unwind(AssertUnwindSafe(|| {
+                let _ = catch_sensitive_unwind(AssertUnwindSafe(|| {
                     service.finish(ShutdownReason::ApplicationError)
                 }));
                 return Err(RuntimeError::WorkerStartup);
@@ -531,7 +532,7 @@ impl CommandExecutor for ServiceWorker {
 impl Drop for ServiceWorker {
     fn drop(&mut self) {
         if !self.finished {
-            let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _ = catch_sensitive_unwind(AssertUnwindSafe(|| {
                 self.service.finish(ShutdownReason::ApplicationError)
             }));
         }
@@ -543,7 +544,7 @@ fn worker_entry(
     initializer: impl FnOnce() -> Result<Box<dyn CommandExecutor>, RuntimeError>,
     initialized: Sender<FinishResult>, shared: Arc<SharedRuntime>,
 ) {
-    let result = catch_unwind(AssertUnwindSafe(|| {
+    let result = catch_sensitive_unwind(AssertUnwindSafe(|| {
         let mut executor = match initializer() {
             Ok(executor) => executor,
             Err(error) => { let _ = initialized.send(Err(error.clone())); shared.publish_exited(Err(error)); return },
@@ -564,9 +565,16 @@ fn worker_loop(executor: &mut dyn CommandExecutor, requests: Receiver<Request>, 
             recv(control) -> control => match control {
                 Ok(Control::Finish(reason)) => {
                     shared.drain_reservations(executor, &requests);
-                    let result = executor.finish(reason).map_err(RuntimeError::Application);
-                    shared.publish_exited(result);
-                    return;
+                    match catch_sensitive_unwind(AssertUnwindSafe(|| executor.finish(reason))) {
+                        Ok(result) => {
+                            shared.publish_exited(result.map_err(RuntimeError::Application));
+                            return;
+                        }
+                        Err(payload) => {
+                            shared.publish_exited(Err(RuntimeError::WorkerPanicked));
+                            resume_unwind(payload);
+                        }
+                    }
                 }
                 Err(_) => { shared.publish_exited(Err(RuntimeError::WorkerExited)); return; }
             },
@@ -580,10 +588,10 @@ fn worker_loop(executor: &mut dyn CommandExecutor, requests: Receiver<Request>, 
 
 fn execute_request(executor: &mut dyn CommandExecutor, request: Request, shared: &SharedRuntime) {
     let Request::Command { command, response } = request;
-    match catch_unwind(AssertUnwindSafe(|| executor.execute_user(command))) {
+    match catch_sensitive_unwind(AssertUnwindSafe(|| executor.execute_user(command))) {
         Ok(result) => { let _ = response.send(result.map_err(RuntimeError::Application)); }
         Err(payload) => {
-            let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _ = catch_sensitive_unwind(AssertUnwindSafe(|| {
                 executor.finish(ShutdownReason::ApplicationError)
             }));
             shared.publish_exited(Err(RuntimeError::WorkerPanicked));

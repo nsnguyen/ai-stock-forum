@@ -1,3 +1,5 @@
+mod panic_boundary;
+
 pub mod agents;
 pub mod app;
 pub mod audit;
