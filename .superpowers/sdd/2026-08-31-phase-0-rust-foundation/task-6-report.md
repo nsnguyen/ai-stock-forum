@@ -171,3 +171,31 @@ semantic punctuation and quoted literals.
 An initial combined-filter invocation used a literal `|` and ran zero tests;
 it was immediately replaced by the complete migration-contract command above,
 which executed all 15 focused tests.
+
+## Round 3 review correction
+
+### Implementation commit
+
+`734436fdb34616b3ca5ccb628d4017c9967620f3` - `test: preserve sql literal case`
+
+### Changed files
+
+- `tests/migration_contract.rs`
+
+### Correction
+
+The punctuation-aware SQL tokenizer previously lowercased complete quoted
+string-literal tokens, which made semantically distinct SQLite literals compare
+equal. It now preserves quoted tokens verbatim, including doubled-quote escape
+handling, while continuing to lowercase unquoted SQL words/identifiers and
+ignore whitespace outside tokens. The regression proves different literal case
+remains distinct and keyword/identifier case plus punctuation whitespace remain
+equivalent. No production schema or behavior changed.
+
+### TDD and verification evidence
+
+| Stage | Command | Result |
+| --- | --- | --- |
+| RED | `cargo test --test migration_contract sql_token_normalization_preserves_literal_case_but_ignores_sql_formatting --locked` | Failed as expected: differently cased quoted literals normalized to the same token. |
+| GREEN | `cargo test --test migration_contract --locked` | Passed: 16 migration contract tests, 0 failures. |
+| Full suite | `cargo test --workspace --all-targets --locked` | Passed: 65 tests, 0 failures. |
