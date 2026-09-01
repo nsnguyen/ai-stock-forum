@@ -62,9 +62,20 @@ fn reject(
 
 fn safe_token(line: &str) -> Option<String> {
     line.split_whitespace().next().map(|token| {
-        token
-            .escape_default()
-            .take(64)
-            .collect::<String>()
+        let mut escaped_token = String::new();
+        let mut output_scalar_count = 0;
+
+        for character in token.chars() {
+            let escaped_fragment = character.escape_default().to_string();
+            let fragment_scalar_count = escaped_fragment.chars().count();
+            if output_scalar_count + fragment_scalar_count > 64 {
+                break;
+            }
+
+            escaped_token.push_str(&escaped_fragment);
+            output_scalar_count += fragment_scalar_count;
+        }
+
+        escaped_token
     })
 }
