@@ -102,3 +102,72 @@ Audit lines now render sequence, timestamp, actor, bounded control-escaped event
 Only recoverable backpressure is rendered inside `FallbackRunner`. Terminal runtime errors propagate without stdout output, allowing `main` to emit one typed safe stderr line.
 
 The Unix SIGINT binary test starts the real executable with stdin held open, waits for the durable open-session condition, sends `SIGINT`, and uses `wait-timeout` for a bounded process wait. It verifies successful exit, exactly one safe interrupt line, an `interrupted` persisted end reason, empty stderr, and no previous-session warning on the next launch. Binary quit and EOF tests now verify persisted `user_quit` and `input_closed` reasons respectively.
+
+## Fix round 2
+
+### Implementation commit
+
+- `53a5ae1db43663c22c5b0d4a1f05b0104d259184` (`fix(task-12): harden panic and input boundaries`)
+
+### Changed files
+
+- `src/lib.rs`
+- `src/panic_boundary.rs`
+- `src/runtime/mod.rs`
+- `src/ui/command/mod.rs`
+- `src/ui/command/runner.rs`
+- `tests/fallback_contract.rs`
+- `tests/fallback_fix_round_contract.rs`
+- `tests/fallback_fix_round_2_contract.rs`
+
+### RED evidence
+
+- `cargo test --locked --test fallback_fix_round_2_contract`
+  - Failed because `CancellableLineSource` and `UnixLineSource` did not exist and the old host contract still exposed `LineSource`.
+- `cargo test --locked --lib panic_boundary::tests::caught_sensitive_panic_subprocess_emits_only_one_safe_line`
+  - Failed because `catch_sensitive_unwind` did not exist.
+
+### Focused GREEN evidence
+
+- `cargo test --locked --lib panic_boundary::tests::caught_sensitive_panic_subprocess_emits_only_one_safe_line`
+  - 1 passed.
+- `cargo test --locked --test fallback_fix_round_2_contract`
+  - 3 passed: blocked Unix read cancellation/join, `POLLNVAL` typed termination, and pipe HUP EOF without spin.
+- `cargo test --locked --test fallback_contract caught_host_writer_panic_subprocess_redacts_payload_and_emits_one_safe_line`
+  - 1 passed; child stderr was exactly `Command host stopped unexpectedly.\n` and excluded the secret panic payload.
+- `cargo test --locked --test fallback_fix_round_contract binary_quit_and_eof_persist_exact_shutdown_reasons`
+  - 1 passed; both persisted terminal reasons and both clean relaunches were verified.
+
+### Full-suite evidence
+
+- `cargo test --locked`
+  - 198 passed, 0 failed across unit, integration, binary, and documentation targets.
+- `git diff --check`
+  - Passed before the implementation commit.
+
+### Panic-hook and catch-boundary design
+
+- `panic_boundary` installs one process-wide hook with `Once`, retains the prior hook, and delegates to it for every panic outside a sensitive application catch boundary.
+- A thread-local depth counter and RAII guard suppress hook diagnostics only while `catch_sensitive_unwind` is active. Nested boundaries remain safe and guard drop restores normal delegation even during unwinding.
+- Runtime worker initialization, command execution, normal finish, panic cleanup finish, and `ServiceWorker` drop cleanup use the sensitive boundary. A command panic performs a separately protected best-effort `ApplicationError` finish, publishes `WorkerPanicked`, and then resumes the already-caught unwind for deterministic join behavior.
+- The host wraps its runner/writer loop and source-thread body in sensitive boundaries. A caught host panic becomes `UiError::Panicked`; the composition root remains the sole renderer of the stable safe stderr line.
+- The subprocess regression injects `credential=host-writer-secret-payload` into a real host writer panic and proves no hook diagnostic or payload escapes.
+
+### Source ownership and platform design
+
+- The host accepts only an owned `CancellableLineSource`. The former generic `BufferedLineSource<BufRead>` adapter was removed; bounded `BufferedLineReader` tests remain pure and host tests now use finite scripted or channel-woken cancellable sources.
+- The host creates one owned source thread, retains its cancellation handle, signals cancellation on every host exit path, and joins the source thread before finishing the runtime or returning. A source panic is hook-redacted, preserved as a failed join, and mapped to `ReaderThread`.
+- Unix `UnixLineSource` incrementally feeds the existing bounded `LineAccumulator`, polls the input fd plus a cancellation socket pair, and treats cancellation readiness as `Cancelled`. Input `POLLNVAL` and `POLLERR` are typed I/O errors; `POLLHUP` drains pending bytes and then yields EOF. Invalid-fd, closed-pipe, and blocked-cancellation tests all use two-second bounded handshakes.
+- Windows uses a manual-reset kernel event and `WaitForMultipleObjects` over stdin and the cancellation event. `SetEvent` wakes an in-progress wait, `ReadFile` feeds the same bounded accumulator, and the event handle is closed by its shared cancellation owner. All Windows declarations and code are isolated behind `cfg(windows)` and require no target-only dependency.
+- Other non-Unix/non-Windows targets retain the explicit safe `LineSourceUnavailable` result. Quit, EOF, startup-failure, previous-warning, and clean-relaunch binary coverage remains outside Unix-only gating; only descriptor/SIGINT mechanics are Unix-gated.
+
+### Lifecycle and persistence evidence
+
+- Interrupt resources and the platform line source are still initialized before `AppPaths`, database bootstrap, and durable session creation.
+- Quit and EOF binary tests now relaunch against the same state and prove no transient previous-session warning, in addition to asserting `user_quit` and `input_closed`. The existing bounded Unix SIGINT test continues to assert one safe interrupt line, persisted `interrupted`, and a warning-free next launch.
+- Full-line byte count/digest authority, oversized-before-parse behavior, audit rendering, recoverable-only backpressure rendering, runtime ordering, and synchronous startup/panic cleanup tests remain GREEN.
+
+### Concerns and limitations
+
+- The installed Rust toolchain does not include `x86_64-pc-windows-gnu`, so a Windows cross-target compile could not be executed (`WINDOWS_TARGET_NOT_INSTALLED`). The Windows implementation is target-isolated, dependency-free kernel32 FFI; Unix and portable behavior are covered by the full suite.
+- No GUI/TUI, network, broker, credential, README, or legacy-warning behavior was added.
