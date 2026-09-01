@@ -189,3 +189,71 @@ supported released format and should be recreated rather than migrated in place.
 
 No runtime queue, terminal host, broker, network, credential, approval execution, or
 other external-action behavior was added in this fix round.
+
+## Fix round 2
+
+### Implementation commit
+
+`d2fe8e2e5402da8ec12e6f494f9b4d9e3669d7a6` (`fix: share command service lifecycle across workers`)
+
+Changed implementation/test files:
+
+- `src/app/service.rs`
+- `tests/application_contract.rs`
+- `tests/migration_contract.rs`
+- `tests/support/mod.rs`
+
+### Strict TDD evidence
+
+Focused RED:
+
+- Command: `cargo test --test application_contract`
+- Result: compilation failed with `E0599` because `ApplicationService::worker` did not exist. This proved that tests could no longer use the public, lifecycle-unbound `open_peer_for_test` constructor.
+
+Focused diagnostic after the first implementation step:
+
+- Command: `cargo test --test application_contract`
+- Result: 24 passed, 1 failed.
+- Failure: `transaction_rejects_a_closed_authoritative_session_before_dependencies_or_writes` received `Recovery(InvalidEventRecord)` instead of `LifecycleFinished`. The exact-session gate was therefore moved ahead of full projection loading, while remaining inside the immediate transaction.
+
+Focused GREEN:
+
+- Command: `cargo test --test application_contract`
+- Result: 25 passed, 0 failed.
+- Command: `cargo test --test migration_contract`
+- Result: 17 passed, 0 failed.
+
+Full-suite GREEN:
+
+- Command: `cargo test`
+- Result: 150 passed, 0 failed across unit, integration, and documentation targets.
+
+### Lifecycle and worker design
+
+- Bootstrap creates one private `SharedLifecycle` containing the authoritative bootstrap `SessionId` and an `RwLock<LifecyclePhase>`.
+- `ApplicationService::worker` is the only peer construction path. It opens another embedded connection while cloning the same private lifecycle, policy, clock, ID generator, and transaction hook. The lifecycle-unbound public test constructor was removed.
+- Command execution takes the shared lifecycle read guard and holds it through `BEGIN IMMEDIATE`, exact-session validation, projection validation, receipt replay or command execution, receipt persistence, and commit.
+- Immediately after `BEGIN IMMEDIATE`, execution checks that the exact bootstrap session still exists with no end marker. It then performs the full projection load, preserving authoritative-event-ahead-of-projection rejection before receipt, policy, clock, ID, or write work.
+- `finish` takes the exclusive lifecycle guard, durably appends/reduces/projects the terminal event through `RecoveryCoordinator::finish_session`, and flips the shared phase to closed only after that transaction succeeds. A failed finish leaves the lifecycle open; every peer created before a successful finish observes closed afterward.
+- A closed shared lifecycle and a transaction-visible closed/missing current session both return exactly `AppError::LifecycleFinished` without policy, clock, event-ID, receipt, event, projection, or approval effects.
+
+### Durable receipt and zero-event evidence
+
+- Denied and approval-required outcomes now have full matrices for sequential replay after policy change, same-ID/different-command conflict, barrier-synchronized same-command races, barrier-synchronized conflicting-command races, and both outcome-materialization and receipt-write failures.
+- All zero-event paths assert no clock or event-ID calls, no event refs, no events, no projection movement, and no approval rows. Concurrent attempts produce one durable receipt authority and deterministic replay or conflict.
+- Receipt replay validation is tested by independently tampering noncanonical request JSON, noncanonical outcome JSON, typed-invalid request JSON, typed-invalid outcome JSON, fingerprint, capability, policy decision, event-ref/outcome identity, ordinal continuity, and reference encoding. Every case returns exactly `AppError::Persistence(PersistenceError::InvalidEventRecord)` before dependencies or further mutation.
+- Rejected-input tests query both durable `request_json` and `outcome_json` and prove the raw secret is absent, in addition to the existing event and debug-output assertions.
+- Outcome materialization remains entirely pre-commit. Replay performs no fallible work after commit, and stale authoritative events ahead of projection rows still produce typed recovery rejection with rollback and zero dependency use.
+
+### Exact schema pinning and compatibility
+
+- The migration SQL was unchanged in fix round 2 because the approved normalized receipt schema already satisfies the stronger contract.
+- Tests now compare normalized full DDL for `command_receipts` and `command_event_refs`, in addition to exact columns, primary keys, foreign keys, semantic indexes, immutability triggers, and ordered-reference constraints.
+- Fingerprints accept exactly 64 lowercase hexadecimal characters. Tests reject uppercase, nonhex, shorter, and longer values.
+- Every valid capability and policy-decision value is accepted; uppercase and extra values are rejected.
+- Phase 0 remains prerelease. Development databases created before the durable-receipt migration checksum change may fail checksum validation and are not a supported released format.
+
+### Scope and concerns
+
+- No runtime queue, terminal host, external action, broker/network behavior, credential execution, or approval-row creation was added.
+- The shared lifecycle is process-local by design, while the exact current-session row is revalidated transactionally for durable authority on every command.
