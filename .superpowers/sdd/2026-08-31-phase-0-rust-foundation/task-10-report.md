@@ -257,3 +257,72 @@ Full-suite GREEN:
 
 - No runtime queue, terminal host, external action, broker/network behavior, credential execution, or approval-row creation was added.
 - The shared lifecycle is process-local by design, while the exact current-session row is revalidated transactionally for durable authority on every command.
+
+## Fix round 3 (final)
+
+### Implementation commit
+
+`654cf5b7b8e91cf4aa2cb4c2df39dace2bc8b907` (`fix: serialize user command IDs with shutdown`)
+
+Changed implementation/test files:
+
+- `migrations/0001_phase0.sql`
+- `src/app/mod.rs`
+- `src/app/service.rs`
+- `tests/application_contract.rs`
+- `tests/migration_contract.rs`
+- `tests/support/mod.rs`
+
+### Strict TDD evidence
+
+Focused RED application contract:
+
+- Command: `cargo test --test application_contract`
+- Result: compilation failed because the public restricted `ApplicationWorker` type and the deterministic lifecycle race-hook boundaries did not exist.
+
+Focused RED migration contract:
+
+- Command: `cargo test --test migration_contract`
+- Result: 15 passed and 2 failed.
+- `command_receipt_fingerprint_and_enumerated_domains_reject_every_extra_form` demonstrated that the old CHECK accepted an embedded-NUL fingerprint.
+- `migration_records_and_complete_schema_are_exact` demonstrated that the exact DDL lacked text typing, UTF-8 byte length, and NUL rejection.
+
+Focused implementation diagnostic:
+
+- Command: `cargo test --test application_contract`
+- Result: 26 passed and 1 failed only because the new race test initially counted one ID for `finish_session`; the reviewed recovery contract allocates both terminal event and correlation IDs. Expectations were corrected to the exact existing dependency contract without changing lifecycle behavior.
+
+Focused GREEN:
+
+- Command: `cargo test --test application_contract`
+- Result: 27 passed, 0 failed.
+- Command: `cargo test --test migration_contract`
+- Result: 17 passed, 0 failed.
+
+Full-suite GREEN:
+
+- Command: `cargo test`
+- Result: 152 passed, 0 failed across unit, integration, and documentation targets.
+
+### Lifecycle race and API design
+
+- `ApplicationService` is now exclusively the owner type. It owns `BootstrapState`, so `finish`, `installation_id`, and `session_id` are total owner-only methods with no optional-state panic path.
+- `ApplicationService::worker` returns the public, restricted `ApplicationWorker`, which exposes only `execute_user` and `execute`. It cannot finish the session or access owner identity methods.
+- Owner and worker delegate execution to one private `CommandExecutor`; no lifecycle or idempotency logic is duplicated.
+- `execute_user` invokes the pre-read test boundary, acquires one shared lifecycle read guard, validates open state, invokes the post-read boundary, allocates command and correlation IDs, and moves that same guard into the complete transactional execution path. It never releases and reacquires the guard.
+- `finish` invokes the deterministic pre-write test boundary and then takes the lifecycle write guard. Therefore it either closes first, causing exact `LifecycleFinished` rejection before user-command IDs, or waits until an already-started command has committed and released its read guard.
+- The barrier-only race test proves both orderings without sleeps. Command-first consumes five IDs total: command ID, command correlation ID, command event ID, finish event ID, and finish correlation ID. Finish-first consumes only the two finish IDs; the rejected user command consumes zero IDs, policy calls, receipts, or command events.
+- Workers created before finish still share the private lifecycle token and reject after finish, while all transaction-visible session, stale projection, receipt replay, rollback, and privacy checks remain unchanged.
+
+### Fingerprint schema decision
+
+- The receipt fingerprint CHECK now requires `typeof(command_fingerprint) = 'text'`.
+- It requires exactly 64 UTF-8 bytes through `length(CAST(command_fingerprint AS BLOB)) = 64`, avoiding SQLite text-length ambiguity at embedded NUL.
+- It independently rejects embedded NUL with `instr(command_fingerprint, char(0)) = 0`.
+- It retains the lowercase ASCII hexadecimal domain check with `NOT GLOB '*[^0-9a-f]*'`.
+- Exact DDL tests and insertion tests cover valid 64-byte lowercase hex, `64a + NUL + tail`, `63a + NUL`, uppercase, nonhex, multibyte, short, long, and 64-byte BLOB values.
+- Because Phase 0 is prerelease and `0001_phase0.sql` changed in place, its checksum changed again. Development databases created against earlier Task 10 checksums can fail with `database_migration_state_invalid` and remain unsupported released formats.
+
+### Scope
+
+No runtime queue, terminal host, broker/network behavior, credential execution, external action, or approval execution was added.
