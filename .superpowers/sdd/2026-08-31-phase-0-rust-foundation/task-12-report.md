@@ -52,3 +52,53 @@ The composition root discovers `AppPaths`, bootstraps `ApplicationService` with 
 The dedicated stdin reader may remain blocked in an operating-system read after explicit quit or Ctrl-C. Rust does not provide a portable cancellation mechanism for that read. The thread owns no application service or database work and is bounded to one queued line; process exit releases it after the host has deterministically joined the application runtime worker.
 
 The `ctrlc` dependency adds platform-specific transitive crates to the lockfile. No GUI/TUI, network, broker, credential, or legacy-warning behavior was added.
+
+## Fix round 1
+
+Implementation commit: `6f42574e67c599d579a3b3aa92256cbceb45bb4a`
+
+### RED, GREEN, and full-suite evidence
+
+Focused RED command: `cargo test --test fallback_fix_round_contract --locked`
+
+After the approved download of the locked `wait-timeout` dev dependency, compilation failed with `E0432` because `BufferedLineSource`, `LineSource`, `LineSourceCancellation`, and `LineSourceEvent` did not exist. This was the expected missing-contract RED failure for the reviewed source-ownership design.
+
+Focused GREEN command: `cargo test --test fallback_contract --test fallback_fix_round_contract --locked`
+
+Result: 28 passed, 0 failed. The original 17 Task 12 tests and all 11 fix-round regressions passed together.
+
+Full-suite command: `cargo test --locked`
+
+Result: 193 passed, 0 failed. The output contained no compiler warnings.
+
+### Exact reader design
+
+The reader now treats physical-line framing and logical-line metadata as one incremental operation. `LineAccumulator` holds a SHA-256 state, an exact checked byte count, one pending-CR bit, and at most `MAX_INPUT_BYTES + 1` retained bytes. A CR is delayed until the next physical byte is known: it is discarded only when that byte is the actual LF delimiter, and otherwise it is committed to the retained prefix, exact count, and digest. LF is never included. A pending CR at EOF is committed. The finalized `RawLine` therefore carries the exact normalized full byte length and full-line digest even when only 4097 bytes are retained.
+
+`FallbackRunner` checks `RawLine::was_oversized` before calling `parse_line`. Oversized input bypasses UTF-8 parsing entirely and becomes `ApplicationCommand::RejectInput` with category `Oversized`, no safe token, and the authoritative full length and digest. Tests independently fix the 32 KiB digest to `2d864c0b789a43214eee8524d3182075125e5ca2cd527f3582ec87ffd94076bc` and cover the adversarial `4096 * x + CR + X + LF` boundary.
+
+### Exact line-source and host design
+
+`LineSource` owns blocking input behavior and supplies a separate `LineSourceCancellation` handle. `FallbackHost` obtains that handle before moving the source into its named input thread. Every body result, including quit, SIGINT, EOF, read error, write error, runtime failure, or caught host panic, triggers cancellation and a synchronous thread join before the host calls `finish_and_join` and returns. A failed source-thread spawn synchronously finishes the application runtime with `ApplicationError`. No host-created thread survives `run`.
+
+The Unix production source creates a nonblocking Unix socket-pair cancellation event and polls both `STDIN_FILENO` and the cancellation descriptor. It reads only after stdin readiness, incrementally feeds the bounded line accumulator, wakes immediately when cancellation is signaled, and owns no application or database work. Injected host tests use explicit cancellable sources; bounded buffered sources remain available for finite cursor/error fixtures. On non-Unix targets, stdio initialization returns the typed safe `LineSourceUnavailable` error before bootstrap.
+
+The interrupt select arm is disabled by replacing a disconnected receiver with `crossbeam_channel::never`. This happens inside the current prompt wait, so disconnection cannot produce repeated prompts or a livelock.
+
+### Exact composition and startup cleanup design
+
+`main` now calls `StdioResources::initialize` before `AppPaths::discover` or `ApplicationService::bootstrap`. Ctrl-C installation and Unix cancellation-resource creation therefore complete before any durable process session is opened.
+
+`ApplicationRuntime::spawn_application` creates the service worker synchronously and wraps service ownership in `ServiceWorker`. Worker initialization failure explicitly attempts `service.finish(ApplicationError)`. Invalid capacity, thread-spawn failure, or another failure that drops the unstarted wrapper invokes its panic-protected `Drop` cleanup synchronously before the startup call returns. Regression tests verify an `application_error` terminal row and a warning-free next launch after an injected thread-spawn failure.
+
+### Exact command-panic cleanup design
+
+When `execute_user` panics, `execute_request` catches the panic and separately wraps `executor.finish(ApplicationError)` in a second `catch_unwind`. Only after that best-effort finish does it publish `WorkerPanicked`, notify the pending outcome, and resume the original panic for worker join classification. `ServiceWorker` records successful finish so its `Drop` fallback cannot duplicate the terminal write. A real `ApplicationService` test with a panicking policy verifies the persisted `application_error` reason and a warning-free next launch.
+
+### Rendering and binary lifecycle evidence
+
+Audit lines now render sequence, timestamp, actor, bounded control-escaped event kind, correlation ID, and bounded control-escaped typed summary. The contract covers all eleven `ApplicationEvent` summary mappings and proves that event JSON, payload names, digests, database paths, rejected full input, and a credential-like secret are absent.
+
+Only recoverable backpressure is rendered inside `FallbackRunner`. Terminal runtime errors propagate without stdout output, allowing `main` to emit one typed safe stderr line.
+
+The Unix SIGINT binary test starts the real executable with stdin held open, waits for the durable open-session condition, sends `SIGINT`, and uses `wait-timeout` for a bounded process wait. It verifies successful exit, exactly one safe interrupt line, an `interrupted` persisted end reason, empty stderr, and no previous-session warning on the next launch. Binary quit and EOF tests now verify persisted `user_quit` and `input_closed` reasons respectively.
