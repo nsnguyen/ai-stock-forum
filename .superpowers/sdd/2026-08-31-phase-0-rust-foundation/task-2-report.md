@@ -67,3 +67,62 @@ The full current suite passed: 5 integration tests in total, plus empty unit-tes
 - SHA-256 digests are always generated as 64-character lowercase hexadecimal, and parsing plus deserialization rejects invalid or uppercase input.
 - `ObjectVersion::new` rejects zero, and `ObjectRef::new` rejects empty or whitespace-only kind and ID values.
 - No concern remains within the requested scope. `SystemClock` intentionally reflects wall-clock time; deterministic consumers can provide their own `Clock` implementation.
+
+## Fix round 1: validate deserialization boundaries
+
+### Changed behavior
+
+`ObjectVersion` no longer accepts `0` through deserialization, and `ObjectRef` no longer accepts empty or whitespace-only `kind` or `id` values through deserialization. The serialized wire shapes are unchanged: `ObjectVersion` remains a JSON number and `ObjectRef` remains an object with `kind`, `id`, `version`, and `digest` fields.
+
+### Root cause
+
+The derived `Deserialize` implementations constructed the private fields directly, bypassing `ObjectVersion::new` and `ObjectRef::new`. The replacement implementations deserialize the existing wire shapes and delegate to those constructors.
+
+### Files
+
+- `src/domain/object.rs`
+- `tests/domain_contract.rs`
+- `.superpowers/sdd/2026-08-31-phase-0-rust-foundation/task-2-report.md`
+
+### Regression tests
+
+- `object_versions_reject_zero_when_deserialized`
+- `object_refs_reject_empty_kind_when_deserialized`
+- `object_refs_reject_whitespace_kind_when_deserialized`
+- `object_refs_reject_empty_id_when_deserialized`
+- `object_refs_reject_whitespace_id_when_deserialized`
+
+### RED
+
+```text
+$ /Users/nguyen-mini/.cargo/bin/cargo test --test domain_contract --locked
+running 9 tests
+test object_refs_reject_whitespace_kind_when_deserialized ... FAILED
+test object_refs_reject_whitespace_id_when_deserialized ... FAILED
+test object_refs_reject_empty_id_when_deserialized ... FAILED
+test object_versions_reject_zero_when_deserialized ... FAILED
+test object_refs_reject_empty_kind_when_deserialized ... FAILED
+
+test result: FAILED. 4 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Each failure was an `assertion failed: serde_json::from_value::<...>(...).is_err()`, proving the invalid payload was accepted before the fix.
+
+### GREEN
+
+```text
+$ /Users/nguyen-mini/.cargo/bin/cargo test --test domain_contract --locked
+running 9 tests
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+$ /Users/nguyen-mini/.cargo/bin/cargo test --locked
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+### Commit
+
+`fix: validate deserialized domain invariants`

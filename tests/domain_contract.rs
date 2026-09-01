@@ -1,8 +1,19 @@
 use ai_stock_forum::domain::{
-    canonical_json_bytes, sha256, CorrelationId, EventId, ObjectVersion, Sha256Digest,
+    canonical_json_bytes, sha256, CorrelationId, EventId, ObjectRef, ObjectVersion, Sha256Digest,
 };
 use serde_json::json;
 use uuid::Uuid;
+
+macro_rules! object_ref_json {
+    ($kind:expr, $id:expr) => {
+        json!({
+            "kind": $kind,
+            "id": $id,
+            "version": 1,
+            "digest": sha256(b"object-ref").to_string(),
+        })
+    };
+}
 
 #[test]
 fn canonical_json_sorts_nested_object_keys() {
@@ -26,6 +37,31 @@ fn typed_ids_do_not_interchange() {
 fn object_versions_reject_zero() {
     assert!(ObjectVersion::new(0).is_err());
     assert_eq!(ObjectVersion::new(1).unwrap().get(), 1);
+}
+
+#[test]
+fn object_versions_reject_zero_when_deserialized() {
+    assert!(serde_json::from_value::<ObjectVersion>(json!(0)).is_err());
+}
+
+#[test]
+fn object_refs_reject_empty_kind_when_deserialized() {
+    assert!(serde_json::from_value::<ObjectRef>(object_ref_json!("", "object")).is_err());
+}
+
+#[test]
+fn object_refs_reject_whitespace_kind_when_deserialized() {
+    assert!(serde_json::from_value::<ObjectRef>(object_ref_json!("   ", "object")).is_err());
+}
+
+#[test]
+fn object_refs_reject_empty_id_when_deserialized() {
+    assert!(serde_json::from_value::<ObjectRef>(object_ref_json!("event", "")).is_err());
+}
+
+#[test]
+fn object_refs_reject_whitespace_id_when_deserialized() {
+    assert!(serde_json::from_value::<ObjectRef>(object_ref_json!("event", "   ")).is_err());
 }
 
 #[test]
