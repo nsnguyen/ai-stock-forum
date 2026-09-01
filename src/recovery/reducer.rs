@@ -83,6 +83,12 @@ pub struct SessionEndProjection {
     pub reason: ShutdownReason,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReducerEffect {
+    None,
+    PreviousSessionInterrupted { session_id: SessionId },
+}
+
 impl ProjectionState {
     pub fn digest(&self) -> Result<Sha256Digest, crate::domain::DomainError> {
         canonical_json_bytes(&PersistentProjectionState {
@@ -102,6 +108,9 @@ impl ProjectionState {
         if self.last_sequence == 0 && self.installation.is_some() {
             return Err(RecoveryError::InvalidEventRecord);
         }
+        if self.setup_status != SetupStatus::NotStarted {
+            return Err(RecoveryError::InvalidEventRecord);
+        }
         if self.installation.is_none() && !self.sessions.is_empty() {
             return Err(RecoveryError::InvalidEventRecord);
         }
@@ -110,6 +119,13 @@ impl ProjectionState {
             .iter()
             .any(|(session_id, projection)| session_id != &projection.session_id)
         {
+            return Err(RecoveryError::InvalidEventRecord);
+        }
+        let minimum_events = u64::from(self.installation.is_some())
+            .checked_add(u64::try_from(self.sessions.len()).map_err(|_| RecoveryError::InvalidEventRecord)?)
+            .and_then(|value| value.checked_add(u64::try_from(self.sessions.values().filter(|session| session.ended.is_some()).count()).ok()?))
+            .ok_or(RecoveryError::EventSequenceOverflow)?;
+        if self.last_sequence < minimum_events {
             return Err(RecoveryError::InvalidEventRecord);
         }
         if self
@@ -134,7 +150,7 @@ struct PersistentProjectionState<'a> {
     last_event_digest: &'a Option<Sha256Digest>,
 }
 
-pub fn reduce(state: &mut ProjectionState, event: &EventEnvelope) -> Result<(), RecoveryError> {
+pub fn reduce(state: &mut ProjectionState, event: &EventEnvelope) -> Result<ReducerEffect, RecoveryError> {
     if event.event_schema_version != EVENT_SCHEMA_VERSION {
         return Err(RecoveryError::UnsupportedEventSchema);
     }
@@ -150,6 +166,7 @@ pub fn reduce(state: &mut ProjectionState, event: &EventEnvelope) -> Result<(), 
     }
 
     let mut next = state.clone();
+    let mut effect = ReducerEffect::None;
     match &event.event {
         ApplicationEvent::InstallationInitialized { installation_id } => {
             if next.installation.is_some() {
@@ -180,6 +197,9 @@ pub fn reduce(state: &mut ProjectionState, event: &EventEnvelope) -> Result<(), 
         }
         ApplicationEvent::PreviousSessionInterrupted { session_id } => {
             end_session(&mut next, *session_id, event, ShutdownReason::Interrupted)?;
+            effect = ReducerEffect::PreviousSessionInterrupted {
+                session_id: *session_id,
+            };
         }
         ApplicationEvent::ProcessSessionEnded { session_id, reason } => {
             end_session(&mut next, *session_id, event, *reason)?;
@@ -200,7 +220,7 @@ pub fn reduce(state: &mut ProjectionState, event: &EventEnvelope) -> Result<(), 
     next.last_event_digest = Some(event.event_digest.clone());
     next.validate()?;
     *state = next;
-    Ok(())
+    Ok(effect)
 }
 
 fn end_session(

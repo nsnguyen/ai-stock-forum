@@ -8,8 +8,8 @@ use ai_stock_forum::{
         sha256, Actor, ConfigurationVersionId, CorrelationId, EventId, InstallationId,
         ObjectVersion, SessionId, SetupDraftId,
     },
-    persistence::{Database, EventRepository, ProjectionRepository, RecoveryError},
-    recovery::{reduce, ProjectionState},
+    persistence::{Database, EventRepository, PersistenceError, ProjectionRepository, RecoveryError},
+    recovery::{reduce, ProjectionState, ReducerEffect},
     recovery::{InstallationProjection, SessionEndProjection, SessionProjection},
     setup::{
         CapabilityReadiness, CapabilityReadinessStatus, InstallationConfigurationVersion,
@@ -375,22 +375,41 @@ fn store_rejects_stale_fabricated_and_immutable_projection_overwrites() {
 
     let stale = reduce_all(&events[..2]);
     let transaction = database.immediate_transaction().unwrap();
-    assert!(ProjectionRepository::store(&transaction, &stale).is_err());
+    assert_eq!(ProjectionRepository::store(&transaction, &stale), Err(PersistenceError::ProjectionStateConflict));
     transaction.rollback().unwrap();
 
     let mut changed_start = direct.clone();
     changed_start.sessions.get_mut(&session_id()).unwrap().started_at_ms += 1;
     let transaction = database.immediate_transaction().unwrap();
-    assert!(ProjectionRepository::store(&transaction, &changed_start).is_err());
+    assert_eq!(ProjectionRepository::store(&transaction, &changed_start), Err(PersistenceError::ProjectionStateConflict));
     transaction.rollback().unwrap();
 
     let mut removed_tombstone = direct.clone();
     removed_tombstone.sessions.get_mut(&session_id()).unwrap().ended = None;
     let transaction = database.immediate_transaction().unwrap();
-    assert!(ProjectionRepository::store(&transaction, &removed_tombstone).is_err());
+    assert_eq!(ProjectionRepository::store(&transaction, &removed_tombstone), Err(PersistenceError::ProjectionStateConflict));
     transaction.rollback().unwrap();
 
-    assert_eq!(ProjectionRepository::load(database.connection()).unwrap(), direct);
+    let mut rewritten_installation = direct.clone();
+    rewritten_installation.installation.as_mut().unwrap().created_at_ms += 1;
+    let transaction = database.immediate_transaction().unwrap();
+    assert_eq!(ProjectionRepository::store(&transaction, &rewritten_installation), Err(PersistenceError::ProjectionStateConflict));
+    transaction.rollback().unwrap();
+
+    let mut modified_tombstone = direct.clone();
+    modified_tombstone.sessions.get_mut(&session_id()).unwrap().ended.as_mut().unwrap().ended_at_ms += 1;
+    let transaction = database.immediate_transaction().unwrap();
+    assert_eq!(ProjectionRepository::store(&transaction, &modified_tombstone), Err(PersistenceError::ProjectionStateConflict));
+    transaction.rollback().unwrap();
+
+    let next_event = append(&mut database, 4, ApplicationEvent::HelpViewed);
+    let mut newer = direct.clone();
+    reduce(&mut newer, &next_event).unwrap();
+    let transaction = database.immediate_transaction().unwrap();
+    ProjectionRepository::store(&transaction, &newer).unwrap();
+    transaction.commit().unwrap();
+    assert_eq!(ProjectionRepository::load(database.connection()).unwrap(), newer);
+
 }
 
 #[test]
@@ -595,4 +614,42 @@ fn projection_state_deserialization_rejects_zero_marker_installations_and_multip
         serde_json::to_value(multiple_open_sessions).unwrap()
     )
     .is_err());
+}
+
+#[test]
+fn newly_applied_interruption_returns_a_transient_effect_but_replay_does_not_store_it() {
+    let (_temporary_directory, mut database) = database();
+    let initialized = append(&mut database, 1, ApplicationEvent::InstallationInitialized { installation_id: installation_id() });
+    let started = append(&mut database, 2, ApplicationEvent::ProcessSessionStarted { session_id: session_id() });
+    let interrupted = append(&mut database, 3, ApplicationEvent::PreviousSessionInterrupted { session_id: session_id() });
+    let mut state = ProjectionState::default();
+    reduce(&mut state, &initialized).unwrap();
+    reduce(&mut state, &started).unwrap();
+
+    assert_eq!(reduce(&mut state, &interrupted).unwrap(), ReducerEffect::PreviousSessionInterrupted { session_id: session_id() });
+    let replayed = reduce_all(&[initialized, started, interrupted]);
+    assert_eq!(replayed, state);
+    assert_eq!(serde_json::to_value(&replayed).unwrap().get("previous_session_interrupted"), None);
+}
+
+#[test]
+fn projection_state_deserialization_independently_rejects_marker_digest_and_reachability_violations() {
+    for value in [
+        json!({"installation":null,"sessions":{},"setup_status":"not_started","last_sequence":0,"last_event_digest":sha256(b"x")} ),
+        json!({"installation":null,"sessions":{},"setup_status":"not_started","last_sequence":1,"last_event_digest":null}),
+        json!({"installation":null,"sessions":{},"setup_status":{"draft_saved":{"draft_id":"00000000-0000-0000-0000-000000000030"}},"last_sequence":1,"last_event_digest":sha256(b"x")}),
+    ] {
+        assert!(serde_json::from_value::<ProjectionState>(value).is_err());
+    }
+}
+
+#[test]
+fn interruption_rejects_wrong_target_and_already_ended_session_without_mutation() {
+    let (_temporary_directory, mut database) = database();
+    let events = installation_session_events(&mut database);
+    let mut state = reduce_all(&events);
+    let before = state.clone();
+    let wrong = append(&mut database, 4, ApplicationEvent::PreviousSessionInterrupted { session_id: second_session_id() });
+    assert_eq!(reduce(&mut state, &wrong), Err(RecoveryError::InvalidEventRecord));
+    assert_eq!(state, before);
 }

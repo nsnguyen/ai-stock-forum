@@ -4,5 +4,6 @@ mod reducer;
 pub const MODULE_NAME: &str = "recovery";
 
 pub use reducer::{
-    reduce, InstallationProjection, ProjectionState, SessionEndProjection, SessionProjection,
+    reduce, InstallationProjection, ProjectionState, ReducerEffect, SessionEndProjection,
+    SessionProjection,
 };

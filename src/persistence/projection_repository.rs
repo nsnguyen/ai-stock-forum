@@ -14,13 +14,18 @@ pub struct ProjectionRepository;
 
 impl ProjectionRepository {
     pub fn load(connection: &Connection) -> Result<ProjectionState, RecoveryError> {
-        let expected = reduce_verified_stream(connection)?;
-        match read_projection_rows(connection)? {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|_| RecoveryError::QueryFailed)?;
+        let expected = reduce_verified_stream(&transaction)?;
+        let result = match read_projection_rows(&transaction)? {
             None if expected == ProjectionState::default() => Ok(expected),
             None => Err(RecoveryError::InvalidEventRecord),
             Some(persisted) if persisted == expected => Ok(persisted),
             Some(_) => Err(RecoveryError::InvalidEventRecord),
-        }
+        };
+        transaction.commit().map_err(|_| RecoveryError::QueryFailed)?;
+        result
     }
 
     pub fn store(
@@ -59,8 +64,12 @@ impl ProjectionRepository {
 }
 
 fn reduce_verified_stream(connection: &Connection) -> Result<ProjectionState, RecoveryError> {
+    reduce_events(&verified_events(connection)?)
+}
+
+fn verified_events(connection: &Connection) -> Result<Vec<EventEnvelope>, RecoveryError> {
     EventRepository::verify(connection)?;
-    reduce_events(&EventRepository::load_all(connection)?)
+    EventRepository::load_all(connection)
 }
 
 fn reduce_events(events: &[EventEnvelope]) -> Result<ProjectionState, RecoveryError> {
@@ -182,11 +191,20 @@ fn store_transaction(
     state
         .validate()
         .map_err(|_| PersistenceError::ProjectionStateConflict)?;
-    let expected = reduce_verified_stream(transaction).map_err(persistence_from_recovery)?;
+    let events = verified_events(transaction).map_err(persistence_from_recovery)?;
+    let expected = reduce_events(&events).map_err(persistence_from_recovery)?;
     if state != &expected {
         return Err(PersistenceError::ProjectionStateConflict);
     }
     if let Some(persisted) = read_projection_rows(transaction).map_err(persistence_from_recovery)? {
+        let prefix = events
+            .iter()
+            .filter(|event| event.sequence <= persisted.last_sequence)
+            .cloned()
+            .collect::<Vec<_>>();
+        if reduce_events(&prefix).map_err(persistence_from_recovery)? != persisted {
+            return Err(PersistenceError::ProjectionStateConflict);
+        }
         validate_store_transition(&persisted, state)?;
     }
     write_projection_rows(transaction, state)
