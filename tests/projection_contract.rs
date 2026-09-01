@@ -646,18 +646,22 @@ fn projection_state_deserialization_independently_rejects_marker_digest_and_reac
 #[test]
 fn interruption_rejects_wrong_target_and_already_ended_session_without_mutation() {
     let (_temporary_directory, mut fixture) = database();
-    let events = installation_session_events(&mut fixture);
-    let mut state = reduce_all(&events);
+    let initialized = append(&mut fixture, 1, ApplicationEvent::InstallationInitialized { installation_id: installation_id() });
+    let started = append(&mut fixture, 2, ApplicationEvent::ProcessSessionStarted { session_id: session_id() });
+    let mut state = reduce_all(&[initialized, started]);
     let before = state.clone();
     let wrong = append(&mut fixture, 4, ApplicationEvent::PreviousSessionInterrupted { session_id: second_session_id() });
     assert_eq!(reduce(&mut state, &wrong), Err(RecoveryError::InvalidEventRecord));
     assert_eq!(state, before);
 
     let (_other_temporary_directory, mut other_database) = database();
-    let other_events = installation_session_events(&mut other_database);
-    let mut ended_state = reduce_all(&other_events);
+    let initialized = append(&mut other_database, 1, ApplicationEvent::InstallationInitialized { installation_id: installation_id() });
+    let started_a = append(&mut other_database, 2, ApplicationEvent::ProcessSessionStarted { session_id: session_id() });
+    let ended_a = append(&mut other_database, 3, ApplicationEvent::ProcessSessionEnded { session_id: session_id(), reason: ShutdownReason::UserQuit });
+    let started_b = append(&mut other_database, 4, ApplicationEvent::ProcessSessionStarted { session_id: second_session_id() });
+    let mut ended_state = reduce_all(&[initialized, started_a, ended_a, started_b]);
     let ended_before = ended_state.clone();
-    let ended = append(&mut other_database, 4, ApplicationEvent::PreviousSessionInterrupted { session_id: session_id() });
+    let ended = append(&mut other_database, 5, ApplicationEvent::PreviousSessionInterrupted { session_id: session_id() });
     assert_eq!(reduce(&mut ended_state, &ended), Err(RecoveryError::InvalidEventRecord));
     assert_eq!(ended_state, ended_before);
 }
@@ -668,15 +672,12 @@ fn projection_lower_bound_rejects_each_underrepresented_installation_session_and
     let installation = InstallationProjection { installation_id: installation_id(), created_event_id: event_id, created_at_ms: 1 };
     let started = SessionProjection { session_id: session_id(), started_event_id: event_id, started_at_ms: 1, ended: None };
     let ended = SessionProjection { ended: Some(SessionEndProjection { ended_event_id: event_id, ended_at_ms: 2, reason: ShutdownReason::UserQuit }), ..started.clone() };
-    for (sessions, sequence, valid_sequence) in [
-        (BTreeMap::new(), 0, 1),
-        (BTreeMap::from([(session_id(), started)]), 1, 2),
-        (BTreeMap::from([(session_id(), ended)]), 2, 3),
+    for (sessions, sequence) in [
+        (BTreeMap::from([(session_id(), started)]), 1),
+        (BTreeMap::from([(session_id(), ended)]), 2),
     ] {
         let state = ProjectionState { installation: Some(installation.clone()), sessions, setup_status: SetupStatus::NotStarted, last_sequence: sequence, last_event_digest: if sequence == 0 { None } else { Some(sha256(b"marker")) } };
-        assert!(serde_json::from_value::<ProjectionState>(serde_json::to_value(state).unwrap()).is_err());
-        let valid = ProjectionState { installation: Some(installation.clone()), sessions: BTreeMap::new(), setup_status: SetupStatus::NotStarted, last_sequence: valid_sequence, last_event_digest: Some(sha256(b"marker")) };
-        if valid_sequence == 1 { assert!(serde_json::from_value::<ProjectionState>(serde_json::to_value(valid).unwrap()).is_ok()); }
+        assert_eq!(serde_json::from_value::<ProjectionState>(serde_json::to_value(state).unwrap()).unwrap_err().to_string(), "event record is invalid");
     }
 }
 
@@ -684,11 +685,9 @@ fn projection_lower_bound_rejects_each_underrepresented_installation_session_and
 fn newer_store_rejects_a_digest_consistent_fabricated_persisted_prefix() {
     let (_temporary_directory, mut database) = database();
     let events = installation_session_events(&mut database);
-    let mut fabricated = reduce_all(&events[..2]);
-    fabricated.sessions.get_mut(&session_id()).unwrap().started_at_ms += 99;
+    let fabricated = ProjectionState { installation: reduce_all(&events[..1]).installation, sessions: BTreeMap::new(), setup_status: SetupStatus::NotStarted, last_sequence: 2, last_event_digest: Some(events[1].event_digest.clone()) };
     let digest = fabricated.digest().unwrap();
     database.connection().execute("INSERT INTO installation_projection (singleton, installation_id, created_event_id, created_at_ms) VALUES (1, ?1, ?2, ?3)", (installation_id().to_string(), events[0].event_id.to_string(), events[0].occurred_at_ms)).unwrap();
-    database.connection().execute("INSERT INTO process_session_projection (session_id, started_event_id, started_at_ms) VALUES (?1, ?2, ?3)", (session_id().to_string(), events[1].event_id.to_string(), events[1].occurred_at_ms + 99)).unwrap();
     database.connection().execute("INSERT INTO projection_metadata (singleton, last_event_sequence, last_event_digest, projection_digest) VALUES (1, 2, ?1, ?2)", (events[1].event_digest.as_str(), digest.as_str())).unwrap();
     let newer_event = append(&mut database, 4, ApplicationEvent::HelpViewed);
     let mut newer = reduce_all(&events);
