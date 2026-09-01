@@ -99,3 +99,37 @@ The focused tests cover deterministic terminal replacement at the SQLite-open
 boundary, pragma mismatch/readback, exact schema columns, constraints, foreign
 keys, indexes, immutable triggers, migration row/checksum and inconsistent
 states, immediate-transaction rollback, and Unix database mode correction.
+
+## Fix round 2
+
+### Implementation commit
+
+`1cf3ac0401f2943f21393f2cef3b2f3f2625eb36` - `test: assert exact sqlite schema contract`
+
+### Changed files
+
+- `tests/migration_contract.rs`
+
+### Scope
+
+Added a deterministic exact-schema contract rather than production behavior.
+The test rejects application-object drift and verifies all non-internal table,
+index, and trigger objects; every column's name, declared type, nullability,
+default, and primary-key position; every foreign-key parent/from/to and action;
+every explicit index's uniqueness, ordered key columns, and normalized
+definition; every immutable trigger's target, operation, and normalized
+definition; and `STRICT` table declarations.
+
+Fresh isolated databases behaviorally reject every specified CHECK, UNIQUE,
+foreign-key, and immutable-trigger operation. The `installation_id` uniqueness
+case temporarily bypasses its singleton CHECK only to make that otherwise
+unreachable unique constraint independently observable. SQL normalization is
+limited to case and whitespace for definitions SQLite exposes only as text.
+
+### TDD and verification evidence
+
+| Stage | Command | Result |
+| --- | --- | --- |
+| RED | `cargo test --test migration_contract task_six_schema_contract_is_exact_and_every_constraint_is_enforced --locked` | Failed as expected because the exact catalog and exhaustive behavioral assertion helpers did not exist. |
+| GREEN | `cargo test --test migration_contract --locked` | Passed: 13 migration contract tests, 0 failures. |
+| Full suite | `cargo test --workspace --all-targets --locked` | Passed: 62 tests, 0 failures. |
