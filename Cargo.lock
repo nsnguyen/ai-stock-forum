@@ -20,6 +20,7 @@ dependencies = [
  "thiserror",
  "uuid",
  "wait-timeout",
+ "windows-sys",
 ]
 
 [[package]]

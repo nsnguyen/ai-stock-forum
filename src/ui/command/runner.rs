@@ -10,6 +10,9 @@ use std::{
 use crossbeam_channel::{bounded, never, select_biased, Receiver};
 use thiserror::Error;
 
+#[cfg(windows)]
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::{
     app::{
         ApplicationCommand, InputRejection, InputRejectionCategory, ShutdownDisposition,
@@ -24,6 +27,8 @@ use super::{
     reader::LineAccumulator,
     BoundedLineReader, ParsedLine, RawLine, TextRenderer,
 };
+#[cfg(windows)]
+use super::windows::{classify_read_error, ReadErrorDisposition};
 
 #[derive(Debug, Error)]
 pub enum UiError {
@@ -223,6 +228,8 @@ mod windows_api {
     pub const WAIT_OBJECT_0: u32 = 0;
     pub const WAIT_FAILED: u32 = u32::MAX;
     pub const INFINITE: u32 = u32::MAX;
+    pub const THREAD_TERMINATE: u32 =
+        windows_sys::Win32::System::Threading::THREAD_TERMINATE;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -234,6 +241,13 @@ mod windows_api {
             name: *const u16,
         ) -> Handle;
         pub fn SetEvent(event: Handle) -> i32;
+        pub fn OpenThread(
+            desired_access: u32,
+            inherit_handle: i32,
+            thread_id: u32,
+        ) -> Handle;
+        pub fn GetCurrentThreadId() -> u32;
+        pub fn CancelSynchronousIo(thread: Handle) -> i32;
         pub fn WaitForMultipleObjects(
             count: u32,
             handles: *const Handle,
@@ -254,13 +268,57 @@ mod windows_api {
 #[cfg(windows)]
 struct WindowsCancellation {
     event: windows_api::Handle,
+    reader_thread: std::sync::Mutex<Option<windows_api::Handle>>,
+    cancelled: AtomicBool,
+}
+
+#[cfg(windows)]
+impl WindowsCancellation {
+    fn register_current_thread(&self) -> io::Result<()> {
+        let mut reader_thread = self.reader_thread.lock().map_err(|_| {
+            io::Error::new(io::ErrorKind::Other, "input cancellation state is unavailable")
+        })?;
+        if reader_thread.is_none() {
+            let handle = unsafe {
+                windows_api::OpenThread(
+                    windows_api::THREAD_TERMINATE,
+                    0,
+                    windows_api::GetCurrentThreadId(),
+                )
+            };
+            if handle == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            *reader_thread = Some(handle);
+            if self.cancelled.load(Ordering::SeqCst) {
+                unsafe {
+                    windows_api::CancelSynchronousIo(handle);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn was_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
 }
 
 #[cfg(windows)]
 impl LineSourceCancellation for WindowsCancellation {
     fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
         unsafe {
             windows_api::SetEvent(self.event);
+        }
+        let reader_thread = match self.reader_thread.lock() {
+            Ok(reader_thread) => reader_thread,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(reader_thread) = *reader_thread {
+            unsafe {
+                windows_api::CancelSynchronousIo(reader_thread);
+            }
         }
     }
 }
@@ -268,7 +326,14 @@ impl LineSourceCancellation for WindowsCancellation {
 #[cfg(windows)]
 impl Drop for WindowsCancellation {
     fn drop(&mut self) {
+        let reader_thread = match self.reader_thread.get_mut() {
+            Ok(reader_thread) => reader_thread,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         unsafe {
+            if let Some(reader_thread) = reader_thread.take() {
+                windows_api::CloseHandle(reader_thread);
+            }
             windows_api::CloseHandle(self.event);
         }
     }
@@ -298,7 +363,11 @@ impl WindowsStdinLineSource {
         }
         Ok(Self {
             input,
-            cancellation: Arc::new(WindowsCancellation { event }),
+            cancellation: Arc::new(WindowsCancellation {
+                event,
+                reader_thread: std::sync::Mutex::new(None),
+                cancelled: AtomicBool::new(false),
+            }),
             accumulator: LineAccumulator::new(),
             ready: std::collections::VecDeque::new(),
             eof: false,
@@ -318,18 +387,28 @@ impl WindowsStdinLineSource {
             )
         };
         if succeeded == 0 {
-            return Err(io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            let error_code = error.raw_os_error().map(|code| code as u32).unwrap_or(0);
+            return match classify_read_error(error_code, self.cancellation.was_cancelled()) {
+                ReadErrorDisposition::Cancelled => Ok(Some(LineSourceEvent::Cancelled)),
+                ReadErrorDisposition::Eof => self.finish_input(),
+                ReadErrorDisposition::Error => Err(error),
+            };
         }
         if amount == 0 {
-            self.eof = true;
-            return Ok(Some(match self.accumulator.finish_eof()? {
-                Some(line) => LineSourceEvent::Line(line),
-                None => LineSourceEvent::Eof,
-            }));
+            return self.finish_input();
         }
         self.ready
             .extend(self.accumulator.push_chunk(&buffer[..amount as usize])?);
         Ok(self.ready.pop_front().map(LineSourceEvent::Line))
+    }
+
+    fn finish_input(&mut self) -> io::Result<Option<LineSourceEvent>> {
+        self.eof = true;
+        Ok(Some(match self.accumulator.finish_eof()? {
+            Some(line) => LineSourceEvent::Line(line),
+            None => LineSourceEvent::Eof,
+        }))
     }
 }
 
@@ -340,8 +419,12 @@ impl CancellableLineSource for WindowsStdinLineSource {
     }
 
     fn next_line(&mut self) -> io::Result<LineSourceEvent> {
+        self.cancellation.register_current_thread()?;
         if let Some(line) = self.ready.pop_front() {
             return Ok(LineSourceEvent::Line(line));
+        }
+        if self.cancellation.was_cancelled() {
+            return Ok(LineSourceEvent::Cancelled);
         }
         if self.eof {
             return Ok(LineSourceEvent::Eof);

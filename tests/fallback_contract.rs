@@ -631,6 +631,7 @@ fn state_path(home: &Path, xdg_data: &Path) -> PathBuf {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn binary_smoke_quit_and_eof_exit_successfully() {
     for input in [b"/quit\n".as_slice(), b"".as_slice()] {
@@ -649,6 +650,7 @@ fn binary_smoke_quit_and_eof_exit_successfully() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn binary_startup_failure_is_redacted_and_uses_failure_status() {
     let temporary_directory = TempDir::new().unwrap();
@@ -664,6 +666,7 @@ fn binary_startup_failure_is_redacted_and_uses_failure_status() {
     assert!(!stderr.contains("not a directory"));
 }
 
+#[cfg(unix)]
 #[test]
 fn binary_prints_previous_session_warning_once_then_finishes_cleanly() {
     let temporary_directory = TempDir::new().unwrap();
