@@ -51,16 +51,15 @@ Each supported CLI form has one typed application effect:
 
 | Form | Output/effect | Continuation |
 | --- | --- | --- |
-| `/help` | Prints the available command forms and records a help-view event. | Continues. |
-| `/status` | Prints `Installation: ready` and `Session: active`, and records a status-view event. | Continues. |
-| `/audit tail` | Prints the latest 20 audit entries and records an audit-view event. | Continues. |
-| `/audit tail N` | Prints the latest `N` audit entries, where `N` is 1 through 100, and records an audit-view event. | Continues. |
-| `/setup status` | Reports setup state; a fresh installation reports `Setup: not started` and guided setup is not implemented. | Continues. |
-| `/quit` | Records the shutdown request and ends the current foreground session. | Ends normally. |
+| `/help` | Outputs `Available commands:` followed by `/help`, `/status`, `/setup status`, `/audit tail [limit: 1-100]`, and `/quit`; commits `HelpViewed`. | Continues. |
+| `/status` | Outputs exactly `Installation: ready` and `Session: active`; commits `StatusViewed`. | Continues. |
+| `/audit tail` | Outputs `Audit tail (limit 20):` plus the selected entries or `No audit entries.`; commits `AuditTailViewed(limit=20)`. | Continues. |
+| `/audit tail N` | Outputs `Audit tail (limit N):` plus the selected entries or `No audit entries.` for `N` from 1 through 100; commits `AuditTailViewed(limit=N)`. | Continues. |
+| `/setup status` | Outputs exactly `Setup: not started` and `Guided setup is not implemented in Phase 0.` on a fresh installation; commits `SetupStatusViewed`. | Continues. |
+| `/quit` | Outputs exactly `Shutting down.`; commits `ShutdownRequested` and ends the session with `UserQuit`. | Ends normally. |
 
 Rejected input is also audited as a typed event and the command host continues.
-Rejected full lines are not stored verbatim; a bounded escaped first token,
-exact byte count, and SHA-256 digest may be persisted and shown in audit.
+Rejected full lines are not stored verbatim.
 Fatal startup, runtime, or UI failures emit one safe summary and use the
 failure exit code instead of continuing the command host.
 
@@ -73,7 +72,7 @@ directory. The exact default locations are:
 | --- | --- | --- | --- |
 | macOS | `~/Library/Application Support/ai-stock-forum/` | `~/Library/Application Support/ai-stock-forum/ai-stock-forum.sqlite3` | `~/Library/Application Support/ai-stock-forum/phase0-bootstrap.lock` |
 | Linux/XDG | `$XDG_DATA_HOME/ai-stock-forum/` or `~/.local/share/ai-stock-forum/` when `XDG_DATA_HOME` is unset | `$XDG_DATA_HOME/ai-stock-forum/ai-stock-forum.sqlite3` or `~/.local/share/ai-stock-forum/ai-stock-forum.sqlite3` | `$XDG_DATA_HOME/ai-stock-forum/phase0-bootstrap.lock` or `~/.local/share/ai-stock-forum/phase0-bootstrap.lock` |
-| Windows | `%LOCALAPPDATA%\ai-stock-forum\` | `%LOCALAPPDATA%\ai-stock-forum\ai-stock-forum.sqlite3` | `%LOCALAPPDATA%\ai-stock-forum\phase0-bootstrap.lock` |
+| Windows | `%APPDATA%\ai-stock-forum\` | `%APPDATA%\ai-stock-forum\ai-stock-forum.sqlite3` | `%APPDATA%\ai-stock-forum\phase0-bootstrap.lock` |
 
 The lock filename is `phase0-bootstrap.lock` on every platform.
 
@@ -84,9 +83,9 @@ and ordered command-event references, and projections rebuilt from the event
 stream. In Phase 0, events remain authoritative for audit and projections;
 receipts are durable command-idempotency evidence.
 
-Privacy warning: there is no supported secret, credential, or profile workflow
-in Phase 0. Do not enter secrets. Rejected full lines are not stored verbatim,
-but a bounded escaped first token, exact byte count, and SHA-256 digest may be persisted and shown in audit.
+Privacy warning: users must not enter secrets; Phase 0 has no supported secret, credential, or profile workflow.
+
+On rejection, a bounded escaped first token, category, exact byte count, and SHA-256 digest may be persisted. Audit rendering may show the category, bounded safe token, and byte count; the digest and rejected full line are not rendered.
 
 ## Startup and sessions
 
