@@ -10,7 +10,7 @@ work.
 
 - [Architecture](architecture.md)
 - [Delivery phases](phases.md)
-- [Approved design specification](docs/superpowers/specs/2026-08-08-ai-stock-forum-design.md)
+- [Approved design specification](docs/superpowers/specs/2026-08-31-phase-0-rust-foundation-design.md)
 - [Phase 0 implementation plan](docs/superpowers/plans/2026-08-31-phase-0-rust-foundation.md)
 
 The architecture and delivery phases are canonical for the current Rust
@@ -22,9 +22,11 @@ historical context and are explicitly marked as superseded.
 - Rust `1.98.0`, pinned by `rust-toolchain.toml` and required by `Cargo.toml`.
 - One foreground process with a bounded, line-oriented fallback command host.
 - Typed commands and application events with append-only, hash-linked audit
-  records and replayable projections.
-- SQLite persistence with database schema version `1` and event schema version
-  `1`, including ordered migrations and startup integrity checks.
+  records, durable command receipts, and replayable projections.
+- SQLite persistence with database schema version `1` and event schema version `1`,
+  including ordered migrations and startup integrity checks. For audit and
+  projections, events remain authoritative; receipts are durable
+  command-idempotency evidence.
 - Per-user state discovery, a single-process guard, installation identity, and
   resumable process-session bookkeeping.
 - Defensive parsing and rendering for bounded input, malformed commands, and
@@ -45,31 +47,46 @@ network access.
 
 ## Supported commands
 
-The Phase 0 command surface is:
+Each supported CLI form has one typed application effect:
 
-- `/help`
-- `/status`
-- `/setup status`
-- `/audit tail [limit: 1-100]`
-- `/quit`
+| Form | Output/effect | Continuation |
+| --- | --- | --- |
+| `/help` | Prints the available command forms and records a help-view event. | Continues. |
+| `/status` | Prints `Installation: ready` and `Session: active`, and records a status-view event. | Continues. |
+| `/audit tail` | Prints the latest 20 audit entries and records an audit-view event. | Continues. |
+| `/audit tail N` | Prints the latest `N` audit entries, where `N` is 1 through 100, and records an audit-view event. | Continues. |
+| `/setup status` | Reports setup state; a fresh installation reports `Setup: not started` and guided setup is not implemented. | Continues. |
+| `/quit` | Records the shutdown request and ends the current foreground session. | Ends normally. |
 
-Audit output defaults to 20 entries and accepts a limit from 1 through 100.
-Guided setup is not implemented in Phase 0; `/setup status` reports that state
-without applying configuration.
+Rejected input is also audited as a typed event and the command host continues.
+Rejected full lines are not stored verbatim; a bounded escaped first token,
+exact byte count, and SHA-256 digest may be persisted and shown in audit.
+Fatal startup, runtime, or UI failures emit one safe summary and use the
+failure exit code instead of continuing the command host.
 
 ## Storage, security, and privacy
 
-Startup discovers a platform-appropriate per-user application data directory
-and stores `ai-stock-forum.sqlite3` there. On Unix, the state directory is
-owner-only (`0700`) and the database is a regular owner-only file (`0600`).
-The database uses ordered migrations, SQLite integrity checks, an immutable
-event stream, and projections rebuilt from that stream.
+The application uses `directories::BaseDirs` to discover its per-user data
+directory. The exact default locations are:
 
-Phase 0 has no provider, broker, market-data, external-runtime, credential,
-OAuth, or network integration. It does not ingest real account exports,
-market data, secrets, or personal profiles. Raw rejected command input is not
-stored as a transcript; rejection records use a category, byte count, bounded
-safe token where available, and an input digest.
+| Platform | State directory | Database | Lock |
+| --- | --- | --- | --- |
+| macOS | `~/Library/Application Support/ai-stock-forum/` | `~/Library/Application Support/ai-stock-forum/ai-stock-forum.sqlite3` | `~/Library/Application Support/ai-stock-forum/phase0-bootstrap.lock` |
+| Linux/XDG | `$XDG_DATA_HOME/ai-stock-forum/` or `~/.local/share/ai-stock-forum/` when `XDG_DATA_HOME` is unset | `$XDG_DATA_HOME/ai-stock-forum/ai-stock-forum.sqlite3` or `~/.local/share/ai-stock-forum/ai-stock-forum.sqlite3` | `$XDG_DATA_HOME/ai-stock-forum/phase0-bootstrap.lock` or `~/.local/share/ai-stock-forum/phase0-bootstrap.lock` |
+| Windows | `%LOCALAPPDATA%\ai-stock-forum\` | `%LOCALAPPDATA%\ai-stock-forum\ai-stock-forum.sqlite3` | `%LOCALAPPDATA%\ai-stock-forum\phase0-bootstrap.lock` |
+
+The lock filename is `phase0-bootstrap.lock` on every platform.
+
+On Unix, the state directory is owner-only (`0700`) and the database and lock
+are regular owner-only files (`0600`). The database uses ordered migrations,
+SQLite integrity checks, an immutable event stream, immutable command receipts
+and ordered command-event references, and projections rebuilt from the event
+stream. In Phase 0, events remain authoritative for audit and projections;
+receipts are durable command-idempotency evidence.
+
+Privacy warning: there is no supported secret, credential, or profile workflow
+in Phase 0. Do not enter secrets. Rejected full lines are not stored verbatim,
+but a bounded escaped first token, exact byte count, and SHA-256 digest may be persisted and shown in audit.
 
 ## Startup and sessions
 
@@ -88,8 +105,9 @@ does not expose local paths or sensitive values.
 ## Platform status
 
 The current verification context is Unix/macOS. Windows-specific source paths
-and static contract coverage are present, but Windows runtime verification has
-not been performed for this phase and is not claimed here.
+and static contract coverage are present, but the non-Unix process guard
+currently refuses startup; Windows runtime verification has not been performed
+for this phase and is not claimed here.
 
 ## Explicit non-goals
 

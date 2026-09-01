@@ -272,6 +272,9 @@ SQLite is the only Phase 0 source of truth. The first migration creates:
 - `schema_migrations`;
 - `event_stream`;
 - append-only update/delete rejection triggers for `event_stream`;
+- immutable `command_receipts` for durable command-idempotency evidence;
+- ordered immutable `command_event_refs` linking each command receipt to its
+  committed events;
 - `installation_projection`;
 - `process_session_projection`;
 - `projection_metadata`;
@@ -282,6 +285,13 @@ SQLite is the only Phase 0 source of truth. The first migration creates:
 - `capability_readiness`;
 - `approval_records`; and
 - constraints and indexes needed by the Phase 0 queries.
+
+The first migration must include `command_receipts` and ordered
+`command_event_refs`, with immutable command receipts and ordered command-event references protected from update/delete before release. The Phase 0 implementation must be released only after this inventory is present. Events remain authoritative for audit and projections; receipts are durable command-idempotency evidence. Receipts retain
+the ordered event references needed to return an exact prior command outcome.
+These pre-receipt unreleased development databases are not a compatibility target:
+they may require recreation, and a checksum mismatch is a typed startup error
+rather than a reason to silently alter or replace the database.
 
 Setup and approval tables establish identifiers, schema versions, immutable
 version links, state columns, exact object/review digests, actor fields, and
