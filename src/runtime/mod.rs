@@ -2,13 +2,13 @@
 
 use std::{
     io,
-    panic::{resume_unwind, AssertUnwindSafe},
+    panic::{AssertUnwindSafe, resume_unwind},
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
     time::Duration,
 };
 
-use crossbeam_channel::{bounded, select_biased, unbounded, Receiver, Sender, TrySendError};
+use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, select_biased, unbounded};
 use thiserror::Error;
 
 use crate::app::{
@@ -137,7 +137,10 @@ impl SharedRuntime {
     }
 
     fn reserve(&self) -> Result<Sender<Request>, RuntimeError> {
-        let mut state = self.state.lock().map_err(|_| RuntimeError::WorkerPanicked)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RuntimeError::WorkerPanicked)?;
         if !matches!(state.worker, WorkerState::Running) {
             return Err(Self::terminal_error(&state));
         }
@@ -151,7 +154,10 @@ impl SharedRuntime {
     }
 
     fn resolve_reservation(&self, accepted: bool) -> Result<(), RuntimeError> {
-        let mut state = self.state.lock().map_err(|_| RuntimeError::WorkerPanicked)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RuntimeError::WorkerPanicked)?;
         state.reservations = state.reservations.saturating_sub(1);
         self.changed.notify_all();
         if accepted {
@@ -218,7 +224,9 @@ impl SharedRuntime {
     }
 
     fn wait_for_joined_timeout(&self, timeout: Duration) -> FinishResult {
-        self.wait_timeout(timeout, |state| matches!(state.worker, WorkerState::Joined(_)))
+        self.wait_timeout(timeout, |state| {
+            matches!(state.worker, WorkerState::Joined(_))
+        })
     }
 
     fn wait_for_reservations(&self, count: usize, timeout: Duration) -> FinishResult {
@@ -238,7 +246,10 @@ impl SharedRuntime {
             Ok(state) => state,
             Err(_) => return Err(RuntimeError::WorkerPanicked),
         };
-        let (state, result) = match self.changed.wait_timeout_while(state, timeout, |state| !ready(state)) {
+        let (state, result) = match self
+            .changed
+            .wait_timeout_while(state, timeout, |state| !ready(state))
+        {
             Ok(result) => result,
             Err(_) => return Err(RuntimeError::WorkerPanicked),
         };
@@ -297,7 +308,11 @@ impl RuntimeClient {
     pub fn try_submit(&self, command: ApplicationCommand) -> Result<PendingOutcome, RuntimeError> {
         let (response_sender, response) = bounded(1);
         let result = {
-            let state = self.shared.state.lock().map_err(|_| RuntimeError::WorkerPanicked)?;
+            let state = self
+                .shared
+                .state
+                .lock()
+                .map_err(|_| RuntimeError::WorkerPanicked)?;
             if !matches!(state.worker, WorkerState::Running) {
                 Err(SharedRuntime::terminal_error(&state))
             } else {
@@ -315,9 +330,16 @@ impl RuntimeClient {
             }
         };
         match result {
-            Ok(()) => Ok(PendingOutcome { response, shared: self.shared.clone() }),
+            Ok(()) => Ok(PendingOutcome {
+                response,
+                shared: self.shared.clone(),
+            }),
             Err(RuntimeError::WorkerExited) => {
-                let state = self.shared.state.lock().map_err(|_| RuntimeError::WorkerPanicked)?;
+                let state = self
+                    .shared
+                    .state
+                    .lock()
+                    .map_err(|_| RuntimeError::WorkerPanicked)?;
                 Err(SharedRuntime::terminal_error(&state))
             }
             Err(error) => Err(error),
@@ -353,10 +375,15 @@ pub struct ApplicationRuntime {
 
 impl ApplicationRuntime {
     pub fn spawn(executor: impl CommandExecutor, capacity: usize) -> Result<Self, RuntimeError> {
-        Self::spawn_with_initializer(capacity, Arc::new(SystemThreadSpawner), move || Ok(Box::new(executor)))
+        Self::spawn_with_initializer(capacity, Arc::new(SystemThreadSpawner), move || {
+            Ok(Box::new(executor))
+        })
     }
 
-    pub fn spawn_application(service: ApplicationService, capacity: usize) -> Result<Self, RuntimeError> {
+    pub fn spawn_application(
+        service: ApplicationService,
+        capacity: usize,
+    ) -> Result<Self, RuntimeError> {
         Self::spawn_application_with_thread_spawner(
             service,
             capacity,
@@ -397,7 +424,9 @@ impl ApplicationRuntime {
     }
 
     pub fn client(&self) -> RuntimeClient {
-        RuntimeClient { shared: self.shared.clone() }
+        RuntimeClient {
+            shared: self.shared.clone(),
+        }
     }
 
     pub fn finish_and_join(&self, reason: ShutdownReason) -> FinishResult {
@@ -443,23 +472,48 @@ impl ApplicationRuntime {
             control: control_sender,
         });
         let worker_shared = shared.clone();
-        let task = Box::new(move || worker_entry(request_receiver, control_receiver, initializer, initialized_sender, worker_shared));
-        let worker = spawner.spawn(task).map_err(|_| RuntimeError::WorkerStartup)?;
-        let runtime = Self { shared, join: Mutex::new(JoinState::Available(worker)) };
+        let task = Box::new(move || {
+            worker_entry(
+                request_receiver,
+                control_receiver,
+                initializer,
+                initialized_sender,
+                worker_shared,
+            )
+        });
+        let worker = spawner
+            .spawn(task)
+            .map_err(|_| RuntimeError::WorkerStartup)?;
+        let runtime = Self {
+            shared,
+            join: Mutex::new(JoinState::Available(worker)),
+        };
         match initialized_receiver.recv() {
             Ok(Ok(())) => Ok(runtime),
-            Ok(Err(error)) => { let _ = runtime.join_worker(); Err(error) }
-            Err(_) => Err(runtime.join_worker().err().unwrap_or(RuntimeError::WorkerExited)),
+            Ok(Err(error)) => {
+                let _ = runtime.join_worker();
+                Err(error)
+            }
+            Err(_) => Err(runtime
+                .join_worker()
+                .err()
+                .unwrap_or(RuntimeError::WorkerExited)),
         }
     }
 
     fn join_worker(&self) -> FinishResult {
         let worker = {
-            let mut join = match self.join.lock() { Ok(join) => join, Err(_) => return Err(RuntimeError::WorkerPanicked) };
+            let mut join = match self.join.lock() {
+                Ok(join) => join,
+                Err(_) => return Err(RuntimeError::WorkerPanicked),
+            };
             match std::mem::replace(&mut *join, JoinState::Joining) {
                 JoinState::Available(worker) => Some(worker),
                 JoinState::Joining => None,
-                JoinState::Joined => { *join = JoinState::Joined; None }
+                JoinState::Joined => {
+                    *join = JoinState::Joined;
+                    None
+                }
             }
         };
         if let Some(worker) = worker {
@@ -467,9 +521,14 @@ impl ApplicationRuntime {
                 state.join_owner = true;
                 self.shared.changed.notify_all();
             }
-            let result = match worker.join() { Ok(()) => self.shared.exited_result(), Err(_) => Err(RuntimeError::WorkerPanicked) };
+            let result = match worker.join() {
+                Ok(()) => self.shared.exited_result(),
+                Err(_) => Err(RuntimeError::WorkerPanicked),
+            };
             self.shared.publish_joined(result.clone());
-            if let Ok(mut join) = self.join.lock() { *join = JoinState::Joined; }
+            if let Ok(mut join) = self.join.lock() {
+                *join = JoinState::Joined;
+            }
             result
         } else {
             self.shared.wait_for_joined(true)
@@ -478,7 +537,10 @@ impl ApplicationRuntime {
 
     fn reap_on_drop(&self) {
         let worker = {
-            let mut join = match self.join.lock() { Ok(join) => join, Err(_) => return };
+            let mut join = match self.join.lock() {
+                Ok(join) => join,
+                Err(_) => return,
+            };
             match std::mem::replace(&mut *join, JoinState::Joining) {
                 JoinState::Available(worker) => Some(worker),
                 JoinState::Joining | JoinState::Joined => None,
@@ -490,14 +552,24 @@ impl ApplicationRuntime {
         let reaper_slot = slot.clone();
         let reaper = move || {
             let result = match reaper_slot.lock().ok().and_then(|mut slot| slot.take()) {
-                Some(worker) => match worker.join() { Ok(()) => shared.exited_result(), Err(_) => Err(RuntimeError::WorkerPanicked) },
+                Some(worker) => match worker.join() {
+                    Ok(()) => shared.exited_result(),
+                    Err(_) => Err(RuntimeError::WorkerPanicked),
+                },
                 None => Err(RuntimeError::WorkerExited),
             };
             shared.publish_joined(result);
         };
-        if thread::Builder::new().name("application-runtime-reaper".to_owned()).spawn(reaper).is_err() {
+        if thread::Builder::new()
+            .name("application-runtime-reaper".to_owned())
+            .spawn(reaper)
+            .is_err()
+        {
             let result = match slot.lock().ok().and_then(|mut slot| slot.take()) {
-                Some(worker) => match worker.join() { Ok(()) => self.shared.exited_result(), Err(_) => Err(RuntimeError::WorkerPanicked) },
+                Some(worker) => match worker.join() {
+                    Ok(()) => self.shared.exited_result(),
+                    Err(_) => Err(RuntimeError::WorkerPanicked),
+                },
                 None => Err(RuntimeError::WorkerExited),
             };
             self.shared.publish_joined(result);
@@ -507,7 +579,8 @@ impl ApplicationRuntime {
 
 impl Drop for ApplicationRuntime {
     fn drop(&mut self) {
-        self.shared.close_admission(ShutdownReason::ApplicationError);
+        self.shared
+            .close_admission(ShutdownReason::ApplicationError);
         self.reap_on_drop();
     }
 }
@@ -519,7 +592,9 @@ struct ServiceWorker {
 }
 
 impl CommandExecutor for ServiceWorker {
-    fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError> { self.worker.execute_user(command) }
+    fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError> {
+        self.worker.execute_user(command)
+    }
     fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
         let result = self.service.finish(reason);
         if result.is_ok() {
@@ -540,14 +615,20 @@ impl Drop for ServiceWorker {
 }
 
 fn worker_entry(
-    requests: Receiver<Request>, control: Receiver<Control>,
+    requests: Receiver<Request>,
+    control: Receiver<Control>,
     initializer: impl FnOnce() -> Result<Box<dyn CommandExecutor>, RuntimeError>,
-    initialized: Sender<FinishResult>, shared: Arc<SharedRuntime>,
+    initialized: Sender<FinishResult>,
+    shared: Arc<SharedRuntime>,
 ) {
     let result = catch_sensitive_unwind(AssertUnwindSafe(|| {
         let mut executor = match initializer() {
             Ok(executor) => executor,
-            Err(error) => { let _ = initialized.send(Err(error.clone())); shared.publish_exited(Err(error)); return },
+            Err(error) => {
+                let _ = initialized.send(Err(error.clone()));
+                shared.publish_exited(Err(error));
+                return;
+            }
         };
         let _ = initialized.send(Ok(()));
         worker_loop(&mut *executor, requests, control, &shared);
@@ -559,7 +640,12 @@ fn worker_entry(
     }
 }
 
-fn worker_loop(executor: &mut dyn CommandExecutor, requests: Receiver<Request>, control: Receiver<Control>, shared: &SharedRuntime) {
+fn worker_loop(
+    executor: &mut dyn CommandExecutor,
+    requests: Receiver<Request>,
+    control: Receiver<Control>,
+    shared: &SharedRuntime,
+) {
     loop {
         select_biased! {
             recv(control) -> control => match control {
@@ -589,7 +675,9 @@ fn worker_loop(executor: &mut dyn CommandExecutor, requests: Receiver<Request>, 
 fn execute_request(executor: &mut dyn CommandExecutor, request: Request, shared: &SharedRuntime) {
     let Request::Command { command, response } = request;
     match catch_sensitive_unwind(AssertUnwindSafe(|| executor.execute_user(command))) {
-        Ok(result) => { let _ = response.send(result.map_err(RuntimeError::Application)); }
+        Ok(result) => {
+            let _ = response.send(result.map_err(RuntimeError::Application));
+        }
         Err(payload) => {
             let _ = catch_sensitive_unwind(AssertUnwindSafe(|| {
                 executor.finish(ShutdownReason::ApplicationError)

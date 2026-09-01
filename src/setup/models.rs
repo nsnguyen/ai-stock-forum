@@ -1,9 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::domain::{
-    ConfigurationVersionId, EventId, ObjectVersion, SetupDraftId, Sha256Digest,
-};
+use crate::domain::{ConfigurationVersionId, EventId, ObjectVersion, SetupDraftId, Sha256Digest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -21,19 +19,18 @@ pub enum SetupPath {
     Customize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[serde(deny_unknown_fields)]
 pub enum SetupStatus {
+    #[default]
     NotStarted,
-    DraftSaved { draft_id: SetupDraftId },
-    Applied { configuration_id: ConfigurationVersionId },
-}
-
-impl Default for SetupStatus {
-    fn default() -> Self {
-        Self::NotStarted
-    }
+    DraftSaved {
+        draft_id: SetupDraftId,
+    },
+    Applied {
+        configuration_id: ConfigurationVersionId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

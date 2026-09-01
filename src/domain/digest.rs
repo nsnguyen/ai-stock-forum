@@ -46,7 +46,8 @@ impl<'de> Deserialize<'de> for Sha256Digest {
 }
 
 pub fn canonical_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, DomainError> {
-    let value = serde_json::to_value(value).map_err(|error| DomainError::CanonicalJson(error.to_string()))?;
+    let value = serde_json::to_value(value)
+        .map_err(|error| DomainError::CanonicalJson(error.to_string()))?;
     serde_json::to_vec(&canonicalize(value))
         .map_err(|error| DomainError::CanonicalJson(error.to_string()))
 }

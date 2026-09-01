@@ -4,8 +4,8 @@ use std::{
     collections::VecDeque,
     io::{self, Cursor, Write},
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     },
     thread,
     time::Duration,
@@ -14,24 +14,20 @@ use std::{
 use ai_stock_forum::{
     app::{
         AppError, ApplicationCommand, ApplicationEvent, ApplicationService, AuditTailView,
-        AuthorizationDecision, CommandOutcome, CommandPolicy, CommandView, EventEnvelope,
-        HelpView, InputRejection, InputRejectionCategory, ShutdownDisposition, ShutdownReason,
+        AuthorizationDecision, CommandOutcome, CommandPolicy, CommandView, EventEnvelope, HelpView,
+        InputRejection, InputRejectionCategory, ShutdownDisposition, ShutdownReason,
     },
     audit::AuditEntry,
     config::AppPaths,
-    domain::{
-        sha256, Actor, CorrelationId, EventId, IdGenerator, InstallationId, SessionId,
-    },
+    domain::{Actor, CorrelationId, EventId, IdGenerator, InstallationId, SessionId, sha256},
     policy::Capability,
-    runtime::{
-        ApplicationRuntime, CommandExecutor, RuntimeError, RuntimeThreadSpawner,
-    },
+    runtime::{ApplicationRuntime, CommandExecutor, RuntimeError, RuntimeThreadSpawner},
     ui::command::{
         BoundedLineReader, CancellableLineSource, FallbackHost, FallbackRunner,
         LineSourceCancellation, LineSourceEvent, RawLine, TextRenderer, UiError,
     },
 };
-use crossbeam_channel::{bounded, never, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, bounded, never};
 use rusqlite::Connection;
 use uuid::Uuid;
 
@@ -232,8 +228,7 @@ fn host_cancels_and_joins_its_owned_line_source_before_returning() {
         1,
     )
     .unwrap();
-    let (source, cancel_calls, source_exited) =
-        cancellable_source([raw_line(b"/quit\n")]);
+    let (source, cancel_calls, source_exited) = cancellable_source([raw_line(b"/quit\n")]);
 
     let reason = FallbackHost::new(runtime, false, false)
         .run(source, Vec::new(), never())
@@ -308,7 +303,7 @@ impl RuntimeThreadSpawner for FailingSpawner {
         &self,
         _task: Box<dyn FnOnce() + Send + 'static>,
     ) -> io::Result<thread::JoinHandle<()>> {
-        Err(io::Error::new(io::ErrorKind::Other, "injected spawn failure"))
+        Err(io::Error::other("injected spawn failure"))
     }
 }
 
@@ -359,7 +354,10 @@ fn service_runtime_spawn_failure_finishes_before_returning() {
         Arc::new(FailingSpawner),
     );
     assert!(matches!(result, Err(RuntimeError::WorkerStartup)));
-    assert_eq!(latest_end_reason(&paths).as_deref(), Some("application_error"));
+    assert_eq!(
+        latest_end_reason(&paths).as_deref(),
+        Some("application_error")
+    );
     assert_next_launch_has_no_interruption(&paths);
 }
 
@@ -392,7 +390,10 @@ fn command_panic_best_effort_finishes_real_service_before_worker_exit() {
         runtime.finish_and_join(ShutdownReason::ApplicationError),
         Err(RuntimeError::WorkerPanicked)
     );
-    assert_eq!(latest_end_reason(&paths).as_deref(), Some("application_error"));
+    assert_eq!(
+        latest_end_reason(&paths).as_deref(),
+        Some("application_error")
+    );
     assert_next_launch_has_no_interruption(&paths);
 }
 
@@ -401,7 +402,11 @@ fn envelope(sequence: u64, event: ApplicationEvent) -> EventEnvelope {
         sequence,
         event_id: EventId::from_uuid(Uuid::from_u128(100 + sequence as u128)),
         event_schema_version: ai_stock_forum::app::EVENT_SCHEMA_VERSION,
-        actor: if sequence % 2 == 0 { Actor::Human } else { Actor::System },
+        actor: if sequence.is_multiple_of(2) {
+            Actor::Human
+        } else {
+            Actor::System
+        },
         occurred_at_ms: 1_700_000_000_000 + sequence as i64,
         correlation_id: CorrelationId::from_uuid(Uuid::from_u128(200 + sequence as u128)),
         causation_id: None,
@@ -424,9 +429,15 @@ fn audit_renderer_includes_every_typed_summary_and_required_metadata_safely() {
     );
     let raw_digest = rejection.input_digest.to_string();
     let events = vec![
-        ApplicationEvent::InstallationInitialized { installation_id: installation },
-        ApplicationEvent::ProcessSessionStarted { session_id: session },
-        ApplicationEvent::PreviousSessionInterrupted { session_id: session },
+        ApplicationEvent::InstallationInitialized {
+            installation_id: installation,
+        },
+        ApplicationEvent::ProcessSessionStarted {
+            session_id: session,
+        },
+        ApplicationEvent::PreviousSessionInterrupted {
+            session_id: session,
+        },
         ApplicationEvent::HelpViewed,
         ApplicationEvent::StatusViewed,
         ApplicationEvent::SetupStatusViewed,
@@ -439,7 +450,9 @@ fn audit_renderer_includes_every_typed_summary_and_required_metadata_safely() {
             session_id: session,
             reason: ShutdownReason::Interrupted,
         },
-        ApplicationEvent::ProjectionRebuilt { through_sequence: 10 },
+        ApplicationEvent::ProjectionRebuilt {
+            through_sequence: 10,
+        },
     ];
     let entries: Vec<_> = events
         .into_iter()
@@ -454,13 +467,19 @@ fn audit_renderer_includes_every_typed_summary_and_required_metadata_safely() {
         "status viewed".to_owned(),
         "setup status viewed".to_owned(),
         "audit tail viewed: 3".to_owned(),
-        format!("command rejected: category=unknown, token=/unknown, bytes={}", raw_secret.len()),
+        format!(
+            "command rejected: category=unknown, token=/unknown, bytes={}",
+            raw_secret.len()
+        ),
         "shutdown requested".to_owned(),
         format!("process session ended: {session}, reason=Interrupted"),
         "projection rebuilt through sequence 10".to_owned(),
     ];
     assert_eq!(
-        entries.iter().map(|entry| entry.summary.clone()).collect::<Vec<_>>(),
+        entries
+            .iter()
+            .map(|entry| entry.summary.clone())
+            .collect::<Vec<_>>(),
         expected_summaries
     );
 
@@ -474,7 +493,10 @@ fn audit_renderer_includes_every_typed_summary_and_required_metadata_safely() {
     for entry in &entries {
         assert!(text.contains(&format!("#{}", entry.sequence)));
         assert!(text.contains(&entry.occurred_at_ms.to_string()));
-        assert!(text.contains(match entry.actor { Actor::Human => "human", Actor::System => "system" }));
+        assert!(text.contains(match entry.actor {
+            Actor::Human => "human",
+            Actor::System => "system",
+        }));
         assert!(text.contains(&entry.kind));
         assert!(text.contains(&entry.correlation_id.to_string()));
         assert!(text.contains(&entry.summary));
@@ -511,9 +533,11 @@ fn runner_leaves_terminal_runtime_error_unrendered_for_the_composition_root() {
         )))
     ));
     assert!(output.is_empty());
-    assert!(runtime
-        .finish_and_join(ShutdownReason::ApplicationError)
-        .is_ok());
+    assert!(
+        runtime
+            .finish_and_join(ShutdownReason::ApplicationError)
+            .is_ok()
+    );
 }
 
 #[cfg(unix)]
@@ -579,7 +603,10 @@ mod unix_binary {
             {
                 return;
             }
-            assert!(Instant::now() < deadline, "timed out waiting for open process session");
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for open process session"
+            );
             thread::sleep(Duration::from_millis(10));
         }
     }
@@ -619,9 +646,11 @@ mod unix_binary {
             assert_eq!(latest_reason(&state_path(&home, &xdg)), expected);
             let next = run_line(&home, &xdg, b"/quit\n");
             assert!(next.status.success());
-            assert!(!String::from_utf8(next.stdout)
-                .unwrap()
-                .contains("previous session ended unexpectedly"));
+            assert!(
+                !String::from_utf8(next.stdout)
+                    .unwrap()
+                    .contains("previous session ended unexpectedly")
+            );
         }
     }
 
@@ -648,8 +677,10 @@ mod unix_binary {
 
         let next = run_line(&home, &xdg, b"/quit\n");
         assert!(next.status.success());
-        assert!(!String::from_utf8(next.stdout)
-            .unwrap()
-            .contains("previous session ended unexpectedly"));
+        assert!(
+            !String::from_utf8(next.stdout)
+                .unwrap()
+                .contains("previous session ended unexpectedly")
+        );
     }
 }

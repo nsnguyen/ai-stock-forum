@@ -2,7 +2,7 @@ use std::ops::Deref;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::domain::{sha256, Actor, CommandId, CorrelationId, Sha256Digest};
+use crate::domain::{Actor, CommandId, CorrelationId, Sha256Digest, sha256};
 use crate::policy::Capability;
 
 pub const MAX_INPUT_BYTES: usize = 4096;
@@ -51,7 +51,12 @@ pub enum AuditLimitError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum ApplicationCommand {
     ShowHelp,
     ShowStatus,
@@ -119,7 +124,10 @@ impl SafeToken {
         if value.chars().count() > MAX_SAFE_TOKEN_CHARS {
             return Err(SafeTokenError::TooLong);
         }
-        if value.chars().any(|character| character.is_control() || character.is_whitespace()) {
+        if value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+        {
             return Err(SafeTokenError::UnsafeCharacter);
         }
         Ok(Self(value))

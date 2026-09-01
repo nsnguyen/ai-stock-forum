@@ -14,7 +14,10 @@ fn append_allocates_a_contiguous_digest_chain() {
 
     assert_eq!(first.sequence, 1);
     assert_eq!(second.sequence, 2);
-    assert_eq!(second.previous_event_digest.as_ref(), Some(&first.event_digest));
+    assert_eq!(
+        second.previous_event_digest.as_ref(),
+        Some(&first.event_digest)
+    );
     EventRepository::verify(fixture.database.connection()).unwrap();
 }
 
@@ -26,9 +29,11 @@ fn append_rolls_back_without_allocating_a_sequence() {
     EventRepository::append(&transaction, pending).unwrap();
     transaction.rollback().unwrap();
 
-    assert!(EventRepository::load_all(fixture.database.connection())
-        .unwrap()
-        .is_empty());
+    assert!(
+        EventRepository::load_all(fixture.database.connection())
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(fixture.append(ApplicationEvent::StatusViewed).sequence, 1);
 }
 
@@ -68,26 +73,36 @@ fn tail_is_bounded_and_returns_latest_events_in_sequence_order() {
         ai_stock_forum::app::AuditLimit::new(2).unwrap(),
     )
     .unwrap();
-    assert_eq!(entries.iter().map(|entry| entry.sequence).collect::<Vec<_>>(), [2, 3]);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        [2, 3]
+    );
 }
 
 #[test]
 fn update_and_delete_are_rejected() {
     let mut fixture = support::database();
     fixture.append(ApplicationEvent::HelpViewed);
-    assert!(fixture
-        .database
-        .connection()
-        .execute("DELETE FROM event_stream", [])
-        .is_err());
-    assert!(fixture
-        .database
-        .connection()
-        .execute(
-            "UPDATE event_stream SET event_type = 'forged' WHERE sequence = 1",
-            []
-        )
-        .is_err());
+    assert!(
+        fixture
+            .database
+            .connection()
+            .execute("DELETE FROM event_stream", [])
+            .is_err()
+    );
+    assert!(
+        fixture
+            .database
+            .connection()
+            .execute(
+                "UPDATE event_stream SET event_type = 'forged' WHERE sequence = 1",
+                []
+            )
+            .is_err()
+    );
 }
 
 #[test]
@@ -97,9 +112,11 @@ fn forged_row_is_reported_without_modifying_the_stream() {
     let first_digest = fixture
         .database
         .connection()
-        .query_row("SELECT event_digest FROM event_stream WHERE sequence = 1", [], |row| {
-            row.get::<_, String>(0)
-        })
+        .query_row(
+            "SELECT event_digest FROM event_stream WHERE sequence = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
         .unwrap();
     fixture
         .database
@@ -116,7 +133,8 @@ fn forged_row_is_reported_without_modifying_the_stream() {
         fixture
             .database
             .connection()
-            .query_row("SELECT COUNT(*) FROM event_stream", [], |row| row.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM event_stream", [], |row| row
+                .get::<_, i64>(0))
             .unwrap(),
         2
     );

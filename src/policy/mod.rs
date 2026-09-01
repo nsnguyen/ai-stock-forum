@@ -7,4 +7,4 @@ pub use approval::{
     ApprovalAction, ApprovalError, ApprovalRecord, ApprovalRecordBuilder, ApprovalResolution,
     ApprovalStatus,
 };
-pub use capability::{evaluate, Capability, Effect, PolicyDecision, PolicyRule};
+pub use capability::{Capability, Effect, PolicyDecision, PolicyRule, evaluate};

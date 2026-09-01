@@ -1,5 +1,5 @@
 use ai_stock_forum::app::{ApplicationCommand, InputRejectionCategory};
-use ai_stock_forum::ui::command::{parse_line, ParsedLine};
+use ai_stock_forum::ui::command::{ParsedLine, parse_line};
 
 fn command(bytes: &[u8]) -> ApplicationCommand {
     match parse_line(bytes) {
@@ -12,7 +12,10 @@ fn command(bytes: &[u8]) -> ApplicationCommand {
 fn parses_the_complete_phase_zero_grammar() {
     assert_eq!(command(b" /help \n"), ApplicationCommand::ShowHelp);
     assert_eq!(command(b"/status"), ApplicationCommand::ShowStatus);
-    assert_eq!(command(b"/setup status"), ApplicationCommand::ShowSetupStatus);
+    assert_eq!(
+        command(b"/setup status"),
+        ApplicationCommand::ShowSetupStatus
+    );
     assert_eq!(
         command(b"/audit tail"),
         ApplicationCommand::audit_tail(20).unwrap()
@@ -35,9 +38,11 @@ fn rejects_bad_audit_limits_without_defaulting() {
             panic!("expected rejection");
         };
         assert_eq!(rejection.category, InputRejectionCategory::Malformed);
-        assert!(!serde_json::to_string(&rejection)
-            .unwrap()
-            .contains("raw_input"));
+        assert!(
+            !serde_json::to_string(&rejection)
+                .unwrap()
+                .contains("raw_input")
+        );
     }
 }
 
@@ -60,8 +65,10 @@ fn rejects_invalid_utf8_and_oversized_input() {
         if value.category == InputRejectionCategory::InvalidEncoding));
 
     let oversized = command(&vec![b'x'; 4097]);
-    assert!(matches!(oversized, ApplicationCommand::RejectInput(ref value)
-        if value.category == InputRejectionCategory::Oversized));
+    assert!(
+        matches!(oversized, ApplicationCommand::RejectInput(ref value)
+        if value.category == InputRejectionCategory::Oversized)
+    );
 }
 
 #[test]

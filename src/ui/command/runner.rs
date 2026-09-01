@@ -1,13 +1,11 @@
 use std::{
     io::{self, BufRead, Write},
-    panic::{resume_unwind, AssertUnwindSafe},
-    sync::{
-        Arc, OnceLock,
-    },
+    panic::{AssertUnwindSafe, resume_unwind},
+    sync::{Arc, OnceLock},
     thread,
 };
 
-use crossbeam_channel::{bounded, never, select_biased, Receiver};
+use crossbeam_channel::{Receiver, bounded, never, select_biased};
 use thiserror::Error;
 
 #[cfg(windows)]
@@ -22,15 +20,13 @@ use crate::{
     runtime::{ApplicationRuntime, RuntimeClient, RuntimeError},
 };
 
-use super::{
-    parse_line,
-    reader::LineAccumulator,
-    BoundedLineReader, ParsedLine, RawLine, TextRenderer,
-};
 #[cfg(windows)]
 use super::windows::{
-    cancellation_decision, classify_read_error, may_begin_read, CancelAttempt, CancelDecision,
-    ReadErrorDisposition, ReadPhase,
+    CancelAttempt, CancelDecision, ReadErrorDisposition, ReadPhase, cancellation_decision,
+    classify_read_error, may_begin_read,
+};
+use super::{
+    BoundedLineReader, ParsedLine, RawLine, TextRenderer, parse_line, reader::LineAccumulator,
 };
 
 #[derive(Debug, Error)]
@@ -119,13 +115,8 @@ impl UnixLineSource {
     fn read_ready_stdin(&mut self) -> io::Result<Option<LineSourceEvent>> {
         let mut buffer = [0_u8; 8192];
         let amount = loop {
-            let amount = unsafe {
-                libc::read(
-                    self.input_fd,
-                    buffer.as_mut_ptr().cast(),
-                    buffer.len(),
-                )
-            };
+            let amount =
+                unsafe { libc::read(self.input_fd, buffer.as_mut_ptr().cast(), buffer.len()) };
             if amount >= 0 {
                 break amount as usize;
             }
@@ -196,10 +187,7 @@ impl CancellableLineSource for UnixLineSource {
                 return Err(error);
             }
             if descriptors[1].revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "input cancellation poll failed",
-                ));
+                return Err(io::Error::other("input cancellation poll failed"));
             }
             if descriptors[1].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
                 return Ok(LineSourceEvent::Cancelled);
@@ -211,15 +199,12 @@ impl CancellableLineSource for UnixLineSource {
                 ));
             }
             if descriptors[0].revents & libc::POLLERR != 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "terminal input poll failed",
-                ));
+                return Err(io::Error::other("terminal input poll failed"));
             }
-            if descriptors[0].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
-                if let Some(event) = self.read_ready_stdin()? {
-                    return Ok(event);
-                }
+            if descriptors[0].revents & (libc::POLLIN | libc::POLLHUP) != 0
+                && let Some(event) = self.read_ready_stdin()?
+            {
+                return Ok(event);
             }
         }
     }
@@ -235,8 +220,7 @@ mod windows_api {
     pub const WAIT_OBJECT_0: u32 = 0;
     pub const WAIT_FAILED: u32 = u32::MAX;
     pub const INFINITE: u32 = u32::MAX;
-    pub const THREAD_TERMINATE: u32 =
-        windows_sys::Win32::System::Threading::THREAD_TERMINATE;
+    pub const THREAD_TERMINATE: u32 = windows_sys::Win32::System::Threading::THREAD_TERMINATE;
     pub const ERROR_NOT_FOUND: u32 = 1168;
 
     #[link(name = "kernel32")]
@@ -249,11 +233,7 @@ mod windows_api {
             name: *const u16,
         ) -> Handle;
         pub fn SetEvent(event: Handle) -> i32;
-        pub fn OpenThread(
-            desired_access: u32,
-            inherit_handle: i32,
-            thread_id: u32,
-        ) -> Handle;
+        pub fn OpenThread(desired_access: u32, inherit_handle: i32, thread_id: u32) -> Handle;
         pub fn GetCurrentThreadId() -> u32;
         pub fn CancelSynchronousIo(thread: Handle) -> i32;
         pub fn CancelIoEx(file: Handle, overlapped: *mut c_void) -> i32;
@@ -294,7 +274,10 @@ struct WindowsReadState {
 impl WindowsCancellation {
     fn register_current_thread(&self) -> io::Result<()> {
         let mut state = self.state.lock().map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "input cancellation state is unavailable")
+            io::Error::new(
+                io::ErrorKind::Other,
+                "input cancellation state is unavailable",
+            )
         })?;
         if state.reader_thread.is_none() {
             let handle = unsafe {
@@ -328,9 +311,10 @@ impl WindowsCancellation {
             self.phase_changed.notify_all();
         }
 
-        let mut state = self.state.lock().map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "input read state is unavailable")
-        })?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "input read state is unavailable"))?;
         if !may_begin_read(self.was_cancelled()) {
             state.phase = ReadPhase::IdleWaiting;
             self.phase_changed.notify_all();
@@ -508,9 +492,7 @@ impl WindowsStdinLineSource {
         if input == 0 || input == windows_api::INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error());
         }
-        let event = unsafe {
-            windows_api::CreateEventW(std::ptr::null(), 1, 0, std::ptr::null())
-        };
+        let event = unsafe { windows_api::CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
         if event == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -649,8 +631,8 @@ impl StdioResources {
         }
         #[cfg(windows)]
         {
-            let source = WindowsStdinLineSource::stdin()
-                .map_err(|_| UiError::LineSourceUnavailable)?;
+            let source =
+                WindowsStdinLineSource::stdin().map_err(|_| UiError::LineSourceUnavailable)?;
             Ok(Self { interrupts, source })
         }
         #[cfg(not(any(unix, windows)))]
@@ -722,8 +704,7 @@ impl FallbackRunner {
         let pending = match self.client.try_submit(command) {
             Ok(pending) => pending,
             Err(error @ RuntimeError::Backpressure) => {
-                TextRenderer::render_runtime_error(&error, writer)
-                    .map_err(|_| UiError::Write)?;
+                TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write)?;
                 return Ok(None);
             }
             Err(error) => return Err(UiError::Runtime(error)),
@@ -772,18 +753,19 @@ impl FallbackHost {
         let source_thread = match thread::Builder::new()
             .name("fallback-input".to_owned())
             .spawn(move || {
-                let result = catch_sensitive_unwind(AssertUnwindSafe(|| loop {
-                    let event = source.next_line();
-                    let terminal = !matches!(event, Ok(LineSourceEvent::Line(_)));
-                    if line_sender.send(event).is_err() || terminal {
-                        return;
+                let result = catch_sensitive_unwind(AssertUnwindSafe(|| {
+                    loop {
+                        let event = source.next_line();
+                        let terminal = !matches!(event, Ok(LineSourceEvent::Line(_)));
+                        if line_sender.send(event).is_err() || terminal {
+                            return;
+                        }
                     }
                 }));
                 if let Err(payload) = result {
                     resume_unwind(payload);
                 }
-            })
-        {
+            }) {
             Ok(thread) => thread,
             Err(_) => {
                 let _ = self
@@ -809,9 +791,10 @@ impl FallbackHost {
 
         let (reason, body_error) = match body {
             Ok(Ok(reason)) if source_joined && !cancellation_failed => (reason, None),
-            Ok(Ok(_)) if !source_joined => {
-                (ShutdownReason::ApplicationError, Some(UiError::ReaderThread))
-            }
+            Ok(Ok(_)) if !source_joined => (
+                ShutdownReason::ApplicationError,
+                Some(UiError::ReaderThread),
+            ),
             Ok(Ok(_)) => (ShutdownReason::ApplicationError, Some(UiError::Read)),
             Ok(Err(error)) => (ShutdownReason::ApplicationError, Some(error)),
             Err(_) => (ShutdownReason::ApplicationError, Some(UiError::Panicked)),

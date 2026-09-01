@@ -3,8 +3,8 @@ mod support;
 use std::{
     io,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     },
     thread,
     time::Duration,
@@ -19,7 +19,7 @@ use ai_stock_forum::{
     domain::IdGenerator,
     runtime::{ApplicationRuntime, CommandExecutor, RuntimeError, RuntimeThreadSpawner},
 };
-use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use tempfile::TempDir;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -126,7 +126,10 @@ impl CommandExecutor for RecordingExecutor {
 struct FailingSpawner;
 
 impl RuntimeThreadSpawner for FailingSpawner {
-    fn spawn(&self, _task: Box<dyn FnOnce() + Send + 'static>) -> io::Result<thread::JoinHandle<()>> {
+    fn spawn(
+        &self,
+        _task: Box<dyn FnOnce() + Send + 'static>,
+    ) -> io::Result<thread::JoinHandle<()>> {
         Err(io::Error::other("injected thread creation failure"))
     }
 }
@@ -146,7 +149,9 @@ fn generic_runtime_spawn_executes_commands_and_preserves_response_correlation() 
     assert!(matches!(status.view, CommandView::Status(_)));
     assert_ne!(help.command_id, status.command_id);
     assert_ne!(help.correlation_id, status.correlation_id);
-    runtime.finish_and_join(ShutdownReason::InputClosed).unwrap();
+    runtime
+        .finish_and_join(ShutdownReason::InputClosed)
+        .unwrap();
 }
 
 #[test]
@@ -184,7 +189,9 @@ fn capacity_one_accepts_the_second_queued_command_and_rejects_the_third() {
         second.recv(),
         Err(RuntimeError::Application(AppError::LifecycleFinished))
     );
-    runtime.finish_and_join(ShutdownReason::InputClosed).unwrap();
+    runtime
+        .finish_and_join(ShutdownReason::InputClosed)
+        .unwrap();
     assert_eq!(
         *seen.lock().unwrap(),
         vec![ApplicationCommand::ShowHelp, ApplicationCommand::ShowStatus]
@@ -313,12 +320,8 @@ fn owner_drop_closes_surviving_clients_and_releases_the_application_guard() {
     for _ in 0..32 {
         replacement_ids.next_uuid();
     }
-    ApplicationService::bootstrap(
-        &paths,
-        Arc::new(support::TestClock::new()),
-        replacement_ids,
-    )
-    .unwrap();
+    ApplicationService::bootstrap(&paths, Arc::new(support::TestClock::new()), replacement_ids)
+        .unwrap();
     drop(directory);
 }
 
@@ -344,7 +347,11 @@ fn submit_and_shutdown_race_accepts_at_most_one_fifo_command() {
     thread::spawn(move || {
         receive(&submit_go);
         submitted_sender
-            .send(submit_client.try_submit(ApplicationCommand::ShowHelp).map(|_| ()))
+            .send(
+                submit_client
+                    .try_submit(ApplicationCommand::ShowHelp)
+                    .map(|_| ()),
+            )
             .unwrap();
     });
     let (shutdown_sender, shutdown) = bounded(1);
@@ -380,8 +387,15 @@ fn dropped_outcomes_do_not_drop_accepted_work() {
     )
     .unwrap();
 
-    drop(runtime.client().try_submit(ApplicationCommand::ShowHelp).unwrap());
-    runtime.finish_and_join(ShutdownReason::InputClosed).unwrap();
+    drop(
+        runtime
+            .client()
+            .try_submit(ApplicationCommand::ShowHelp)
+            .unwrap(),
+    );
+    runtime
+        .finish_and_join(ShutdownReason::InputClosed)
+        .unwrap();
     assert_eq!(*seen.lock().unwrap(), vec![ApplicationCommand::ShowHelp]);
     assert_eq!(finishes.load(Ordering::SeqCst), 1);
 }
@@ -448,7 +462,9 @@ fn submit_blocks_for_capacity_then_returns_its_own_typed_outcome() {
         receive(&submitted),
         Err(RuntimeError::Application(AppError::LifecycleFinished))
     );
-    runtime.finish_and_join(ShutdownReason::InputClosed).unwrap();
+    runtime
+        .finish_and_join(ShutdownReason::InputClosed)
+        .unwrap();
     assert_eq!(
         *seen.lock().unwrap(),
         vec![
@@ -575,8 +591,13 @@ fn forced_submit_shutdown_orders_complete_or_reject_without_lost_work() {
         1,
     )
     .unwrap();
-    let pending = runtime.client().try_submit(ApplicationCommand::ShowHelp).unwrap();
-    runtime.finish_and_join(ShutdownReason::InputClosed).unwrap();
+    let pending = runtime
+        .client()
+        .try_submit(ApplicationCommand::ShowHelp)
+        .unwrap();
+    runtime
+        .finish_and_join(ShutdownReason::InputClosed)
+        .unwrap();
     assert_eq!(
         pending.recv(),
         Err(RuntimeError::Application(AppError::LifecycleFinished))
@@ -594,7 +615,9 @@ fn forced_submit_shutdown_orders_complete_or_reject_without_lost_work() {
         1,
     )
     .unwrap();
-    runtime.finish_and_join(ShutdownReason::InputClosed).unwrap();
+    runtime
+        .finish_and_join(ShutdownReason::InputClosed)
+        .unwrap();
     assert!(matches!(
         runtime.client().try_submit(ApplicationCommand::ShowHelp),
         Err(RuntimeError::Closed)

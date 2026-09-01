@@ -1,12 +1,12 @@
 use std::str::FromStr;
 
-use rusqlite::{params, Connection, Error as SqliteError, ErrorCode, OptionalExtension, Row};
+use rusqlite::{Connection, Error as SqliteError, ErrorCode, OptionalExtension, Row, params};
 use thiserror::Error;
 
 use crate::{
     app::{
-        envelope_from_pending, AuditLimit, EventEnvelope, EventEnvelopeWire, PendingEvent,
-        EVENT_SCHEMA_VERSION,
+        AuditLimit, EVENT_SCHEMA_VERSION, EventEnvelope, EventEnvelopeWire, PendingEvent,
+        envelope_from_pending,
     },
     domain::{CausationId, EventId, ObjectRef, ObjectVersion, Sha256Digest},
 };
@@ -85,7 +85,8 @@ impl EventRepository {
             .map(|(sequence, digest)| {
                 Ok((
                     u64::try_from(sequence).map_err(|_| PersistenceError::InvalidEventRecord)?,
-                    Sha256Digest::parse(&digest).map_err(|_| PersistenceError::InvalidEventRecord)?,
+                    Sha256Digest::parse(&digest)
+                        .map_err(|_| PersistenceError::InvalidEventRecord)?,
                 ))
             })
             .transpose()?;
@@ -120,16 +121,22 @@ impl EventRepository {
         );
         match result {
             Ok(_) => Ok(envelope),
-            Err(error) if is_constraint(&error) => match load_by_event_id(transaction, envelope.event_id)? {
-                Some(existing) => replay_or_conflict(existing, &pending_from(&envelope)),
-                None => Err(map_sqlite(error)),
-            },
+            Err(error) if is_constraint(&error) => {
+                match load_by_event_id(transaction, envelope.event_id)? {
+                    Some(existing) => replay_or_conflict(existing, &pending_from(&envelope)),
+                    None => Err(map_sqlite(error)),
+                }
+            }
             Err(error) => Err(map_sqlite(error)),
         }
     }
 
     pub fn load_all(connection: &Connection) -> Result<Vec<EventEnvelope>, RecoveryError> {
-        load_query(connection, &format!("SELECT {EVENT_COLUMNS} FROM event_stream ORDER BY sequence"), [])
+        load_query(
+            connection,
+            &format!("SELECT {EVENT_COLUMNS} FROM event_stream ORDER BY sequence"),
+            [],
+        )
     }
 
     pub fn tail(
@@ -149,8 +156,8 @@ impl EventRepository {
         limit: AuditLimit,
         through_sequence: u64,
     ) -> Result<Vec<EventEnvelope>, PersistenceError> {
-        let through_sequence = i64::try_from(through_sequence)
-            .map_err(|_| PersistenceError::InvalidEventRecord)?;
+        let through_sequence =
+            i64::try_from(through_sequence).map_err(|_| PersistenceError::InvalidEventRecord)?;
         load_query(
             connection,
             &format!("SELECT {EVENT_COLUMNS} FROM (SELECT {EVENT_COLUMNS} FROM event_stream WHERE sequence <= ?1 ORDER BY sequence DESC LIMIT ?2) ORDER BY sequence"),
@@ -205,8 +212,12 @@ fn load_query<P: rusqlite::Params>(
     query: &str,
     parameters: P,
 ) -> Result<Vec<EventEnvelope>, RecoveryError> {
-    let mut statement = connection.prepare(query).map_err(|_| RecoveryError::QueryFailed)?;
-    let mut rows = statement.query(parameters).map_err(|_| RecoveryError::QueryFailed)?;
+    let mut statement = connection
+        .prepare(query)
+        .map_err(|_| RecoveryError::QueryFailed)?;
+    let mut rows = statement
+        .query(parameters)
+        .map_err(|_| RecoveryError::QueryFailed)?;
     let mut events = Vec::new();
     while let Some(row) = rows.next().map_err(|_| RecoveryError::QueryFailed)? {
         events.push(decode_row(row)?);
@@ -220,9 +231,13 @@ fn load_by_event_id(
 ) -> Result<Option<EventEnvelope>, PersistenceError> {
     let mut statement = transaction
         .transaction()
-        .prepare(&format!("SELECT {EVENT_COLUMNS} FROM event_stream WHERE event_id = ?1"))
+        .prepare(&format!(
+            "SELECT {EVENT_COLUMNS} FROM event_stream WHERE event_id = ?1"
+        ))
         .map_err(map_sqlite)?;
-    let mut rows = statement.query([event_id.to_string()]).map_err(map_sqlite)?;
+    let mut rows = statement
+        .query([event_id.to_string()])
+        .map_err(map_sqlite)?;
     match rows.next().map_err(map_sqlite)? {
         Some(row) => decode_row(row).map(Some).map_err(persistence_from_recovery),
         None => Ok(None),
@@ -262,24 +277,43 @@ fn pending_from(envelope: &EventEnvelope) -> PendingEvent {
 }
 
 fn decode_row(row: &Row<'_>) -> Result<EventEnvelope, RecoveryError> {
-    let sequence = u64::try_from(row.get::<_, i64>(0).map_err(|_| RecoveryError::QueryFailed)?)
-        .map_err(|_| RecoveryError::InvalidEventRecord)?;
-    let event_schema_version = u16::try_from(row.get::<_, i64>(2).map_err(|_| RecoveryError::QueryFailed)?)
-        .map_err(|_| RecoveryError::InvalidEventRecord)?;
+    let sequence = u64::try_from(
+        row.get::<_, i64>(0)
+            .map_err(|_| RecoveryError::QueryFailed)?,
+    )
+    .map_err(|_| RecoveryError::InvalidEventRecord)?;
+    let event_schema_version = u16::try_from(
+        row.get::<_, i64>(2)
+            .map_err(|_| RecoveryError::QueryFailed)?,
+    )
+    .map_err(|_| RecoveryError::InvalidEventRecord)?;
     if event_schema_version != EVENT_SCHEMA_VERSION {
         return Err(RecoveryError::UnsupportedEventSchema);
     }
-    let actor = parse_actor(&row.get::<_, String>(4).map_err(|_| RecoveryError::QueryFailed)?)?;
-    if row.get::<_, Option<String>>(5).map_err(|_| RecoveryError::QueryFailed)?.is_some() {
+    let actor = parse_actor(
+        &row.get::<_, String>(4)
+            .map_err(|_| RecoveryError::QueryFailed)?,
+    )?;
+    if row
+        .get::<_, Option<String>>(5)
+        .map_err(|_| RecoveryError::QueryFailed)?
+        .is_some()
+    {
         return Err(RecoveryError::InvalidEventRecord);
     }
     let wire = EventEnvelopeWire {
         sequence,
-        event_id: parse_id(row.get::<_, String>(1).map_err(|_| RecoveryError::QueryFailed)?)?,
+        event_id: parse_id(
+            row.get::<_, String>(1)
+                .map_err(|_| RecoveryError::QueryFailed)?,
+        )?,
         event_schema_version,
         actor,
         occurred_at_ms: row.get(6).map_err(|_| RecoveryError::QueryFailed)?,
-        correlation_id: parse_id(row.get::<_, String>(7).map_err(|_| RecoveryError::QueryFailed)?)?,
+        correlation_id: parse_id(
+            row.get::<_, String>(7)
+                .map_err(|_| RecoveryError::QueryFailed)?,
+        )?,
         causation_id: row
             .get::<_, Option<String>>(8)
             .map_err(|_| RecoveryError::QueryFailed)?
@@ -291,10 +325,13 @@ fn decode_row(row: &Row<'_>) -> Result<EventEnvelope, RecoveryError> {
         previous_event_digest: row
             .get::<_, Option<String>>(13)
             .map_err(|_| RecoveryError::QueryFailed)?
-            .map(|digest| Sha256Digest::parse(&digest).map_err(|_| RecoveryError::InvalidEventRecord))
+            .map(|digest| {
+                Sha256Digest::parse(&digest).map_err(|_| RecoveryError::InvalidEventRecord)
+            })
             .transpose()?,
         event_digest: Sha256Digest::parse(
-            &row.get::<_, String>(15).map_err(|_| RecoveryError::QueryFailed)?,
+            &row.get::<_, String>(15)
+                .map_err(|_| RecoveryError::QueryFailed)?,
         )
         .map_err(|_| RecoveryError::InvalidEventRecord)?,
     };
@@ -302,17 +339,27 @@ fn decode_row(row: &Row<'_>) -> Result<EventEnvelope, RecoveryError> {
 }
 
 fn decode_object(row: &Row<'_>) -> Result<Option<ObjectRef>, RecoveryError> {
-    let kind = row.get::<_, Option<String>>(9).map_err(|_| RecoveryError::QueryFailed)?;
-    let id = row.get::<_, Option<String>>(10).map_err(|_| RecoveryError::QueryFailed)?;
-    let version = row.get::<_, Option<i64>>(11).map_err(|_| RecoveryError::QueryFailed)?;
-    let digest = row.get::<_, Option<String>>(12).map_err(|_| RecoveryError::QueryFailed)?;
+    let kind = row
+        .get::<_, Option<String>>(9)
+        .map_err(|_| RecoveryError::QueryFailed)?;
+    let id = row
+        .get::<_, Option<String>>(10)
+        .map_err(|_| RecoveryError::QueryFailed)?;
+    let version = row
+        .get::<_, Option<i64>>(11)
+        .map_err(|_| RecoveryError::QueryFailed)?;
+    let digest = row
+        .get::<_, Option<String>>(12)
+        .map_err(|_| RecoveryError::QueryFailed)?;
     match (kind, id, version, digest) {
         (None, None, None, None) => Ok(None),
         (Some(kind), Some(id), Some(version), Some(digest)) => ObjectRef::new(
             kind,
             id,
-            ObjectVersion::new(u64::try_from(version).map_err(|_| RecoveryError::InvalidEventRecord)?)
-                .map_err(|_| RecoveryError::InvalidEventRecord)?,
+            ObjectVersion::new(
+                u64::try_from(version).map_err(|_| RecoveryError::InvalidEventRecord)?,
+            )
+            .map_err(|_| RecoveryError::InvalidEventRecord)?,
             Sha256Digest::parse(&digest).map_err(|_| RecoveryError::InvalidEventRecord)?,
         )
         .map(Some)
@@ -347,7 +394,10 @@ fn is_constraint(error: &SqliteError) -> bool {
 fn map_sqlite(error: SqliteError) -> PersistenceError {
     match error {
         SqliteError::SqliteFailure(error, _)
-            if matches!(error.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) =>
+            if matches!(
+                error.code,
+                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+            ) =>
         {
             PersistenceError::Contention
         }

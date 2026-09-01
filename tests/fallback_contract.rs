@@ -25,11 +25,11 @@ use ai_stock_forum::{
     runtime::{ApplicationRuntime, CommandExecutor, RuntimeError},
     setup::SetupStatus,
     ui::command::{
-        parse_line, BoundedLineReader, CancellableLineSource, FallbackHost, FallbackRunner,
-        LineSourceCancellation, LineSourceEvent, ParsedLine, TextRenderer, UiError,
+        BoundedLineReader, CancellableLineSource, FallbackHost, FallbackRunner,
+        LineSourceCancellation, LineSourceEvent, ParsedLine, TextRenderer, UiError, parse_line,
     },
 };
-use crossbeam_channel::{bounded, never, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, bounded, never};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -110,10 +110,7 @@ fn outcome_for(command: ApplicationCommand) -> CommandOutcome {
             }),
             ShutdownDisposition::Requested,
         ),
-        _ => outcome(
-            CommandView::Help(HelpView),
-            ShutdownDisposition::Continue,
-        ),
+        _ => outcome(CommandView::Help(HelpView), ShutdownDisposition::Continue),
     }
 }
 
@@ -163,13 +160,13 @@ struct FailingReader;
 
 impl Read for FailingReader {
     fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
-        Err(io::Error::new(io::ErrorKind::Other, "secret reader detail"))
+        Err(io::Error::other("secret reader detail"))
     }
 }
 
 impl BufRead for FailingReader {
     fn fill_buf(&mut self) -> io::Result<&[u8]> {
-        Err(io::Error::new(io::ErrorKind::Other, "secret reader detail"))
+        Err(io::Error::other("secret reader detail"))
     }
 
     fn consume(&mut self, _amount: usize) {}
@@ -339,7 +336,10 @@ fn eof_without_a_line_records_input_closed() {
         .run(Cursor::new(Vec::<u8>::new()), Vec::new())
         .unwrap();
     runtime.finish_and_join(reason);
-    assert_eq!(runtime.last_shutdown_reason().as_deref(), Some("input_closed"));
+    assert_eq!(
+        runtime.last_shutdown_reason().as_deref(),
+        Some("input_closed")
+    );
 }
 
 struct RecordingExecutor {
@@ -393,11 +393,17 @@ struct FailingWriter;
 
 impl Write for FailingWriter {
     fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
-        Err(io::Error::new(io::ErrorKind::BrokenPipe, "secret write detail"))
+        Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "secret write detail",
+        ))
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::BrokenPipe, "secret write detail"))
+        Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "secret write detail",
+        ))
     }
 }
 
@@ -569,7 +575,10 @@ fn runner_reports_backpressure_without_reordering_or_blocking_input() {
         .run(Cursor::new(b"/help\n".to_vec()), &mut output)
         .unwrap();
     assert_eq!(reason, ShutdownReason::InputClosed);
-    assert_eq!(String::from_utf8(output).unwrap(), "Command queue is busy; try again.\n");
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "Command queue is busy; try again.\n"
+    );
 
     release_sender.send(()).unwrap();
     first.recv().unwrap();
@@ -641,12 +650,17 @@ fn binary_smoke_quit_and_eof_exit_successfully() {
         fs::create_dir_all(&home).unwrap();
         fs::create_dir_all(&xdg).unwrap();
         let output = binary_output(&home, &xdg, input);
-        assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert!(!String::from_utf8_lossy(&output.stderr).contains("sqlite"));
         let next = binary_output(&home, &xdg, b"/quit\n");
         assert!(next.status.success());
-        assert!(!String::from_utf8_lossy(&next.stdout)
-            .contains("previous session ended unexpectedly"));
+        assert!(
+            !String::from_utf8_lossy(&next.stdout).contains("previous session ended unexpectedly")
+        );
     }
 }
 
@@ -687,7 +701,9 @@ fn binary_prints_previous_session_warning_once_then_finishes_cleanly() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert_eq!(
-        stdout.matches("Warning: the previous session ended unexpectedly.").count(),
+        stdout
+            .matches("Warning: the previous session ended unexpectedly.")
+            .count(),
         1
     );
 }

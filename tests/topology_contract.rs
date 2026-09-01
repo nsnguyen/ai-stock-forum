@@ -1,6 +1,6 @@
 use ai_stock_forum::{
-    agents, app, audit, config, domains, jobs, mcp, memory, persistence, policy,
-    providers, recovery, rooms, runtime, runtimes, setup, skills, ui,
+    agents, app, audit, config, domains, jobs, mcp, memory, persistence, policy, providers,
+    recovery, rooms, runtime, runtimes, setup, skills, ui,
 };
 
 #[test]

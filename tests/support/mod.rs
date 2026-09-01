@@ -3,12 +3,13 @@
 use ai_stock_forum::{
     app::{
         ApplicationEvent, ApplicationService, ApplicationWorker, AuthorizationDecision,
-        CommandPolicy, CommandTransactionHook, PendingEvent, ShutdownReason,
-        EVENT_SCHEMA_VERSION,
+        CommandPolicy, CommandTransactionHook, EVENT_SCHEMA_VERSION, PendingEvent, ShutdownReason,
     },
     config::AppPaths,
     domain::{Actor, Clock, CorrelationId, EventId, IdGenerator},
-    persistence::{Database, EventRepository, PersistenceError},
+    persistence::{
+        Database, EventRepository, PersistenceError, ProjectionRepository, RecoveryError,
+    },
     policy::Capability,
     runtime::{ApplicationRuntime, RuntimeClient},
 };
@@ -16,8 +17,8 @@ use rusqlite::Connection;
 use std::{
     ops::{Deref, DerefMut},
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Barrier, Mutex,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 use tempfile::TempDir;
@@ -54,12 +55,9 @@ impl RuntimeFixture {
 pub fn runtime() -> RuntimeFixture {
     let temporary_directory = tempfile::tempdir().unwrap();
     let paths = AppPaths::for_test(temporary_directory.path());
-    let service = ApplicationService::bootstrap(
-        &paths,
-        Arc::new(TestClock::new()),
-        Arc::new(TestIds::new()),
-    )
-    .unwrap();
+    let service =
+        ApplicationService::bootstrap(&paths, Arc::new(TestClock::new()), Arc::new(TestIds::new()))
+            .unwrap();
     let session_id = service.session_id();
     let runtime = ApplicationRuntime::spawn_application(service, 32).unwrap();
     RuntimeFixture {
@@ -67,6 +65,76 @@ pub fn runtime() -> RuntimeFixture {
         paths,
         session_id,
         runtime,
+    }
+}
+
+pub struct PersistentFixture {
+    _temporary_directory: TempDir,
+    paths: AppPaths,
+    clock: Arc<TestClock>,
+    ids: Arc<TestIds>,
+}
+
+impl PersistentFixture {
+    pub fn runtime(&self) -> ApplicationRuntime {
+        let service =
+            ApplicationService::bootstrap(&self.paths, self.clock.clone(), self.ids.clone())
+                .unwrap();
+        ApplicationRuntime::spawn_application(service, 32).unwrap()
+    }
+
+    pub fn installation_id(&self) -> ai_stock_forum::domain::InstallationId {
+        let database = Database::open(&self.paths).unwrap();
+        ProjectionRepository::load(database.connection())
+            .unwrap()
+            .installation
+            .unwrap()
+            .installation_id
+    }
+
+    pub fn event_count_all(&self) -> i64 {
+        self.count_rows("event_stream")
+    }
+
+    pub fn count_rows(&self, table: &str) -> i64 {
+        assert!(matches!(
+            table,
+            "event_stream" | "setup_drafts" | "installation_configuration_versions"
+        ));
+        Database::open(&self.paths)
+            .unwrap()
+            .connection()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    pub fn verify_event_stream(&self) -> Result<(), RecoveryError> {
+        let database = Database::open(&self.paths).unwrap();
+        EventRepository::verify(database.connection())
+    }
+
+    pub fn assert_projection_matches_replay(&self) {
+        let database = Database::open(&self.paths).unwrap();
+        let events = EventRepository::load_all(database.connection()).unwrap();
+        let mut replayed = ai_stock_forum::recovery::ProjectionState::default();
+        for event in &events {
+            ai_stock_forum::recovery::reduce(&mut replayed, event).unwrap();
+        }
+        let persisted = ProjectionRepository::load(database.connection()).unwrap();
+        assert_eq!(persisted, replayed);
+    }
+}
+
+pub fn persistent_fixture() -> PersistentFixture {
+    let temporary_directory = tempfile::tempdir().unwrap();
+    let paths = AppPaths::for_test(temporary_directory.path());
+    PersistentFixture {
+        _temporary_directory: temporary_directory,
+        paths,
+        clock: Arc::new(TestClock::new()),
+        ids: Arc::new(TestIds::new()),
     }
 }
 
@@ -378,7 +446,9 @@ impl TestApp {
         ));
         Connection::open(self.paths.database_path())
             .unwrap()
-            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
             .unwrap()
     }
 
@@ -415,7 +485,10 @@ impl TestApp {
             .unwrap()
     }
 
-    pub fn receipt_row(&self, command_id: ai_stock_forum::domain::CommandId) -> (String, String, String, String, String) {
+    pub fn receipt_row(
+        &self,
+        command_id: ai_stock_forum::domain::CommandId,
+    ) -> (String, String, String, String, String) {
         Connection::open(self.paths.database_path())
             .unwrap()
             .query_row(
@@ -450,7 +523,9 @@ impl TestApp {
             )
             .unwrap();
         statement
-            .query_map([command_id.to_string()], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_map([command_id.to_string()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
             .unwrap()
             .map(Result::unwrap)
             .collect()
@@ -499,10 +574,7 @@ impl TestApp {
         transaction.commit().unwrap();
     }
 
-    pub fn shift_event_ref_to_ordinal_one(
-        &self,
-        command_id: ai_stock_forum::domain::CommandId,
-    ) {
+    pub fn shift_event_ref_to_ordinal_one(&self, command_id: ai_stock_forum::domain::CommandId) {
         Connection::open(self.paths.database_path())
             .unwrap()
             .execute_batch(&format!(
@@ -677,7 +749,9 @@ impl TestApp {
                     .unwrap();
             }
             ReceiptTamper::MalformedReference => {
-                connection.pragma_update(None, "foreign_keys", "OFF").unwrap();
+                connection
+                    .pragma_update(None, "foreign_keys", "OFF")
+                    .unwrap();
                 connection
                     .execute(
                         "UPDATE command_event_refs SET event_id = 'not-an-event-id' WHERE command_id = ?1",

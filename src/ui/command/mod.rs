@@ -5,12 +5,12 @@ mod runner;
 #[cfg(any(windows, test))]
 mod windows;
 
-pub use parser::{parse_line, ParsedLine};
+pub use parser::{ParsedLine, parse_line};
 pub use reader::{BoundedLineReader, RawLine};
 pub use renderer::TextRenderer;
-pub use runner::{
-    run_stdio, CancellableLineSource, FallbackHost, FallbackRunner, LineSourceCancellation,
-    LineSourceEvent, StdioResources, UiError,
-};
 #[cfg(unix)]
 pub use runner::UnixLineSource;
+pub use runner::{
+    CancellableLineSource, FallbackHost, FallbackRunner, LineSourceCancellation, LineSourceEvent,
+    StdioResources, UiError, run_stdio,
+};

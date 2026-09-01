@@ -48,10 +48,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        panic::AssertUnwindSafe,
-        process::Command,
-    };
+    use std::{panic::AssertUnwindSafe, process::Command};
 
     const CHILD_ENV: &str = "AI_STOCK_FORUM_SENSITIVE_PANIC_CHILD";
     const SECRET: &str = "credential=round-two-secret-panic-payload";

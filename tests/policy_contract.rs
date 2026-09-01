@@ -1,10 +1,10 @@
 use ai_stock_forum::app::{ApplicationCommand, InputRejection, InputRejectionCategory, SafeToken};
-use ai_stock_forum::domain::{sha256, Actor, ApprovalId, ObjectRef, ObjectVersion};
+use ai_stock_forum::domain::{Actor, ApprovalId, ObjectRef, ObjectVersion, sha256};
 use ai_stock_forum::policy::{
-    evaluate, ApprovalAction, ApprovalError, ApprovalRecord, ApprovalRecordBuilder,
-    ApprovalResolution, ApprovalStatus, Capability, Effect, PolicyDecision, PolicyRule,
+    ApprovalAction, ApprovalError, ApprovalRecord, ApprovalRecordBuilder, ApprovalResolution,
+    ApprovalStatus, Capability, Effect, PolicyDecision, PolicyRule, evaluate,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 fn object() -> ObjectRef {
@@ -135,8 +135,8 @@ fn commands_map_to_exact_safe_capabilities() {
 fn approval_requires_an_exact_object_and_pending_status() {
     assert_eq!(
         ApprovalRecord::builder(ApprovalAction::GitPush)
-        .build()
-        .unwrap_err(),
+            .build()
+            .unwrap_err(),
         ApprovalError::MissingApprovalId
     );
     assert!(!ApprovalStatus::Pending.is_terminal());
@@ -221,17 +221,11 @@ fn approval_builder_rejects_non_pending_creation_and_invalid_expiry() {
         ApprovalError::InitialResolutionNotAllowed
     );
     assert_eq!(
-        builder()
-            .expires_at_millis(100)
-            .build()
-            .unwrap_err(),
+        builder().expires_at_millis(100).build().unwrap_err(),
         ApprovalError::ExpiryMustFollowCreation
     );
     assert_eq!(
-        builder()
-            .expires_at_millis(99)
-            .build()
-            .unwrap_err(),
+        builder().expires_at_millis(99).build().unwrap_err(),
         ApprovalError::ExpiryMustFollowCreation
     );
 }
@@ -241,7 +235,10 @@ fn valid_approval_records_round_trip_through_serde() {
     let record = valid_record();
     let encoded = serde_json::to_string(&record).unwrap();
 
-    assert_eq!(serde_json::from_str::<ApprovalRecord>(&encoded).unwrap(), record);
+    assert_eq!(
+        serde_json::from_str::<ApprovalRecord>(&encoded).unwrap(),
+        record
+    );
 }
 
 #[test]

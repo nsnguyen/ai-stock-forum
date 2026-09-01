@@ -53,7 +53,6 @@ impl AppPaths {
             ensure_portable(&self.state_dir)
         }
     }
-
 }
 
 #[cfg(unix)]
@@ -61,7 +60,7 @@ fn ensure_unix(path: &Path) -> Result<(), StartupError> {
     use std::os::fd::AsFd;
     use std::path::Component;
 
-    use rustix::fs::{fchmod, fstat, mkdirat, openat, CWD, FileType, Mode, OFlags};
+    use rustix::fs::{CWD, FileType, Mode, OFlags, fchmod, fstat, mkdirat, openat};
 
     #[cfg(target_os = "macos")]
     let walk_path = macos_walk_path(path);
@@ -108,8 +107,7 @@ fn ensure_unix(path: &Path) -> Result<(), StartupError> {
         return Err(StartupError::StateDirectoryUnavailable);
     }
 
-    fchmod(&current, Mode::from_raw_mode(0o700))
-        .map_err(|_| StartupError::StatePermissions)?;
+    fchmod(&current, Mode::from_raw_mode(0o700)).map_err(|_| StartupError::StatePermissions)?;
     let state = fstat(current.as_fd()).map_err(|_| StartupError::StatePermissions)?;
     if FileType::from_raw_mode(state.st_mode) != FileType::Directory
         || state.st_mode & 0o777 != 0o700
@@ -134,8 +132,7 @@ fn ensure_unix(path: &Path) -> Result<(), StartupError> {
     if FileType::from_raw_mode(database_stat.st_mode) != FileType::RegularFile {
         return Err(StartupError::StateDirectoryUnavailable);
     }
-    fchmod(&database, Mode::from_raw_mode(0o600))
-        .map_err(|_| StartupError::StatePermissions)?;
+    fchmod(&database, Mode::from_raw_mode(0o600)).map_err(|_| StartupError::StatePermissions)?;
     let database_stat = fstat(database.as_fd()).map_err(|_| StartupError::StatePermissions)?;
     if FileType::from_raw_mode(database_stat.st_mode) != FileType::RegularFile
         || database_stat.st_mode & 0o777 != 0o600
@@ -167,8 +164,8 @@ fn ensure_portable(path: &Path) -> Result<(), StartupError> {
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             fs::create_dir_all(path).map_err(|_| StartupError::StateDirectoryUnavailable)?;
-            let metadata = fs::symlink_metadata(path)
-                .map_err(|_| StartupError::StateDirectoryUnavailable)?;
+            let metadata =
+                fs::symlink_metadata(path).map_err(|_| StartupError::StateDirectoryUnavailable)?;
             if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
                 return Err(StartupError::StateDirectoryUnavailable);
             }

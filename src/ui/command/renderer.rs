@@ -89,17 +89,11 @@ impl TextRenderer {
         }
     }
 
-    pub fn render_startup_error<W: Write>(
-        error: StartupError,
-        writer: &mut W,
-    ) -> io::Result<()> {
+    pub fn render_startup_error<W: Write>(error: StartupError, writer: &mut W) -> io::Result<()> {
         writeln!(writer, "Startup failed [{}].", error.code())
     }
 
-    pub fn render_runtime_error<W: Write>(
-        error: &RuntimeError,
-        writer: &mut W,
-    ) -> io::Result<()> {
+    pub fn render_runtime_error<W: Write>(error: &RuntimeError, writer: &mut W) -> io::Result<()> {
         let message = match error {
             RuntimeError::InvalidCapacity => "Runtime configuration is invalid.",
             RuntimeError::Backpressure => "Command queue is busy; try again.",
@@ -131,10 +125,7 @@ impl TextRenderer {
         writer.write_all(b"Warning: the previous session ended unexpectedly.\n")
     }
 
-    pub fn render_ui_error<W: Write>(
-        error: &super::UiError,
-        writer: &mut W,
-    ) -> io::Result<()> {
+    pub fn render_ui_error<W: Write>(error: &super::UiError, writer: &mut W) -> io::Result<()> {
         match error {
             super::UiError::Read => writer.write_all(b"Input could not be read.\n"),
             super::UiError::Write => writer.write_all(b"Output could not be written.\n"),
@@ -148,9 +139,7 @@ impl TextRenderer {
             super::UiError::LineSourceUnavailable => {
                 writer.write_all(b"Terminal input is unavailable on this platform.\n")
             }
-            super::UiError::Panicked => {
-                writer.write_all(b"Command host stopped unexpectedly.\n")
-            }
+            super::UiError::Panicked => writer.write_all(b"Command host stopped unexpectedly.\n"),
         }
     }
 }

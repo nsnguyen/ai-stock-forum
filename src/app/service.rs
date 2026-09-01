@@ -1,25 +1,26 @@
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
     app::{
         AppError, ApplicationCommand, ApplicationEvent, AuditTailView, CommandEnvelope,
-        CommandOutcome, CommandView, HelpView, InputRejectedView, PendingEvent, SetupStatusView,
-        ShutdownDisposition, ShutdownReason, ShutdownView, StatusView, EVENT_SCHEMA_VERSION,
+        CommandOutcome, CommandView, EVENT_SCHEMA_VERSION, HelpView, InputRejectedView,
+        PendingEvent, SetupStatusView, ShutdownDisposition, ShutdownReason, ShutdownView,
+        StatusView,
     },
     audit::AuditEntry,
     config::{AppPaths, StartupError},
     domain::{
-        canonical_json_bytes, sha256, Actor, CausationId, Clock, CommandId, CorrelationId,
-        EventId, IdGenerator, SessionId, Sha256Digest,
+        Actor, CausationId, Clock, CommandId, CorrelationId, EventId, IdGenerator, SessionId,
+        Sha256Digest, canonical_json_bytes, sha256,
     },
     persistence::{
         CommandReceiptRecord, CommandReceiptRepository, Database, EventRepository,
         ImmediateTransaction, PersistenceError, ProjectionRepository, RecoveryError,
     },
-    policy::{evaluate, Capability, Effect, PolicyDecision, PolicyRule},
-    recovery::{reduce, BootstrapState, ProjectionState, RecoveryCoordinator},
+    policy::{Capability, Effect, PolicyDecision, PolicyRule, evaluate},
+    recovery::{BootstrapState, ProjectionState, RecoveryCoordinator, reduce},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,14 +147,23 @@ impl StoredPolicyDecision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 enum StoredExecution {
-    Success { outcome: CommandOutcome },
+    Success {
+        outcome: CommandOutcome,
+    },
     CapabilityDenied {
         capability: Capability,
         decision: PolicyDecision,
     },
-    ApprovalRequired { capability: Capability },
+    ApprovalRequired {
+        capability: Capability,
+    },
 }
 
 impl StoredExecution {
@@ -167,9 +177,7 @@ impl StoredExecution {
                 capability,
                 decision,
             }),
-            Self::ApprovalRequired { capability } => {
-                Err(AppError::ApprovalRequired { capability })
-            }
+            Self::ApprovalRequired { capability } => Err(AppError::ApprovalRequired { capability }),
         }
     }
 }
@@ -245,12 +253,8 @@ impl ApplicationService {
         hook: Arc<dyn CommandTransactionHook>,
     ) -> Result<Self, StartupError> {
         let mut database = Database::open(paths)?;
-        let state = RecoveryCoordinator::bootstrap(
-            &mut database,
-            clock.as_ref(),
-            ids.as_ref(),
-            &[],
-        )?;
+        let state =
+            RecoveryCoordinator::bootstrap(&mut database, clock.as_ref(), ids.as_ref(), &[])?;
         let lifecycle = Arc::new(SharedLifecycle {
             session_id: state.session_id(),
             phase: RwLock::new(LifecyclePhase::Open),
@@ -538,10 +542,8 @@ fn validate_receipt(
                 })
                 .collect::<Result<Vec<_>, AppError>>()?;
             let last = events.last().ok_or_else(invalid_receipt)?;
-            let projection = ProjectionRepository::load_at(
-                transaction.transaction(),
-                last.sequence,
-            )?;
+            let projection =
+                ProjectionRepository::load_at(transaction.transaction(), last.sequence)?;
             let expected = materialize_success(
                 transaction,
                 receipt.command_id,
@@ -600,10 +602,9 @@ fn materialize_success(
         return Err(invalid_receipt());
     }
     let (view, shutdown) = match (&request.command, &event.event) {
-        (ApplicationCommand::ShowHelp, ApplicationEvent::HelpViewed) => (
-            CommandView::Help(HelpView),
-            ShutdownDisposition::Continue,
-        ),
+        (ApplicationCommand::ShowHelp, ApplicationEvent::HelpViewed) => {
+            (CommandView::Help(HelpView), ShutdownDisposition::Continue)
+        }
         (ApplicationCommand::ShowStatus, ApplicationEvent::StatusViewed) => {
             let installation_id = projection
                 .installation
@@ -704,8 +705,7 @@ fn decode_canonical<T>(json: &str) -> Result<T, AppError>
 where
     T: DeserializeOwned,
 {
-    let value: serde_json::Value =
-        serde_json::from_str(json).map_err(|_| invalid_receipt())?;
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|_| invalid_receipt())?;
     let canonical = String::from_utf8(
         canonical_json_bytes(&value).map_err(|_| PersistenceError::InvalidEventRecord)?,
     )

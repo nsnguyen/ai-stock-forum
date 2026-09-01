@@ -39,10 +39,7 @@ pub(super) enum CancelDecision {
     Failed(u32),
 }
 
-pub(super) fn cancellation_decision(
-    phase: ReadPhase,
-    attempt: CancelAttempt,
-) -> CancelDecision {
+pub(super) fn cancellation_decision(phase: ReadPhase, attempt: CancelAttempt) -> CancelDecision {
     match attempt {
         CancelAttempt::Failed(error) => CancelDecision::Failed(error),
         CancelAttempt::Succeeded => CancelDecision::Complete,
@@ -98,10 +95,7 @@ mod tests {
 
     #[test]
     fn unrelated_windows_read_error_remains_typed_as_an_error() {
-        assert_eq!(
-            classify_read_error(5, false),
-            ReadErrorDisposition::Error
-        );
+        assert_eq!(classify_read_error(5, false), ReadErrorDisposition::Error);
     }
 
     #[test]

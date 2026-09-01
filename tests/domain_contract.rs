@@ -1,5 +1,5 @@
 use ai_stock_forum::domain::{
-    canonical_json_bytes, sha256, CorrelationId, EventId, ObjectRef, ObjectVersion, Sha256Digest,
+    CorrelationId, EventId, ObjectRef, ObjectVersion, Sha256Digest, canonical_json_bytes, sha256,
 };
 use serde_json::json;
 use uuid::Uuid;

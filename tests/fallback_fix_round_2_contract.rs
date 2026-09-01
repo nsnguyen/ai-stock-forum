@@ -1,8 +1,6 @@
 #[cfg(unix)]
 mod unix_line_source_contract {
-    use ai_stock_forum::ui::command::{
-        CancellableLineSource, LineSourceEvent, UnixLineSource,
-    };
+    use ai_stock_forum::ui::command::{CancellableLineSource, LineSourceEvent, UnixLineSource};
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;

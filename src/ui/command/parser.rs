@@ -1,6 +1,6 @@
 use crate::app::{
-    ApplicationCommand, InputRejection, InputRejectionCategory, SafeToken, DEFAULT_AUDIT_LIMIT,
-    MAX_INPUT_BYTES,
+    ApplicationCommand, DEFAULT_AUDIT_LIMIT, InputRejection, InputRejectionCategory,
+    MAX_INPUT_BYTES, SafeToken,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,11 +11,7 @@ pub enum ParsedLine {
 
 pub fn parse_line(input: &[u8]) -> ParsedLine {
     if input.len() > MAX_INPUT_BYTES {
-        return ParsedLine::Command(reject(
-            InputRejectionCategory::Oversized,
-            None,
-            input,
-        ));
+        return ParsedLine::Command(reject(InputRejectionCategory::Oversized, None, input));
     }
 
     let line = match std::str::from_utf8(input) {
@@ -41,8 +37,9 @@ pub fn parse_line(input: &[u8]) -> ParsedLine {
         ["/audit", "tail"] => ApplicationCommand::audit_tail(DEFAULT_AUDIT_LIMIT)
             .expect("default audit limit is within the supported range"),
         ["/audit", "tail", limit] => match limit.parse::<u16>() {
-            Ok(limit) => ApplicationCommand::audit_tail(limit)
-                .unwrap_or_else(|_| reject(InputRejectionCategory::Malformed, safe_token(line), input)),
+            Ok(limit) => ApplicationCommand::audit_tail(limit).unwrap_or_else(|_| {
+                reject(InputRejectionCategory::Malformed, safe_token(line), input)
+            }),
             Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
         },
         ["/quit"] => ApplicationCommand::RequestShutdown,
@@ -64,7 +61,7 @@ fn reject(
 }
 
 fn safe_token(line: &str) -> Option<SafeToken> {
-    line.split_whitespace().next().map(|token| {
+    line.split_whitespace().next().and_then(|token| {
         let mut escaped_token = String::new();
         let mut output_scalar_count = 0;
 
@@ -81,5 +78,4 @@ fn safe_token(line: &str) -> Option<SafeToken> {
 
         SafeToken::new(escaped_token).ok()
     })
-    .flatten()
 }

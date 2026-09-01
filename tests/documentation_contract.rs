@@ -49,7 +49,10 @@ fn readme_is_the_canonical_phase_zero_rust_guide() {
     }
 
     for row in EXPECTED_COMMAND_ROWS {
-        assert!(README.contains(row), "README is missing exact CLI row: {row}");
+        assert!(
+            README.contains(row),
+            "README is missing exact CLI row: {row}"
+        );
     }
 
     assert!(README.contains(EXPECTED_PRIVACY_BLOCK));
@@ -81,7 +84,10 @@ fn canonical_design_records_the_prerelease_receipt_ruling() {
         "recreation",
         "checksum mismatch",
     ] {
-        assert!(DESIGN.contains(required), "canonical design is missing: {required}");
+        assert!(
+            DESIGN.contains(required),
+            "canonical design is missing: {required}"
+        );
     }
     assert!(!DESIGN.contains("/Users/nguyen-mini"));
     assert!(!DESIGN.contains("/private/tmp"));

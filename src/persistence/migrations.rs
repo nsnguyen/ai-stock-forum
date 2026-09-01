@@ -1,4 +1,4 @@
-use crate::domain::{sha256, Sha256Digest};
+use crate::domain::{Sha256Digest, sha256};
 
 pub const LATEST_SCHEMA_VERSION: u32 = 1;
 
@@ -40,6 +40,9 @@ impl Migration {
 pub(crate) fn ordered() -> [Migration; 1] {
     [Migration {
         version: 1,
-        sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations/0001_phase0.sql")),
+        sql: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/0001_phase0.sql"
+        )),
     }]
 }

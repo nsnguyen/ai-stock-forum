@@ -45,7 +45,9 @@ fn summary(event: &ApplicationEvent) -> String {
         ApplicationEvent::HelpViewed => "help viewed".to_owned(),
         ApplicationEvent::StatusViewed => "status viewed".to_owned(),
         ApplicationEvent::SetupStatusViewed => "setup status viewed".to_owned(),
-        ApplicationEvent::AuditTailViewed { limit } => format!("audit tail viewed: {}", limit.get()),
+        ApplicationEvent::AuditTailViewed { limit } => {
+            format!("audit tail viewed: {}", limit.get())
+        }
         ApplicationEvent::CommandRejected { rejection } => format!(
             "command rejected: category={}, token={}, bytes={}",
             rejection_category(rejection.category),
@@ -77,8 +79,5 @@ fn rejection_category(category: InputRejectionCategory) -> &'static str {
 }
 
 fn defensive_escape(token: &SafeToken) -> String {
-    token
-        .chars()
-        .flat_map(char::escape_default)
-        .collect()
+    token.chars().flat_map(char::escape_default).collect()
 }

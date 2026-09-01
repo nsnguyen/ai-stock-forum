@@ -6,7 +6,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use rustix::fs::{flock, fchmod, fstat, openat, CWD, FileType, FlockOperation, Mode, OFlags};
+use rustix::fs::{CWD, FileType, FlockOperation, Mode, OFlags, fchmod, flock, fstat, openat};
 
 use super::StartupError;
 
@@ -51,7 +51,8 @@ impl ProcessGuard {
             if FileType::from_raw_mode(state.st_mode) != FileType::RegularFile {
                 return Err(StartupError::StatePermissions);
             }
-            fchmod(&file, Mode::from_raw_mode(0o600)).map_err(|_| StartupError::StatePermissions)?;
+            fchmod(&file, Mode::from_raw_mode(0o600))
+                .map_err(|_| StartupError::StatePermissions)?;
             let state = fstat(file.as_fd()).map_err(|_| StartupError::StatePermissions)?;
             if state.st_mode & 0o777 != 0o600 {
                 return Err(StartupError::StatePermissions);
@@ -86,7 +87,11 @@ fn open_state_directory(state_dir: &Path) -> Result<std::os::fd::OwnedFd, Startu
 
     let mut current = openat(
         CWD,
-        if walk_path.is_absolute() { Path::new("/") } else { Path::new(".") },
+        if walk_path.is_absolute() {
+            Path::new("/")
+        } else {
+            Path::new(".")
+        },
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
     )

@@ -15,7 +15,10 @@ fn windows_source_cancels_active_synchronous_reads_with_an_owned_thread_handle()
         "CancelSynchronousIo",
         "reader_thread",
     ] {
-        assert!(runner.contains(required), "missing Windows cancellation API: {required}");
+        assert!(
+            runner.contains(required),
+            "missing Windows cancellation API: {required}"
+        );
     }
     assert!(runner.contains("impl Drop for WindowsCancellation"));
     assert!(runner.contains("CloseHandle(reader_thread)"));
@@ -62,7 +65,10 @@ fn windows_bindings_are_target_scoped_with_the_required_api_features() {
         "Win32_System_Console",
         "Win32_System_Threading",
     ] {
-        assert!(cargo.contains(feature), "missing windows-sys feature: {feature}");
+        assert!(
+            cargo.contains(feature),
+            "missing windows-sys feature: {feature}"
+        );
     }
     assert!(command_module.contains("#[cfg(any(windows, test))]"));
     assert!(command_module.contains("mod windows;"));

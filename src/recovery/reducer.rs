@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
-    app::{ApplicationEvent, EventEnvelope, ShutdownReason, EVENT_SCHEMA_VERSION},
-    domain::{canonical_json_bytes, sha256, EventId, InstallationId, SessionId, Sha256Digest},
+    app::{ApplicationEvent, EVENT_SCHEMA_VERSION, EventEnvelope, ShutdownReason},
+    domain::{EventId, InstallationId, SessionId, Sha256Digest, canonical_json_bytes, sha256},
     persistence::RecoveryError,
     setup::SetupStatus,
 };
@@ -122,8 +122,21 @@ impl ProjectionState {
             return Err(RecoveryError::InvalidEventRecord);
         }
         let minimum_events = u64::from(self.installation.is_some())
-            .checked_add(u64::try_from(self.sessions.len()).map_err(|_| RecoveryError::InvalidEventRecord)?)
-            .and_then(|value| value.checked_add(u64::try_from(self.sessions.values().filter(|session| session.ended.is_some()).count()).ok()?))
+            .checked_add(
+                u64::try_from(self.sessions.len())
+                    .map_err(|_| RecoveryError::InvalidEventRecord)?,
+            )
+            .and_then(|value| {
+                value.checked_add(
+                    u64::try_from(
+                        self.sessions
+                            .values()
+                            .filter(|session| session.ended.is_some())
+                            .count(),
+                    )
+                    .ok()?,
+                )
+            })
             .ok_or(RecoveryError::EventSequenceOverflow)?;
         if self.last_sequence < minimum_events {
             return Err(RecoveryError::InvalidEventRecord);
@@ -150,7 +163,10 @@ struct PersistentProjectionState<'a> {
     last_event_digest: &'a Option<Sha256Digest>,
 }
 
-pub fn reduce(state: &mut ProjectionState, event: &EventEnvelope) -> Result<ReducerEffect, RecoveryError> {
+pub fn reduce(
+    state: &mut ProjectionState,
+    event: &EventEnvelope,
+) -> Result<ReducerEffect, RecoveryError> {
     if event.event_schema_version != EVENT_SCHEMA_VERSION {
         return Err(RecoveryError::UnsupportedEventSchema);
     }
@@ -181,7 +197,10 @@ pub fn reduce(state: &mut ProjectionState, event: &EventEnvelope) -> Result<Redu
         ApplicationEvent::ProcessSessionStarted { session_id } => {
             if next.installation.is_none()
                 || next.sessions.contains_key(session_id)
-                || next.sessions.values().any(|session| session.ended.is_none())
+                || next
+                    .sessions
+                    .values()
+                    .any(|session| session.ended.is_none())
             {
                 return Err(RecoveryError::InvalidEventRecord);
             }

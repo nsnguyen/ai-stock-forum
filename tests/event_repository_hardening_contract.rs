@@ -1,17 +1,17 @@
 use std::{
     collections::BTreeMap,
-    sync::{mpsc, Arc, Barrier},
+    sync::{Arc, Barrier, mpsc},
     time::Duration,
 };
 
 use ai_stock_forum::{
     app::{
-        ApplicationEvent, AuditLimit, EventEnvelope, EventEnvelopeWire, InputRejection,
-        PendingEvent, SafeToken, EVENT_SCHEMA_VERSION,
+        ApplicationEvent, AuditLimit, EVENT_SCHEMA_VERSION, EventEnvelope, EventEnvelopeWire,
+        InputRejection, PendingEvent, SafeToken,
     },
     audit::AuditEntry,
     config::AppPaths,
-    domain::{sha256, Actor, CorrelationId, EventId},
+    domain::{Actor, CorrelationId, EventId, sha256},
     persistence::{Database, EventRepository, PersistenceError, RecoveryError},
 };
 use serde_json::json;
@@ -40,9 +40,9 @@ fn append(database: &mut Database, pending: PendingEvent) -> EventEnvelope {
 
 fn independently_canonical(value: serde_json::Value) -> serde_json::Value {
     match value {
-        serde_json::Value::Array(values) => serde_json::Value::Array(
-            values.into_iter().map(independently_canonical).collect(),
-        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(independently_canonical).collect())
+        }
         serde_json::Value::Object(values) => {
             let sorted: BTreeMap<_, _> = values
                 .into_iter()
@@ -105,19 +105,29 @@ fn envelope_wire_rejects_invalid_shape_noncanonical_data_and_digest_mutation() {
     let mut database = Database::open(&AppPaths::for_test(temporary_directory.path())).unwrap();
     let envelope = append(
         &mut database,
-        pending(1, 2, ApplicationEvent::AuditTailViewed {
-            limit: AuditLimit::try_from(2_u16).unwrap(),
-        }),
+        pending(
+            1,
+            2,
+            ApplicationEvent::AuditTailViewed {
+                limit: AuditLimit::try_from(2_u16).unwrap(),
+            },
+        ),
     );
     let wire = EventEnvelopeWire::from(&envelope);
 
     assert_eq!(EventEnvelope::try_from(wire.clone()).unwrap(), envelope);
     assert!(matches!(
-        EventEnvelope::try_from(EventEnvelopeWire { sequence: 0, ..wire.clone() }),
+        EventEnvelope::try_from(EventEnvelopeWire {
+            sequence: 0,
+            ..wire.clone()
+        }),
         Err(RecoveryError::InvalidEventRecord)
     ));
     assert!(matches!(
-        EventEnvelope::try_from(EventEnvelopeWire { event_schema_version: 2, ..wire.clone() }),
+        EventEnvelope::try_from(EventEnvelopeWire {
+            event_schema_version: 2,
+            ..wire.clone()
+        }),
         Err(RecoveryError::UnsupportedEventSchema)
     ));
     assert!(matches!(
@@ -156,9 +166,13 @@ fn event_payload_is_variant_data_without_a_duplicate_discriminator() {
     let mut database = Database::open(&AppPaths::for_test(temporary_directory.path())).unwrap();
     append(
         &mut database,
-        pending(1, 2, ApplicationEvent::AuditTailViewed {
-            limit: AuditLimit::try_from(2_u16).unwrap(),
-        }),
+        pending(
+            1,
+            2,
+            ApplicationEvent::AuditTailViewed {
+                limit: AuditLimit::try_from(2_u16).unwrap(),
+            },
+        ),
     );
 
     let (event_type, payload): (String, String) = database
@@ -222,15 +236,17 @@ fn repository_scope_is_one_event_and_event_id_replay_is_not_command_idempotency(
     let mut database = Database::open(&AppPaths::for_test(temporary_directory.path())).unwrap();
     let first = append(&mut database, pending(1, 2, ApplicationEvent::HelpViewed));
     let transaction = database.immediate_transaction().unwrap();
-    let replay = EventRepository::append(
-        &transaction,
-        pending(1, 2, ApplicationEvent::HelpViewed),
-    )
-    .unwrap();
+    let replay =
+        EventRepository::append(&transaction, pending(1, 2, ApplicationEvent::HelpViewed)).unwrap();
     transaction.commit().unwrap();
 
     assert_eq!(replay, first);
-    assert_eq!(EventRepository::load_all(database.connection()).unwrap().len(), 1);
+    assert_eq!(
+        EventRepository::load_all(database.connection())
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -257,26 +273,25 @@ fn immediate_transactions_report_contention_then_replay_or_conflict_deterministi
         first_result_sender.send(contention).unwrap();
         retry_receiver.recv().unwrap();
         let transaction = second_database.immediate_transaction().unwrap();
-        let replay = EventRepository::append(
-            &transaction,
-            pending(1, 2, ApplicationEvent::HelpViewed),
-        );
+        let replay =
+            EventRepository::append(&transaction, pending(1, 2, ApplicationEvent::HelpViewed));
         transaction.commit().unwrap();
         let transaction = second_database.immediate_transaction().unwrap();
-        let conflict = EventRepository::append(
-            &transaction,
-            pending(1, 2, ApplicationEvent::StatusViewed),
-        )
-        .unwrap_err();
+        let conflict =
+            EventRepository::append(&transaction, pending(1, 2, ApplicationEvent::StatusViewed))
+                .unwrap_err();
         transaction.rollback().unwrap();
         (replay, conflict)
     });
 
     let transaction = first_database.immediate_transaction().unwrap();
     barrier.wait();
-    assert_eq!(first_result_receiver.recv().unwrap(), PersistenceError::Contention);
-    let first = EventRepository::append(&transaction, pending(1, 2, ApplicationEvent::HelpViewed))
-        .unwrap();
+    assert_eq!(
+        first_result_receiver.recv().unwrap(),
+        PersistenceError::Contention
+    );
+    let first =
+        EventRepository::append(&transaction, pending(1, 2, ApplicationEvent::HelpViewed)).unwrap();
     transaction.commit().unwrap();
     retry_sender.send(()).unwrap();
     let (replay, conflict) = thread.join().unwrap();

@@ -11,8 +11,8 @@ use crate::{
 };
 
 use super::migrations::{
-    ordered, AppliedMigration, Migration, APPLICATION_ID, LATEST_SCHEMA_VERSION,
-    SCHEMA_MIGRATIONS_SQL,
+    APPLICATION_ID, AppliedMigration, LATEST_SCHEMA_VERSION, Migration, SCHEMA_MIGRATIONS_SQL,
+    ordered,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -79,11 +79,8 @@ impl Database {
         let database_path = paths.sqlite_open_path();
 
         before_sqlite_open();
-        let mut connection = Connection::open_with_flags(
-            database_path,
-            database_open_flags(),
-        )
-        .map_err(startup_error)?;
+        let mut connection = Connection::open_with_flags(database_path, database_open_flags())
+            .map_err(startup_error)?;
 
         let application_id = pragma_i64(&connection, "application_id")?;
         if application_id != 0 && application_id != APPLICATION_ID {
@@ -155,7 +152,8 @@ impl Database {
 
         rows.map(|row| {
             let (version, checksum) = row.map_err(persistence_error)?;
-            let version = u32::try_from(version).map_err(|_| PersistenceError::InvalidMigrationRecord)?;
+            let version =
+                u32::try_from(version).map_err(|_| PersistenceError::InvalidMigrationRecord)?;
             let checksum = Sha256Digest::parse(&checksum)
                 .map_err(|_| PersistenceError::InvalidMigrationRecord)?;
             Ok(AppliedMigration { version, checksum })
@@ -233,7 +231,9 @@ fn run_migrations_with(
         if migration.version <= user_version {
             return Err(StartupError::DatabaseMigrationState);
         }
-        transaction.execute_batch(migration.sql).map_err(startup_error)?;
+        transaction
+            .execute_batch(migration.sql)
+            .map_err(startup_error)?;
         transaction
             .execute(
                 "INSERT INTO schema_migrations (version, checksum) VALUES (?1, ?2)",
@@ -273,8 +273,8 @@ fn read_applied_migrations(
     for row in rows {
         let (version, checksum) = row.map_err(startup_error)?;
         let version = u32::try_from(version).map_err(|_| StartupError::DatabaseMigrationState)?;
-        let checksum = Sha256Digest::parse(&checksum)
-            .map_err(|_| StartupError::DatabaseMigrationState)?;
+        let checksum =
+            Sha256Digest::parse(&checksum).map_err(|_| StartupError::DatabaseMigrationState)?;
         applied.insert(version, checksum);
     }
     Ok(applied)
@@ -294,7 +294,10 @@ fn verify_applied_migrations(
         }
     }
     for version in 1..=user_version {
-        let Some(migration) = migrations.iter().find(|migration| migration.version == version) else {
+        let Some(migration) = migrations
+            .iter()
+            .find(|migration| migration.version == version)
+        else {
             return Err(StartupError::DatabaseMigrationState);
         };
         let Some(checksum) = applied.get(&version) else {
@@ -330,7 +333,10 @@ fn quick_check(connection: &Connection) -> Result<(), StartupError> {
 fn startup_error(error: SqliteError) -> StartupError {
     match error {
         SqliteError::SqliteFailure(error, _)
-            if matches!(error.code, ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase) =>
+            if matches!(
+                error.code,
+                ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase
+            ) =>
         {
             StartupError::DatabaseCorrupt
         }
@@ -349,7 +355,10 @@ fn startup_error(error: SqliteError) -> StartupError {
 fn persistence_error(error: SqliteError) -> PersistenceError {
     match error {
         SqliteError::SqliteFailure(error, _)
-            if matches!(error.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) =>
+            if matches!(
+                error.code,
+                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+            ) =>
         {
             PersistenceError::Contention
         }

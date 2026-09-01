@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, str::FromStr};
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
     app::{EventEnvelope, ShutdownReason},
@@ -17,7 +17,9 @@ impl ProjectionRepository {
         Self::load_with_before_projection_rows(connection, || {})
     }
 
-    pub fn load_in(transaction: &ImmediateTransaction<'_>) -> Result<ProjectionState, RecoveryError> {
+    pub fn load_in(
+        transaction: &ImmediateTransaction<'_>,
+    ) -> Result<ProjectionState, RecoveryError> {
         let expected = reduce_verified_stream(transaction.transaction())?;
         match read_projection_rows(transaction.transaction())? {
             None if expected == ProjectionState::default() => Ok(expected),
@@ -32,10 +34,9 @@ impl ProjectionRepository {
         through_sequence: u64,
     ) -> Result<ProjectionState, RecoveryError> {
         let events = verified_events(connection)?;
-        if events
-            .last()
-            .map_or(through_sequence != 0, |event| through_sequence > event.sequence)
-        {
+        if events.last().map_or(through_sequence != 0, |event| {
+            through_sequence > event.sequence
+        }) {
             return Err(RecoveryError::InvalidEventRecord);
         }
         reduce_events(
@@ -65,7 +66,9 @@ impl ProjectionRepository {
             Some(persisted) if persisted == expected => Ok(persisted),
             Some(_) => Err(RecoveryError::InvalidEventRecord),
         };
-        transaction.commit().map_err(|_| RecoveryError::QueryFailed)?;
+        transaction
+            .commit()
+            .map_err(|_| RecoveryError::QueryFailed)?;
         result
     }
 
@@ -86,7 +89,9 @@ impl ProjectionRepository {
         let state = prepare_rebuild(&transaction, events)?;
         clear_rebuildable_projection_rows(&transaction)?;
         store_transaction(&transaction, &state).map_err(recovery_from_persistence)?;
-        transaction.commit().map_err(|_| RecoveryError::QueryFailed)?;
+        transaction
+            .commit()
+            .map_err(|_| RecoveryError::QueryFailed)?;
         Ok(state)
     }
 
@@ -243,7 +248,11 @@ fn read_projection_rows(connection: &Connection) -> Result<Option<ProjectionStat
     state.validate()?;
     let stored_digest =
         Sha256Digest::parse(&projection_digest).map_err(|_| RecoveryError::InvalidEventRecord)?;
-    if state.digest().map_err(|_| RecoveryError::InvalidEventRecord)? != stored_digest {
+    if state
+        .digest()
+        .map_err(|_| RecoveryError::InvalidEventRecord)?
+        != stored_digest
+    {
         return Err(RecoveryError::InvalidEventRecord);
     }
     Ok(Some(state))
@@ -301,10 +310,10 @@ fn validate_store_transition(
         {
             return Err(PersistenceError::ProjectionStateConflict);
         }
-        if let Some(existing_end) = &existing.ended {
-            if candidate.ended.as_ref() != Some(existing_end) {
-                return Err(PersistenceError::ProjectionStateConflict);
-            }
+        if let Some(existing_end) = &existing.ended
+            && candidate.ended.as_ref() != Some(existing_end)
+        {
+            return Err(PersistenceError::ProjectionStateConflict);
         }
     }
     Ok(())

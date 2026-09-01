@@ -110,10 +110,7 @@ impl LineAccumulator {
         let input_digest = Sha256Digest::parse(&hex::encode(digest))
             .expect("sha256 output is canonical lowercase hexadecimal");
         let line = RawLine {
-            bytes: std::mem::replace(
-                &mut self.bytes,
-                Vec::with_capacity(MAX_INPUT_BYTES + 1),
-            ),
+            bytes: std::mem::replace(&mut self.bytes, Vec::with_capacity(MAX_INPUT_BYTES + 1)),
             full_byte_length: std::mem::take(&mut self.full_byte_length),
             input_digest,
         };

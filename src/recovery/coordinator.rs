@@ -1,11 +1,17 @@
 use crate::{
-    app::{AppError, ApplicationEvent, EventEnvelope, PendingEvent, ShutdownReason, EVENT_SCHEMA_VERSION},
+    app::{
+        AppError, ApplicationEvent, EVENT_SCHEMA_VERSION, EventEnvelope, PendingEvent,
+        ShutdownReason,
+    },
     config::{ProcessGuard, StartupError},
     domain::{Actor, Clock, CorrelationId, EventId, IdGenerator, InstallationId, SessionId},
-    persistence::{Database, EventRepository, ImmediateTransaction, PersistenceError, ProjectionRepository, RecoveryError},
+    persistence::{
+        Database, EventRepository, ImmediateTransaction, PersistenceError, ProjectionRepository,
+        RecoveryError,
+    },
 };
 
-use super::{reduce, ProjectionState};
+use super::{ProjectionState, reduce};
 
 pub trait RecoveryHook: Send + Sync {
     fn recover(
@@ -69,7 +75,8 @@ impl RecoveryCoordinator {
     ) -> Result<BootstrapState, StartupError> {
         let process_guard = database.acquire_process_guard()?;
         EventRepository::verify(database.connection()).map_err(startup_from_recovery)?;
-        let events = EventRepository::load_all(database.connection()).map_err(startup_from_recovery)?;
+        let events =
+            EventRepository::load_all(database.connection()).map_err(startup_from_recovery)?;
         let mut state = match ProjectionRepository::load(database.connection()) {
             Ok(state) => state,
             Err(RecoveryError::InvalidEventRecord) => {
@@ -96,7 +103,9 @@ impl RecoveryCoordinator {
             .find(|session| session.ended.is_none())
             .map(|session| session.session_id);
         if let Some(interrupted_session) = previous_session_interrupted {
-            let transaction = database.immediate_transaction().map_err(startup_from_persistence)?;
+            let transaction = database
+                .immediate_transaction()
+                .map_err(startup_from_persistence)?;
             let mut next = state.clone();
             append_and_project(
                 &transaction,
@@ -127,7 +136,9 @@ impl RecoveryCoordinator {
         let installation_id = state
             .installation
             .as_ref()
-            .ok_or(StartupError::EventStreamRecovery(RecoveryError::InvalidEventRecord))?
+            .ok_or(StartupError::EventStreamRecovery(
+                RecoveryError::InvalidEventRecord,
+            ))?
             .installation_id;
         Ok(BootstrapState {
             installation_id,
@@ -181,8 +192,11 @@ fn rebuild_and_record(
     clock: &dyn Clock,
     ids: &dyn IdGenerator,
 ) -> Result<ProjectionState, StartupError> {
-    let transaction = database.immediate_transaction().map_err(startup_from_persistence)?;
-    let mut state = ProjectionRepository::rebuild_in(&transaction, events).map_err(startup_from_recovery)?;
+    let transaction = database
+        .immediate_transaction()
+        .map_err(startup_from_persistence)?;
+    let mut state =
+        ProjectionRepository::rebuild_in(&transaction, events).map_err(startup_from_recovery)?;
     let through_sequence = state.last_sequence;
     append_and_project(
         &transaction,
@@ -203,7 +217,9 @@ fn append_and_commit(
     clock: &dyn Clock,
     ids: &dyn IdGenerator,
 ) -> Result<EventEnvelope, StartupError> {
-    let transaction = database.immediate_transaction().map_err(startup_from_persistence)?;
+    let transaction = database
+        .immediate_transaction()
+        .map_err(startup_from_persistence)?;
     let mut next = state.clone();
     let envelope = append_and_project(&transaction, &mut next, event, clock, ids)
         .map_err(startup_from_persistence)?;

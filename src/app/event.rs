@@ -1,11 +1,11 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::{
     app::{AuditLimit, InputRejection},
     domain::{
-        canonical_json_bytes, sha256, Actor, CausationId, CorrelationId, EventId,
-        InstallationId, ObjectRef, SessionId, Sha256Digest,
+        Actor, CausationId, CorrelationId, EventId, InstallationId, ObjectRef, SessionId,
+        Sha256Digest, canonical_json_bytes, sha256,
     },
     persistence::RecoveryError,
 };
@@ -25,17 +25,32 @@ pub enum ShutdownReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ApplicationEvent {
-    InstallationInitialized { installation_id: InstallationId },
-    ProcessSessionStarted { session_id: SessionId },
-    PreviousSessionInterrupted { session_id: SessionId },
+    InstallationInitialized {
+        installation_id: InstallationId,
+    },
+    ProcessSessionStarted {
+        session_id: SessionId,
+    },
+    PreviousSessionInterrupted {
+        session_id: SessionId,
+    },
     HelpViewed,
     StatusViewed,
     SetupStatusViewed,
-    AuditTailViewed { limit: AuditLimit },
-    CommandRejected { rejection: InputRejection },
+    AuditTailViewed {
+        limit: AuditLimit,
+    },
+    CommandRejected {
+        rejection: InputRejection,
+    },
     ShutdownRequested,
-    ProcessSessionEnded { session_id: SessionId, reason: ShutdownReason },
-    ProjectionRebuilt { through_sequence: u64 },
+    ProcessSessionEnded {
+        session_id: SessionId,
+        reason: ShutdownReason,
+    },
+    ProjectionRebuilt {
+        through_sequence: u64,
+    },
 }
 
 impl ApplicationEvent {

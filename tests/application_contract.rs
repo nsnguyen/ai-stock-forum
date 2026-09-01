@@ -27,8 +27,16 @@ fn envelope(id: u128, correlation: u128, command: ApplicationCommand) -> Command
 
 fn commands() -> Vec<(ApplicationCommand, Capability, &'static str)> {
     vec![
-        (ApplicationCommand::ShowHelp, Capability::HelpRead, "help_viewed"),
-        (ApplicationCommand::ShowStatus, Capability::StatusRead, "status_viewed"),
+        (
+            ApplicationCommand::ShowHelp,
+            Capability::HelpRead,
+            "help_viewed",
+        ),
+        (
+            ApplicationCommand::ShowStatus,
+            Capability::StatusRead,
+            "status_viewed",
+        ),
         (
             ApplicationCommand::ShowSetupStatus,
             Capability::SetupStatusRead,
@@ -66,8 +74,14 @@ fn status_flows_through_event_and_projection_transaction() {
     assert_eq!(view.installation_id, app.installation_id());
     assert_eq!(view.session_id, app.session_id());
     assert_eq!(outcome.committed_events.len(), 1);
-    assert_eq!(outcome.committed_events[0].correlation_id, outcome.correlation_id);
-    assert_eq!(app.persisted_last_sequence(), outcome.committed_events[0].sequence);
+    assert_eq!(
+        outcome.committed_events[0].correlation_id,
+        outcome.correlation_id
+    );
+    assert_eq!(
+        app.persisted_last_sequence(),
+        outcome.committed_events[0].sequence
+    );
 }
 
 #[test]
@@ -118,7 +132,11 @@ fn every_command_uses_its_exact_capability_event_and_typed_view() {
 
     for (offset, (command, _, event_kind)) in commands().into_iter().enumerate() {
         let outcome = app
-            .execute(envelope(100 + offset as u128, 200 + offset as u128, command))
+            .execute(envelope(
+                100 + offset as u128,
+                200 + offset as u128,
+                command,
+            ))
             .unwrap();
         assert_eq!(outcome.committed_events[0].event.kind(), event_kind);
         assert!(matches!(
@@ -146,9 +164,8 @@ fn every_command_uses_its_exact_capability_event_and_typed_view() {
 
 #[test]
 fn denied_commands_are_typed_inert_and_consume_no_clock_or_ids() {
-    let policy = support::RecordingPolicy::new(AuthorizationDecision::Denied(
-        PolicyDecision::Denied,
-    ));
+    let policy =
+        support::RecordingPolicy::new(AuthorizationDecision::Denied(PolicyDecision::Denied));
     let mut app = support::app_with_policy(Arc::new(policy.clone()));
     let events_before = app.count_rows("event_stream");
     let sequence_before = app.persisted_last_sequence();
@@ -157,8 +174,12 @@ fn denied_commands_are_typed_inert_and_consume_no_clock_or_ids() {
 
     for (offset, (command, capability, _)) in commands().into_iter().enumerate() {
         assert_eq!(
-            app.execute(envelope(300 + offset as u128, 400 + offset as u128, command))
-                .unwrap_err(),
+            app.execute(envelope(
+                300 + offset as u128,
+                400 + offset as u128,
+                command
+            ))
+            .unwrap_err(),
             AppError::CapabilityDenied {
                 capability,
                 decision: PolicyDecision::Denied,
@@ -178,8 +199,12 @@ fn denied_commands_are_typed_inert_and_consume_no_clock_or_ids() {
     let policy_before = policy.calls();
     for (offset, (command, capability, _)) in commands().into_iter().enumerate() {
         assert_eq!(
-            app.execute(envelope(300 + offset as u128, 400 + offset as u128, command))
-                .unwrap_err(),
+            app.execute(envelope(
+                300 + offset as u128,
+                400 + offset as u128,
+                command
+            ))
+            .unwrap_err(),
             AppError::CapabilityDenied {
                 capability,
                 decision: PolicyDecision::Denied,
@@ -202,8 +227,12 @@ fn approval_required_commands_are_typed_inert_and_consume_no_clock_or_ids() {
 
     for (offset, (command, capability, _)) in commands().into_iter().enumerate() {
         assert_eq!(
-            app.execute(envelope(500 + offset as u128, 600 + offset as u128, command))
-                .unwrap_err(),
+            app.execute(envelope(
+                500 + offset as u128,
+                600 + offset as u128,
+                command
+            ))
+            .unwrap_err(),
             AppError::ApprovalRequired { capability }
         );
     }
@@ -220,8 +249,12 @@ fn approval_required_commands_are_typed_inert_and_consume_no_clock_or_ids() {
     let policy_before = policy.calls();
     for (offset, (command, capability, _)) in commands().into_iter().enumerate() {
         assert_eq!(
-            app.execute(envelope(500 + offset as u128, 600 + offset as u128, command))
-                .unwrap_err(),
+            app.execute(envelope(
+                500 + offset as u128,
+                600 + offset as u128,
+                command
+            ))
+            .unwrap_err(),
             AppError::ApprovalRequired { capability }
         );
     }
@@ -339,7 +372,11 @@ fn receipt_and_outcome_failures_roll_back_every_command_effect() {
         let ids_before = app.ids.calls();
 
         assert!(matches!(
-            app.execute(envelope(1_000 + failure as u128, 1_100, ApplicationCommand::ShowStatus)),
+            app.execute(envelope(
+                1_000 + failure as u128,
+                1_100,
+                ApplicationCommand::ShowStatus
+            )),
             Err(AppError::Persistence(_))
         ));
         assert_eq!(app.count_rows("event_stream"), events_before);
@@ -409,7 +446,8 @@ fn finished_service_rejects_commands_before_policy_ids_clock_or_writes() {
     let policy_before = policy.calls();
 
     assert_eq!(
-        app.execute_user(ApplicationCommand::ShowStatus).unwrap_err(),
+        app.execute_user(ApplicationCommand::ShowStatus)
+            .unwrap_err(),
         AppError::LifecycleFinished
     );
     assert_eq!(app.count_rows("command_receipts"), receipts_before);
@@ -508,7 +546,8 @@ fn peers_created_before_finish_share_the_closed_lifecycle_gate() {
     let policy_before = policy.calls();
 
     assert_eq!(
-        peer.execute_user(ApplicationCommand::ShowStatus).unwrap_err(),
+        peer.execute_user(ApplicationCommand::ShowStatus)
+            .unwrap_err(),
         AppError::LifecycleFinished
     );
     assert_eq!(app.count_rows("command_receipts"), receipts_before);
@@ -568,9 +607,7 @@ fn execute_user_and_finish_have_two_atomic_lifecycle_orderings_without_id_races(
     let clock_before = clock.calls();
     let ids_before = ids.calls();
     let events_before = app.count_rows("event_stream");
-    let command_handle = thread::spawn(move || {
-        worker.execute_user(ApplicationCommand::ShowStatus)
-    });
+    let command_handle = thread::spawn(move || worker.execute_user(ApplicationCommand::ShowStatus));
     command_entered.wait();
     let finish_handle = thread::spawn(move || {
         let mut app = app;
@@ -609,9 +646,7 @@ fn execute_user_and_finish_have_two_atomic_lifecycle_orderings_without_id_races(
     let clock_before = app.clock.calls();
     let ids_before = app.ids.calls();
     let events_before = app.count_rows("event_stream");
-    let command_handle = thread::spawn(move || {
-        worker.execute_user(ApplicationCommand::ShowStatus)
-    });
+    let command_handle = thread::spawn(move || worker.execute_user(ApplicationCommand::ShowStatus));
     command_entered.wait();
     app.finish(ShutdownReason::UserQuit).unwrap();
     command_release.wait();
@@ -727,7 +762,10 @@ fn concurrent_zero_event_same_and_conflicting_commands_have_one_receipt_authorit
         barrier.wait();
         let results = [first_handle.join().unwrap(), second_handle.join().unwrap()];
 
-        assert_eq!(results[0].as_ref().unwrap_err(), results[1].as_ref().unwrap_err());
+        assert_eq!(
+            results[0].as_ref().unwrap_err(),
+            results[1].as_ref().unwrap_err()
+        );
         assert_eq!(app.count_rows("command_receipts"), 1);
         assert_eq!(app.count_rows("command_event_refs"), 0);
         assert_eq!(app.count_rows("event_stream"), events_before);
