@@ -46,7 +46,10 @@ pub fn parse_line(input: &[u8]) -> ParsedLine {
             Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
         },
         ["/quit"] => ApplicationCommand::RequestShutdown,
-        _ => reject(InputRejectionCategory::Malformed, safe_token(line), input),
+        ["/help" | "/status" | "/setup" | "/audit" | "/quit", ..] => {
+            reject(InputRejectionCategory::Malformed, safe_token(line), input)
+        }
+        _ => reject(InputRejectionCategory::Unknown, safe_token(line), input),
     };
 
     ParsedLine::Command(command)

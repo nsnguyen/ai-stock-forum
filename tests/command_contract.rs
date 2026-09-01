@@ -106,3 +106,34 @@ fn rejects_commands_with_extra_arguments() {
 
     assert_eq!(rejection.category, InputRejectionCategory::Malformed);
 }
+
+#[test]
+fn classifies_unknown_command_names_without_retaining_input() {
+    let ApplicationCommand::RejectInput(rejection) = command(b"/unrecognized hunter2") else {
+        panic!("expected rejection");
+    };
+
+    assert_eq!(rejection.category, InputRejectionCategory::Unknown);
+    assert_eq!(rejection.safe_token.as_deref(), Some("/unrecognized"));
+    assert_eq!(rejection.byte_length, 21);
+    let encoded = serde_json::to_string(&rejection).unwrap();
+    assert!(!encoded.contains("hunter2"));
+    assert!(!encoded.contains("raw_input"));
+}
+
+#[test]
+fn classifies_invalid_forms_of_recognized_commands_as_malformed() {
+    for input in [
+        b"/help extra".as_slice(),
+        b"/status extra",
+        b"/setup",
+        b"/audit",
+        b"/audit tail nope",
+        b"/quit later",
+    ] {
+        let ApplicationCommand::RejectInput(rejection) = command(input) else {
+            panic!("expected rejection for {input:?}");
+        };
+        assert_eq!(rejection.category, InputRejectionCategory::Malformed);
+    }
+}
