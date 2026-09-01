@@ -1,5 +1,7 @@
 use std::{
-    sync::{Arc, Barrier, Mutex},
+    fs,
+    path::PathBuf,
+    sync::{mpsc, Arc, Barrier, Mutex},
     thread,
 };
 
@@ -15,11 +17,21 @@ use serde::Serialize;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+#[cfg(unix)]
+use std::{
+    ffi::CString,
+    os::unix::{fs::{symlink, MetadataExt, PermissionsExt}, net::UnixListener},
+};
+
 struct TestClock(Mutex<i64>);
 
 impl TestClock {
     fn new() -> Self {
         Self(Mutex::new(1_700_000_000_000))
+    }
+
+    fn calls(&self) -> usize {
+        (*self.0.lock().unwrap() - 1_700_000_000_000) as usize
     }
 }
 
@@ -32,25 +44,31 @@ impl Clock for TestClock {
     }
 }
 
-struct TestIds(Mutex<u128>);
+struct TestIds {
+    next_id: Mutex<u128>,
+    initial_id: u128,
+}
 
 impl TestIds {
     fn new() -> Self {
-        Self(Mutex::new(1))
+        Self::starting_at(1)
     }
 
     fn starting_at(next_id: u128) -> Self {
-        Self(Mutex::new(next_id))
+        Self {
+            next_id: Mutex::new(next_id),
+            initial_id: next_id,
+        }
     }
 
     fn calls(&self) -> usize {
-        (*self.0.lock().unwrap() - 1) as usize
+        (*self.next_id.lock().unwrap() - self.initial_id) as usize
     }
 }
 
 impl IdGenerator for TestIds {
     fn next_uuid(&self) -> Uuid {
-        let mut current = self.0.lock().unwrap();
+        let mut current = self.next_id.lock().unwrap();
         let value = Uuid::from_u128(*current);
         *current += 1;
         value
@@ -91,6 +109,10 @@ impl Fixture {
         Database::open(&AppPaths::for_test(self._temporary_directory.path())).unwrap()
     }
 
+    fn lock_path(&self) -> PathBuf {
+        self._temporary_directory.path().join("phase0-bootstrap.lock")
+    }
+
     fn finish(
         &mut self,
         state: &mut ai_stock_forum::recovery::BootstrapState,
@@ -98,8 +120,7 @@ impl Fixture {
     ) -> Vec<ai_stock_forum::app::EventEnvelope> {
         RecoveryCoordinator::finish_session(
             &mut self.database,
-            &mut state.projection,
-            state.session_id,
+            state,
             reason,
             &self.clock,
             &self.ids,
@@ -113,6 +134,24 @@ impl Fixture {
             .iter()
             .filter(|event| event.event.kind() == kind)
             .count()
+    }
+
+    fn raw_event_count(&self) -> i64 {
+        self.database
+            .connection()
+            .query_row("SELECT COUNT(*) FROM event_stream", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    fn projection_marker(&self) -> (i64, Option<String>, String) {
+        self.database
+            .connection()
+            .query_row(
+                "SELECT last_event_sequence, last_event_digest, projection_digest FROM projection_metadata WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
     }
 
     fn corrupt_projection_metadata(&mut self) {
@@ -298,8 +337,8 @@ fn empty_database_creates_one_installation_and_current_session() {
     assert_eq!(fixture.event_count("installation_initialized"), 1);
     assert_eq!(fixture.event_count("process_session_started"), 1);
     assert_eq!(fixture.event_count("projection_rebuilt"), 0);
-    assert_eq!(state.projection.installation.unwrap().installation_id, state.installation_id);
-    assert!(state.projection.sessions[&state.session_id].ended.is_none());
+    assert_eq!(state.projection().installation.as_ref().unwrap().installation_id, state.installation_id());
+    assert!(state.projection().sessions[&state.session_id()].ended.is_none());
 }
 
 #[test]
@@ -307,15 +346,15 @@ fn clean_restart_reuses_installation_without_reporting_an_interruption() {
     let mut fixture = Fixture::new();
     let mut first = fixture.bootstrap();
     fixture.finish(&mut first, ShutdownReason::InputClosed);
-    let first_installation_id = first.installation_id;
-    let first_session_id = first.session_id;
+    let first_installation_id = first.installation_id();
+    let first_session_id = first.session_id();
     drop(first);
 
     let second = fixture.bootstrap();
 
-    assert_eq!(first_installation_id, second.installation_id);
-    assert_ne!(first_session_id, second.session_id);
-    assert!(!second.previous_session_interrupted);
+    assert_eq!(first_installation_id, second.installation_id());
+    assert_ne!(first_session_id, second.session_id());
+    assert!(!second.previous_session_interrupted());
     assert_eq!(fixture.event_count("previous_session_interrupted"), 0);
 }
 
@@ -323,7 +362,7 @@ fn clean_restart_reuses_installation_without_reporting_an_interruption() {
 fn interrupted_prior_session_is_closed_once_and_exposed_only_on_that_boot() {
     let mut fixture = Fixture::new();
     let abandoned = fixture.bootstrap();
-    let abandoned_session_id = abandoned.session_id;
+    let abandoned_session_id = abandoned.session_id();
     drop(abandoned);
     let recovered = Arc::new(Mutex::new(Vec::new()));
     let hooks: Vec<Box<dyn RecoveryHook>> = vec![Box::new(RecordingHook {
@@ -332,14 +371,14 @@ fn interrupted_prior_session_is_closed_once_and_exposed_only_on_that_boot() {
 
     let second = fixture.bootstrap_with_hooks(&hooks).unwrap();
 
-    assert!(second.previous_session_interrupted);
+    assert!(second.previous_session_interrupted());
     assert_eq!(*recovered.lock().unwrap(), vec![abandoned_session_id]);
     assert_eq!(fixture.event_count("previous_session_interrupted"), 1);
     let mut second = second;
     fixture.finish(&mut second, ShutdownReason::UserQuit);
     drop(second);
     let third = fixture.bootstrap();
-    assert!(!third.previous_session_interrupted);
+    assert!(!third.previous_session_interrupted());
     assert_eq!(fixture.event_count("previous_session_interrupted"), 1);
 }
 
@@ -347,13 +386,13 @@ fn interrupted_prior_session_is_closed_once_and_exposed_only_on_that_boot() {
 fn missing_projections_rebuild_from_the_verified_event_stream() {
     let mut fixture = Fixture::new();
     let state = fixture.bootstrap();
-    let installation_id = state.installation_id;
+    let installation_id = state.installation_id();
     drop(state);
     fixture.remove_projections();
 
     let recovered = fixture.bootstrap();
 
-    assert_eq!(installation_id, recovered.installation_id);
+    assert_eq!(installation_id, recovered.installation_id());
     assert_eq!(fixture.event_count("projection_rebuilt"), 1);
 }
 
@@ -361,13 +400,13 @@ fn missing_projections_rebuild_from_the_verified_event_stream() {
 fn stale_projection_metadata_rebuilds_from_the_verified_event_stream() {
     let mut fixture = Fixture::new();
     let state = fixture.bootstrap();
-    let installation_id = state.installation_id;
+    let installation_id = state.installation_id();
     drop(state);
     fixture.corrupt_projection_metadata();
 
     let recovered = fixture.bootstrap();
 
-    assert_eq!(installation_id, recovered.installation_id);
+    assert_eq!(installation_id, recovered.installation_id());
     assert_eq!(fixture.event_count("projection_rebuilt"), 1);
 }
 
@@ -375,13 +414,13 @@ fn stale_projection_metadata_rebuilds_from_the_verified_event_stream() {
 fn corrupt_projection_rows_rebuild_from_the_verified_event_stream() {
     let mut fixture = Fixture::new();
     let state = fixture.bootstrap();
-    let installation_id = state.installation_id;
+    let installation_id = state.installation_id();
     drop(state);
     fixture.corrupt_projection_rows();
 
     let recovered = fixture.bootstrap();
 
-    assert_eq!(installation_id, recovered.installation_id);
+    assert_eq!(installation_id, recovered.installation_id());
     assert_eq!(fixture.event_count("projection_rebuilt"), 1);
 }
 
@@ -390,6 +429,8 @@ fn corrupt_event_stream_refuses_bootstrap_without_appending_recovery_events() {
     let mut fixture = Fixture::new();
     fixture.bootstrap();
     fixture.insert_bad_event();
+    let clock_before = fixture.clock.calls();
+    let ids_before = fixture.ids.calls();
     let count_before: i64 = fixture
         .database
         .connection()
@@ -408,21 +449,27 @@ fn corrupt_event_stream_refuses_bootstrap_without_appending_recovery_events() {
             .unwrap(),
         count_before
     );
+    assert_eq!(fixture.clock.calls() - clock_before, 0);
+    assert_eq!(fixture.ids.calls() - ids_before, 0);
 }
 
 #[test]
 fn failed_interruption_hook_rolls_back_the_interruption_event_and_projection() {
     let mut fixture = Fixture::new();
     let abandoned = fixture.bootstrap();
-    let abandoned_session_id = abandoned.session_id;
+    let abandoned_session_id = abandoned.session_id();
     drop(abandoned);
     let event_count_before = fixture.event_count("process_session_started")
         + fixture.event_count("previous_session_interrupted");
     let hooks: Vec<Box<dyn RecoveryHook>> = vec![Box::new(FailingHook)];
+    let clock_before = fixture.clock.calls();
+    let ids_before = fixture.ids.calls();
 
     let error = fixture.bootstrap_with_hooks(&hooks).unwrap_err();
 
     assert_eq!(error.code(), "event_query_failed");
+    assert_eq!(fixture.clock.calls() - clock_before, 1);
+    assert_eq!(fixture.ids.calls() - ids_before, 2);
     assert_eq!(
         fixture.event_count("process_session_started") + fixture.event_count("previous_session_interrupted"),
         event_count_before
@@ -437,8 +484,12 @@ fn failed_interruption_hook_rolls_back_the_interruption_event_and_projection() {
         )
         .unwrap());
 
+    let retry_clock_before = fixture.clock.calls();
+    let retry_ids_before = fixture.ids.calls();
     let retried = fixture.bootstrap();
-    assert!(retried.previous_session_interrupted);
+    assert!(retried.previous_session_interrupted());
+    assert_eq!(fixture.clock.calls() - retry_clock_before, 2);
+    assert_eq!(fixture.ids.calls() - retry_ids_before, 5);
 }
 
 #[test]
@@ -446,12 +497,20 @@ fn orderly_shutdown_ends_the_current_session_once() {
     let mut fixture = Fixture::new();
     let mut state = fixture.bootstrap();
 
+    let clock_before = fixture.clock.calls();
+    let ids_before = fixture.ids.calls();
     let first = fixture.finish(&mut state, ShutdownReason::UserQuit);
+    assert_eq!(fixture.clock.calls() - clock_before, 1);
+    assert_eq!(fixture.ids.calls() - ids_before, 2);
+    let retry_clock_before = fixture.clock.calls();
+    let retry_ids_before = fixture.ids.calls();
     let second = fixture.finish(&mut state, ShutdownReason::UserQuit);
 
     assert_eq!(first, second);
     assert_eq!(fixture.event_count("process_session_ended"), 1);
-    assert_eq!(state.projection.sessions[&state.session_id].ended.as_ref().unwrap().reason, ShutdownReason::UserQuit);
+    assert_eq!(state.projection().sessions[&state.session_id()].ended.as_ref().unwrap().reason, ShutdownReason::UserQuit);
+    assert_eq!(fixture.clock.calls() - retry_clock_before, 0);
+    assert_eq!(fixture.ids.calls() - retry_ids_before, 0);
 }
 
 #[test]
@@ -467,7 +526,7 @@ fn bootstrap_rejects_a_second_live_instance_and_releases_the_guard_when_owner_dr
     assert_eq!(fixture.ids.calls(), calls_before);
     drop(first);
     let resumed = RecoveryCoordinator::bootstrap(&mut peer, &fixture.clock, &fixture.ids, &[]).unwrap();
-    assert!(resumed.previous_session_interrupted);
+    assert!(resumed.previous_session_interrupted());
 }
 
 #[test]
@@ -485,18 +544,26 @@ fn invalid_projection_metadata_on_an_empty_stream_rebuilds_before_initialization
         )
         .unwrap();
 
+    let clock_before = fixture.clock.calls();
+    let ids_before = fixture.ids.calls();
     let state = fixture.bootstrap();
 
     assert_eq!(fixture.event_count("projection_rebuilt"), 1);
     assert_eq!(fixture.event_count("installation_initialized"), 1);
-    assert_eq!(state.projection.last_sequence, 3);
+    assert_eq!(state.projection().last_sequence, 3);
+    assert_eq!(fixture.clock.calls() - clock_before, 3);
+    assert_eq!(fixture.ids.calls() - ids_before, 8);
 }
 
 #[test]
-fn bootstrap_preserves_precise_stream_failure_codes_without_mutation() {
+fn unsupported_event_schema_refuses_bootstrap_without_mutation() {
     let mut unsupported = Fixture::new();
     unsupported.bootstrap();
     let unsupported_before = unsupported.event_count("process_session_started");
+    let event_count_before = unsupported.raw_event_count();
+    let marker_before = unsupported.projection_marker();
+    let clock_before = unsupported.clock.calls();
+    let ids_before = unsupported.ids.calls();
     unsupported.insert_invalid_event(2, "{}");
     let error = RecoveryCoordinator::bootstrap(
         &mut unsupported.database,
@@ -518,9 +585,20 @@ fn bootstrap_preserves_precise_stream_failure_codes_without_mutation() {
             .unwrap() as usize,
         unsupported_before
     );
+    assert_eq!(unsupported.raw_event_count(), event_count_before + 1);
+    assert_eq!(unsupported.projection_marker(), marker_before);
+    assert_eq!(unsupported.clock.calls() - clock_before, 0);
+    assert_eq!(unsupported.ids.calls() - ids_before, 0);
+}
 
+#[test]
+fn malformed_event_refuses_bootstrap_without_mutation() {
     let mut malformed = Fixture::new();
     malformed.bootstrap();
+    let event_count_before = malformed.raw_event_count();
+    let marker_before = malformed.projection_marker();
+    let clock_before = malformed.clock.calls();
+    let ids_before = malformed.ids.calls();
     malformed.insert_invalid_event(1, "{\"unexpected\":true}");
     let error = RecoveryCoordinator::bootstrap(
         &mut malformed.database,
@@ -530,13 +608,28 @@ fn bootstrap_preserves_precise_stream_failure_codes_without_mutation() {
     )
     .unwrap_err();
     assert_eq!(error.code(), "invalid_event_record");
+    assert_eq!(malformed.raw_event_count(), event_count_before + 1);
+    assert_eq!(malformed.projection_marker(), marker_before);
+    assert_eq!(malformed.clock.calls() - clock_before, 0);
+    assert_eq!(malformed.ids.calls() - ids_before, 0);
+}
 
+#[test]
+fn sequence_gap_refuses_bootstrap_without_mutation() {
     let mut gapped = Fixture::new();
     gapped.bootstrap();
+    let event_count_before = gapped.raw_event_count();
+    let marker_before = gapped.projection_marker();
+    let clock_before = gapped.clock.calls();
+    let ids_before = gapped.ids.calls();
     gapped.insert_valid_sequence_gap();
     let error = RecoveryCoordinator::bootstrap(&mut gapped.database, &gapped.clock, &gapped.ids, &[])
         .unwrap_err();
     assert_eq!(error.code(), "event_sequence_gap");
+    assert_eq!(gapped.raw_event_count(), event_count_before + 1);
+    assert_eq!(gapped.projection_marker(), marker_before);
+    assert_eq!(gapped.clock.calls() - clock_before, 0);
+    assert_eq!(gapped.ids.calls() - ids_before, 0);
 }
 
 #[test]
@@ -560,54 +653,41 @@ fn duplicate_generator_values_cannot_create_a_second_session() {
 }
 
 #[test]
-fn finish_session_uses_authoritative_state_for_stale_and_different_reason_retries() {
+fn finish_session_returns_the_authoritative_terminal_event_for_a_different_reason_retry() {
     let mut fixture = Fixture::new();
     let mut state = fixture.bootstrap();
-    let mut stale = state.projection.clone();
 
-    let first = RecoveryCoordinator::finish_session(
-        &mut fixture.database,
-        &mut state.projection,
-        state.session_id,
-        ShutdownReason::UserQuit,
-        &fixture.clock,
-        &fixture.ids,
-    )
-    .unwrap();
-    let retry = RecoveryCoordinator::finish_session(
-        &mut fixture.database,
-        &mut stale,
-        state.session_id,
-        ShutdownReason::ApplicationError,
-        &fixture.clock,
-        &fixture.ids,
-    )
-    .unwrap();
+    let first = fixture.finish(&mut state, ShutdownReason::UserQuit);
+    let retry_clock_before = fixture.clock.calls();
+    let retry_ids_before = fixture.ids.calls();
+    let retry = fixture.finish(&mut state, ShutdownReason::ApplicationError);
 
     assert_eq!(retry, first);
     assert_eq!(fixture.event_count("process_session_ended"), 1);
+    assert_eq!(fixture.clock.calls() - retry_clock_before, 0);
+    assert_eq!(fixture.ids.calls() - retry_ids_before, 0);
 }
 
 #[test]
 fn concurrent_shutdown_attempts_return_one_authoritative_terminal_event() {
     let mut fixture = Fixture::new();
     let state = fixture.bootstrap();
-    let session_id = state.session_id;
-    let projection = state.projection.clone();
+    let state = Arc::new(Mutex::new(state));
     let database_a = fixture.open_peer();
     let database_b = fixture.open_peer();
     let barrier = Arc::new(Barrier::new(3));
     let barrier_a = Arc::clone(&barrier);
     let barrier_b = Arc::clone(&barrier);
+    let state_a = Arc::clone(&state);
+    let state_b = Arc::clone(&state);
 
     let first = thread::spawn(move || {
         let mut database = database_a;
-        let mut state = projection;
         barrier_a.wait();
+        let mut lifecycle = state_a.lock().unwrap();
         RecoveryCoordinator::finish_session(
             &mut database,
-            &mut state,
-            session_id,
+            &mut lifecycle,
             ShutdownReason::UserQuit,
             &TestClock::new(),
             &TestIds::starting_at(10_000),
@@ -616,12 +696,11 @@ fn concurrent_shutdown_attempts_return_one_authoritative_terminal_event() {
     });
     let second = thread::spawn(move || {
         let mut database = database_b;
-        let mut state = state.projection.clone();
         barrier_b.wait();
+        let mut lifecycle = state_b.lock().unwrap();
         RecoveryCoordinator::finish_session(
             &mut database,
-            &mut state,
-            session_id,
+            &mut lifecycle,
             ShutdownReason::ApplicationError,
             &TestClock::new(),
             &TestIds::starting_at(20_000),
@@ -634,4 +713,129 @@ fn concurrent_shutdown_attempts_return_one_authoritative_terminal_event() {
     let second = second.join().unwrap();
     assert_eq!(first, second);
     assert_eq!(fixture.event_count("process_session_ended"), 1);
+}
+
+#[test]
+fn nonempty_rebuild_and_ordinary_startup_have_exact_dependency_deltas() {
+    let mut fixture = Fixture::new();
+    let state = fixture.bootstrap();
+    assert_eq!(fixture.clock.calls(), 2);
+    assert_eq!(fixture.ids.calls(), 6);
+    drop(state);
+    fixture.corrupt_projection_metadata();
+    let clock_before = fixture.clock.calls();
+    let ids_before = fixture.ids.calls();
+
+    let rebuilt = fixture.bootstrap();
+
+    assert!(rebuilt.previous_session_interrupted());
+    assert_eq!(fixture.clock.calls() - clock_before, 3);
+    assert_eq!(fixture.ids.calls() - ids_before, 7);
+}
+
+#[test]
+fn simultaneous_bootstrap_allows_one_owner_and_retains_its_guard_until_drop() {
+    let temporary_directory = tempfile::tempdir().unwrap();
+    let paths = AppPaths::for_test(temporary_directory.path());
+    Database::open(&paths).unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+    let (sender, receiver) = mpsc::channel();
+    let mut handles = Vec::new();
+    for seed in [1_u128, 10_000] {
+        let paths = paths.clone();
+        let barrier = Arc::clone(&barrier);
+        let sender = sender.clone();
+        handles.push(thread::spawn(move || {
+            let mut database = Database::open(&paths).unwrap();
+            let clock = TestClock::new();
+            let ids = TestIds::starting_at(seed);
+            barrier.wait();
+            let result = RecoveryCoordinator::bootstrap(&mut database, &clock, &ids, &[]);
+            sender.send((result, clock.calls(), ids.calls())).unwrap();
+        }));
+    }
+    drop(sender);
+    barrier.wait();
+    let mut winner = None;
+    let mut loser_counts = None;
+    for _ in 0..2 {
+        let (result, clock_calls, id_calls) = receiver.recv().unwrap();
+        match result {
+            Ok(state) => {
+                assert_eq!((clock_calls, id_calls), (2, 6));
+                winner = Some(state);
+            }
+            Err(error) => {
+                assert_eq!(error.code(), "already_running");
+                assert_eq!((clock_calls, id_calls), (0, 0));
+                loser_counts = Some((clock_calls, id_calls));
+            }
+        }
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    assert_eq!(loser_counts, Some((0, 0)));
+    let mut peer = Database::open(&paths).unwrap();
+    let peer_clock = TestClock::new();
+    let peer_ids = TestIds::starting_at(20_000);
+    assert_eq!(
+        RecoveryCoordinator::bootstrap(&mut peer, &peer_clock, &peer_ids, &[])
+            .unwrap_err()
+            .code(),
+        "already_running"
+    );
+    drop(winner);
+    let resumed = RecoveryCoordinator::bootstrap(&mut peer, &peer_clock, &peer_ids, &[]).unwrap();
+    assert!(resumed.previous_session_interrupted());
+}
+
+#[cfg(unix)]
+#[test]
+fn process_guard_refuses_terminal_and_intermediate_symlinks_without_touching_targets() {
+    let temporary_directory = tempfile::tempdir().unwrap();
+    let root = temporary_directory.path().join("state");
+    let paths = AppPaths::for_test(&root);
+    let database = Database::open(&paths).unwrap();
+    let target = temporary_directory.path().join("target");
+    fs::write(&target, b"unchanged").unwrap();
+    symlink(&target, root.join("phase0-bootstrap.lock")).unwrap();
+    assert_eq!(database.acquire_process_guard().unwrap_err().code(), "state_permissions");
+    assert_eq!(fs::read(&target).unwrap(), b"unchanged");
+
+    fs::remove_file(root.join("phase0-bootstrap.lock")).unwrap();
+    let redirected = temporary_directory.path().join("redirected-state");
+    fs::rename(&root, &redirected).unwrap();
+    fs::write(redirected.join("target-marker"), b"unchanged").unwrap();
+    symlink(&redirected, &root).unwrap();
+    assert_eq!(database.acquire_process_guard().unwrap_err().code(), "state_directory_unavailable");
+    assert_eq!(fs::read(redirected.join("target-marker")).unwrap(), b"unchanged");
+}
+
+#[cfg(unix)]
+#[test]
+fn process_guard_refuses_fifo_and_socket_and_corrects_lock_mode() {
+    let fixture = Fixture::new();
+    let lock = fixture.lock_path();
+    let fifo = CString::new(lock.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    assert_eq!(fixture.database.acquire_process_guard().unwrap_err().code(), "state_permissions");
+    fs::remove_file(&lock).unwrap();
+    #[cfg(target_os = "macos")]
+    let socket_path = PathBuf::from("/private").join(lock.strip_prefix("/").unwrap());
+    #[cfg(not(target_os = "macos"))]
+    let socket_path = lock.clone();
+    let listener = match UnixListener::bind(&socket_path) {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("could not create socket fixture: {error}"),
+    };
+    assert_eq!(fixture.database.acquire_process_guard().unwrap_err().code(), "state_permissions");
+    drop(listener);
+    fs::remove_file(&lock).unwrap();
+    fs::write(&lock, b"").unwrap();
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+    let guard = fixture.database.acquire_process_guard().unwrap();
+    assert_eq!(fs::metadata(&lock).unwrap().mode() & 0o777, 0o600);
+    drop(guard);
 }

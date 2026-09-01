@@ -3,13 +3,15 @@
 use std::{
     fmt,
     path::{Component, Path},
+    sync::{Mutex, OnceLock},
 };
 
-use rustix::fs::{fchmod, fstat, openat, CWD, FileType, Mode, OFlags};
+use rustix::fs::{flock, fchmod, fstat, openat, CWD, FileType, FlockOperation, Mode, OFlags};
 
 use super::StartupError;
 
 const LOCK_FILENAME: &str = "phase0-bootstrap.lock";
+static PROCESS_GUARD_ACQUISITION: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub struct ProcessGuard {
     #[cfg(unix)]
@@ -23,10 +25,19 @@ impl fmt::Debug for ProcessGuard {
 }
 
 impl ProcessGuard {
+    pub const fn is_held(&self) -> bool {
+        true
+    }
+
     pub(crate) fn acquire(state_dir: &Path) -> Result<Self, StartupError> {
         #[cfg(unix)]
         {
-            use std::os::fd::{AsFd, AsRawFd};
+            use std::os::fd::AsFd;
+
+            let _acquisition = PROCESS_GUARD_ACQUISITION
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
 
             let directory = open_state_directory(state_dir)?;
             let file = openat(
@@ -46,14 +57,13 @@ impl ProcessGuard {
                 return Err(StartupError::StatePermissions);
             }
 
-            let result = unsafe { flock(file.as_fd().as_raw_fd(), LOCK_EX | LOCK_NB) };
-            if result == 0 {
-                return Ok(Self { _file: file });
+            match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => Ok(Self { _file: file }),
+                Err(error) if error == rustix::io::Errno::WOULDBLOCK => {
+                    Err(StartupError::AlreadyRunning)
+                }
+                Err(_) => Err(StartupError::StatePermissions),
             }
-            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
-                return Err(StartupError::AlreadyRunning);
-            }
-            Err(StartupError::StatePermissions)
         }
         #[cfg(not(unix))]
         {
@@ -61,16 +71,6 @@ impl ProcessGuard {
             Err(StartupError::StatePermissions)
         }
     }
-}
-
-#[cfg(unix)]
-const LOCK_EX: i32 = 2;
-#[cfg(unix)]
-const LOCK_NB: i32 = 4;
-
-#[cfg(unix)]
-unsafe extern "C" {
-    fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::os::raw::c_int;
 }
 
 #[cfg(unix)]

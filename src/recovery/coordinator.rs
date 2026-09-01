@@ -29,11 +29,33 @@ impl RecoveryHook for NoopRecoveryHook {
 
 #[derive(Debug)]
 pub struct BootstrapState {
-    pub installation_id: InstallationId,
-    pub session_id: SessionId,
-    pub projection: ProjectionState,
-    pub previous_session_interrupted: bool,
-    pub process_guard: ProcessGuard,
+    installation_id: InstallationId,
+    session_id: SessionId,
+    projection: ProjectionState,
+    previous_session_interrupted: bool,
+    process_guard: ProcessGuard,
+}
+
+impl BootstrapState {
+    pub const fn installation_id(&self) -> InstallationId {
+        self.installation_id
+    }
+
+    pub const fn session_id(&self) -> SessionId {
+        self.session_id
+    }
+
+    pub fn projection(&self) -> &ProjectionState {
+        &self.projection
+    }
+
+    pub const fn previous_session_interrupted(&self) -> bool {
+        self.previous_session_interrupted
+    }
+
+    pub const fn process_guard(&self) -> &ProcessGuard {
+        &self.process_guard
+    }
 }
 
 pub struct RecoveryCoordinator;
@@ -118,12 +140,12 @@ impl RecoveryCoordinator {
 
     pub fn finish_session(
         database: &mut Database,
-        state: &mut ProjectionState,
-        session_id: SessionId,
+        state: &mut BootstrapState,
         reason: ShutdownReason,
         clock: &dyn Clock,
         ids: &dyn IdGenerator,
     ) -> Result<Vec<EventEnvelope>, AppError> {
+        let session_id = state.session_id;
         let transaction = database.immediate_transaction()?;
         let mut next = ProjectionRepository::load_in(&transaction)?;
         let session = next
@@ -136,7 +158,7 @@ impl RecoveryCoordinator {
                 .find(|event| event.event_id == end.ended_event_id)
                 .ok_or(RecoveryError::InvalidEventRecord)?;
             transaction.commit()?;
-            *state = next;
+            state.projection = next;
             return Ok(vec![existing]);
         }
 
@@ -148,7 +170,7 @@ impl RecoveryCoordinator {
             ids,
         )?;
         transaction.commit()?;
-        *state = next;
+        state.projection = next;
         Ok(vec![event])
     }
 }
