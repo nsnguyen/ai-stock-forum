@@ -814,7 +814,7 @@ fn process_guard_refuses_terminal_and_intermediate_symlinks_without_touching_tar
 
 #[cfg(unix)]
 #[test]
-fn process_guard_refuses_fifo_and_socket_and_corrects_lock_mode() {
+fn process_guard_refuses_fifo_and_socket_when_socket_fixture_is_available() {
     let fixture = Fixture::new();
     let lock = fixture.lock_path();
     let fifo = CString::new(lock.as_os_str().as_encoded_bytes()).unwrap();
@@ -825,14 +825,22 @@ fn process_guard_refuses_fifo_and_socket_and_corrects_lock_mode() {
     let socket_path = PathBuf::from("/private").join(lock.strip_prefix("/").unwrap());
     #[cfg(not(target_os = "macos"))]
     let socket_path = lock.clone();
-    let listener = match UnixListener::bind(&socket_path) {
-        Ok(listener) => listener,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+    match UnixListener::bind(&socket_path) {
+        Ok(listener) => {
+            assert_eq!(fixture.database.acquire_process_guard().unwrap_err().code(), "state_permissions");
+            drop(listener);
+            fs::remove_file(&lock).unwrap();
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
         Err(error) => panic!("could not create socket fixture: {error}"),
-    };
-    assert_eq!(fixture.database.acquire_process_guard().unwrap_err().code(), "state_permissions");
-    drop(listener);
-    fs::remove_file(&lock).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn process_guard_corrects_existing_regular_lock_file_to_owner_only_mode() {
+    let fixture = Fixture::new();
+    let lock = fixture.lock_path();
     fs::write(&lock, b"").unwrap();
     fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
     let guard = fixture.database.acquire_process_guard().unwrap();
