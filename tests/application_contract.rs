@@ -11,6 +11,7 @@ use ai_stock_forum::{
         InputRejection, InputRejectionCategory, SafeToken, ShutdownDisposition, ShutdownReason,
     },
     domain::{Actor, CommandId, CorrelationId},
+    persistence::PersistenceError,
     policy::{Capability, PolicyDecision},
 };
 use uuid::Uuid;
@@ -493,6 +494,286 @@ fn concurrent_conflicting_command_has_one_winner_and_one_deterministic_conflict(
 }
 
 #[test]
+fn peers_created_before_finish_share_the_closed_lifecycle_gate() {
+    let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
+    let mut app = support::app_with_policy(Arc::new(policy.clone()));
+    let mut peer = app.peer();
+    app.finish(ShutdownReason::UserQuit).unwrap();
+    let receipts_before = app.count_rows("command_receipts");
+    let events_before = app.count_rows("event_stream");
+    let projection_before = app.persisted_last_sequence();
+    let approvals_before = app.count_rows("approval_records");
+    let clock_before = app.clock.calls();
+    let ids_before = app.ids.calls();
+    let policy_before = policy.calls();
+
+    assert_eq!(
+        peer.execute_user(ApplicationCommand::ShowStatus).unwrap_err(),
+        AppError::LifecycleFinished
+    );
+    assert_eq!(app.count_rows("command_receipts"), receipts_before);
+    assert_eq!(app.count_rows("event_stream"), events_before);
+    assert_eq!(app.persisted_last_sequence(), projection_before);
+    assert_eq!(app.count_rows("approval_records"), approvals_before);
+    assert_eq!(app.clock.calls(), clock_before);
+    assert_eq!(app.ids.calls(), ids_before);
+    assert_eq!(policy.calls(), policy_before);
+}
+
+#[test]
+fn transaction_rejects_a_closed_authoritative_session_before_dependencies_or_writes() {
+    let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
+    let app = support::app_with_policy(Arc::new(policy.clone()));
+    let mut peer = app.peer();
+    app.mark_current_session_finished_in_database();
+    let receipts_before = app.count_rows("command_receipts");
+    let events_before = app.count_rows("event_stream");
+    let projection_before = app.persisted_last_sequence();
+    let approvals_before = app.count_rows("approval_records");
+    let clock_before = app.clock.calls();
+    let ids_before = app.ids.calls();
+    let policy_before = policy.calls();
+
+    assert_eq!(
+        peer.execute(envelope(1_600, 1_601, ApplicationCommand::ShowStatus))
+            .unwrap_err(),
+        AppError::LifecycleFinished
+    );
+    assert_eq!(app.count_rows("command_receipts"), receipts_before);
+    assert_eq!(app.count_rows("event_stream"), events_before);
+    assert_eq!(app.persisted_last_sequence(), projection_before);
+    assert_eq!(app.count_rows("approval_records"), approvals_before);
+    assert_eq!(app.clock.calls(), clock_before);
+    assert_eq!(app.ids.calls(), ids_before);
+    assert_eq!(policy.calls(), policy_before);
+}
+
+#[test]
+fn zero_event_decisions_replay_and_conflict_without_dependencies_or_effects() {
+    for (offset, decision) in [
+        AuthorizationDecision::Denied(PolicyDecision::Denied),
+        AuthorizationDecision::ApprovalRequired,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let policy = support::RecordingPolicy::new(decision);
+        let mut app = support::app_with_policy(Arc::new(policy.clone()));
+        let id = 1_700 + offset as u128;
+        let command = envelope(id, id + 10, ApplicationCommand::ShowStatus);
+        let events_before = app.count_rows("event_stream");
+        let projection_before = app.persisted_last_sequence();
+        let approvals_before = app.count_rows("approval_records");
+        let clock_before = app.clock.calls();
+        let ids_before = app.ids.calls();
+        let first = app.execute(command.clone()).unwrap_err();
+
+        policy.set_decision(AuthorizationDecision::Granted);
+        let policy_before_replay = policy.calls();
+        assert_eq!(app.execute(command).unwrap_err(), first);
+        assert_eq!(
+            app.execute(envelope(id, id + 10, ApplicationCommand::ShowHelp))
+                .unwrap_err(),
+            AppError::CommandConflict
+        );
+        assert_eq!(app.count_rows("command_receipts"), 1);
+        assert_eq!(app.count_rows("command_event_refs"), 0);
+        assert_eq!(app.count_rows("event_stream"), events_before);
+        assert_eq!(app.persisted_last_sequence(), projection_before);
+        assert_eq!(app.count_rows("approval_records"), approvals_before);
+        assert_eq!(app.clock.calls(), clock_before);
+        assert_eq!(app.ids.calls(), ids_before);
+        assert_eq!(policy.calls(), policy_before_replay);
+    }
+}
+
+#[test]
+fn concurrent_zero_event_same_and_conflicting_commands_have_one_receipt_authority() {
+    for (case, decision) in [
+        AuthorizationDecision::Denied(PolicyDecision::Denied),
+        AuthorizationDecision::ApprovalRequired,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let policy = support::RecordingPolicy::new(decision);
+        let app = support::app_with_policy(Arc::new(policy.clone()));
+        let mut first = app.peer();
+        let mut second = app.peer();
+        let command = envelope(1_800 + case as u128, 1_810, ApplicationCommand::ShowStatus);
+        let barrier = Arc::new(Barrier::new(3));
+        let first_barrier = barrier.clone();
+        let first_command = command.clone();
+        let first_handle = thread::spawn(move || {
+            first_barrier.wait();
+            first.execute(first_command)
+        });
+        let second_barrier = barrier.clone();
+        let second_handle = thread::spawn(move || {
+            second_barrier.wait();
+            second.execute(command)
+        });
+        let events_before = app.count_rows("event_stream");
+        let projection_before = app.persisted_last_sequence();
+        let clock_before = app.clock.calls();
+        let ids_before = app.ids.calls();
+        barrier.wait();
+        let results = [first_handle.join().unwrap(), second_handle.join().unwrap()];
+
+        assert_eq!(results[0].as_ref().unwrap_err(), results[1].as_ref().unwrap_err());
+        assert_eq!(app.count_rows("command_receipts"), 1);
+        assert_eq!(app.count_rows("command_event_refs"), 0);
+        assert_eq!(app.count_rows("event_stream"), events_before);
+        assert_eq!(app.persisted_last_sequence(), projection_before);
+        assert_eq!(app.count_rows("approval_records"), 0);
+        assert_eq!(app.clock.calls(), clock_before);
+        assert_eq!(app.ids.calls(), ids_before);
+        assert_eq!(policy.calls(), 1);
+
+        let policy = support::RecordingPolicy::new(decision);
+        let app = support::app_with_policy(Arc::new(policy.clone()));
+        let mut first = app.peer();
+        let mut second = app.peer();
+        let barrier = Arc::new(Barrier::new(3));
+        let first_barrier = barrier.clone();
+        let first_handle = thread::spawn(move || {
+            first_barrier.wait();
+            first.execute(envelope(
+                1_900 + case as u128,
+                1_910,
+                ApplicationCommand::ShowHelp,
+            ))
+        });
+        let second_barrier = barrier.clone();
+        let second_handle = thread::spawn(move || {
+            second_barrier.wait();
+            second.execute(envelope(
+                1_900 + case as u128,
+                1_911,
+                ApplicationCommand::ShowStatus,
+            ))
+        });
+        let events_before = app.count_rows("event_stream");
+        let projection_before = app.persisted_last_sequence();
+        let clock_before = app.clock.calls();
+        let ids_before = app.ids.calls();
+        barrier.wait();
+        let results = [first_handle.join().unwrap(), second_handle.join().unwrap()];
+
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(AppError::CommandConflict)))
+                .count(),
+            1
+        );
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 2);
+        assert_eq!(app.count_rows("command_receipts"), 1);
+        assert_eq!(app.count_rows("command_event_refs"), 0);
+        assert_eq!(app.count_rows("event_stream"), events_before);
+        assert_eq!(app.persisted_last_sequence(), projection_before);
+        assert_eq!(app.count_rows("approval_records"), 0);
+        assert_eq!(app.clock.calls(), clock_before);
+        assert_eq!(app.ids.calls(), ids_before);
+        assert_eq!(policy.calls(), 1);
+    }
+}
+
+#[test]
+fn zero_event_receipt_failures_roll_back_without_consuming_dependencies() {
+    for (case, decision) in [
+        AuthorizationDecision::Denied(PolicyDecision::Denied),
+        AuthorizationDecision::ApprovalRequired,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for failure in [
+            support::HookFailure::OutcomeMaterialization,
+            support::HookFailure::ReceiptWrite,
+        ] {
+            let policy = support::RecordingPolicy::new(decision);
+            let hook = Arc::new(support::TestCommandHook::failing(failure));
+            let mut app = support::app_with_policy_and_hook(Arc::new(policy.clone()), hook);
+            let events_before = app.count_rows("event_stream");
+            let projection_before = app.persisted_last_sequence();
+            let approvals_before = app.count_rows("approval_records");
+            let clock_before = app.clock.calls();
+            let ids_before = app.ids.calls();
+
+            assert_eq!(
+                app.execute(envelope(
+                    2_000 + (case * 10) as u128 + failure as u128,
+                    2_100,
+                    ApplicationCommand::ShowStatus,
+                ))
+                .unwrap_err(),
+                AppError::Persistence(PersistenceError::QueryFailed)
+            );
+            assert_eq!(app.count_rows("command_receipts"), 0);
+            assert_eq!(app.count_rows("command_event_refs"), 0);
+            assert_eq!(app.count_rows("event_stream"), events_before);
+            assert_eq!(app.persisted_last_sequence(), projection_before);
+            assert_eq!(app.count_rows("approval_records"), approvals_before);
+            assert_eq!(app.clock.calls(), clock_before);
+            assert_eq!(app.ids.calls(), ids_before);
+            assert_eq!(policy.calls(), 1);
+        }
+    }
+}
+
+#[test]
+fn every_durable_receipt_boundary_is_validated_before_dependencies_or_mutation() {
+    for (offset, tamper) in [
+        support::ReceiptTamper::NoncanonicalRequest,
+        support::ReceiptTamper::NoncanonicalOutcome,
+        support::ReceiptTamper::TypedInvalidRequest,
+        support::ReceiptTamper::TypedInvalidOutcome,
+        support::ReceiptTamper::FingerprintMismatch,
+        support::ReceiptTamper::CapabilityMismatch,
+        support::ReceiptTamper::PolicyDecisionMismatch,
+        support::ReceiptTamper::EventRefOutcomeMismatch,
+        support::ReceiptTamper::OrdinalGap,
+        support::ReceiptTamper::MalformedReference,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
+        let mut app = support::app_with_policy(Arc::new(policy.clone()));
+        let command = envelope(
+            2_200 + offset as u128,
+            2_300 + offset as u128,
+            ApplicationCommand::ShowStatus,
+        );
+        app.execute(command.clone()).unwrap();
+        app.tamper_receipt(command.command_id, tamper);
+        let receipt_before = app.receipt_row(command.command_id);
+        let refs_before = app.event_ref_rows(command.command_id);
+        let events_before = app.count_rows("event_stream");
+        let projection_before = app.persisted_last_sequence();
+        let approvals_before = app.count_rows("approval_records");
+        let clock_before = app.clock.calls();
+        let ids_before = app.ids.calls();
+        let policy_before = policy.calls();
+
+        assert_eq!(
+            app.execute(command.clone()).unwrap_err(),
+            AppError::Persistence(PersistenceError::InvalidEventRecord),
+            "tamper {tamper:?}"
+        );
+        assert_eq!(app.receipt_row(command.command_id), receipt_before);
+        assert_eq!(app.event_ref_rows(command.command_id), refs_before);
+        assert_eq!(app.count_rows("event_stream"), events_before);
+        assert_eq!(app.persisted_last_sequence(), projection_before);
+        assert_eq!(app.count_rows("approval_records"), approvals_before);
+        assert_eq!(app.clock.calls(), clock_before);
+        assert_eq!(app.ids.calls(), ids_before);
+        assert_eq!(policy.calls(), policy_before);
+    }
+}
+
+#[test]
 fn rejected_input_retains_only_bounded_redacted_metadata() {
     let mut app = support::app();
     let secret = b"broker-token=super-secret-value";
@@ -506,6 +787,9 @@ fn rejected_input_retains_only_bounded_redacted_metadata() {
 
     assert!(!format!("{outcome:?}").contains("super-secret-value"));
     assert!(!app.last_payload_json().contains("super-secret-value"));
+    let (_, request_json, _, _, outcome_json) = app.receipt_row(outcome.command_id);
+    assert!(!request_json.contains("super-secret-value"));
+    assert!(!outcome_json.contains("super-secret-value"));
 }
 
 #[test]

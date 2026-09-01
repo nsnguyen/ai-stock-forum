@@ -169,6 +169,20 @@ pub enum HookFailure {
     ReceiptWrite,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptTamper {
+    NoncanonicalRequest,
+    NoncanonicalOutcome,
+    TypedInvalidRequest,
+    TypedInvalidOutcome,
+    FingerprintMismatch,
+    CapabilityMismatch,
+    PolicyDecisionMismatch,
+    EventRefOutcomeMismatch,
+    OrdinalGap,
+    MalformedReference,
+}
+
 pub struct TestCommandHook {
     failure: Option<HookFailure>,
 }
@@ -307,6 +321,24 @@ impl TestApp {
             .collect()
     }
 
+    pub fn event_ref_rows(
+        &self,
+        command_id: ai_stock_forum::domain::CommandId,
+    ) -> Vec<(i64, String)> {
+        let connection = Connection::open(self.paths.database_path()).unwrap();
+        let mut statement = connection
+            .prepare(
+                "SELECT event_ordinal, event_id FROM command_event_refs
+                 WHERE command_id = ?1 ORDER BY event_ordinal",
+            )
+            .unwrap();
+        statement
+            .query_map([command_id.to_string()], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
     pub fn install_projection_failure(&self) {
         Connection::open(self.paths.database_path())
             .unwrap()
@@ -364,15 +396,183 @@ impl TestApp {
             .unwrap();
     }
 
+    pub fn mark_current_session_finished_in_database(&self) {
+        Connection::open(self.paths.database_path())
+            .unwrap()
+            .execute(
+                "UPDATE process_session_projection
+                 SET ended_event_id = started_event_id, ended_at_ms = started_at_ms + 1,
+                     end_reason = 'application_error'
+                 WHERE session_id = ?1",
+                [self.session_id().to_string()],
+            )
+            .unwrap();
+    }
+
+    pub fn tamper_receipt(
+        &self,
+        command_id: ai_stock_forum::domain::CommandId,
+        tamper: ReceiptTamper,
+    ) {
+        let connection = Connection::open(self.paths.database_path()).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER IF EXISTS command_receipts_no_update;
+                 DROP TRIGGER IF EXISTS command_event_refs_no_update;",
+            )
+            .unwrap();
+        let command_id = command_id.to_string();
+
+        match tamper {
+            ReceiptTamper::NoncanonicalRequest => {
+                let value: serde_json::Value = serde_json::from_str(
+                    &connection
+                        .query_row(
+                            "SELECT request_json FROM command_receipts WHERE command_id = ?1",
+                            [&command_id],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .unwrap(),
+                )
+                .unwrap();
+                let json = serde_json::to_string_pretty(&value).unwrap();
+                let fingerprint = ai_stock_forum::domain::sha256(json.as_bytes()).to_string();
+                connection
+                    .execute(
+                        "UPDATE command_receipts SET request_json = ?1, command_fingerprint = ?2 WHERE command_id = ?3",
+                        rusqlite::params![json, fingerprint, command_id],
+                    )
+                    .unwrap();
+            }
+            ReceiptTamper::NoncanonicalOutcome => {
+                let value: serde_json::Value = serde_json::from_str(
+                    &connection
+                        .query_row(
+                            "SELECT outcome_json FROM command_receipts WHERE command_id = ?1",
+                            [&command_id],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .unwrap(),
+                )
+                .unwrap();
+                let json = serde_json::to_string_pretty(&value).unwrap();
+                connection
+                    .execute(
+                        "UPDATE command_receipts SET outcome_json = ?1 WHERE command_id = ?2",
+                        rusqlite::params![json, command_id],
+                    )
+                    .unwrap();
+            }
+            ReceiptTamper::TypedInvalidRequest => {
+                let mut value: serde_json::Value = serde_json::from_str(
+                    &connection
+                        .query_row(
+                            "SELECT request_json FROM command_receipts WHERE command_id = ?1",
+                            [&command_id],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .unwrap(),
+                )
+                .unwrap();
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("unexpected".into(), serde_json::Value::Bool(true));
+                let json = serde_json::to_string(&value).unwrap();
+                let fingerprint = ai_stock_forum::domain::sha256(json.as_bytes()).to_string();
+                connection
+                    .execute(
+                        "UPDATE command_receipts SET request_json = ?1, command_fingerprint = ?2 WHERE command_id = ?3",
+                        rusqlite::params![json, fingerprint, command_id],
+                    )
+                    .unwrap();
+            }
+            ReceiptTamper::TypedInvalidOutcome => {
+                let mut value: serde_json::Value = serde_json::from_str(
+                    &connection
+                        .query_row(
+                            "SELECT outcome_json FROM command_receipts WHERE command_id = ?1",
+                            [&command_id],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .unwrap(),
+                )
+                .unwrap();
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("unexpected".into(), serde_json::Value::Bool(true));
+                let json = serde_json::to_string(&value).unwrap();
+                connection
+                    .execute(
+                        "UPDATE command_receipts SET outcome_json = ?1 WHERE command_id = ?2",
+                        rusqlite::params![json, command_id],
+                    )
+                    .unwrap();
+            }
+            ReceiptTamper::FingerprintMismatch => {
+                connection
+                    .execute(
+                        "UPDATE command_receipts SET command_fingerprint = ?1 WHERE command_id = ?2",
+                        rusqlite::params!["b".repeat(64), command_id],
+                    )
+                    .unwrap();
+            }
+            ReceiptTamper::CapabilityMismatch => {
+                connection
+                    .execute(
+                        "UPDATE command_receipts SET capability = 'help_read' WHERE command_id = ?1",
+                        [&command_id],
+                    )
+                    .unwrap();
+            }
+            ReceiptTamper::PolicyDecisionMismatch => {
+                connection
+                    .execute(
+                        "UPDATE command_receipts SET policy_decision = 'denied' WHERE command_id = ?1",
+                        [&command_id],
+                    )
+                    .unwrap();
+            }
+            ReceiptTamper::EventRefOutcomeMismatch => {
+                let replacement = connection
+                    .query_row(
+                        "SELECT event_id FROM event_stream
+                         WHERE event_id NOT IN (SELECT event_id FROM command_event_refs)
+                         ORDER BY sequence LIMIT 1",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "UPDATE command_event_refs SET event_id = ?1 WHERE command_id = ?2",
+                        rusqlite::params![replacement, command_id],
+                    )
+                    .unwrap();
+            }
+            ReceiptTamper::OrdinalGap => {
+                connection
+                    .execute(
+                        "UPDATE command_event_refs SET event_ordinal = 1 WHERE command_id = ?1",
+                        [&command_id],
+                    )
+                    .unwrap();
+            }
+            ReceiptTamper::MalformedReference => {
+                connection.pragma_update(None, "foreign_keys", "OFF").unwrap();
+                connection
+                    .execute(
+                        "UPDATE command_event_refs SET event_id = 'not-an-event-id' WHERE command_id = ?1",
+                        [&command_id],
+                    )
+                    .unwrap();
+            }
+        }
+    }
+
     pub fn peer(&self) -> ApplicationService {
-        ApplicationService::open_peer_for_test(
-            &self.paths,
-            self.clock.clone(),
-            self.ids.clone(),
-            self.policy.as_ref().expect("peer requires injected policy").clone(),
-            self.hook.clone(),
-        )
-        .unwrap()
+        self.service.worker().unwrap()
     }
 }
 

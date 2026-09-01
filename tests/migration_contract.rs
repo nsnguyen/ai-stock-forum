@@ -249,9 +249,46 @@ fn migration_records_and_complete_schema_are_exact() {
     let receipt_sql: String = connection
         .query_row("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'command_receipts'", [], |row| row.get(0))
         .unwrap();
-    assert!(receipt_sql.contains("CHECK (json_valid(request_json))"));
-    assert!(receipt_sql.contains("CHECK (json_valid(outcome_json))"));
-    assert!(receipt_sql.ends_with(" STRICT"));
+    assert_eq!(
+        normalize_sql(&receipt_sql),
+        normalize_sql(
+            "CREATE TABLE command_receipts (
+                command_id TEXT PRIMARY KEY,
+                command_fingerprint TEXT NOT NULL CHECK (
+                    length(command_fingerprint) = 64
+                    AND command_fingerprint NOT GLOB '*[^0-9a-f]*'
+                ),
+                request_json TEXT NOT NULL CHECK (json_valid(request_json)),
+                capability TEXT NOT NULL CHECK (capability IN (
+                    'help_read', 'status_read', 'setup_status_read', 'audit_read', 'shutdown',
+                    'discussion_run', 'mcp_use', 'engineering_job_run', 'git_merge', 'git_push',
+                    'finance_recommendation'
+                )),
+                policy_decision TEXT NOT NULL CHECK (policy_decision IN (
+                    'granted', 'denied', 'denied_by_default', 'approval_required'
+                )),
+                outcome_json TEXT NOT NULL CHECK (json_valid(outcome_json))
+            ) STRICT"
+        )
+    );
+    let refs_sql: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'command_event_refs'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        normalize_sql(&refs_sql),
+        normalize_sql(
+            "CREATE TABLE command_event_refs (
+                command_id TEXT NOT NULL REFERENCES command_receipts(command_id),
+                event_ordinal INTEGER NOT NULL CHECK (event_ordinal >= 0),
+                event_id TEXT NOT NULL REFERENCES event_stream(event_id),
+                PRIMARY KEY (command_id, event_ordinal)
+            ) STRICT"
+        )
+    );
 }
 
 #[test]
@@ -401,6 +438,41 @@ fn semantic_index_oracle_detects_an_extra_autoindex_constraint() {
 #[test]
 fn every_enumerated_check_value_is_accepted() {
     assert_every_enumerated_check_value_is_accepted();
+}
+
+#[test]
+fn command_receipt_fingerprint_and_enumerated_domains_reject_every_extra_form() {
+    for fingerprint in [
+        "A".repeat(64),
+        "g".repeat(64),
+        "a".repeat(65),
+        "a".repeat(63),
+    ] {
+        let (_temp, database) = fresh_database();
+        assert!(database
+            .connection()
+            .execute(
+                "INSERT INTO command_receipts (command_id, command_fingerprint, request_json, capability, policy_decision, outcome_json) VALUES ('command', ?1, '{}', 'help_read', 'granted', '{}')",
+                [fingerprint],
+            )
+            .is_err());
+    }
+
+    for (capability, decision) in [
+        ("HELP_READ", "granted"),
+        ("help_read_extra", "granted"),
+        ("help_read", "GRANTED"),
+        ("help_read", "granted_extra"),
+    ] {
+        let (_temp, database) = fresh_database();
+        assert!(database
+            .connection()
+            .execute(
+                "INSERT INTO command_receipts (command_id, command_fingerprint, request_json, capability, policy_decision, outcome_json) VALUES ('command', ?1, '{}', ?2, ?3, '{}')",
+                rusqlite::params!["a".repeat(64), capability, decision],
+            )
+            .is_err());
+    }
 }
 
 #[test]

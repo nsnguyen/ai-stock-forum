@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
@@ -12,7 +12,7 @@ use crate::{
     config::{AppPaths, StartupError},
     domain::{
         canonical_json_bytes, sha256, Actor, CausationId, Clock, CommandId, CorrelationId,
-        EventId, IdGenerator, Sha256Digest,
+        EventId, IdGenerator, SessionId, Sha256Digest,
     },
     persistence::{
         CommandReceiptRecord, CommandReceiptRepository, Database, EventRepository,
@@ -169,13 +169,26 @@ impl StoredExecution {
 }
 
 pub struct ApplicationService {
+    paths: AppPaths,
     database: Database,
     state: Option<BootstrapState>,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGenerator>,
     policy: Arc<dyn CommandPolicy>,
     hook: Arc<dyn CommandTransactionHook>,
-    finished: bool,
+    lifecycle: Arc<SharedLifecycle>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LifecyclePhase {
+    Open,
+    Closed,
+}
+
+#[derive(Debug)]
+struct SharedLifecycle {
+    session_id: SessionId,
+    phase: RwLock<LifecyclePhase>,
 }
 
 impl ApplicationService {
@@ -224,33 +237,32 @@ impl ApplicationService {
             ids.as_ref(),
             &[],
         )?;
+        let lifecycle = Arc::new(SharedLifecycle {
+            session_id: state.session_id(),
+            phase: RwLock::new(LifecyclePhase::Open),
+        });
         Ok(Self {
+            paths: paths.clone(),
             database,
             state: Some(state),
             clock,
             ids,
             policy,
             hook,
-            finished: false,
+            lifecycle,
         })
     }
 
-    #[doc(hidden)]
-    pub fn open_peer_for_test(
-        paths: &AppPaths,
-        clock: Arc<dyn Clock>,
-        ids: Arc<dyn IdGenerator>,
-        policy: Arc<dyn CommandPolicy>,
-        hook: Arc<dyn CommandTransactionHook>,
-    ) -> Result<Self, StartupError> {
+    pub fn worker(&self) -> Result<Self, StartupError> {
         Ok(Self {
-            database: Database::open(paths)?,
+            paths: self.paths.clone(),
+            database: Database::open(&self.paths)?,
             state: None,
-            clock,
-            ids,
-            policy,
-            hook,
-            finished: false,
+            clock: self.clock.clone(),
+            ids: self.ids.clone(),
+            policy: self.policy.clone(),
+            hook: self.hook.clone(),
+            lifecycle: self.lifecycle.clone(),
         })
     }
 
@@ -268,11 +280,24 @@ impl ApplicationService {
     }
 
     pub fn execute(&mut self, envelope: CommandEnvelope) -> Result<CommandOutcome, AppError> {
-        self.ensure_running()?;
+        let lifecycle = self.lifecycle.clone();
+        let phase = lifecycle
+            .phase
+            .read()
+            .map_err(|_| AppError::LifecycleFinished)?;
+        if *phase == LifecyclePhase::Closed {
+            return Err(AppError::LifecycleFinished);
+        }
         let request = CommandRequest::from(&envelope);
         let request_json = encode_canonical(&request)?;
         let command_fingerprint = sha256(request_json.as_bytes());
         let transaction = self.database.immediate_transaction()?;
+        ensure_authoritative_session_open(&transaction, lifecycle.session_id)?;
+        let mut projection = ProjectionRepository::load_in(&transaction)?;
+        match projection.sessions.get(&lifecycle.session_id) {
+            Some(session) if session.ended.is_none() => {}
+            _ => return Err(AppError::LifecycleFinished),
+        }
 
         if let Some(receipt) = CommandReceiptRepository::load(&transaction, envelope.command_id)? {
             let stored = validate_receipt(
@@ -286,7 +311,6 @@ impl ApplicationService {
             return stored.into_result();
         }
 
-        let mut projection = ProjectionRepository::load_in(&transaction)?;
         let capability = request.command.required_capability();
         let (policy_decision, stored, events) = match self.policy.authorize(capability) {
             AuthorizationDecision::Granted => {
@@ -367,7 +391,12 @@ impl ApplicationService {
     }
 
     pub fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
-        if self.finished {
+        let lifecycle = self.lifecycle.clone();
+        let mut phase = lifecycle
+            .phase
+            .write()
+            .map_err(|_| AppError::LifecycleFinished)?;
+        if *phase == LifecyclePhase::Closed {
             return Ok(());
         }
         let state = self.state.as_mut().ok_or(AppError::LifecycleFinished)?;
@@ -378,7 +407,7 @@ impl ApplicationService {
             self.clock.as_ref(),
             self.ids.as_ref(),
         )?;
-        self.finished = true;
+        *phase = LifecyclePhase::Closed;
         Ok(())
     }
 
@@ -397,11 +426,32 @@ impl ApplicationService {
     }
 
     fn ensure_running(&self) -> Result<(), AppError> {
-        if self.finished {
-            Err(AppError::LifecycleFinished)
-        } else {
-            Ok(())
+        match self.lifecycle.phase.read() {
+            Ok(phase) if *phase == LifecyclePhase::Open => Ok(()),
+            _ => Err(AppError::LifecycleFinished),
         }
+    }
+}
+
+fn ensure_authoritative_session_open(
+    transaction: &ImmediateTransaction<'_>,
+    session_id: SessionId,
+) -> Result<(), AppError> {
+    let is_open = transaction
+        .transaction()
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM process_session_projection
+                WHERE session_id = ?1 AND ended_event_id IS NULL
+            )",
+            [session_id.to_string()],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|_| PersistenceError::QueryFailed)?;
+    if is_open {
+        Ok(())
+    } else {
+        Err(AppError::LifecycleFinished)
     }
 }
 
