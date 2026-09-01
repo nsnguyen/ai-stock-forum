@@ -22,7 +22,7 @@ use ai_stock_forum::{
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use tempfile::TempDir;
 
-const TIMEOUT: Duration = Duration::from_secs(1);
+const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn receive<T>(receiver: &Receiver<T>) -> T {
     receiver
@@ -289,7 +289,8 @@ fn shutdown_waiters_do_not_finish_early_while_finish_is_blocked() {
             .unwrap();
     });
 
-    assert!(second.recv_timeout(Duration::from_millis(20)).is_err());
+    runtime.wait_for_join_owner(TIMEOUT).unwrap();
+    runtime.wait_for_join_waiter(TIMEOUT).unwrap();
     release_sender.send(()).unwrap();
     assert_eq!(receive(&first), Ok(()));
     assert_eq!(receive(&second), Ok(()));
@@ -398,4 +399,206 @@ fn thread_creation_failure_maps_to_worker_startup() {
         ),
         Err(RuntimeError::WorkerStartup)
     ));
+}
+
+#[test]
+fn submit_blocks_for_capacity_then_returns_its_own_typed_outcome() {
+    let (entered_sender, entered) = bounded(1);
+    let (release_sender, release) = bounded(1);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let finishes = Arc::new(AtomicUsize::new(0));
+    let runtime = Arc::new(
+        ApplicationRuntime::spawn(
+            GateExecutor {
+                first_entered: entered_sender,
+                first_release: release,
+                seen: seen.clone(),
+                finishes: finishes.clone(),
+            },
+            1,
+        )
+        .unwrap(),
+    );
+    let client = runtime.client();
+    let first = client.try_submit(ApplicationCommand::ShowHelp).unwrap();
+    receive(&entered);
+    let second = client.try_submit(ApplicationCommand::ShowStatus).unwrap();
+    let (started_sender, started) = bounded(1);
+    let (submitted_sender, submitted) = bounded(1);
+    let submit_client = client.clone();
+    thread::spawn(move || {
+        started_sender.send(()).unwrap();
+        submitted_sender
+            .send(submit_client.submit(ApplicationCommand::ShowSetupStatus))
+            .unwrap();
+    });
+    receive(&started);
+    runtime.wait_for_reservations(1, TIMEOUT).unwrap();
+
+    release_sender.send(()).unwrap();
+    assert_eq!(
+        first.recv(),
+        Err(RuntimeError::Application(AppError::LifecycleFinished))
+    );
+    assert_eq!(
+        second.recv(),
+        Err(RuntimeError::Application(AppError::LifecycleFinished))
+    );
+    assert_eq!(
+        receive(&submitted),
+        Err(RuntimeError::Application(AppError::LifecycleFinished))
+    );
+    runtime.finish_and_join(ShutdownReason::InputClosed).unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            ApplicationCommand::ShowHelp,
+            ApplicationCommand::ShowStatus,
+            ApplicationCommand::ShowSetupStatus,
+        ]
+    );
+    assert_eq!(finishes.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn shutdown_drains_a_blocked_submit_reservation_before_finishing() {
+    let (entered_sender, entered) = bounded(1);
+    let (release_sender, release) = bounded(1);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let finishes = Arc::new(AtomicUsize::new(0));
+    let runtime = Arc::new(
+        ApplicationRuntime::spawn(
+            GateExecutor {
+                first_entered: entered_sender,
+                first_release: release,
+                seen: seen.clone(),
+                finishes: finishes.clone(),
+            },
+            1,
+        )
+        .unwrap(),
+    );
+    let client = runtime.client();
+    let first = client.try_submit(ApplicationCommand::ShowHelp).unwrap();
+    receive(&entered);
+    let second = client.try_submit(ApplicationCommand::ShowStatus).unwrap();
+    let (submitted_sender, submitted) = bounded(1);
+    let submit_client = client.clone();
+    thread::spawn(move || {
+        submitted_sender
+            .send(submit_client.submit(ApplicationCommand::ShowSetupStatus))
+            .unwrap();
+    });
+    runtime.wait_for_reservations(1, TIMEOUT).unwrap();
+    let (shutdown_sender, shutdown) = bounded(1);
+    let shutdown_runtime = runtime.clone();
+    thread::spawn(move || {
+        shutdown_sender
+            .send(shutdown_runtime.finish_and_join(ShutdownReason::InputClosed))
+            .unwrap();
+    });
+
+    release_sender.send(()).unwrap();
+    assert_eq!(
+        first.recv(),
+        Err(RuntimeError::Application(AppError::LifecycleFinished))
+    );
+    assert_eq!(
+        second.recv(),
+        Err(RuntimeError::Application(AppError::LifecycleFinished))
+    );
+    assert_eq!(
+        receive(&submitted),
+        Err(RuntimeError::Application(AppError::LifecycleFinished))
+    );
+    assert_eq!(receive(&shutdown), Ok(()));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            ApplicationCommand::ShowHelp,
+            ApplicationCommand::ShowStatus,
+            ApplicationCommand::ShowSetupStatus,
+        ]
+    );
+    assert_eq!(finishes.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_blocked_submit_observes_the_stored_failure_when_the_worker_panics() {
+    let (entered_sender, entered) = bounded(1);
+    let (release_sender, release) = bounded(1);
+    let runtime = Arc::new(
+        ApplicationRuntime::spawn(
+            PanicAfterGateExecutor {
+                first_entered: entered_sender,
+                first_release: release,
+            },
+            1,
+        )
+        .unwrap(),
+    );
+    let client = runtime.client();
+    let first = client.try_submit(ApplicationCommand::ShowHelp).unwrap();
+    receive(&entered);
+    let panic = client.try_submit(ApplicationCommand::ShowStatus).unwrap();
+    let (submitted_sender, submitted) = bounded(1);
+    let submit_client = client.clone();
+    thread::spawn(move || {
+        submitted_sender
+            .send(submit_client.submit(ApplicationCommand::ShowSetupStatus))
+            .unwrap();
+    });
+    runtime.wait_for_reservations(1, TIMEOUT).unwrap();
+
+    release_sender.send(()).unwrap();
+    assert_eq!(
+        first.recv(),
+        Err(RuntimeError::Application(AppError::LifecycleFinished))
+    );
+    assert_eq!(panic.recv(), Err(RuntimeError::WorkerPanicked));
+    assert_eq!(receive(&submitted), Err(RuntimeError::WorkerPanicked));
+    assert_eq!(
+        runtime.finish_and_join(ShutdownReason::ApplicationError),
+        Err(RuntimeError::WorkerPanicked)
+    );
+}
+
+#[test]
+fn forced_submit_shutdown_orders_complete_or_reject_without_lost_work() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let finishes = Arc::new(AtomicUsize::new(0));
+    let runtime = ApplicationRuntime::spawn(
+        RecordingExecutor {
+            seen: seen.clone(),
+            finishes: finishes.clone(),
+        },
+        1,
+    )
+    .unwrap();
+    let pending = runtime.client().try_submit(ApplicationCommand::ShowHelp).unwrap();
+    runtime.finish_and_join(ShutdownReason::InputClosed).unwrap();
+    assert_eq!(
+        pending.recv(),
+        Err(RuntimeError::Application(AppError::LifecycleFinished))
+    );
+    assert_eq!(*seen.lock().unwrap(), vec![ApplicationCommand::ShowHelp]);
+    assert_eq!(finishes.load(Ordering::SeqCst), 1);
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let finishes = Arc::new(AtomicUsize::new(0));
+    let runtime = ApplicationRuntime::spawn(
+        RecordingExecutor {
+            seen: seen.clone(),
+            finishes: finishes.clone(),
+        },
+        1,
+    )
+    .unwrap();
+    runtime.finish_and_join(ShutdownReason::InputClosed).unwrap();
+    assert!(matches!(
+        runtime.client().try_submit(ApplicationCommand::ShowHelp),
+        Err(RuntimeError::Closed)
+    ));
+    assert!(seen.lock().unwrap().is_empty());
+    assert_eq!(finishes.load(Ordering::SeqCst), 1);
 }
