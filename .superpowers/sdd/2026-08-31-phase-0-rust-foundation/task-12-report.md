@@ -234,3 +234,57 @@ The Unix SIGINT binary test starts the real executable with stdin held open, wai
 - Per the round-3 instruction, no Windows cross-compile was attempted and none is claimed. A Windows target compile/runtime check remains appropriate for Task 14 when a Windows toolchain is available.
 - Microsoft documents that `CancelSynchronousIo` requires a thread HANDLE with `THREAD_TERMINATE` and reports cancelled operations with `ERROR_OPERATION_ABORTED`; the implementation follows that contract.
 - No parser, renderer, runtime, composition-root, database, README, legacy-warning, GUI/TUI, network, broker, or credential behavior changed.
+
+## Round 3 review correction
+
+### Implementation commit
+
+- `91d08b37ebc674c9106e60baa6c935a255eeeb7b` (`fix(task-12): close Windows stdin cancel race`)
+
+### Changed files
+
+- `src/ui/command/runner.rs`
+- `src/ui/command/windows.rs`
+- `tests/windows_source_static_contract.rs`
+
+### RED evidence
+
+- `cargo test --locked --lib ui::command::windows::tests && cargo test --locked --test windows_source_static_contract`
+  - Compilation failed with 18 expected missing-state-model errors for `ReadPhase`, `CancelAttempt`, `CancelDecision`, `cancellation_decision`, and `may_begin_read`.
+  - The static contract also required the phase condition, not-found retry marker, exited acknowledgement, cancel-first wait ordering, and begin/end read guards.
+
+### Focused GREEN evidence
+
+- `cargo test --locked --lib ui::command::windows::tests`
+  - 5 passed: prior EOF/error mappings plus cancel-before-pending retry, idle/exited acknowledgement, persistent cancellation, successful cancellation, and genuine-failure preservation.
+- `cargo test --locked --test windows_source_static_contract`
+  - 5 passed: prior Windows API/cfg/gating contracts plus the acknowledged retry protocol and cancel-first wait ordering.
+
+### Full-suite evidence
+
+- `cargo test --locked`
+  - 208 passed, 0 failed, with no warnings.
+- `git diff --check`
+  - Passed before the correction commit.
+
+### Windows read-phase and acknowledgement protocol
+
+- The cancellation owner now protects `WindowsReadState` with a mutex and `phase_changed` condition variable. The explicit phases are `IdleWaiting`, `AboutToRead`, `ReadActive`, and `Exited`.
+- `begin_read` checks the persistent cancellation flag before publishing `AboutToRead`, checks it again before publishing `ReadActive`, and checks once more before returning permission to call `ReadFile`. A cancellation observed at any checkpoint restores `IdleWaiting` and forbids the read.
+- Publishing `ReadActive` under the state mutex defines the logical read start. If cancellation races after that acknowledgement but before the kernel request is pending, cancellation sees a phase that may still issue the request and keeps retrying.
+- The Windows wait handle order is now `[cancel_event, stdin]`, so `WaitForMultipleObjects` selects cancellation first when both handles are signaled.
+- Every completed `ReadFile` calls `end_read`, moving back to `IdleWaiting` and notifying waiters. `WindowsStdinLineSource::drop` calls `mark_exited`; the transition is idempotently guarded and notifies waiters exactly once for the single owned source.
+
+### Cancel-before-pending retry and failure behavior
+
+- Cancellation permanently sets the atomic flag and signals the manual-reset event before inspecting read phase.
+- In `AboutToRead` or `ReadActive`, `CancelSynchronousIo` success completes cancellation. `ERROR_NOT_FOUND` is explicitly retryable; cancellation waits briefly on `phase_changed`, then retries until cancellation succeeds or the source acknowledges `IdleWaiting`/`Exited`, states that cannot start another read after the persistent flag is set.
+- A genuine `CancelSynchronousIo` failure is retained in `cancel_error` and `CancelIoEx` is attempted as a wake fallback. After source join, the host observes the retained error through the cancellation contract and returns the existing typed `UiError::Read` instead of silently treating shutdown as successful.
+- Broken-pipe, handle-EOF, zero-byte EOF, and operation-aborted-after-cancel behavior remain unchanged.
+
+### HANDLE lifecycle and scope
+
+- The event HANDLE and real source-thread HANDLE remain owned by the final `WindowsCancellation` reference. The source drops and acknowledges exit before join completes; the host retains its cancellation reference through join; final drop closes each owned HANDLE exactly once after join.
+- The standard-input HANDLE remains borrowed and is not closed.
+- Unix line-source code and all parser, renderer, runtime, composition, persistence, binary, README, and legacy-warning behavior are unchanged.
+- No Windows cross-compile or runtime execution was performed or claimed.
