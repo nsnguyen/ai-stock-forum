@@ -1,4 +1,4 @@
-use ai_stock_forum::app::{ApplicationCommand, InputRejection, InputRejectionCategory};
+use ai_stock_forum::app::{ApplicationCommand, InputRejection, InputRejectionCategory, SafeToken};
 use ai_stock_forum::domain::{sha256, Actor, ApprovalId, ObjectRef, ObjectVersion};
 use ai_stock_forum::policy::{
     evaluate, ApprovalAction, ApprovalError, ApprovalRecord, ApprovalRecordBuilder,
@@ -118,7 +118,7 @@ fn commands_map_to_exact_safe_capabilities() {
         (
             ApplicationCommand::RejectInput(InputRejection::from_input(
                 InputRejectionCategory::Malformed,
-                Some("/not-supported".to_owned()),
+                Some(SafeToken::new("/not-supported").unwrap()),
                 b"/not-supported",
             )),
             Capability::HelpRead,

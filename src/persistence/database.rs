@@ -27,11 +27,37 @@ pub enum PersistenceError {
     UnsupportedEventSchema,
     #[error("event id conflicts with an existing event")]
     IdempotencyConflict,
+    #[error("database write is contended")]
+    Contention,
+    #[error("event stream is immutable")]
+    ImmutableEventStream,
+    #[error("event predecessor digest is invalid")]
+    PreviousEventDigestMismatch,
+    #[error("event digest is invalid")]
+    EventDigestMismatch,
 }
 
 pub struct Database {
     connection: Connection,
     schema_version: u32,
+}
+
+pub struct ImmediateTransaction<'connection> {
+    transaction: Transaction<'connection>,
+}
+
+impl<'connection> ImmediateTransaction<'connection> {
+    pub fn commit(self) -> Result<(), PersistenceError> {
+        self.transaction.commit().map_err(persistence_error)
+    }
+
+    pub fn rollback(self) -> Result<(), PersistenceError> {
+        self.transaction.rollback().map_err(persistence_error)
+    }
+
+    pub(crate) fn transaction(&self) -> &Transaction<'connection> {
+        &self.transaction
+    }
 }
 
 impl Database {
@@ -89,6 +115,13 @@ impl Database {
 
     pub fn connection_mut(&mut self) -> &mut Connection {
         &mut self.connection
+    }
+
+    pub fn immediate_transaction(&mut self) -> Result<ImmediateTransaction<'_>, PersistenceError> {
+        self.connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map(|transaction| ImmediateTransaction { transaction })
+            .map_err(persistence_error)
     }
 
     pub fn has_table(&self, name: &str) -> Result<bool, PersistenceError> {
@@ -305,8 +338,21 @@ fn startup_error(error: SqliteError) -> StartupError {
     }
 }
 
-fn persistence_error(_: SqliteError) -> PersistenceError {
-    PersistenceError::QueryFailed
+fn persistence_error(error: SqliteError) -> PersistenceError {
+    match error {
+        SqliteError::SqliteFailure(error, _)
+            if matches!(error.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) =>
+        {
+            PersistenceError::Contention
+        }
+        SqliteError::SqliteFailure(error, Some(message))
+            if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+                && message == "event_stream is append-only" =>
+        {
+            PersistenceError::ImmutableEventStream
+        }
+        _ => PersistenceError::QueryFailed,
+    }
 }
 
 #[cfg(test)]

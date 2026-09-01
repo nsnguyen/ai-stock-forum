@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use crate::{
-    app::{ApplicationEvent, EventEnvelope},
+    app::{ApplicationEvent, EventEnvelope, InputRejectionCategory, SafeToken},
     domain::{Actor, CorrelationId},
 };
 
@@ -46,9 +46,14 @@ fn summary(event: &ApplicationEvent) -> String {
         ApplicationEvent::SetupStatusViewed => "setup status viewed".to_owned(),
         ApplicationEvent::AuditTailViewed { limit } => format!("audit tail viewed: {}", limit.get()),
         ApplicationEvent::CommandRejected { rejection } => format!(
-            "command rejected: category={:?}, token={}, bytes={}",
-            rejection.category,
-            rejection.safe_token.as_deref().unwrap_or("none"),
+            "command rejected: category={}, token={}, bytes={}",
+            rejection_category(rejection.category),
+            rejection
+                .safe_token
+                .as_ref()
+                .map(defensive_escape)
+                .as_deref()
+                .unwrap_or("none"),
             rejection.byte_length,
         ),
         ApplicationEvent::ShutdownRequested => "shutdown requested".to_owned(),
@@ -59,4 +64,20 @@ fn summary(event: &ApplicationEvent) -> String {
             format!("projection rebuilt through sequence {through_sequence}")
         }
     }
+}
+
+fn rejection_category(category: InputRejectionCategory) -> &'static str {
+    match category {
+        InputRejectionCategory::InvalidEncoding => "invalid_encoding",
+        InputRejectionCategory::Oversized => "oversized",
+        InputRejectionCategory::Malformed => "malformed",
+        InputRejectionCategory::Unknown => "unknown",
+    }
+}
+
+fn defensive_escape(token: &SafeToken) -> String {
+    token
+        .chars()
+        .flat_map(char::escape_default)
+        .collect()
 }

@@ -1,22 +1,18 @@
 use std::str::FromStr;
 
-use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
-use serde::Serialize;
+use rusqlite::{params, Connection, Error as SqliteError, ErrorCode, OptionalExtension, Row};
 use thiserror::Error;
 
 use crate::{
     app::{
-        ApplicationEvent, AuditLimit, EventEnvelope, PendingEvent, EVENT_SCHEMA_VERSION,
+        envelope_from_pending, AuditLimit, EventEnvelope, EventEnvelopeWire, PendingEvent,
+        EVENT_SCHEMA_VERSION,
     },
-    domain::{
-        canonical_json_bytes, sha256, Actor, CausationId, CorrelationId, EventId, ObjectRef,
-        ObjectVersion, Sha256Digest,
-    },
+    domain::{EventId, ObjectRef, ObjectVersion, Sha256Digest},
 };
 
-use super::PersistenceError;
+use super::{ImmediateTransaction, PersistenceError};
 
-const DIGEST_FORMAT_VERSION: u16 = 1;
 const EVENT_COLUMNS: &str = "sequence, event_id, event_schema_version, event_type, actor_kind, actor_id, occurred_at_ms, correlation_id, causation_id, object_kind, object_id, object_version, object_digest, previous_event_digest, payload_json, event_digest";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -27,6 +23,8 @@ pub enum RecoveryError {
     UnsupportedEventSchema,
     #[error("event record is invalid")]
     InvalidEventRecord,
+    #[error("event predecessor shape is invalid")]
+    InvalidPredecessorShape,
     #[error("event previous digest does not match")]
     PreviousEventDigestMismatch,
     #[error("event digest does not match")]
@@ -41,6 +39,7 @@ impl RecoveryError {
             Self::EventSequenceGap => "event_sequence_gap",
             Self::UnsupportedEventSchema => "unsupported_event_schema",
             Self::InvalidEventRecord => "invalid_event_record",
+            Self::InvalidPredecessorShape => "invalid_predecessor_shape",
             Self::PreviousEventDigestMismatch => "previous_event_digest_mismatch",
             Self::EventDigestMismatch => "event_digest_mismatch",
             Self::QueryFailed => "event_query_failed",
@@ -51,115 +50,88 @@ impl RecoveryError {
 pub struct EventRepository;
 
 impl EventRepository {
+    /// Appends exactly one event. Event-ID replay is repository scope only; command and batch
+    /// idempotency are deferred to the application-service task.
     pub fn append(
-        transaction: &Transaction<'_>,
+        transaction: &ImmediateTransaction<'_>,
         pending: PendingEvent,
     ) -> Result<EventEnvelope, PersistenceError> {
         if pending.event_schema_version != EVENT_SCHEMA_VERSION {
             return Err(PersistenceError::UnsupportedEventSchema);
         }
-
         if let Some(existing) = load_by_event_id(transaction, pending.event_id)? {
-            return if matches_pending(&existing, &pending) {
-                Ok(existing)
-            } else {
-                Err(PersistenceError::IdempotencyConflict)
-            };
+            return replay_or_conflict(existing, &pending);
         }
 
         let previous = transaction
+            .transaction()
             .query_row(
                 "SELECT sequence, event_digest FROM event_stream ORDER BY sequence DESC LIMIT 1",
                 [],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()
-            .map_err(query_error)?
+            .map_err(map_sqlite)?
             .map(|(sequence, digest)| {
-                let sequence = u64::try_from(sequence).map_err(|_| PersistenceError::InvalidEventRecord)?;
-                let digest = Sha256Digest::parse(&digest).map_err(|_| PersistenceError::InvalidEventRecord)?;
-                Ok((sequence, digest))
+                Ok((
+                    u64::try_from(sequence).map_err(|_| PersistenceError::InvalidEventRecord)?,
+                    Sha256Digest::parse(&digest).map_err(|_| PersistenceError::InvalidEventRecord)?,
+                ))
             })
             .transpose()?;
-        let sequence = previous.as_ref().map_or(1, |(value, _)| value + 1);
-        let previous_event_digest = previous.map(|(_, digest)| digest);
-        let payload_json = canonical_json(&pending.event)?;
-        let event_digest = digest_for(
-            sequence,
-            &pending,
-            previous_event_digest.as_ref(),
-            &payload_json,
-        )?;
-        let actor_kind = actor_kind(&pending.actor);
-        let object = pending.object.as_ref();
+        let sequence = previous.as_ref().map_or(1, |(sequence, _)| sequence + 1);
+        let envelope = envelope_from_pending(sequence, pending, previous.map(|(_, digest)| digest))
+            .map_err(|_| PersistenceError::InvalidEventRecord)?;
+        let wire = EventEnvelopeWire::from(&envelope);
+        let object = wire.object.as_ref();
         let object_version = object
-            .map(|value| i64::try_from(value.version.get()))
+            .map(|object| i64::try_from(object.version.get()))
             .transpose()
             .map_err(|_| PersistenceError::InvalidEventRecord)?;
-
-        transaction
-            .execute(
-                "INSERT INTO event_stream (sequence, event_id, event_schema_version, event_type, actor_kind, actor_id, occurred_at_ms, correlation_id, causation_id, object_kind, object_id, object_version, object_digest, previous_event_digest, payload_json, event_digest) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-                params![
-                    i64::try_from(sequence).map_err(|_| PersistenceError::InvalidEventRecord)?,
-                    pending.event_id.to_string(),
-                    i64::from(pending.event_schema_version),
-                    pending.event.kind(),
-                    actor_kind,
-                    pending.occurred_at_ms,
-                    pending.correlation_id.to_string(),
-                    pending.causation_id.map(|value| value.to_string()),
-                    object.map(|value| value.kind.as_str()),
-                    object.map(|value| value.id.as_str()),
-                    object_version,
-                    object.map(|value| value.digest.as_str()),
-                    previous_event_digest.as_ref().map(Sha256Digest::as_str),
-                    payload_json,
-                    event_digest.as_str(),
-                ],
-            )
-            .map_err(query_error)?;
-
-        Ok(EventEnvelope {
-            sequence,
-            event_id: pending.event_id,
-            event_schema_version: pending.event_schema_version,
-            actor: pending.actor,
-            occurred_at_ms: pending.occurred_at_ms,
-            correlation_id: pending.correlation_id,
-            causation_id: pending.causation_id,
-            object: pending.object,
-            event: pending.event,
-            previous_event_digest,
-            event_digest,
-        })
+        let result = transaction.transaction().execute(
+            "INSERT INTO event_stream (sequence, event_id, event_schema_version, event_type, actor_kind, actor_id, occurred_at_ms, correlation_id, causation_id, object_kind, object_id, object_version, object_digest, previous_event_digest, payload_json, event_digest) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                i64::try_from(wire.sequence).map_err(|_| PersistenceError::InvalidEventRecord)?,
+                wire.event_id.to_string(),
+                i64::from(wire.event_schema_version),
+                wire.event_type,
+                actor_kind(&wire.actor),
+                wire.occurred_at_ms,
+                wire.correlation_id.to_string(),
+                wire.causation_id.map(|id| id.to_string()),
+                object.map(|object| object.kind.as_str()),
+                object.map(|object| object.id.as_str()),
+                object_version,
+                object.map(|object| object.digest.as_str()),
+                wire.previous_event_digest.as_ref().map(Sha256Digest::as_str),
+                wire.payload_json,
+                wire.event_digest.as_str(),
+            ],
+        );
+        match result {
+            Ok(_) => Ok(envelope),
+            Err(error) if is_constraint(&error) => match load_by_event_id(transaction, envelope.event_id)? {
+                Some(existing) => replay_or_conflict(existing, &pending_from(&envelope)),
+                None => Err(map_sqlite(error)),
+            },
+            Err(error) => Err(map_sqlite(error)),
+        }
     }
 
     pub fn load_all(connection: &Connection) -> Result<Vec<EventEnvelope>, RecoveryError> {
-        let mut statement = connection
-            .prepare(&format!("SELECT {EVENT_COLUMNS} FROM event_stream ORDER BY sequence"))
-            .map_err(|_| RecoveryError::QueryFailed)?;
-        let mut rows = statement.query([]).map_err(|_| RecoveryError::QueryFailed)?;
-        let mut events = Vec::new();
-        while let Some(row) = rows.next().map_err(|_| RecoveryError::QueryFailed)? {
-            events.push(decode_row(row)?);
-        }
-        Ok(events)
+        load_query(connection, &format!("SELECT {EVENT_COLUMNS} FROM event_stream ORDER BY sequence"), [])
     }
 
     pub fn tail(
         connection: &Connection,
         limit: AuditLimit,
     ) -> Result<Vec<EventEnvelope>, PersistenceError> {
-        let mut statement = connection
-            .prepare(&format!("SELECT {EVENT_COLUMNS} FROM (SELECT {EVENT_COLUMNS} FROM event_stream ORDER BY sequence DESC LIMIT ?1) ORDER BY sequence"))
-            .map_err(query_error)?;
-        let rows = statement
-            .query_map([i64::from(limit.get())], |row| {
-                decode_row(row).map_err(|_| rusqlite::Error::InvalidQuery)
-            })
-            .map_err(query_error)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(query_error)
+        load_query(
+            connection,
+            &format!("SELECT {EVENT_COLUMNS} FROM (SELECT {EVENT_COLUMNS} FROM event_stream ORDER BY sequence DESC LIMIT ?1) ORDER BY sequence"),
+            [i64::from(limit.get())],
+        )
+        .map_err(persistence_from_recovery)
     }
 
     pub fn verify(connection: &Connection) -> Result<(), RecoveryError> {
@@ -169,31 +141,8 @@ impl EventRepository {
             if event.sequence != (index as u64) + 1 {
                 return Err(RecoveryError::EventSequenceGap);
             }
-            if event.event_schema_version != EVENT_SCHEMA_VERSION {
-                return Err(RecoveryError::UnsupportedEventSchema);
-            }
             if event.previous_event_digest != previous_digest {
                 return Err(RecoveryError::PreviousEventDigestMismatch);
-            }
-            let payload_json = canonical_json(&event.event).map_err(|_| RecoveryError::InvalidEventRecord)?;
-            let expected_digest = digest_for(
-                event.sequence,
-                &PendingEvent {
-                    event_id: event.event_id,
-                    event_schema_version: event.event_schema_version,
-                    actor: event.actor.clone(),
-                    occurred_at_ms: event.occurred_at_ms,
-                    correlation_id: event.correlation_id,
-                    causation_id: event.causation_id,
-                    object: event.object.clone(),
-                    event: event.event.clone(),
-                },
-                event.previous_event_digest.as_ref(),
-                &payload_json,
-            )
-            .map_err(|_| RecoveryError::InvalidEventRecord)?;
-            if event.event_digest != expected_digest {
-                return Err(RecoveryError::EventDigestMismatch);
             }
             previous_digest = Some(event.event_digest.clone());
         }
@@ -201,72 +150,40 @@ impl EventRepository {
     }
 }
 
-#[derive(Serialize)]
-struct DigestMaterial<'a> {
-    digest_format_version: u16,
-    sequence: u64,
-    event_id: &'a EventId,
-    event_schema_version: u16,
-    event_type: &'a str,
-    actor_kind: &'a str,
-    actor_id: Option<&'a str>,
-    occurred_at_ms: i64,
-    correlation_id: &'a CorrelationId,
-    causation_id: Option<&'a CausationId>,
-    object: Option<&'a ObjectRef>,
-    previous_event_digest: Option<&'a Sha256Digest>,
-    payload_json: &'a str,
-}
-
-fn digest_for(
-    sequence: u64,
-    pending: &PendingEvent,
-    previous_event_digest: Option<&Sha256Digest>,
-    payload_json: &str,
-) -> Result<Sha256Digest, PersistenceError> {
-    let material = DigestMaterial {
-        digest_format_version: DIGEST_FORMAT_VERSION,
-        sequence,
-        event_id: &pending.event_id,
-        event_schema_version: pending.event_schema_version,
-        event_type: pending.event.kind(),
-        actor_kind: actor_kind(&pending.actor),
-        actor_id: None,
-        occurred_at_ms: pending.occurred_at_ms,
-        correlation_id: &pending.correlation_id,
-        causation_id: pending.causation_id.as_ref(),
-        object: pending.object.as_ref(),
-        previous_event_digest,
-        payload_json,
-    };
-    canonical_json_bytes(&material)
-        .map(|bytes| sha256(&bytes))
-        .map_err(|_| PersistenceError::InvalidEventRecord)
-}
-
-fn canonical_json(event: &ApplicationEvent) -> Result<String, PersistenceError> {
-    String::from_utf8(
-        canonical_json_bytes(event).map_err(|_| PersistenceError::InvalidEventRecord)?,
-    )
-    .map_err(|_| PersistenceError::InvalidEventRecord)
+fn load_query<P: rusqlite::Params>(
+    connection: &Connection,
+    query: &str,
+    parameters: P,
+) -> Result<Vec<EventEnvelope>, RecoveryError> {
+    let mut statement = connection.prepare(query).map_err(|_| RecoveryError::QueryFailed)?;
+    let mut rows = statement.query(parameters).map_err(|_| RecoveryError::QueryFailed)?;
+    let mut events = Vec::new();
+    while let Some(row) = rows.next().map_err(|_| RecoveryError::QueryFailed)? {
+        events.push(decode_row(row)?);
+    }
+    Ok(events)
 }
 
 fn load_by_event_id(
-    transaction: &Transaction<'_>,
+    transaction: &ImmediateTransaction<'_>,
     event_id: EventId,
 ) -> Result<Option<EventEnvelope>, PersistenceError> {
-    transaction
-        .query_row(
-            &format!("SELECT {EVENT_COLUMNS} FROM event_stream WHERE event_id = ?1"),
-            [event_id.to_string()],
-            |row| decode_row(row).map_err(|_| rusqlite::Error::InvalidQuery),
-        )
-        .optional()
-        .map_err(query_error)
+    let mut statement = transaction
+        .transaction()
+        .prepare(&format!("SELECT {EVENT_COLUMNS} FROM event_stream WHERE event_id = ?1"))
+        .map_err(map_sqlite)?;
+    let mut rows = statement.query([event_id.to_string()]).map_err(map_sqlite)?;
+    match rows.next().map_err(map_sqlite)? {
+        Some(row) => decode_row(row).map(Some).map_err(persistence_from_recovery),
+        None => Ok(None),
+    }
 }
 
-fn matches_pending(existing: &EventEnvelope, pending: &PendingEvent) -> bool {
-    existing.event_id == pending.event_id
+fn replay_or_conflict(
+    existing: EventEnvelope,
+    pending: &PendingEvent,
+) -> Result<EventEnvelope, PersistenceError> {
+    if existing.event_id == pending.event_id
         && existing.event_schema_version == pending.event_schema_version
         && existing.actor == pending.actor
         && existing.occurred_at_ms == pending.occurred_at_ms
@@ -274,57 +191,64 @@ fn matches_pending(existing: &EventEnvelope, pending: &PendingEvent) -> bool {
         && existing.causation_id == pending.causation_id
         && existing.object == pending.object
         && existing.event == pending.event
+    {
+        Ok(existing)
+    } else {
+        Err(PersistenceError::IdempotencyConflict)
+    }
+}
+
+fn pending_from(envelope: &EventEnvelope) -> PendingEvent {
+    PendingEvent {
+        event_id: envelope.event_id,
+        event_schema_version: envelope.event_schema_version,
+        actor: envelope.actor.clone(),
+        occurred_at_ms: envelope.occurred_at_ms,
+        correlation_id: envelope.correlation_id,
+        causation_id: envelope.causation_id,
+        object: envelope.object.clone(),
+        event: envelope.event.clone(),
+    }
 }
 
 fn decode_row(row: &Row<'_>) -> Result<EventEnvelope, RecoveryError> {
-    let sequence = integer_to_u64(row.get::<_, i64>(0).map_err(|_| RecoveryError::QueryFailed)?)?;
-    let event_id = parse_id(row.get::<_, String>(1).map_err(|_| RecoveryError::QueryFailed)?)?;
+    let sequence = u64::try_from(row.get::<_, i64>(0).map_err(|_| RecoveryError::QueryFailed)?)
+        .map_err(|_| RecoveryError::InvalidEventRecord)?;
     let event_schema_version = u16::try_from(row.get::<_, i64>(2).map_err(|_| RecoveryError::QueryFailed)?)
         .map_err(|_| RecoveryError::InvalidEventRecord)?;
-    let event_type = row.get::<_, String>(3).map_err(|_| RecoveryError::QueryFailed)?;
+    if event_schema_version != EVENT_SCHEMA_VERSION {
+        return Err(RecoveryError::UnsupportedEventSchema);
+    }
     let actor = parse_actor(&row.get::<_, String>(4).map_err(|_| RecoveryError::QueryFailed)?)?;
     if row.get::<_, Option<String>>(5).map_err(|_| RecoveryError::QueryFailed)?.is_some() {
         return Err(RecoveryError::InvalidEventRecord);
     }
-    let occurred_at_ms = row.get(6).map_err(|_| RecoveryError::QueryFailed)?;
-    let correlation_id = parse_id(row.get::<_, String>(7).map_err(|_| RecoveryError::QueryFailed)?)?;
-    let causation_id = row
-        .get::<_, Option<String>>(8)
-        .map_err(|_| RecoveryError::QueryFailed)?
-        .map(parse_id)
-        .transpose()?;
-    let object = decode_object(row)?;
-    let previous_event_digest = row
-        .get::<_, Option<String>>(13)
-        .map_err(|_| RecoveryError::QueryFailed)?
-        .map(|value| Sha256Digest::parse(&value).map_err(|_| RecoveryError::InvalidEventRecord))
-        .transpose()?;
-    let payload_json = row.get::<_, String>(14).map_err(|_| RecoveryError::QueryFailed)?;
-    let event = serde_json::from_str::<ApplicationEvent>(&payload_json)
-        .map_err(|_| RecoveryError::InvalidEventRecord)?;
-    if event.kind() != event_type {
-        return Err(RecoveryError::InvalidEventRecord);
-    }
-    if canonical_json(&event).map_err(|_| RecoveryError::InvalidEventRecord)? != payload_json {
-        return Err(RecoveryError::InvalidEventRecord);
-    }
-    let event_digest = Sha256Digest::parse(
-        &row.get::<_, String>(15).map_err(|_| RecoveryError::QueryFailed)?,
-    )
-    .map_err(|_| RecoveryError::InvalidEventRecord)?;
-    Ok(EventEnvelope {
+    let wire = EventEnvelopeWire {
         sequence,
-        event_id,
+        event_id: parse_id(row.get::<_, String>(1).map_err(|_| RecoveryError::QueryFailed)?)?,
         event_schema_version,
         actor,
-        occurred_at_ms,
-        correlation_id,
-        causation_id,
-        object,
-        event,
-        previous_event_digest,
-        event_digest,
-    })
+        occurred_at_ms: row.get(6).map_err(|_| RecoveryError::QueryFailed)?,
+        correlation_id: parse_id(row.get::<_, String>(7).map_err(|_| RecoveryError::QueryFailed)?)?,
+        causation_id: row
+            .get::<_, Option<String>>(8)
+            .map_err(|_| RecoveryError::QueryFailed)?
+            .map(parse_id)
+            .transpose()?,
+        object: decode_object(row)?,
+        event_type: row.get(3).map_err(|_| RecoveryError::QueryFailed)?,
+        payload_json: row.get(14).map_err(|_| RecoveryError::QueryFailed)?,
+        previous_event_digest: row
+            .get::<_, Option<String>>(13)
+            .map_err(|_| RecoveryError::QueryFailed)?
+            .map(|digest| Sha256Digest::parse(&digest).map_err(|_| RecoveryError::InvalidEventRecord))
+            .transpose()?,
+        event_digest: Sha256Digest::parse(
+            &row.get::<_, String>(15).map_err(|_| RecoveryError::QueryFailed)?,
+        )
+        .map_err(|_| RecoveryError::InvalidEventRecord)?,
+    };
+    wire.try_into()
 }
 
 fn decode_object(row: &Row<'_>) -> Result<Option<ObjectRef>, RecoveryError> {
@@ -351,25 +275,50 @@ fn parse_id<T: FromStr>(value: String) -> Result<T, RecoveryError> {
     value.parse().map_err(|_| RecoveryError::InvalidEventRecord)
 }
 
-fn parse_actor(value: &str) -> Result<Actor, RecoveryError> {
+fn parse_actor(value: &str) -> Result<crate::domain::Actor, RecoveryError> {
     match value {
-        "human" => Ok(Actor::Human),
-        "system" => Ok(Actor::System),
+        "human" => Ok(crate::domain::Actor::Human),
+        "system" => Ok(crate::domain::Actor::System),
         _ => Err(RecoveryError::InvalidEventRecord),
     }
 }
 
-fn actor_kind(actor: &Actor) -> &'static str {
+fn actor_kind(actor: &crate::domain::Actor) -> &'static str {
     match actor {
-        Actor::Human => "human",
-        Actor::System => "system",
+        crate::domain::Actor::Human => "human",
+        crate::domain::Actor::System => "system",
     }
 }
 
-fn integer_to_u64(value: i64) -> Result<u64, RecoveryError> {
-    u64::try_from(value).map_err(|_| RecoveryError::InvalidEventRecord)
+fn is_constraint(error: &SqliteError) -> bool {
+    matches!(error, SqliteError::SqliteFailure(error, _) if error.code == ErrorCode::ConstraintViolation)
 }
 
-fn query_error(_: rusqlite::Error) -> PersistenceError {
-    PersistenceError::QueryFailed
+fn map_sqlite(error: SqliteError) -> PersistenceError {
+    match error {
+        SqliteError::SqliteFailure(error, _)
+            if matches!(error.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) =>
+        {
+            PersistenceError::Contention
+        }
+        SqliteError::SqliteFailure(error, Some(message))
+            if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+                && message == "event_stream is append-only" =>
+        {
+            PersistenceError::ImmutableEventStream
+        }
+        _ => PersistenceError::QueryFailed,
+    }
+}
+
+fn persistence_from_recovery(error: RecoveryError) -> PersistenceError {
+    match error {
+        RecoveryError::UnsupportedEventSchema => PersistenceError::UnsupportedEventSchema,
+        RecoveryError::InvalidEventRecord | RecoveryError::InvalidPredecessorShape => {
+            PersistenceError::InvalidEventRecord
+        }
+        RecoveryError::PreviousEventDigestMismatch => PersistenceError::PreviousEventDigestMismatch,
+        RecoveryError::EventDigestMismatch => PersistenceError::EventDigestMismatch,
+        RecoveryError::EventSequenceGap | RecoveryError::QueryFailed => PersistenceError::QueryFailed,
+    }
 }

@@ -4,7 +4,7 @@ mod database;
 mod event_repository;
 mod migrations;
 
-pub use database::{Database, PersistenceError};
+pub use database::{Database, ImmediateTransaction, PersistenceError};
 pub use event_repository::{EventRepository, RecoveryError};
 pub use migrations::{AppliedMigration, LATEST_SCHEMA_VERSION};
 

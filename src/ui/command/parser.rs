@@ -1,5 +1,5 @@
 use crate::app::{
-    ApplicationCommand, InputRejection, InputRejectionCategory, DEFAULT_AUDIT_LIMIT,
+    ApplicationCommand, InputRejection, InputRejectionCategory, SafeToken, DEFAULT_AUDIT_LIMIT,
     MAX_INPUT_BYTES,
 };
 
@@ -54,13 +54,13 @@ pub fn parse_line(input: &[u8]) -> ParsedLine {
 
 fn reject(
     category: InputRejectionCategory,
-    safe_token: Option<String>,
+    safe_token: Option<SafeToken>,
     input: &[u8],
 ) -> ApplicationCommand {
     ApplicationCommand::RejectInput(InputRejection::from_input(category, safe_token, input))
 }
 
-fn safe_token(line: &str) -> Option<String> {
+fn safe_token(line: &str) -> Option<SafeToken> {
     line.split_whitespace().next().map(|token| {
         let mut escaped_token = String::new();
         let mut output_scalar_count = 0;
@@ -76,6 +76,7 @@ fn safe_token(line: &str) -> Option<String> {
             output_scalar_count += fragment_scalar_count;
         }
 
-        escaped_token
+        SafeToken::new(escaped_token).ok()
     })
+    .flatten()
 }

@@ -22,7 +22,7 @@ fn append_allocates_a_contiguous_digest_chain() {
 fn append_rolls_back_without_allocating_a_sequence() {
     let mut fixture = support::database();
     let pending = fixture.pending(ApplicationEvent::HelpViewed);
-    let transaction = fixture.database.connection_mut().transaction().unwrap();
+    let transaction = fixture.database.immediate_transaction().unwrap();
     EventRepository::append(&transaction, pending).unwrap();
     transaction.rollback().unwrap();
 
@@ -36,11 +36,11 @@ fn append_rolls_back_without_allocating_a_sequence() {
 fn duplicate_event_id_returns_the_original_envelope_and_conflicts_on_different_content() {
     let mut fixture = support::database();
     let pending = fixture.pending(ApplicationEvent::HelpViewed);
-    let transaction = fixture.database.connection_mut().transaction().unwrap();
+    let transaction = fixture.database.immediate_transaction().unwrap();
     let first = EventRepository::append(&transaction, pending.clone()).unwrap();
     transaction.commit().unwrap();
 
-    let transaction = fixture.database.connection_mut().transaction().unwrap();
+    let transaction = fixture.database.immediate_transaction().unwrap();
     let repeated = EventRepository::append(&transaction, pending.clone()).unwrap();
     transaction.commit().unwrap();
     assert_eq!(repeated, first);
@@ -49,7 +49,7 @@ fn duplicate_event_id_returns_the_original_envelope_and_conflicts_on_different_c
         event: ApplicationEvent::StatusViewed,
         ..pending
     };
-    let transaction = fixture.database.connection_mut().transaction().unwrap();
+    let transaction = fixture.database.immediate_transaction().unwrap();
     assert_eq!(
         EventRepository::append(&transaction, conflicting).unwrap_err(),
         PersistenceError::IdempotencyConflict
@@ -105,7 +105,7 @@ fn forged_row_is_reported_without_modifying_the_stream() {
         .database
         .connection()
         .execute(
-            "INSERT INTO event_stream (sequence, event_id, event_schema_version, event_type, actor_kind, occurred_at_ms, correlation_id, previous_event_digest, payload_json, event_digest) VALUES (2, '00000000-0000-0000-0000-000000000099', 1, 'status_viewed', 'human', 1700000000000, '00000000-0000-0000-0000-000000000100', ?1, '{\"type\":\"status_viewed\"}', '0000000000000000000000000000000000000000000000000000000000000000')",
+            "INSERT INTO event_stream (sequence, event_id, event_schema_version, event_type, actor_kind, occurred_at_ms, correlation_id, previous_event_digest, payload_json, event_digest) VALUES (2, '00000000-0000-0000-0000-000000000099', 1, 'status_viewed', 'human', 1700000000000, '00000000-0000-0000-0000-000000000100', ?1, '{}', '0000000000000000000000000000000000000000000000000000000000000000')",
             [first_digest],
         )
         .unwrap();

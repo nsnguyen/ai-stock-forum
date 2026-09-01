@@ -15,7 +15,7 @@ pub struct DatabaseFixture {
 impl DatabaseFixture {
     pub fn append(&mut self, event: ApplicationEvent) -> ai_stock_forum::app::EventEnvelope {
         let pending = self.pending(event);
-        let transaction = self.database.connection_mut().transaction().unwrap();
+        let transaction = self.database.immediate_transaction().unwrap();
         let envelope = EventRepository::append(&transaction, pending).unwrap();
         transaction.commit().unwrap();
         envelope
@@ -61,7 +61,7 @@ pub fn rejected_event(input: &[u8]) -> ai_stock_forum::app::EventEnvelope {
     fixture.append(ApplicationEvent::CommandRejected {
         rejection: ai_stock_forum::app::InputRejection::from_input(
             ai_stock_forum::app::InputRejectionCategory::Malformed,
-            Some("/secret".to_owned()),
+            Some(ai_stock_forum::app::SafeToken::new("/secret").unwrap()),
             input,
         ),
     })
