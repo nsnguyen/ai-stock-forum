@@ -521,6 +521,113 @@ fn peers_created_before_finish_share_the_closed_lifecycle_gate() {
 }
 
 #[test]
+fn worker_is_a_public_restricted_execution_type_and_owner_accessors_remain_total() {
+    let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
+    let mut app = support::app_with_policy(Arc::new(policy));
+    let installation_id = app.installation_id();
+    let session_id = app.session_id();
+    let mut worker = app.peer();
+    let _: &mut ai_stock_forum::app::ApplicationWorker = &mut worker;
+
+    let outcome = worker
+        .execute(envelope(1_550, 1_551, ApplicationCommand::ShowStatus))
+        .unwrap();
+    let CommandView::Status(status) = outcome.view else {
+        panic!("status view")
+    };
+    assert_eq!(status.installation_id, installation_id);
+    assert_eq!(status.session_id, session_id);
+
+    app.finish(ShutdownReason::UserQuit).unwrap();
+    assert_eq!(
+        worker
+            .execute(envelope(1_552, 1_553, ApplicationCommand::ShowHelp))
+            .unwrap_err(),
+        AppError::LifecycleFinished
+    );
+    assert_eq!(app.installation_id(), installation_id);
+    assert_eq!(app.session_id(), session_id);
+}
+
+#[test]
+fn execute_user_and_finish_have_two_atomic_lifecycle_orderings_without_id_races() {
+    let command_entered = Arc::new(Barrier::new(2));
+    let command_release = Arc::new(Barrier::new(2));
+    let finish_attempted = Arc::new(Barrier::new(2));
+    let hook = Arc::new(support::TestLifecycleHook::new(
+        support::LifecycleRacePoint::AfterUserRead,
+        command_entered.clone(),
+        command_release.clone(),
+        Some(finish_attempted.clone()),
+    ));
+    let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
+    let app = support::app_with_policy_and_hook(Arc::new(policy.clone()), hook);
+    let mut worker = app.peer();
+    let clock = app.clock.clone();
+    let ids = app.ids.clone();
+    let clock_before = clock.calls();
+    let ids_before = ids.calls();
+    let events_before = app.count_rows("event_stream");
+    let command_handle = thread::spawn(move || {
+        worker.execute_user(ApplicationCommand::ShowStatus)
+    });
+    command_entered.wait();
+    let finish_handle = thread::spawn(move || {
+        let mut app = app;
+        app.finish(ShutdownReason::UserQuit).unwrap();
+        app
+    });
+    finish_attempted.wait();
+    command_release.wait();
+
+    let outcome = command_handle.join().unwrap().unwrap();
+    let mut app = finish_handle.join().unwrap();
+    assert!(matches!(outcome.view, CommandView::Status(_)));
+    assert_eq!(ids.calls() - ids_before, 5);
+    assert_eq!(clock.calls() - clock_before, 2);
+    assert_eq!(policy.calls(), 1);
+    assert_eq!(app.count_rows("event_stream"), events_before + 2);
+    assert_eq!(app.count_rows("command_receipts"), 1);
+    let ids_after = ids.calls();
+    assert_eq!(
+        app.execute_user(ApplicationCommand::ShowHelp).unwrap_err(),
+        AppError::LifecycleFinished
+    );
+    assert_eq!(ids.calls(), ids_after);
+
+    let command_entered = Arc::new(Barrier::new(2));
+    let command_release = Arc::new(Barrier::new(2));
+    let hook = Arc::new(support::TestLifecycleHook::new(
+        support::LifecycleRacePoint::BeforeUserRead,
+        command_entered.clone(),
+        command_release.clone(),
+        None,
+    ));
+    let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
+    let mut app = support::app_with_policy_and_hook(Arc::new(policy.clone()), hook);
+    let mut worker = app.peer();
+    let clock_before = app.clock.calls();
+    let ids_before = app.ids.calls();
+    let events_before = app.count_rows("event_stream");
+    let command_handle = thread::spawn(move || {
+        worker.execute_user(ApplicationCommand::ShowStatus)
+    });
+    command_entered.wait();
+    app.finish(ShutdownReason::UserQuit).unwrap();
+    command_release.wait();
+
+    assert_eq!(
+        command_handle.join().unwrap().unwrap_err(),
+        AppError::LifecycleFinished
+    );
+    assert_eq!(app.ids.calls() - ids_before, 2);
+    assert_eq!(app.clock.calls() - clock_before, 1);
+    assert_eq!(policy.calls(), 0);
+    assert_eq!(app.count_rows("event_stream"), events_before + 1);
+    assert_eq!(app.count_rows("command_receipts"), 0);
+}
+
+#[test]
 fn transaction_rejects_a_closed_authoritative_session_before_dependencies_or_writes() {
     let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
     let app = support::app_with_policy(Arc::new(policy.clone()));

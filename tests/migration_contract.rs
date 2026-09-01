@@ -255,7 +255,9 @@ fn migration_records_and_complete_schema_are_exact() {
             "CREATE TABLE command_receipts (
                 command_id TEXT PRIMARY KEY,
                 command_fingerprint TEXT NOT NULL CHECK (
-                    length(command_fingerprint) = 64
+                    typeof(command_fingerprint) = 'text'
+                    AND length(CAST(command_fingerprint AS BLOB)) = 64
+                    AND instr(command_fingerprint, char(0)) = 0
                     AND command_fingerprint NOT GLOB '*[^0-9a-f]*'
                 ),
                 request_json TEXT NOT NULL CHECK (json_valid(request_json)),
@@ -443,8 +445,11 @@ fn every_enumerated_check_value_is_accepted() {
 #[test]
 fn command_receipt_fingerprint_and_enumerated_domains_reject_every_extra_form() {
     for fingerprint in [
+        format!("{}\0tail", "a".repeat(64)),
+        format!("{}\0", "a".repeat(63)),
         "A".repeat(64),
         "g".repeat(64),
+        "é".repeat(32),
         "a".repeat(65),
         "a".repeat(63),
     ] {
@@ -457,6 +462,23 @@ fn command_receipt_fingerprint_and_enumerated_domains_reject_every_extra_form() 
             )
             .is_err());
     }
+
+    let (_temp, database) = fresh_database();
+    assert!(database
+        .connection()
+        .execute(
+            "INSERT INTO command_receipts (command_id, command_fingerprint, request_json, capability, policy_decision, outcome_json) VALUES ('blob-command', zeroblob(64), '{}', 'help_read', 'granted', '{}')",
+            [],
+        )
+        .is_err());
+    let (_temp, database) = fresh_database();
+    assert!(database
+        .connection()
+        .execute(
+            "INSERT INTO command_receipts (command_id, command_fingerprint, request_json, capability, policy_decision, outcome_json) VALUES ('valid-command', ?1, '{}', 'help_read', 'granted', '{}')",
+            ["a".repeat(64)],
+        )
+        .is_ok());
 
     for (capability, decision) in [
         ("HELP_READ", "granted"),

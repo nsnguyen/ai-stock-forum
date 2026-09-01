@@ -33,7 +33,9 @@ CREATE INDEX event_stream_type_idx ON event_stream(event_type, sequence);
 CREATE TABLE command_receipts (
     command_id TEXT PRIMARY KEY,
     command_fingerprint TEXT NOT NULL CHECK (
-        length(command_fingerprint) = 64
+        typeof(command_fingerprint) = 'text'
+        AND length(CAST(command_fingerprint AS BLOB)) = 64
+        AND instr(command_fingerprint, char(0)) = 0
         AND command_fingerprint NOT GLOB '*[^0-9a-f]*'
     ),
     request_json TEXT NOT NULL CHECK (json_valid(request_json)),

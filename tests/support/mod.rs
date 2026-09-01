@@ -2,8 +2,8 @@
 
 use ai_stock_forum::{
     app::{
-        ApplicationEvent, ApplicationService, AuthorizationDecision, CommandPolicy,
-        CommandTransactionHook, PendingEvent, EVENT_SCHEMA_VERSION,
+        ApplicationEvent, ApplicationService, ApplicationWorker, AuthorizationDecision,
+        CommandPolicy, CommandTransactionHook, PendingEvent, EVENT_SCHEMA_VERSION,
     },
     config::AppPaths,
     domain::{Actor, Clock, CorrelationId, EventId, IdGenerator},
@@ -15,7 +15,7 @@ use std::{
     ops::{Deref, DerefMut},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc, Barrier, Mutex,
     },
 };
 use tempfile::TempDir;
@@ -220,6 +220,74 @@ impl CommandTransactionHook for TestCommandHook {
         } else {
             Ok(())
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleRacePoint {
+    BeforeUserRead,
+    AfterUserRead,
+}
+
+pub struct TestLifecycleHook {
+    point: LifecycleRacePoint,
+    command_entered: Arc<Barrier>,
+    command_release: Arc<Barrier>,
+    finish_attempted: Option<Arc<Barrier>>,
+}
+
+impl TestLifecycleHook {
+    pub fn new(
+        point: LifecycleRacePoint,
+        command_entered: Arc<Barrier>,
+        command_release: Arc<Barrier>,
+        finish_attempted: Option<Arc<Barrier>>,
+    ) -> Self {
+        Self {
+            point,
+            command_entered,
+            command_release,
+            finish_attempted,
+        }
+    }
+
+    fn block_command(&self) {
+        self.command_entered.wait();
+        self.command_release.wait();
+    }
+}
+
+impl CommandTransactionHook for TestLifecycleHook {
+    fn before_user_lifecycle_read(&self) {
+        if self.point == LifecycleRacePoint::BeforeUserRead {
+            self.block_command();
+        }
+    }
+
+    fn after_user_lifecycle_read(&self) {
+        if self.point == LifecycleRacePoint::AfterUserRead {
+            self.block_command();
+        }
+    }
+
+    fn before_finish_lifecycle_write(&self) {
+        if let Some(barrier) = &self.finish_attempted {
+            barrier.wait();
+        }
+    }
+
+    fn before_outcome_materialization(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn before_receipt_write(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
     }
 }
 
@@ -571,7 +639,7 @@ impl TestApp {
         }
     }
 
-    pub fn peer(&self) -> ApplicationService {
+    pub fn peer(&self) -> ApplicationWorker {
         self.service.worker().unwrap()
     }
 }

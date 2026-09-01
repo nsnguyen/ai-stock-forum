@@ -25,7 +25,8 @@ pub use outcome::{
     ShutdownDisposition, ShutdownView, StatusView,
 };
 pub use service::{
-    ApplicationService, AuthorizationDecision, CommandPolicy, CommandTransactionHook,
+    ApplicationService, ApplicationWorker, AuthorizationDecision, CommandPolicy,
+    CommandTransactionHook,
     NoopCommandTransactionHook,
 };
 

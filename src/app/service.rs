@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
@@ -34,6 +34,12 @@ pub trait CommandPolicy: Send + Sync {
 }
 
 pub trait CommandTransactionHook: Send + Sync {
+    fn before_user_lifecycle_read(&self) {}
+
+    fn after_user_lifecycle_read(&self) {}
+
+    fn before_finish_lifecycle_write(&self) {}
+
     fn before_outcome_materialization(
         &self,
         transaction: &rusqlite::Transaction<'_>,
@@ -170,8 +176,16 @@ impl StoredExecution {
 
 pub struct ApplicationService {
     paths: AppPaths,
+    state: BootstrapState,
+    executor: CommandExecutor,
+}
+
+pub struct ApplicationWorker {
+    executor: CommandExecutor,
+}
+
+struct CommandExecutor {
     database: Database,
-    state: Option<BootstrapState>,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGenerator>,
     policy: Arc<dyn CommandPolicy>,
@@ -243,26 +257,28 @@ impl ApplicationService {
         });
         Ok(Self {
             paths: paths.clone(),
-            database,
-            state: Some(state),
-            clock,
-            ids,
-            policy,
-            hook,
-            lifecycle,
+            state,
+            executor: CommandExecutor {
+                database,
+                clock,
+                ids,
+                policy,
+                hook,
+                lifecycle,
+            },
         })
     }
 
-    pub fn worker(&self) -> Result<Self, StartupError> {
-        Ok(Self {
-            paths: self.paths.clone(),
-            database: Database::open(&self.paths)?,
-            state: None,
-            clock: self.clock.clone(),
-            ids: self.ids.clone(),
-            policy: self.policy.clone(),
-            hook: self.hook.clone(),
-            lifecycle: self.lifecycle.clone(),
+    pub fn worker(&self) -> Result<ApplicationWorker, StartupError> {
+        Ok(ApplicationWorker {
+            executor: CommandExecutor {
+                database: Database::open(&self.paths)?,
+                clock: self.executor.clock.clone(),
+                ids: self.executor.ids.clone(),
+                policy: self.executor.policy.clone(),
+                hook: self.executor.hook.clone(),
+                lifecycle: self.executor.lifecycle.clone(),
+            },
         })
     }
 
@@ -270,16 +286,59 @@ impl ApplicationService {
         &mut self,
         command: ApplicationCommand,
     ) -> Result<CommandOutcome, AppError> {
-        self.ensure_running()?;
-        self.execute(CommandEnvelope {
-            command_id: CommandId::from_uuid(self.ids.next_uuid()),
-            correlation_id: CorrelationId::from_uuid(self.ids.next_uuid()),
-            actor: Actor::Human,
-            command,
-        })
+        self.executor.execute_user(command)
     }
 
     pub fn execute(&mut self, envelope: CommandEnvelope) -> Result<CommandOutcome, AppError> {
+        self.executor.execute(envelope)
+    }
+
+    pub fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
+        self.executor.hook.before_finish_lifecycle_write();
+        let lifecycle = self.executor.lifecycle.clone();
+        let mut phase = lifecycle
+            .phase
+            .write()
+            .map_err(|_| AppError::LifecycleFinished)?;
+        if *phase == LifecyclePhase::Closed {
+            return Ok(());
+        }
+        RecoveryCoordinator::finish_session(
+            &mut self.executor.database,
+            &mut self.state,
+            reason,
+            self.executor.clock.as_ref(),
+            self.executor.ids.as_ref(),
+        )?;
+        *phase = LifecyclePhase::Closed;
+        Ok(())
+    }
+
+    pub fn installation_id(&self) -> crate::domain::InstallationId {
+        self.state.installation_id()
+    }
+
+    pub fn session_id(&self) -> crate::domain::SessionId {
+        self.state.session_id()
+    }
+}
+
+impl ApplicationWorker {
+    pub fn execute_user(
+        &mut self,
+        command: ApplicationCommand,
+    ) -> Result<CommandOutcome, AppError> {
+        self.executor.execute_user(command)
+    }
+
+    pub fn execute(&mut self, envelope: CommandEnvelope) -> Result<CommandOutcome, AppError> {
+        self.executor.execute(envelope)
+    }
+}
+
+impl CommandExecutor {
+    fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError> {
+        self.hook.before_user_lifecycle_read();
         let lifecycle = self.lifecycle.clone();
         let phase = lifecycle
             .phase
@@ -288,13 +347,41 @@ impl ApplicationService {
         if *phase == LifecyclePhase::Closed {
             return Err(AppError::LifecycleFinished);
         }
+        self.hook.after_user_lifecycle_read();
+        let envelope = CommandEnvelope {
+            command_id: CommandId::from_uuid(self.ids.next_uuid()),
+            correlation_id: CorrelationId::from_uuid(self.ids.next_uuid()),
+            actor: Actor::Human,
+            command,
+        };
+        self.execute_locked(envelope, lifecycle.session_id, phase)
+    }
+
+    fn execute(&mut self, envelope: CommandEnvelope) -> Result<CommandOutcome, AppError> {
+        let lifecycle = self.lifecycle.clone();
+        let phase = lifecycle
+            .phase
+            .read()
+            .map_err(|_| AppError::LifecycleFinished)?;
+        if *phase == LifecyclePhase::Closed {
+            return Err(AppError::LifecycleFinished);
+        }
+        self.execute_locked(envelope, lifecycle.session_id, phase)
+    }
+
+    fn execute_locked(
+        &mut self,
+        envelope: CommandEnvelope,
+        session_id: SessionId,
+        _phase: RwLockReadGuard<'_, LifecyclePhase>,
+    ) -> Result<CommandOutcome, AppError> {
         let request = CommandRequest::from(&envelope);
         let request_json = encode_canonical(&request)?;
         let command_fingerprint = sha256(request_json.as_bytes());
         let transaction = self.database.immediate_transaction()?;
-        ensure_authoritative_session_open(&transaction, lifecycle.session_id)?;
+        ensure_authoritative_session_open(&transaction, session_id)?;
         let mut projection = ProjectionRepository::load_in(&transaction)?;
-        match projection.sessions.get(&lifecycle.session_id) {
+        match projection.sessions.get(&session_id) {
             Some(session) if session.ended.is_none() => {}
             _ => return Err(AppError::LifecycleFinished),
         }
@@ -388,48 +475,6 @@ impl ApplicationService {
         )?;
         transaction.commit()?;
         stored.into_result()
-    }
-
-    pub fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
-        let lifecycle = self.lifecycle.clone();
-        let mut phase = lifecycle
-            .phase
-            .write()
-            .map_err(|_| AppError::LifecycleFinished)?;
-        if *phase == LifecyclePhase::Closed {
-            return Ok(());
-        }
-        let state = self.state.as_mut().ok_or(AppError::LifecycleFinished)?;
-        RecoveryCoordinator::finish_session(
-            &mut self.database,
-            state,
-            reason,
-            self.clock.as_ref(),
-            self.ids.as_ref(),
-        )?;
-        *phase = LifecyclePhase::Closed;
-        Ok(())
-    }
-
-    pub fn installation_id(&self) -> crate::domain::InstallationId {
-        self.state
-            .as_ref()
-            .expect("bootstrap service owns lifecycle state")
-            .installation_id()
-    }
-
-    pub fn session_id(&self) -> crate::domain::SessionId {
-        self.state
-            .as_ref()
-            .expect("bootstrap service owns lifecycle state")
-            .session_id()
-    }
-
-    fn ensure_running(&self) -> Result<(), AppError> {
-        match self.lifecycle.phase.read() {
-            Ok(phase) if *phase == LifecyclePhase::Open => Ok(()),
-            _ => Err(AppError::LifecycleFinished),
-        }
     }
 }
 
