@@ -1,7 +1,6 @@
 # Phase 0 Rust Foundation Design Specification
 
-**Status:** Design approved in chat on 2026-08-31; written specification pending
-final review
+**Status:** Approved on 2026-08-31
 
 **Canonical inputs:** [architecture.md](../../../architecture.md) and
 [phases.md](../../../phases.md)
@@ -436,10 +435,10 @@ editor, test, or worktree rules.
 
 ## 19. Toolchain and dependency policy
 
-Before code work, install the official Rust stable toolchain because the current
-machine has no Rust compiler or Cargo. Record the exact installed version in
-`rust-toolchain.toml` and the matching `rust-version` package field. Include
-`rustfmt` and `clippy` components.
+Before code work, install Rust 1.98.0, the official stable release current on
+2026-08-31, because the current machine has no Rust compiler or Cargo. Pin
+`1.98.0` in `rust-toolchain.toml` and the matching `rust-version` package field.
+Include `rustfmt` and `clippy` components.
 
 `Cargo.lock` is committed. Runtime dependencies are limited to what Phase 0
 uses directly: SQLite, serialization, structured errors, hashing, UUIDs,
