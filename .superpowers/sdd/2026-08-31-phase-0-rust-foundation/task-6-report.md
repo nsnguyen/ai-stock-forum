@@ -133,3 +133,41 @@ limited to case and whitespace for definitions SQLite exposes only as text.
 | RED | `cargo test --test migration_contract task_six_schema_contract_is_exact_and_every_constraint_is_enforced --locked` | Failed as expected because the exact catalog and exhaustive behavioral assertion helpers did not exist. |
 | GREEN | `cargo test --test migration_contract --locked` | Passed: 13 migration contract tests, 0 failures. |
 | Full suite | `cargo test --workspace --all-targets --locked` | Passed: 62 tests, 0 failures. |
+
+## Fix round 3 (final allowed round)
+
+### Implementation commit
+
+`44a40172205f0aa2a8b73bba330059f9dad3d8ee` - `test: strengthen sqlite schema oracle`
+
+### Changed files
+
+- `tests/migration_contract.rs`
+
+### Scope
+
+The schema oracle now derives the complete semantic index set from `PRAGMA
+index_list` and `PRAGMA index_xinfo`, including SQLite-generated autoindexes.
+It compares origin, uniqueness, partial flag, and ordered key columns for every
+application table while intentionally ignoring generated index names. A focused
+fixture with an extra anonymous `UNIQUE` constraint proves the oracle rejects
+drift that the prior `sqlite_%` catalog filter could not observe.
+
+Accepted-value tests now exercise every member of each enumerated CHECK domain:
+setup state and path, setup-step status, capability-readiness status, and every
+approval status with the required pending/terminal companion fields. Existing
+negative probes remain in place. Index and trigger SQL checks now compare a
+punctuation-aware token sequence that ignores whitespace and case but preserves
+semantic punctuation and quoted literals.
+
+### TDD and verification evidence
+
+| Stage | Command | Result |
+| --- | --- | --- |
+| RED | `cargo test --test migration_contract semantic_index_oracle_detects_an_extra_autoindex_constraint --locked` | Failed as expected because the semantic-index and accepted-domain helpers did not exist. |
+| GREEN | `cargo test --test migration_contract --locked` | Passed: 15 migration contract tests, 0 failures. |
+| Full suite | `cargo test --workspace --all-targets --locked` | Passed: 64 tests, 0 failures. |
+
+An initial combined-filter invocation used a literal `|` and ran zero tests;
+it was immediately replaced by the complete migration-contract command above,
+which executed all 15 focused tests.
