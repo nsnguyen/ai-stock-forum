@@ -6,6 +6,8 @@ pub use paths::AppPaths;
 
 use thiserror::Error;
 
+use crate::persistence::RecoveryError;
+
 pub const MODULE_NAME: &str = "config";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -30,6 +32,8 @@ pub enum StartupError {
     DatabasePragmaMismatch,
     #[error("database terminal path was rejected")]
     DatabaseTerminalPathRejected,
+    #[error("event stream recovery failed: {0}")]
+    EventStreamRecovery(RecoveryError),
 }
 
 impl StartupError {
@@ -45,6 +49,7 @@ impl StartupError {
             Self::DatabaseMigrationState => "database_migration_state_invalid",
             Self::DatabasePragmaMismatch => "database_pragma_mismatch",
             Self::DatabaseTerminalPathRejected => "database_terminal_path_rejected",
+            Self::EventStreamRecovery(error) => error.code(),
         }
     }
 }

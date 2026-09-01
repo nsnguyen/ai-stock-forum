@@ -3,6 +3,8 @@ mod command;
 mod event;
 mod outcome;
 
+use thiserror::Error;
+
 pub const MODULE_NAME: &str = "app";
 
 pub use command::{
@@ -19,3 +21,11 @@ pub use outcome::{
     AuditTailView, CommandView, HelpView, InputRejectedView, SetupStatusView, ShutdownDisposition,
     ShutdownView, StatusView,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum AppError {
+    #[error("persistence operation failed: {0}")]
+    Persistence(#[from] crate::persistence::PersistenceError),
+    #[error("event recovery failed: {0}")]
+    Recovery(#[from] crate::persistence::RecoveryError),
+}

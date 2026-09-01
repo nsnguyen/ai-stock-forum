@@ -54,25 +54,49 @@ impl ProjectionRepository {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| RecoveryError::QueryFailed)?;
-        EventRepository::verify(&transaction)?;
-        let snapshot_events = EventRepository::load_all(&transaction)?;
-        if snapshot_events != events {
-            return Err(RecoveryError::InvalidEventRecord);
-        }
-        let state = reduce_events(&snapshot_events)?;
-        transaction
-            .execute("DELETE FROM projection_metadata", [])
-            .map_err(|_| RecoveryError::QueryFailed)?;
-        transaction
-            .execute("DELETE FROM process_session_projection", [])
-            .map_err(|_| RecoveryError::QueryFailed)?;
-        transaction
-            .execute("DELETE FROM installation_projection", [])
-            .map_err(|_| RecoveryError::QueryFailed)?;
+        let state = prepare_rebuild(&transaction, events)?;
+        clear_rebuildable_projection_rows(&transaction)?;
         store_transaction(&transaction, &state).map_err(recovery_from_persistence)?;
         transaction.commit().map_err(|_| RecoveryError::QueryFailed)?;
         Ok(state)
     }
+
+    /// Clears rebuildable projection rows after proving that `events` is the current,
+    /// verified authoritative stream. The caller appends the rebuild marker and stores
+    /// the resulting state in the same immediate transaction.
+    pub fn rebuild_in(
+        transaction: &ImmediateTransaction<'_>,
+        events: &[EventEnvelope],
+    ) -> Result<ProjectionState, RecoveryError> {
+        let state = prepare_rebuild(transaction.transaction(), events)?;
+        clear_rebuildable_projection_rows(transaction.transaction())?;
+        Ok(state)
+    }
+}
+
+fn prepare_rebuild(
+    connection: &Connection,
+    events: &[EventEnvelope],
+) -> Result<ProjectionState, RecoveryError> {
+    EventRepository::verify(connection)?;
+    let snapshot_events = EventRepository::load_all(connection)?;
+    if snapshot_events != events {
+        return Err(RecoveryError::InvalidEventRecord);
+    }
+    reduce_events(&snapshot_events)
+}
+
+fn clear_rebuildable_projection_rows(transaction: &Transaction<'_>) -> Result<(), RecoveryError> {
+    transaction
+        .execute("DELETE FROM projection_metadata", [])
+        .map_err(|_| RecoveryError::QueryFailed)?;
+    transaction
+        .execute("DELETE FROM process_session_projection", [])
+        .map_err(|_| RecoveryError::QueryFailed)?;
+    transaction
+        .execute("DELETE FROM installation_projection", [])
+        .map_err(|_| RecoveryError::QueryFailed)?;
+    Ok(())
 }
 
 fn reduce_verified_stream(connection: &Connection) -> Result<ProjectionState, RecoveryError> {
