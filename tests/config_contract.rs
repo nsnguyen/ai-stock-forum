@@ -21,6 +21,19 @@ fn ensure_creates_an_injected_state_directory() {
     assert!(state.is_dir());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn ensure_accepts_the_macos_tmp_system_alias() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let state = temp.path().join("state");
+    let paths = AppPaths::for_test(&state);
+
+    paths.ensure().unwrap();
+
+    assert!(state.is_dir());
+    assert!(paths.database_path().is_file());
+}
+
 #[cfg(unix)]
 #[test]
 fn ensure_makes_the_state_directory_owner_only() {

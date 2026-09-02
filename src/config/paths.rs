@@ -37,10 +37,13 @@ impl AppPaths {
     pub(crate) fn sqlite_open_path(&self) -> PathBuf {
         let path = self.database_path();
         #[cfg(target_os = "macos")]
-        if path.starts_with(Path::new("/var")) {
-            return Path::new("/private").join(path.strip_prefix("/").unwrap_or(&path));
+        {
+            macos_physical_path(&path)
         }
-        path
+        #[cfg(not(target_os = "macos"))]
+        {
+            path
+        }
     }
 
     pub fn ensure(&self) -> Result<(), StartupError> {
@@ -63,7 +66,7 @@ fn ensure_unix(path: &Path) -> Result<(), StartupError> {
     use rustix::fs::{CWD, FileType, Mode, OFlags, fchmod, fstat, mkdirat, openat};
 
     #[cfg(target_os = "macos")]
-    let walk_path = macos_walk_path(path);
+    let walk_path = macos_physical_path(path);
     #[cfg(not(target_os = "macos"))]
     let walk_path = path.to_path_buf();
 
@@ -144,12 +147,13 @@ fn ensure_unix(path: &Path) -> Result<(), StartupError> {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_walk_path(path: &Path) -> PathBuf {
-    if path.starts_with(Path::new("/var")) {
-        Path::new("/private").join(path.strip_prefix("/").unwrap_or(path))
-    } else {
-        path.to_path_buf()
+fn macos_physical_path(path: &Path) -> PathBuf {
+    for system_alias in [Path::new("/var"), Path::new("/tmp")] {
+        if path.starts_with(system_alias) {
+            return Path::new("/private").join(path.strip_prefix("/").unwrap_or(path));
+        }
     }
+    path.to_path_buf()
 }
 
 #[cfg(not(unix))]
