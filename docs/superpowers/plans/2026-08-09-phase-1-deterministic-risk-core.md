@@ -1,5 +1,11 @@
 # Phase 1 Deterministic Risk Core Implementation Plan
 
+> **SUPERSEDED - DO NOT EXECUTE**
+>
+> This document describes the retired Python/React/Hermes architecture. The
+> canonical Rust design is [architecture.md](../../../architecture.md) and the
+> active delivery roadmap is [phases.md](../../../phases.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a fixture-driven, deterministic validator for cash-funded long
