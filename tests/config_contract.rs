@@ -1,4 +1,6 @@
 use ai_stock_forum::config::{AppPaths, StartupError};
+#[cfg(target_os = "macos")]
+use ai_stock_forum::persistence::Database;
 
 #[test]
 fn injected_paths_use_the_phase_zero_database_name() {
@@ -32,6 +34,19 @@ fn ensure_accepts_the_macos_tmp_system_alias() {
 
     assert!(state.is_dir());
     assert!(paths.database_path().is_file());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn process_guard_accepts_the_macos_tmp_system_alias() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let state = temp.path().join("state");
+    let paths = AppPaths::for_test(&state);
+    let database = Database::open(&paths).unwrap();
+
+    let guard = database.acquire_process_guard().unwrap();
+
+    assert!(guard.is_held());
 }
 
 #[cfg(unix)]

@@ -147,7 +147,7 @@ fn ensure_unix(path: &Path) -> Result<(), StartupError> {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_physical_path(path: &Path) -> PathBuf {
+pub(super) fn macos_physical_path(path: &Path) -> PathBuf {
     for system_alias in [Path::new("/var"), Path::new("/tmp")] {
         if path.starts_with(system_alias) {
             return Path::new("/private").join(path.strip_prefix("/").unwrap_or(path));

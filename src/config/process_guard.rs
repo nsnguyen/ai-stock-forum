@@ -9,6 +9,8 @@ use std::{
 use rustix::fs::{CWD, FileType, FlockOperation, Mode, OFlags, fchmod, flock, fstat, openat};
 
 use super::StartupError;
+#[cfg(target_os = "macos")]
+use super::paths::macos_physical_path;
 
 const LOCK_FILENAME: &str = "phase0-bootstrap.lock";
 static PROCESS_GUARD_ACQUISITION: OnceLock<Mutex<()>> = OnceLock::new();
@@ -77,11 +79,7 @@ impl ProcessGuard {
 #[cfg(unix)]
 fn open_state_directory(state_dir: &Path) -> Result<std::os::fd::OwnedFd, StartupError> {
     #[cfg(target_os = "macos")]
-    let walk_path = if state_dir.starts_with(Path::new("/var")) {
-        Path::new("/private").join(state_dir.strip_prefix("/").unwrap_or(state_dir))
-    } else {
-        state_dir.to_path_buf()
-    };
+    let walk_path = macos_physical_path(state_dir);
     #[cfg(not(target_os = "macos"))]
     let walk_path = state_dir.to_path_buf();
 
