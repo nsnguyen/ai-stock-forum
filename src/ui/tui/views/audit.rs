@@ -1,8 +1,8 @@
 use ratatui::{
+    Frame,
     layout::{Constraint, Rect},
     text::Line,
     widgets::{Cell, Row, Table, TableState},
-    Frame,
 };
 
 use super::{actor_name, label_value, panel, safe_text, workspace_focused};
@@ -30,7 +30,11 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
         ],
     )
     .header(header)
-    .block(panel("Audit - recent activity", workspace_focused(model), theme))
+    .block(panel(
+        "Audit - recent activity",
+        workspace_focused(model),
+        theme,
+    ))
     .row_highlight_style(theme.focus)
     .highlight_symbol("> ");
     let mut state = TableState::default().with_selected(model.audit_selection);

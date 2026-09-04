@@ -98,11 +98,8 @@ mod tests {
 
     #[test]
     fn key_repeat_events_are_forwarded() {
-        let event = KeyEvent::new_with_kind(
-            KeyCode::Char('x'),
-            KeyModifiers::NONE,
-            KeyEventKind::Repeat,
-        );
+        let event =
+            KeyEvent::new_with_kind(KeyCode::Char('x'), KeyModifiers::NONE, KeyEventKind::Repeat);
         assert_eq!(translate(Event::Key(event)), Some(TuiEvent::Key(event)));
     }
 

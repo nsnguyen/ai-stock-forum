@@ -1,4 +1,9 @@
-use ratatui::{layout::Rect, text::Line, widgets::{Paragraph, Wrap}, Frame};
+use ratatui::{
+    Frame,
+    layout::Rect,
+    text::Line,
+    widgets::{Paragraph, Wrap},
+};
 
 use super::{panel, workspace_focused};
 use crate::ui::tui::{model::TuiModel, theme::Theme};

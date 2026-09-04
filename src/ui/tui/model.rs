@@ -294,7 +294,9 @@ impl TuiModel {
     pub fn select_previous_audit(&mut self) {
         self.audit_selection = match (self.audit_selection, self.audit_last_index()) {
             (_, None) => None,
-            (Some(selection), Some(last_index)) => Some(selection.min(last_index).saturating_sub(1)),
+            (Some(selection), Some(last_index)) => {
+                Some(selection.min(last_index).saturating_sub(1))
+            }
             (None, Some(last_index)) => Some(last_index),
         };
     }
@@ -302,7 +304,9 @@ impl TuiModel {
     pub fn select_next_audit(&mut self) {
         self.audit_selection = match (self.audit_selection, self.audit_last_index()) {
             (_, None) => None,
-            (Some(selection), Some(last_index)) => Some(selection.min(last_index).saturating_add(1).min(last_index)),
+            (Some(selection), Some(last_index)) => {
+                Some(selection.min(last_index).saturating_add(1).min(last_index))
+            }
             (None, Some(_)) => Some(0),
         };
     }
@@ -547,8 +551,14 @@ mod tests {
         let model = TuiModel::new(snapshot, false);
 
         assert_eq!(model.audit_entries.len(), COMMAND_HISTORY_CAPACITY);
-        assert_eq!(model.audit_entries.first().map(|entry| entry.sequence), Some(11));
-        assert_eq!(model.audit_entries.last().map(|entry| entry.sequence), Some(110));
+        assert_eq!(
+            model.audit_entries.first().map(|entry| entry.sequence),
+            Some(11)
+        );
+        assert_eq!(
+            model.audit_entries.last().map(|entry| entry.sequence),
+            Some(110)
+        );
         assert_eq!(model.audit_selection, Some(99));
     }
 
@@ -558,8 +568,14 @@ mod tests {
         model.audit_selection = None;
         model.replace_audit((1..=110).map(audit_entry).collect());
         assert_eq!(model.audit_entries.len(), 100);
-        assert_eq!(model.audit_entries.first().map(|entry| entry.sequence), Some(11));
-        assert_eq!(model.audit_entries.last().map(|entry| entry.sequence), Some(110));
+        assert_eq!(
+            model.audit_entries.first().map(|entry| entry.sequence),
+            Some(11)
+        );
+        assert_eq!(
+            model.audit_entries.last().map(|entry| entry.sequence),
+            Some(110)
+        );
         assert_eq!(model.audit_selection, Some(99));
     }
 

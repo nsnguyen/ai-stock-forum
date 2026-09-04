@@ -3,15 +3,9 @@ use std::io::{self, Stdout, Write, stdout};
 use crossterm::{
     cursor::{Hide, Show},
     execute,
-    terminal::{
-        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-    },
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{
-    Terminal,
-    backend::CrosstermBackend,
-    layout::Rect,
-};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 
 use super::{error::TuiError, model::TuiModel, render, theme::Theme};
 
@@ -156,8 +150,7 @@ impl CrosstermScreen {
     pub fn new() -> Result<Self, TuiError> {
         let guard = TerminalGuard::enter(CrosstermTerminalControl::new())?;
         let backend = CrosstermBackend::new(stdout());
-        let mut terminal =
-            Terminal::new(backend).map_err(|_| TuiError::TerminalInitialization)?;
+        let mut terminal = Terminal::new(backend).map_err(|_| TuiError::TerminalInitialization)?;
         terminal
             .clear()
             .map_err(|_| TuiError::TerminalInitialization)?;

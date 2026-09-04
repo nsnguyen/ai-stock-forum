@@ -71,8 +71,8 @@ pub fn calculate(area: Rect, inspector_open: bool) -> CockpitLayout {
             (Some(columns[0]), columns[1], Some(columns[2]))
         }
         LayoutMode::Medium => {
-            let columns = Layout::horizontal([Constraint::Length(20), Constraint::Min(0)])
-                .split(content);
+            let columns =
+                Layout::horizontal([Constraint::Length(20), Constraint::Min(0)]).split(content);
             let workspace = columns[1];
             (
                 Some(columns[0]),
@@ -116,7 +116,12 @@ fn centered_overlay(area: Rect) -> Rect {
     ])
     .split(area);
 
-    Rect::new(horizontal[1].x, vertical[1].y, horizontal[1].width, vertical[1].height)
+    Rect::new(
+        horizontal[1].x,
+        vertical[1].y,
+        horizontal[1].width,
+        vertical[1].height,
+    )
 }
 
 fn seventy_percent(value: u16) -> u16 {
@@ -213,10 +218,7 @@ mod tests {
             assert!(layout.workspace.x >= area.x && layout.workspace.y >= area.y);
             assert!(layout.workspace.right() <= area.right());
             assert!(layout.workspace.bottom() <= area.bottom());
-            for rectangle in [layout.navigation, layout.inspector]
-                .into_iter()
-                .flatten()
-            {
+            for rectangle in [layout.navigation, layout.inspector].into_iter().flatten() {
                 assert!(rectangle.x >= area.x && rectangle.y >= area.y);
                 assert!(rectangle.right() <= area.right());
                 assert!(rectangle.bottom() <= area.bottom());

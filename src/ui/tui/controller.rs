@@ -7,9 +7,7 @@ use super::{
     model::{Focus, LayoutMode, RuntimeStatus, Severity, TuiModel, View},
 };
 use crate::{
-    app::{
-        ApplicationCommand, CommandOutcome, CommandView, ShutdownDisposition, ShutdownReason,
-    },
+    app::{ApplicationCommand, CommandOutcome, CommandView, ShutdownDisposition, ShutdownReason},
     audit::AuditEntry,
     ui::command::{ParsedLine, parse_line},
 };
@@ -34,9 +32,7 @@ pub fn handle_event(model: &mut TuiModel, event: TuiEvent) -> ControllerEffect {
             normalize_focus(model);
             ControllerEffect::Redraw
         }
-        TuiEvent::Key(key)
-            if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
-        {
+        TuiEvent::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
             handle_key(model, key)
         }
         TuiEvent::Key(_) => ControllerEffect::None,
@@ -526,7 +522,10 @@ mod tests {
         assert_eq!(model.command.text(), "/");
         assert_eq!(handle_event(&mut model, key('q')), ControllerEffect::Redraw);
         assert_eq!(model.command.text(), "/q");
-        assert_eq!(handle_event(&mut model, key_code(KeyCode::Esc, KeyModifiers::NONE)), ControllerEffect::Redraw);
+        assert_eq!(
+            handle_event(&mut model, key_code(KeyCode::Esc, KeyModifiers::NONE)),
+            ControllerEffect::Redraw
+        );
         assert!(matches!(
             handle_event(&mut model, key('q')),
             ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
@@ -572,10 +571,7 @@ mod tests {
                     KeyModifiers::CONTROL | KeyModifiers::ALT,
                 ),
             ),
-            (
-                model(),
-                key_code(KeyCode::Tab, KeyModifiers::CONTROL),
-            ),
+            (model(), key_code(KeyCode::Tab, KeyModifiers::CONTROL)),
             (
                 command_model("/status"),
                 key_code(KeyCode::Enter, KeyModifiers::ALT),
@@ -609,10 +605,7 @@ mod tests {
         let before = model.clone();
 
         assert_eq!(
-            handle_event(
-                &mut model,
-                key_code(KeyCode::Enter, KeyModifiers::HYPER),
-            ),
+            handle_event(&mut model, key_code(KeyCode::Enter, KeyModifiers::HYPER),),
             ControllerEffect::None
         );
         assert_eq!(model, before);
@@ -661,7 +654,10 @@ mod tests {
     fn enter_uses_the_authoritative_parser_and_marks_one_command_in_flight() {
         let mut model = command_model("/status");
         let effect = handle_event(&mut model, enter());
-        assert_eq!(effect, ControllerEffect::Submit(ApplicationCommand::ShowStatus));
+        assert_eq!(
+            effect,
+            ControllerEffect::Submit(ApplicationCommand::ShowStatus)
+        );
         assert!(model.command_in_flight);
         assert_eq!(model.command.text(), "");
         assert_eq!(model.command.history_back(), Some("/status"));
@@ -697,16 +693,28 @@ mod tests {
     #[test]
     fn command_focus_edits_text_and_traverses_memory_only_history() {
         let mut model = command_model("ac");
-        assert_eq!(handle_event(&mut model, key_code(KeyCode::Left, KeyModifiers::NONE)), ControllerEffect::Redraw);
+        assert_eq!(
+            handle_event(&mut model, key_code(KeyCode::Left, KeyModifiers::NONE)),
+            ControllerEffect::Redraw
+        );
         assert_eq!(handle_event(&mut model, key('b')), ControllerEffect::Redraw);
         assert_eq!(model.command.text(), "abc");
-        assert_eq!(handle_event(&mut model, key_code(KeyCode::Backspace, KeyModifiers::NONE)), ControllerEffect::Redraw);
+        assert_eq!(
+            handle_event(&mut model, key_code(KeyCode::Backspace, KeyModifiers::NONE)),
+            ControllerEffect::Redraw
+        );
         assert_eq!(model.command.text(), "ac");
         model.command.remember("/help".to_owned());
         model.command.remember("/status".to_owned());
-        assert_eq!(handle_event(&mut model, key_code(KeyCode::Up, KeyModifiers::NONE)), ControllerEffect::Redraw);
+        assert_eq!(
+            handle_event(&mut model, key_code(KeyCode::Up, KeyModifiers::NONE)),
+            ControllerEffect::Redraw
+        );
         assert_eq!(model.command.text(), "/status");
-        assert_eq!(handle_event(&mut model, key_code(KeyCode::Down, KeyModifiers::NONE)), ControllerEffect::Redraw);
+        assert_eq!(
+            handle_event(&mut model, key_code(KeyCode::Down, KeyModifiers::NONE)),
+            ControllerEffect::Redraw
+        );
         assert_eq!(model.command.text(), "");
     }
 
@@ -733,31 +741,55 @@ mod tests {
 
         let mut command_tiny = command_model("");
         command_tiny.layout_mode = LayoutMode::TooSmall;
-        assert_eq!(handle_event(&mut command_tiny, key('q')), ControllerEffect::None);
+        assert_eq!(
+            handle_event(&mut command_tiny, key('q')),
+            ControllerEffect::None
+        );
         assert_eq!(command_tiny.command.text(), "");
     }
 
     #[test]
     fn resize_focus_and_navigation_keys_update_only_model_state() {
         let mut model = model();
-        assert_eq!(handle_event(&mut model, TuiEvent::Resize(59, 18)), ControllerEffect::Redraw);
+        assert_eq!(
+            handle_event(&mut model, TuiEvent::Resize(59, 18)),
+            ControllerEffect::Redraw
+        );
         assert_eq!(model.layout_mode, LayoutMode::TooSmall);
-        assert_eq!(handle_event(&mut model, TuiEvent::Resize(120, 30)), ControllerEffect::Redraw);
+        assert_eq!(
+            handle_event(&mut model, TuiEvent::Resize(120, 30)),
+            ControllerEffect::Redraw
+        );
         assert_eq!(model.layout_mode, LayoutMode::Wide);
 
-        assert_eq!(handle_event(&mut model, key_code(KeyCode::Tab, KeyModifiers::NONE)), ControllerEffect::Redraw);
+        assert_eq!(
+            handle_event(&mut model, key_code(KeyCode::Tab, KeyModifiers::NONE)),
+            ControllerEffect::Redraw
+        );
         assert_eq!(model.focus, Focus::Inspector);
-        assert_eq!(handle_event(&mut model, key_code(KeyCode::BackTab, KeyModifiers::SHIFT)), ControllerEffect::Redraw);
+        assert_eq!(
+            handle_event(&mut model, key_code(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            ControllerEffect::Redraw
+        );
         assert_eq!(model.focus, Focus::Workspace);
 
         model.active_view = View::Audit;
         model.replace_audit(vec![audit_entry(1), audit_entry(2), audit_entry(3)]);
         model.audit_selection = Some(1);
-        assert_eq!(handle_event(&mut model, key_code(KeyCode::Up, KeyModifiers::NONE)), ControllerEffect::Redraw);
+        assert_eq!(
+            handle_event(&mut model, key_code(KeyCode::Up, KeyModifiers::NONE)),
+            ControllerEffect::Redraw
+        );
         assert_eq!(model.audit_selection, Some(0));
-        assert_eq!(handle_event(&mut model, key_code(KeyCode::End, KeyModifiers::NONE)), ControllerEffect::Redraw);
+        assert_eq!(
+            handle_event(&mut model, key_code(KeyCode::End, KeyModifiers::NONE)),
+            ControllerEffect::Redraw
+        );
         assert_eq!(model.audit_selection, Some(2));
-        assert_eq!(handle_event(&mut model, key_code(KeyCode::Home, KeyModifiers::NONE)), ControllerEffect::Redraw);
+        assert_eq!(
+            handle_event(&mut model, key_code(KeyCode::Home, KeyModifiers::NONE)),
+            ControllerEffect::Redraw
+        );
         assert_eq!(model.audit_selection, Some(0));
     }
 
@@ -778,7 +810,10 @@ mod tests {
         );
         assert!(!model.command_in_flight);
         assert_eq!(model.active_view, View::Help);
-        assert_eq!(model.audit_entries, vec![audit_entry_from_event(1, ApplicationEvent::HelpViewed)]);
+        assert_eq!(
+            model.audit_entries,
+            vec![audit_entry_from_event(1, ApplicationEvent::HelpViewed)]
+        );
 
         let next_installation = installation_id(11);
         let next_session = session_id(12);
@@ -895,9 +930,11 @@ mod tests {
         assert_eq!(model.audit_entries.len(), 100);
         assert_eq!(model.audit_entries.first().unwrap().sequence, 26);
         assert_eq!(model.audit_entries.last().unwrap().sequence, 125);
-        assert!(model.audit_entries[75..]
-            .iter()
-            .all(|entry| entry.kind == "status_viewed"));
+        assert!(
+            model.audit_entries[75..]
+                .iter()
+                .all(|entry| entry.kind == "status_viewed")
+        );
     }
 
     fn audit_entry_from_event(sequence: u64, event: ApplicationEvent) -> AuditEntry {

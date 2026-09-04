@@ -1,4 +1,9 @@
-use ratatui::{layout::Rect, text::Line, widgets::{Paragraph, Wrap}, Frame};
+use ratatui::{
+    Frame,
+    layout::Rect,
+    text::Line,
+    widgets::{Paragraph, Wrap},
+};
 
 use crate::setup::SetupStatus;
 
@@ -26,7 +31,10 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
         Line::styled("Read-only in Phase 0B.", theme.warning),
         Line::raw("Setup editing is deferred to a later phase."),
         Line::default(),
-        Line::styled("Use /setup status to refresh this native view.", theme.muted),
+        Line::styled(
+            "Use /setup status to refresh this native view.",
+            theme.muted,
+        ),
     ]);
 
     frame.render_widget(

@@ -1,4 +1,9 @@
-use ratatui::{layout::Rect, text::Line, widgets::{Paragraph, Wrap}, Frame};
+use ratatui::{
+    Frame,
+    layout::Rect,
+    text::Line,
+    widgets::{Paragraph, Wrap},
+};
 
 use crate::setup::SetupStatus;
 

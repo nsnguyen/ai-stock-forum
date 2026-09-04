@@ -1,12 +1,12 @@
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Layout, Rect},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
-    Frame,
 };
 
 use super::{
-    layout::{calculate, MIN_HEIGHT, MIN_WIDTH},
+    layout::{MIN_HEIGHT, MIN_WIDTH, calculate},
     model::{Focus, LayoutMode, Severity, TuiModel, View},
     theme::Theme,
     views,
@@ -51,7 +51,10 @@ fn render_header(
     } else if model.previous_session_interrupted {
         Line::styled("WARNING  Previous session interrupted", theme.warning)
     } else {
-        Line::styled("Local cockpit  |  native views  |  typed audit", theme.muted)
+        Line::styled(
+            "Local cockpit  |  native views  |  typed audit",
+            theme.muted,
+        )
     };
     let third = if mode == LayoutMode::Narrow && model.previous_session_interrupted {
         Line::styled("WARNING  Previous session interrupted", theme.warning)
@@ -75,7 +78,10 @@ fn numbered_tabs(model: &TuiModel, theme: &Theme) -> Line<'static> {
         } else {
             theme.muted
         };
-        spans.push(Span::styled(format!("{} {}", index + 1, view_name(view)), style));
+        spans.push(Span::styled(
+            format!("{} {}", index + 1, view_name(view)),
+            style,
+        ));
     }
     Line::from(spans)
 }
@@ -93,7 +99,12 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
     {
         let selected = view == model.active_view;
         lines.push(Line::styled(
-            format!("{} {} {}", if selected { ">" } else { " " }, index + 1, view_name(view)),
+            format!(
+                "{} {} {}",
+                if selected { ">" } else { " " },
+                index + 1,
+                view_name(view)
+            ),
             if selected { theme.focus } else { theme.muted },
         ));
     }
@@ -147,7 +158,11 @@ fn render_command(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
         .border_style(if focused { theme.focus } else { theme.muted });
     let line = if focused {
         let cursor = model.command.cursor_byte().min(model.command.text().len());
-        let prefix = model.command.text().get(..cursor).unwrap_or(model.command.text());
+        let prefix = model
+            .command
+            .text()
+            .get(..cursor)
+            .unwrap_or(model.command.text());
         let suffix = model.command.text().get(cursor..).unwrap_or_default();
         Line::from(vec![
             Span::styled("> ", theme.accent),
@@ -187,7 +202,10 @@ fn render_too_small(frame: &mut Frame<'_>, area: Rect) {
         Constraint::Fill(1),
     ])
     .split(area)[1];
-    frame.render_widget(Paragraph::new(content).alignment(Alignment::Center), centered);
+    frame.render_widget(
+        Paragraph::new(content).alignment(Alignment::Center),
+        centered,
+    );
 }
 
 fn view_name(view: View) -> &'static str {
@@ -213,11 +231,11 @@ mod tests {
     use std::io;
 
     use ratatui::{
+        Terminal,
         backend::{Backend, ClearType, TestBackend, WindowSize},
         buffer::Cell as BufferCell,
         layout::{Position, Size},
         style::Modifier,
-        Terminal,
     };
     use uuid::Uuid;
 
@@ -369,8 +387,20 @@ mod tests {
     fn overview_renders_every_runtime_and_command_state_independently() {
         let cases = [
             ("ready_idle", RuntimeStatus::Ready, false, "Ready", "Idle"),
-            ("ready_running", RuntimeStatus::Ready, true, "Ready", "Running"),
-            ("stopping_idle", RuntimeStatus::Stopping, false, "Stopping", "Idle"),
+            (
+                "ready_running",
+                RuntimeStatus::Ready,
+                true,
+                "Ready",
+                "Running",
+            ),
+            (
+                "stopping_idle",
+                RuntimeStatus::Stopping,
+                false,
+                "Stopping",
+                "Idle",
+            ),
             (
                 "stopping_running",
                 RuntimeStatus::Stopping,
@@ -474,7 +504,10 @@ mod tests {
         model.command.insert('x');
         model.command.move_left();
         let mut terminal = rendered(model, 100, 30, false);
-        assert_eq!(terminal.get_cursor_position().expect("cursor position"), Position::new(5, 28));
+        assert_eq!(
+            terminal.get_cursor_position().expect("cursor position"),
+            Position::new(5, 28)
+        );
     }
 
     #[test]

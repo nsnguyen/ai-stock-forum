@@ -24,14 +24,20 @@ impl Theme {
         }
 
         Self {
-            accent: Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            accent: Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
             focus: Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD | Modifier::REVERSED),
             muted: Style::default().fg(Color::DarkGray),
-            success: Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-            warning: Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            success: Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            warning: Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
             error: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         }
     }

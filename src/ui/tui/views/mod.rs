@@ -4,10 +4,10 @@ mod overview;
 mod setup;
 
 use ratatui::{
+    Frame,
     layout::Rect,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
-    Frame,
 };
 
 use super::{
@@ -24,12 +24,7 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
     }
 }
 
-pub(super) fn render_inspector(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    model: &TuiModel,
-    theme: &Theme,
-) {
+pub(super) fn render_inspector(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     let border_style = if model.focus == Focus::Inspector {
         theme.focus
     } else {
@@ -45,7 +40,12 @@ pub(super) fn render_inspector(
         View::Setup => contextual_lines("Setup", "State is read-only in Phase 0B", theme),
         View::Help => contextual_lines("Help", "Approved keyboard and slash grammar", theme),
     };
-    frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 pub(super) fn panel<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
@@ -65,7 +65,13 @@ pub(super) fn label_value<'a>(label: &'a str, value: String, theme: &Theme) -> L
 pub(super) fn safe_text(value: &str) -> String {
     value
         .chars()
-        .map(|character| if character.is_control() { ' ' } else { character })
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
         .collect()
 }
 
