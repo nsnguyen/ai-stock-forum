@@ -1,3 +1,4 @@
+mod controller;
 mod error;
 mod event;
 pub mod layout;
@@ -7,6 +8,7 @@ mod terminal;
 pub mod theme;
 pub mod views;
 
+pub use controller::{ControllerEffect, apply_outcome, handle_event};
 pub use error::TuiError;
 pub use event::{CrosstermEventSource, EventSource, TuiEvent};
 pub use terminal::{CrosstermScreen, Screen};
