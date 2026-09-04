@@ -222,9 +222,7 @@ impl TuiModel {
             setup_status,
             recent_audit,
         } = snapshot;
-        let audit_selection = recent_audit.len().checked_sub(1);
-
-        Self {
+        let mut model = Self {
             active_view: View::Overview,
             focus: Focus::Workspace,
             layout_mode: LayoutMode::Wide,
@@ -233,13 +231,15 @@ impl TuiModel {
             installation_id,
             session_id,
             setup_status,
-            audit_entries: recent_audit,
-            audit_selection,
+            audit_entries: Vec::new(),
+            audit_selection: None,
             workspace_scroll: 0,
             message: None,
             command_in_flight: false,
             previous_session_interrupted,
-        }
+        };
+        model.replace_audit(recent_audit);
+        model
     }
 
     pub fn select_view(&mut self, view: View) {
@@ -515,6 +515,19 @@ mod tests {
         assert!(model.command_in_flight);
         model.clear_message();
         assert_eq!(model.message, None);
+    }
+
+    #[test]
+    fn model_initialization_keeps_only_the_newest_hundred_audit_entries() {
+        let mut snapshot = snapshot();
+        snapshot.recent_audit = (1..=110).map(audit_entry).collect();
+
+        let model = TuiModel::new(snapshot, false);
+
+        assert_eq!(model.audit_entries.len(), COMMAND_HISTORY_CAPACITY);
+        assert_eq!(model.audit_entries.first().map(|entry| entry.sequence), Some(11));
+        assert_eq!(model.audit_entries.last().map(|entry| entry.sequence), Some(110));
+        assert_eq!(model.audit_selection, Some(99));
     }
 
     #[test]
