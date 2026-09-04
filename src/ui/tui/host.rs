@@ -33,7 +33,7 @@ pub fn run_tui(
         Err(error) => return finish_with_primary(runner, error),
     };
 
-    let result = run_loop(runner, &mut screen, &mut events, &theme);
+    let result = run_with_screen(runner, &mut screen, &mut events, &theme);
     drop(screen);
     result
 }
@@ -214,6 +214,20 @@ fn run_loop(
     }
 }
 
+fn run_with_screen(
+    runner: TuiRunner,
+    screen: &mut dyn Screen,
+    events: &mut dyn EventSource,
+    theme: &Theme,
+) -> Result<(), TuiError> {
+    let primary = run_loop(runner, screen, events, theme);
+    let restoration = screen.restore();
+    match primary {
+        Err(error) => Err(error),
+        Ok(()) => restoration,
+    }
+}
+
 fn finish_with_primary(mut runner: TuiRunner, error: TuiError) -> Result<(), TuiError> {
     runner.begin_stopping();
     let _ = runner.finish(ShutdownReason::ApplicationError);
@@ -226,7 +240,7 @@ mod tests {
         collections::VecDeque,
         sync::{
             Arc, Mutex,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         thread,
         time::Duration,
@@ -237,7 +251,7 @@ mod tests {
     use ratatui::layout::Rect;
     use uuid::Uuid;
 
-    use super::{TuiRunner, run_loop};
+    use super::{TuiRunner, run_with_screen};
     use crate::{
         app::{
             AppError, ApplicationCommand, CommandOutcome, CommandView, HelpView,
@@ -266,6 +280,8 @@ mod tests {
         frames: Arc<Mutex<Vec<RecordedFrame>>>,
         fail_draw: Arc<AtomicBool>,
         panic_on_draw: Arc<AtomicBool>,
+        fail_restore: Arc<AtomicBool>,
+        restore_calls: Arc<AtomicUsize>,
     }
 
     impl RecordingScreen {
@@ -275,6 +291,8 @@ mod tests {
                 frames: Arc::new(Mutex::new(Vec::new())),
                 fail_draw: Arc::new(AtomicBool::new(false)),
                 panic_on_draw: Arc::new(AtomicBool::new(false)),
+                fail_restore: Arc::new(AtomicBool::new(false)),
+                restore_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
 
@@ -290,8 +308,18 @@ mod tests {
             screen
         }
 
+        fn failing_restore(area: Rect) -> Self {
+            let screen = Self::new(area);
+            screen.fail_restore.store(true, Ordering::SeqCst);
+            screen
+        }
+
         fn frames(&self) -> Vec<RecordedFrame> {
             self.frames.lock().unwrap().clone()
+        }
+
+        fn restore_calls(&self) -> usize {
+            self.restore_calls.load(Ordering::SeqCst)
         }
     }
 
@@ -313,6 +341,15 @@ mod tests {
                 runtime_status: model.runtime_status,
             });
             Ok(())
+        }
+
+        fn restore(&mut self) -> Result<(), TuiError> {
+            self.restore_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_restore.load(Ordering::SeqCst) {
+                Err(TuiError::TerminalOutput)
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -501,7 +538,7 @@ mod tests {
         screen: &mut dyn Screen,
         events: &mut dyn EventSource,
     ) -> Result<(), TuiError> {
-        run_loop(
+        run_with_screen(
             TuiRunner::new(runtime, snapshot(), false),
             screen,
             events,
@@ -665,5 +702,44 @@ mod tests {
 
         assert!(matches!(result, Err(TuiError::Panicked)));
         assert_eq!(observer.finishes(), [ShutdownReason::ApplicationError]);
+    }
+
+    #[test]
+    fn clean_loop_returns_restore_error_and_restores_once_before_return() {
+        let (runtime, observer, _) = runtime(false, false, false);
+        let mut screen = RecordingScreen::failing_restore(Rect::new(0, 0, 140, 40));
+        let mut events = FakeEvents::from([EventStep::Event(TuiEvent::Interrupt)]);
+
+        let result = execute(runtime, &mut screen, &mut events);
+
+        assert!(matches!(result, Err(TuiError::TerminalOutput)));
+        assert_eq!(observer.finishes(), [ShutdownReason::Interrupted]);
+        assert_eq!(screen.restore_calls(), 1);
+    }
+
+    #[test]
+    fn primary_error_wins_over_restore_error_and_restores_once_before_return() {
+        let (runtime, observer, _) = runtime(false, false, false);
+        let mut screen = RecordingScreen::failing_restore(Rect::new(0, 0, 140, 40));
+        let mut events = FakeEvents::from([EventStep::InputError]);
+
+        let result = execute(runtime, &mut screen, &mut events);
+
+        assert!(matches!(result, Err(TuiError::TerminalInput)));
+        assert_eq!(observer.finishes(), [ShutdownReason::ApplicationError]);
+        assert_eq!(screen.restore_calls(), 1);
+    }
+
+    #[test]
+    fn clean_loop_restores_exactly_once_before_return() {
+        let (runtime, observer, _) = runtime(false, false, false);
+        let mut screen = RecordingScreen::new(Rect::new(0, 0, 140, 40));
+        let mut events = FakeEvents::from([EventStep::Event(TuiEvent::Interrupt)]);
+
+        let result = execute(runtime, &mut screen, &mut events);
+
+        assert!(result.is_ok());
+        assert_eq!(observer.finishes(), [ShutdownReason::Interrupted]);
+        assert_eq!(screen.restore_calls(), 1);
     }
 }

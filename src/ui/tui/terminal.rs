@@ -18,6 +18,7 @@ use super::{error::TuiError, model::TuiModel, render, theme::Theme};
 pub trait Screen {
     fn size(&self) -> Result<Rect, TuiError>;
     fn draw(&mut self, model: &TuiModel, theme: &Theme) -> Result<(), TuiError>;
+    fn restore(&mut self) -> Result<(), TuiError>;
 }
 
 trait TerminalControl {
@@ -180,6 +181,10 @@ impl Screen for CrosstermScreen {
             .draw(|frame| render::render(frame, model, theme))
             .map(|_| ())
             .map_err(|_| TuiError::TerminalOutput)
+    }
+
+    fn restore(&mut self) -> Result<(), TuiError> {
+        self._guard.restore()
     }
 }
 
