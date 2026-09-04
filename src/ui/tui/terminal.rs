@@ -2,6 +2,7 @@ use std::io::{self, Stdout, Write, stdout};
 
 use crossterm::{
     cursor::{Hide, Show},
+    event::{DisableBracketedPaste, EnableBracketedPaste},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -19,6 +20,8 @@ trait TerminalControl {
     fn enable_raw(&mut self) -> io::Result<()>;
     fn enter_alt(&mut self) -> io::Result<()>;
     fn hide_cursor(&mut self) -> io::Result<()>;
+    fn enable_bracketed_paste(&mut self) -> io::Result<()>;
+    fn disable_bracketed_paste(&mut self) -> io::Result<()>;
     fn show_cursor(&mut self) -> io::Result<()>;
     fn leave_alt(&mut self) -> io::Result<()>;
     fn disable_raw(&mut self) -> io::Result<()>;
@@ -30,6 +33,7 @@ struct TerminalGuard<C: TerminalControl> {
     raw_enabled: bool,
     alternate_screen_entered: bool,
     cursor_hidden: bool,
+    bracketed_paste_enabled: bool,
     flush_required: bool,
 }
 
@@ -40,6 +44,7 @@ impl<C: TerminalControl> TerminalGuard<C> {
             raw_enabled: false,
             alternate_screen_entered: false,
             cursor_hidden: false,
+            bracketed_paste_enabled: false,
             flush_required: false,
         };
 
@@ -62,12 +67,27 @@ impl<C: TerminalControl> TerminalGuard<C> {
         }
         guard.cursor_hidden = true;
 
+        if guard.control.enable_bracketed_paste().is_err() {
+            let _ = guard.restore();
+            return Err(TuiError::TerminalInitialization);
+        }
+        guard.bracketed_paste_enabled = true;
+
         Ok(guard)
     }
 
     fn restore(&mut self) -> Result<(), TuiError> {
         let mut first_error = None;
 
+        if self.bracketed_paste_enabled {
+            self.bracketed_paste_enabled = false;
+            retain_first_error(
+                &mut first_error,
+                self.control
+                    .disable_bracketed_paste()
+                    .map_err(|_| TuiError::TerminalOutput),
+            );
+        }
         if self.cursor_hidden {
             self.cursor_hidden = false;
             retain_first_error(
@@ -142,6 +162,14 @@ impl TerminalControl for CrosstermTerminalControl {
 
     fn hide_cursor(&mut self) -> io::Result<()> {
         execute!(self.output, Hide)
+    }
+
+    fn enable_bracketed_paste(&mut self) -> io::Result<()> {
+        execute!(self.output, EnableBracketedPaste)
+    }
+
+    fn disable_bracketed_paste(&mut self) -> io::Result<()> {
+        execute!(self.output, DisableBracketedPaste)
     }
 
     fn show_cursor(&mut self) -> io::Result<()> {
@@ -263,6 +291,14 @@ mod tests {
             self.perform("hide_cursor")
         }
 
+        fn enable_bracketed_paste(&mut self) -> io::Result<()> {
+            self.perform("enable_bracketed_paste")
+        }
+
+        fn disable_bracketed_paste(&mut self) -> io::Result<()> {
+            self.perform("disable_bracketed_paste")
+        }
+
         fn show_cursor(&mut self) -> io::Result<()> {
             self.perform("show_cursor")
         }
@@ -309,6 +345,8 @@ mod tests {
                 "enable_raw",
                 "enter_alt",
                 "hide_cursor",
+                "enable_bracketed_paste",
+                "disable_bracketed_paste",
                 "show_cursor",
                 "leave_alt",
                 "disable_raw",
@@ -319,7 +357,7 @@ mod tests {
 
     #[test]
     fn every_initialization_failure_restores_only_acquired_state() {
-        let cases: [(&str, &[&str]); 3] = [
+        let cases: [(&str, &[&str]); 4] = [
             ("enable_raw", &["enable_raw"]),
             (
                 "enter_alt",
@@ -331,6 +369,19 @@ mod tests {
                     "enable_raw",
                     "enter_alt",
                     "hide_cursor",
+                    "leave_alt",
+                    "disable_raw",
+                    "flush",
+                ],
+            ),
+            (
+                "enable_bracketed_paste",
+                &[
+                    "enable_raw",
+                    "enter_alt",
+                    "hide_cursor",
+                    "enable_bracketed_paste",
+                    "show_cursor",
                     "leave_alt",
                     "disable_raw",
                     "flush",
@@ -358,11 +409,18 @@ mod tests {
     #[test]
     fn every_restoration_failure_attempts_all_steps_and_returns_only_a_safe_error() {
         let cases = [
+            vec!["disable_bracketed_paste"],
             vec!["show_cursor"],
             vec!["leave_alt"],
             vec!["disable_raw"],
             vec!["flush"],
-            vec!["show_cursor", "leave_alt", "disable_raw", "flush"],
+            vec![
+                "disable_bracketed_paste",
+                "show_cursor",
+                "leave_alt",
+                "disable_raw",
+                "flush",
+            ],
         ];
 
         for failures in cases {
@@ -378,6 +436,8 @@ mod tests {
                     "enable_raw",
                     "enter_alt",
                     "hide_cursor",
+                    "enable_bracketed_paste",
+                    "disable_bracketed_paste",
                     "show_cursor",
                     "leave_alt",
                     "disable_raw",
@@ -391,7 +451,11 @@ mod tests {
 
     #[test]
     fn restoration_is_idempotent_after_success_and_failure() {
-        for failures in [Vec::new(), vec!["show_cursor"]] {
+        for failures in [
+            Vec::new(),
+            vec!["disable_bracketed_paste"],
+            vec!["show_cursor"],
+        ] {
             let control = FakeTerminalControl::failing_at_all(&failures);
             let observer = control.clone();
             let mut guard = TerminalGuard::enter(control).unwrap();
@@ -406,6 +470,8 @@ mod tests {
                     "enable_raw",
                     "enter_alt",
                     "hide_cursor",
+                    "enable_bracketed_paste",
+                    "disable_bracketed_paste",
                     "show_cursor",
                     "leave_alt",
                     "disable_raw",
