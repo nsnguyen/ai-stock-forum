@@ -121,56 +121,72 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
     }
 
     match key.code {
-        KeyCode::Char('1') if plain_modifiers(key.modifiers) => select_view(model, View::Overview),
-        KeyCode::Char('2') if plain_modifiers(key.modifiers) => select_view(model, View::Setup),
-        KeyCode::Char('3') if plain_modifiers(key.modifiers) => select_view(model, View::Audit),
-        KeyCode::Char('4') if plain_modifiers(key.modifiers) => select_view(model, View::Help),
-        KeyCode::Char('?') if plain_modifiers(key.modifiers) => select_view(model, View::Help),
-        KeyCode::Char('/') if plain_modifiers(key.modifiers) => {
+        KeyCode::Char('1') if no_modifiers(key.modifiers) => select_view(model, View::Overview),
+        KeyCode::Char('2') if no_modifiers(key.modifiers) => select_view(model, View::Setup),
+        KeyCode::Char('3') if no_modifiers(key.modifiers) => select_view(model, View::Audit),
+        KeyCode::Char('4') if no_modifiers(key.modifiers) => select_view(model, View::Help),
+        KeyCode::Char('?') if text_modifiers(key.modifiers) => select_view(model, View::Help),
+        KeyCode::Char('/') if no_modifiers(key.modifiers) => {
             model.command.clear();
             model.command.insert('/');
             model.set_focus(Focus::Command);
             ControllerEffect::Redraw
         }
-        KeyCode::Char('i') if plain_modifiers(key.modifiers) => toggle_or_focus_inspector(model),
-        KeyCode::Char('q') if plain_modifiers(key.modifiers) => {
+        KeyCode::Char('i') if no_modifiers(key.modifiers) => toggle_or_focus_inspector(model),
+        KeyCode::Char('q') if no_modifiers(key.modifiers) => {
             ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
         }
-        KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => cycle_focus(model, true),
-        KeyCode::BackTab | KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            cycle_focus(model, false)
+        KeyCode::Tab if no_modifiers(key.modifiers) => cycle_focus(model, true),
+        KeyCode::BackTab if backtab_modifiers(key.modifiers) => cycle_focus(model, false),
+        KeyCode::Esc if no_modifiers(key.modifiers) => dismiss(model),
+        KeyCode::Up | KeyCode::Left if no_modifiers(key.modifiers) => {
+            move_focused(model, false, false)
         }
-        KeyCode::Esc => dismiss(model),
-        KeyCode::Up | KeyCode::Left => move_focused(model, false, false),
-        KeyCode::Down | KeyCode::Right => move_focused(model, true, false),
-        KeyCode::PageUp => move_focused(model, false, true),
-        KeyCode::PageDown => move_focused(model, true, true),
-        KeyCode::Home => move_to_bound(model, false),
-        KeyCode::End => move_to_bound(model, true),
+        KeyCode::Down | KeyCode::Right if no_modifiers(key.modifiers) => {
+            move_focused(model, true, false)
+        }
+        KeyCode::PageUp if no_modifiers(key.modifiers) => move_focused(model, false, true),
+        KeyCode::PageDown if no_modifiers(key.modifiers) => move_focused(model, true, true),
+        KeyCode::Home if no_modifiers(key.modifiers) => move_to_bound(model, false),
+        KeyCode::End if no_modifiers(key.modifiers) => move_to_bound(model, true),
         _ => ControllerEffect::None,
     }
 }
 
 fn handle_command_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
     match key.code {
-        KeyCode::Esc => {
+        KeyCode::Esc if no_modifiers(key.modifiers) => {
             model.command.clear();
             model.set_focus(Focus::Workspace);
             ControllerEffect::Redraw
         }
-        KeyCode::Enter => submit_command(model),
-        KeyCode::Left => edit(model, |model| model.command.move_left()),
-        KeyCode::Right => edit(model, |model| model.command.move_right()),
-        KeyCode::Home => edit(model, |model| model.command.move_home()),
-        KeyCode::End => edit(model, |model| model.command.move_end()),
-        KeyCode::Backspace => edit(model, |model| model.command.backspace()),
-        KeyCode::Delete => edit(model, |model| model.command.delete()),
-        KeyCode::Up => edit(model, |model| model.command.history_previous()),
-        KeyCode::Down => edit(model, |model| model.command.history_next()),
-        KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => cycle_focus(model, true),
-        KeyCode::BackTab | KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            cycle_focus(model, false)
+        KeyCode::Enter if no_modifiers(key.modifiers) => submit_command(model),
+        KeyCode::Left if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_left())
         }
+        KeyCode::Right if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_right())
+        }
+        KeyCode::Home if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_home())
+        }
+        KeyCode::End if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_end())
+        }
+        KeyCode::Backspace if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.backspace())
+        }
+        KeyCode::Delete if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.delete())
+        }
+        KeyCode::Up if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.history_previous())
+        }
+        KeyCode::Down if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.history_next())
+        }
+        KeyCode::Tab if no_modifiers(key.modifiers) => cycle_focus(model, true),
+        KeyCode::BackTab if backtab_modifiers(key.modifiers) => cycle_focus(model, false),
         KeyCode::Char(character) if text_modifiers(key.modifiers) => {
             model.command.insert(character);
             ControllerEffect::Redraw
@@ -365,20 +381,23 @@ fn requests_shutdown(disposition: ShutdownDisposition) -> bool {
 }
 
 fn is_ctrl_c(key: KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('c' | 'C'))
-        && key.modifiers.contains(KeyModifiers::CONTROL)
+    key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL
 }
 
 fn is_plain_char(key: KeyEvent, expected: char) -> bool {
-    key.code == KeyCode::Char(expected) && plain_modifiers(key.modifiers)
+    key.code == KeyCode::Char(expected) && no_modifiers(key.modifiers)
 }
 
-fn plain_modifiers(modifiers: KeyModifiers) -> bool {
-    modifiers.is_empty() || modifiers == KeyModifiers::SHIFT
+fn no_modifiers(modifiers: KeyModifiers) -> bool {
+    modifiers == KeyModifiers::NONE
+}
+
+fn backtab_modifiers(modifiers: KeyModifiers) -> bool {
+    matches!(modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
 }
 
 fn text_modifiers(modifiers: KeyModifiers) -> bool {
-    !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+    matches!(modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
 }
 
 #[cfg(test)]
@@ -530,6 +549,81 @@ mod tests {
             handle_event(&mut model(), TuiEvent::Interrupt),
             ControllerEffect::RequestShutdown(ShutdownReason::Interrupted)
         );
+    }
+
+    #[test]
+    fn unsupported_modified_chords_are_ignored_without_changing_model_state() {
+        let mut navigation = model();
+        navigation.focus = Focus::Navigation;
+        navigation.active_view = View::Setup;
+
+        let cases = [
+            (
+                model(),
+                key_code(
+                    KeyCode::Char('c'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                ),
+            ),
+            (
+                model(),
+                key_code(
+                    KeyCode::Char('c'),
+                    KeyModifiers::CONTROL | KeyModifiers::ALT,
+                ),
+            ),
+            (
+                model(),
+                key_code(KeyCode::Tab, KeyModifiers::CONTROL),
+            ),
+            (
+                command_model("/status"),
+                key_code(KeyCode::Enter, KeyModifiers::ALT),
+            ),
+            (
+                command_model("abc"),
+                key_code(KeyCode::Left, KeyModifiers::ALT),
+            ),
+            (
+                command_model("abc"),
+                key_code(KeyCode::Delete, KeyModifiers::SUPER),
+            ),
+            (
+                command_model("abc"),
+                key_code(KeyCode::Char('x'), KeyModifiers::META),
+            ),
+            (navigation, key_code(KeyCode::Down, KeyModifiers::ALT)),
+            (model(), key_code(KeyCode::Char('q'), KeyModifiers::SHIFT)),
+        ];
+
+        for (mut model, event) in cases {
+            let before = model.clone();
+            assert_eq!(handle_event(&mut model, event), ControllerEffect::None);
+            assert_eq!(model, before);
+        }
+    }
+
+    #[test]
+    fn exact_shift_bindings_enter_text_and_move_focus_backward() {
+        let mut command = command_model("a");
+        assert_eq!(
+            handle_event(
+                &mut command,
+                key_code(KeyCode::Char('B'), KeyModifiers::SHIFT),
+            ),
+            ControllerEffect::Redraw
+        );
+        assert_eq!(command.command.text(), "aB");
+
+        let mut workspace = model();
+        assert_eq!(
+            handle_event(
+                &mut workspace,
+                key_code(KeyCode::BackTab, KeyModifiers::SHIFT),
+            ),
+            ControllerEffect::Redraw
+        );
+        assert_eq!(workspace.focus, Focus::Navigation);
     }
 
     #[test]
