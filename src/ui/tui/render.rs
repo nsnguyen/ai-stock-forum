@@ -366,18 +366,36 @@ mod tests {
     }
 
     #[test]
-    fn overview_renders_runtime_and_command_activity_independently() {
-        let mut ready_running = model(View::Overview);
-        ready_running.set_command_in_flight(true);
-        let text = render_text(ready_running, 140, 40, false);
-        assert!(text.contains("Runtime       Ready"));
-        assert!(text.contains("Command       Running"));
+    fn overview_renders_every_runtime_and_command_state_independently() {
+        let cases = [
+            ("ready_idle", RuntimeStatus::Ready, false, "Ready", "Idle"),
+            ("ready_running", RuntimeStatus::Ready, true, "Ready", "Running"),
+            ("stopping_idle", RuntimeStatus::Stopping, false, "Stopping", "Idle"),
+            (
+                "stopping_running",
+                RuntimeStatus::Stopping,
+                true,
+                "Stopping",
+                "Running",
+            ),
+        ];
 
-        let mut stopping_idle = model(View::Overview);
-        stopping_idle.set_runtime_status(RuntimeStatus::Stopping);
-        let text = render_text(stopping_idle, 140, 40, false);
-        assert!(text.contains("Runtime       Stopping"));
-        assert!(text.contains("Command       Idle"));
+        for (case, runtime_status, command_in_flight, expected_runtime, expected_command) in cases {
+            let mut model = model(View::Overview);
+            model.set_runtime_status(runtime_status);
+            model.set_command_in_flight(command_in_flight);
+
+            let text = render_text(model, 140, 40, false);
+
+            assert!(
+                text.contains(&format!("Runtime       {expected_runtime}")),
+                "case={case}"
+            );
+            assert!(
+                text.contains(&format!("Command       {expected_command}")),
+                "case={case}"
+            );
+        }
     }
 
     #[test]
