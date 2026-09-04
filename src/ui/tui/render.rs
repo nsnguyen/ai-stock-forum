@@ -1,0 +1,374 @@
+use ratatui::{
+    layout::{Alignment, Constraint, Layout, Rect},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, Paragraph},
+    Frame,
+};
+
+use super::{
+    layout::{calculate, MIN_HEIGHT, MIN_WIDTH},
+    model::{Focus, LayoutMode, Severity, TuiModel, View},
+    theme::Theme,
+    views,
+};
+
+pub fn render(frame: &mut Frame<'_>, model: &TuiModel, theme: &Theme) {
+    let cockpit = calculate(frame.area(), model.inspector_open);
+    frame.render_widget(Clear, cockpit.viewport);
+    if cockpit.mode == LayoutMode::TooSmall {
+        render_too_small(frame, cockpit.viewport);
+        return;
+    }
+
+    render_header(frame, cockpit.header, model, cockpit.mode, theme);
+    if let Some(navigation) = cockpit.navigation {
+        render_navigation(frame, navigation, model, theme);
+    }
+    views::render(frame, cockpit.workspace, model, theme);
+    render_message(frame, cockpit.message, model, theme);
+    render_command(frame, cockpit.command, model, theme);
+    if let Some(inspector) = cockpit.inspector {
+        frame.render_widget(Clear, inspector);
+        views::render_inspector(frame, inspector, model, theme);
+    }
+}
+
+fn render_header(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &TuiModel,
+    mode: LayoutMode,
+    theme: &Theme,
+) {
+    let identity = Line::from(vec![
+        Span::styled("AI STOCK FORUM", theme.accent),
+        Span::raw("  /  "),
+        Span::styled(view_name(model.active_view), theme.focus),
+        Span::raw(format!("  /  {}", mode_name(mode))),
+    ]);
+    let second = if mode == LayoutMode::Narrow {
+        numbered_tabs(model, theme)
+    } else if model.previous_session_interrupted {
+        Line::styled("WARNING  Previous session interrupted", theme.warning)
+    } else {
+        Line::styled("Local cockpit  |  native views  |  typed audit", theme.muted)
+    };
+    let third = if mode == LayoutMode::Narrow && model.previous_session_interrupted {
+        Line::styled("WARNING  Previous session interrupted", theme.warning)
+    } else {
+        Line::styled("-".repeat(usize::from(area.width)), theme.muted)
+    };
+    frame.render_widget(Paragraph::new(vec![identity, second, third]), area);
+}
+
+fn numbered_tabs(model: &TuiModel, theme: &Theme) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (index, view) in [View::Overview, View::Setup, View::Audit, View::Help]
+        .into_iter()
+        .enumerate()
+    {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
+        let style = if view == model.active_view {
+            theme.focus
+        } else {
+            theme.muted
+        };
+        spans.push(Span::styled(format!("{} {}", index + 1, view_name(view)), style));
+    }
+    Line::from(spans)
+}
+
+fn render_navigation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    let border_style = if model.focus == Focus::Navigation {
+        theme.focus
+    } else {
+        theme.muted
+    };
+    let mut lines = vec![Line::styled("VIEWS", theme.accent), Line::default()];
+    for (index, view) in [View::Overview, View::Setup, View::Audit, View::Help]
+        .into_iter()
+        .enumerate()
+    {
+        let selected = view == model.active_view;
+        lines.push(Line::styled(
+            format!("{} {} {}", if selected { ">" } else { " " }, index + 1, view_name(view)),
+            if selected { theme.focus } else { theme.muted },
+        ));
+    }
+    lines.extend([
+        Line::default(),
+        Line::styled("/ command", theme.muted),
+        Line::styled("? help", theme.muted),
+        Line::styled("q quit", theme.muted),
+    ]);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(" Navigation ")
+                .borders(Borders::ALL)
+                .border_style(border_style),
+        ),
+        area,
+    );
+}
+
+fn render_message(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    let line = match &model.message {
+        Some(message) => {
+            let (label, style) = match message.severity {
+                Severity::Info => ("INFO", theme.accent),
+                Severity::Warning => ("WARNING", theme.warning),
+                Severity::Error => ("ERROR", theme.error),
+            };
+            Line::from(vec![
+                Span::styled(format!(" {label:<7}"), style),
+                Span::raw(views::safe_text(&message.text)),
+            ])
+        }
+        None => Line::from(vec![
+            Span::styled(" INFO   ", theme.accent),
+            Span::styled("Ready", theme.muted),
+        ]),
+    };
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn render_command(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    let focused = model.focus == Focus::Command;
+    let block = Block::default()
+        .title(if model.command_in_flight {
+            " Command - working "
+        } else {
+            " Command "
+        })
+        .borders(Borders::ALL)
+        .border_style(if focused { theme.focus } else { theme.muted });
+    let line = if focused {
+        let cursor = model.command.cursor_byte().min(model.command.text().len());
+        let prefix = model.command.text().get(..cursor).unwrap_or(model.command.text());
+        let suffix = model.command.text().get(cursor..).unwrap_or_default();
+        Line::from(vec![
+            Span::styled("> ", theme.accent),
+            Span::raw(prefix.to_owned()),
+            Span::styled("|", theme.focus),
+            Span::raw(suffix.to_owned()),
+        ])
+    } else if model.command.text().is_empty() {
+        Line::styled("Type /help for commands", theme.muted)
+    } else {
+        Line::from(model.command.text().to_owned())
+    };
+    frame.render_widget(Paragraph::new(line).block(block), area);
+
+    if focused && area.width > 2 && area.height > 2 {
+        let prefix_width = Line::from(model.command.prefix()).width();
+        let desired = area
+            .x
+            .saturating_add(1)
+            .saturating_add(2)
+            .saturating_add(u16::try_from(prefix_width).unwrap_or(u16::MAX));
+        let cursor_x = desired.min(area.right().saturating_sub(2));
+        frame.set_cursor_position((cursor_x, area.y.saturating_add(1)));
+    }
+}
+
+fn render_too_small(frame: &mut Frame<'_>, area: Rect) {
+    let content = vec![
+        Line::raw("Terminal too small"),
+        Line::raw(format!("Minimum: {MIN_WIDTH} x {MIN_HEIGHT}")),
+        Line::raw(format!("Current: {} x {}", area.width, area.height)),
+        Line::raw("q / Ctrl+C to exit"),
+    ];
+    let centered = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(4.min(area.height)),
+        Constraint::Fill(1),
+    ])
+    .split(area)[1];
+    frame.render_widget(Paragraph::new(content).alignment(Alignment::Center), centered);
+}
+
+fn view_name(view: View) -> &'static str {
+    match view {
+        View::Overview => "Overview",
+        View::Setup => "Setup",
+        View::Audit => "Audit",
+        View::Help => "Help",
+    }
+}
+
+fn mode_name(mode: LayoutMode) -> &'static str {
+    match mode {
+        LayoutMode::Wide => "Wide",
+        LayoutMode::Medium => "Medium",
+        LayoutMode::Narrow => "Narrow",
+        LayoutMode::TooSmall => "Too small",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{
+        backend::TestBackend,
+        style::Modifier,
+        Terminal,
+    };
+    use uuid::Uuid;
+
+    use super::render;
+    use crate::{
+        app::PresentationSnapshot,
+        audit::AuditEntry,
+        domain::{Actor, CorrelationId, InstallationId, SessionId},
+        setup::SetupStatus,
+        ui::tui::{
+            model::{Focus, Severity, TuiModel, View},
+            theme::Theme,
+        },
+    };
+
+    fn model(view: View) -> TuiModel {
+        let mut model = TuiModel::new(
+            PresentationSnapshot {
+                installation_id: InstallationId::from_uuid(Uuid::from_u128(1)),
+                session_id: SessionId::from_uuid(Uuid::from_u128(2)),
+                setup_status: SetupStatus::NotStarted,
+                recent_audit: vec![AuditEntry {
+                    sequence: 7,
+                    occurred_at_ms: 1_725_000_000_000,
+                    actor: Actor::Human,
+                    kind: "status_viewed".to_owned(),
+                    correlation_id: CorrelationId::from_uuid(Uuid::from_u128(3)),
+                    summary: "status viewed".to_owned(),
+                }],
+            },
+            false,
+        );
+        model.select_view(view);
+        model
+    }
+
+    fn rendered(model: TuiModel, width: u16, height: u16, no_color: bool) -> Terminal<TestBackend> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::from_no_color(no_color);
+        terminal
+            .draw(|frame| render(frame, &model, &theme))
+            .expect("render model");
+        terminal
+    }
+
+    fn render_text(model: TuiModel, width: u16, height: u16, no_color: bool) -> String {
+        rendered(model, width, height, no_color)
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn wide_overview_renders_identity_health_navigation_and_command_bar() {
+        let text = render_text(model(View::Overview), 140, 40, false);
+        assert!(text.contains("AI STOCK FORUM"));
+        assert!(text.contains("Overview"));
+        assert!(text.contains("Installation"));
+        assert!(text.contains("Session"));
+        assert!(text.contains("Runtime"));
+        assert!(text.contains("Type /help"));
+    }
+
+    #[test]
+    fn each_command_view_is_native_and_no_transcript_heading_exists() {
+        for view in [View::Overview, View::Setup, View::Audit, View::Help] {
+            let text = render_text(model(view), 100, 30, false);
+            assert!(!text.contains("Transcript"));
+            assert!(!text.contains("Command output"));
+        }
+    }
+
+    #[test]
+    fn too_small_screen_contains_only_size_guidance() {
+        let text = render_text(model(View::Audit), 59, 17, false);
+        assert!(text.contains("Terminal too small"));
+        assert!(text.contains("60 x 18"));
+        assert!(text.contains("q / Ctrl+C"));
+        assert!(!text.contains("Installation"));
+        assert!(!text.contains("AI STOCK FORUM"));
+    }
+
+    #[test]
+    fn no_color_theme_uses_modifiers_without_terminal_colors() {
+        let theme = Theme::from_no_color(true);
+        for style in theme.styles() {
+            assert_eq!(style.fg, None);
+            assert_eq!(style.bg, None);
+        }
+        assert!(theme.focus.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn native_views_show_phase_safe_content_and_complete_help() {
+        let setup = render_text(model(View::Setup), 100, 30, false);
+        assert!(setup.contains("Read-only"));
+        assert!(setup.contains("Phase 0B"));
+
+        let audit = render_text(model(View::Audit), 140, 40, false);
+        for heading in ["Sequence", "Kind", "Actor", "Summary", "Correlation"] {
+            assert!(audit.contains(heading), "missing audit heading: {heading}");
+        }
+
+        let help = render_text(model(View::Help), 100, 30, false);
+        for command in [
+            "/help",
+            "/status",
+            "/setup status",
+            "/audit tail [limit: 1-100]",
+            "/quit",
+        ] {
+            assert!(help.contains(command), "missing command: {command}");
+        }
+        for key in ["1-4", "Tab", "Enter", "Esc", "Up/Down", "Home/End", "q"] {
+            assert!(help.contains(key), "missing key: {key}");
+        }
+    }
+
+    #[test]
+    fn narrow_mode_uses_numbered_tabs_and_message_severity_is_typed() {
+        let mut model = model(View::Audit);
+        model.set_message(Severity::Warning, "Setup needs attention");
+        let text = render_text(model, 70, 20, true);
+        assert!(text.contains("1 Overview"));
+        assert!(text.contains("2 Setup"));
+        assert!(text.contains("3 Audit"));
+        assert!(text.contains("4 Help"));
+        assert!(text.contains("WARNING"));
+        assert!(text.contains("Setup needs attention"));
+    }
+
+    #[test]
+    fn command_focus_renders_unicode_editor_with_visible_insertion_cursor() {
+        let mut model = model(View::Overview);
+        model.set_focus(Focus::Command);
+        model.command.insert('界');
+        model.command.insert('x');
+        model.command.move_left();
+        let text = render_text(model, 100, 30, false);
+        assert!(text.contains("界 |x"));
+    }
+
+    #[test]
+    fn interrupted_session_warning_and_selected_audit_details_are_visible() {
+        let mut model = model(View::Audit);
+        model.previous_session_interrupted = true;
+        model.inspector_open = true;
+        let text = render_text(model, 100, 30, false);
+        assert!(text.contains("Previous session interrupted"));
+        assert!(text.contains("Audit detail"));
+        assert!(text.contains("1725000000000"));
+        assert!(text.contains("00000000-0000-0000-0000-000000000003"));
+    }
+}
