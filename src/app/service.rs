@@ -189,10 +189,22 @@ pub struct ApplicationService {
     executor: CommandExecutor,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseReadiness {
+    Ready,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessGuardOwnership {
+    Held,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresentationSnapshot {
     pub installation_id: InstallationId,
     pub session_id: SessionId,
+    pub database_readiness: DatabaseReadiness,
+    pub process_guard_ownership: ProcessGuardOwnership,
     pub setup_status: SetupStatus,
     pub recent_audit: Vec<AuditEntry>,
 }
@@ -349,6 +361,8 @@ impl ApplicationService {
         Ok(PresentationSnapshot {
             installation_id: self.state.installation_id(),
             session_id: self.state.session_id(),
+            database_readiness: DatabaseReadiness::Ready,
+            process_guard_ownership: ProcessGuardOwnership::Held,
             setup_status: projection.setup_status.clone(),
             recent_audit: events.iter().map(AuditEntry::from_event).collect(),
         })

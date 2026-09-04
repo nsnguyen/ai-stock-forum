@@ -5,11 +5,25 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 
-use super::{panel, workspace_focused};
+use super::{panel, workspace_focused, wrapped_height};
 use crate::ui::tui::{model::TuiModel, theme::Theme};
 
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
-    let lines = vec![
+    frame.render_widget(
+        Paragraph::new(content(theme))
+            .block(panel("Help", workspace_focused(model), theme))
+            .wrap(Wrap { trim: false })
+            .scroll((model.workspace_scroll, 0)),
+        area,
+    );
+}
+
+pub(super) fn content_height(width: u16) -> u16 {
+    wrapped_height(content(&Theme::from_no_color(true)), width)
+}
+
+fn content(theme: &Theme) -> Vec<Line<'static>> {
+    vec![
         Line::styled("KEYS", theme.accent),
         Line::raw("1-4                 Open Overview / Setup / Audit / Help"),
         Line::raw("Tab / Shift+Tab     Move focus forward / backward"),
@@ -31,12 +45,5 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
         Line::raw("/setup status"),
         Line::raw("/audit tail [limit: 1-100]"),
         Line::raw("/quit"),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel("Help", workspace_focused(model), theme))
-            .wrap(Wrap { trim: false })
-            .scroll((model.workspace_scroll, 0)),
-        area,
-    );
+    ]
 }

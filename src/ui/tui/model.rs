@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::{
-    app::PresentationSnapshot,
+    app::{DatabaseReadiness, MAX_INPUT_BYTES, PresentationSnapshot, ProcessGuardOwnership},
     audit::AuditEntry,
     domain::{InstallationId, SessionId},
     setup::SetupStatus,
@@ -74,9 +74,19 @@ impl CommandEditor {
     }
 
     pub fn insert(&mut self, character: char) {
+        let mut encoded = [0; 4];
+        self.ingest(character.encode_utf8(&mut encoded));
+    }
+
+    pub fn ingest(&mut self, text: &str) {
         self.normalize_cursor();
-        self.buffer.insert(self.cursor_byte, character);
-        self.cursor_byte = self.cursor_byte.saturating_add(character.len_utf8());
+        let available = MAX_INPUT_BYTES.saturating_sub(self.buffer.len());
+        let accepted = bounded_safe_prefix(text, available);
+        if accepted.is_empty() {
+            return;
+        }
+        self.buffer.insert_str(self.cursor_byte, &accepted);
+        self.cursor_byte = self.cursor_byte.saturating_add(accepted.len());
         self.history_index = None;
     }
 
@@ -136,6 +146,7 @@ impl CommandEditor {
     }
 
     pub fn remember(&mut self, entry: String) {
+        let entry = bounded_safe_prefix(&entry, MAX_INPUT_BYTES);
         if entry.trim().is_empty() || self.history.back() == Some(&entry) {
             return;
         }
@@ -191,6 +202,20 @@ impl CommandEditor {
     }
 }
 
+fn bounded_safe_prefix(input: &str, byte_limit: usize) -> String {
+    let mut bounded = String::with_capacity(input.len().min(byte_limit));
+    for character in input.chars() {
+        if character.is_control() {
+            continue;
+        }
+        if bounded.len().saturating_add(character.len_utf8()) > byte_limit {
+            break;
+        }
+        bounded.push(character);
+    }
+    bounded
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiModel {
     pub active_view: View,
@@ -200,10 +225,14 @@ pub struct TuiModel {
     pub command: CommandEditor,
     pub installation_id: InstallationId,
     pub session_id: SessionId,
+    pub database_readiness: DatabaseReadiness,
+    pub process_guard_ownership: ProcessGuardOwnership,
     pub setup_status: SetupStatus,
     pub audit_entries: Vec<AuditEntry>,
     pub audit_selection: Option<usize>,
     pub workspace_scroll: u16,
+    pub workspace_body_width: u16,
+    pub workspace_body_height: u16,
     pub message: Option<UiMessage>,
     pub command_in_flight: bool,
     pub runtime_status: RuntimeStatus,
@@ -215,6 +244,8 @@ impl TuiModel {
         let PresentationSnapshot {
             installation_id,
             session_id,
+            database_readiness,
+            process_guard_ownership,
             setup_status,
             recent_audit,
         } = snapshot;
@@ -226,10 +257,14 @@ impl TuiModel {
             command: CommandEditor::default(),
             installation_id,
             session_id,
+            database_readiness,
+            process_guard_ownership,
             setup_status,
             audit_entries: Vec::new(),
             audit_selection: None,
             workspace_scroll: 0,
+            workspace_body_width: 0,
+            workspace_body_height: 0,
             message: None,
             command_in_flight: false,
             runtime_status: RuntimeStatus::Ready,
@@ -265,6 +300,11 @@ impl TuiModel {
 
     pub fn scroll_home(&mut self) {
         self.workspace_scroll = 0;
+    }
+
+    pub fn set_workspace_body_size(&mut self, width: u16, height: u16) {
+        self.workspace_body_width = width;
+        self.workspace_body_height = height;
     }
 
     pub fn replace_audit(&mut self, mut entries: Vec<AuditEntry>) {
@@ -338,7 +378,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        app::PresentationSnapshot,
+        app::{MAX_INPUT_BYTES, PresentationSnapshot},
         audit::AuditEntry,
         domain::{Actor, CorrelationId, InstallationId, SessionId},
         setup::SetupStatus,
@@ -348,6 +388,8 @@ mod tests {
         PresentationSnapshot {
             installation_id: InstallationId::from_uuid(Uuid::from_u128(1)),
             session_id: SessionId::from_uuid(Uuid::from_u128(2)),
+            database_readiness: crate::app::DatabaseReadiness::Ready,
+            process_guard_ownership: crate::app::ProcessGuardOwnership::Held,
             setup_status: SetupStatus::NotStarted,
             recent_audit: vec![audit_entry(1)],
         }
@@ -384,6 +426,38 @@ mod tests {
         editor.backspace();
         assert_eq!(editor.text(), "界");
         assert_eq!(editor.cursor_byte(), 0);
+    }
+
+    #[test]
+    fn editor_ingestion_stops_at_the_byte_limit_without_splitting_unicode() {
+        let mut editor = CommandEditor::default();
+        editor.ingest(&"a".repeat(MAX_INPUT_BYTES - 1));
+        assert_eq!(editor.text().len(), 4095);
+
+        editor.ingest("界");
+        assert_eq!(editor.text().len(), 4095);
+        editor.ingest("b");
+        assert_eq!(editor.text().len(), 4096);
+        editor.ingest("c");
+        editor.insert('d');
+
+        assert_eq!(editor.text().len(), MAX_INPUT_BYTES);
+        assert!(editor.text().is_char_boundary(editor.text().len()));
+    }
+
+    #[test]
+    fn public_history_ingestion_is_control_safe_utf8_bounded_and_duplicate_collapsing() {
+        let oversized = format!("{}\n\tignored", "界".repeat(MAX_INPUT_BYTES));
+        let mut editor = CommandEditor::default();
+
+        editor.remember(oversized.clone());
+        editor.remember(oversized);
+
+        let stored = editor.history_back().expect("bounded history entry");
+        assert!(stored.len() <= MAX_INPUT_BYTES);
+        assert!(stored.is_char_boundary(stored.len()));
+        assert!(!stored.chars().any(char::is_control));
+        assert_eq!(editor.history_len(), 1);
     }
 
     #[test]

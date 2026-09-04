@@ -7,10 +7,24 @@ use ratatui::{
 
 use crate::setup::SetupStatus;
 
-use super::{label_value, panel, workspace_focused};
+use super::{label_value, panel, workspace_focused, wrapped_height};
 use crate::ui::tui::{model::TuiModel, theme::Theme};
 
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    frame.render_widget(
+        Paragraph::new(content(model, theme))
+            .block(panel("Setup", workspace_focused(model), theme))
+            .wrap(Wrap { trim: false })
+            .scroll((model.workspace_scroll, 0)),
+        area,
+    );
+}
+
+pub(super) fn content_height(model: &TuiModel, width: u16) -> u16 {
+    wrapped_height(content(model, &Theme::from_no_color(true)), width)
+}
+
+fn content(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
     let (state, reference) = match &model.setup_status {
         SetupStatus::NotStarted => ("Not started", None),
         SetupStatus::DraftSaved { draft_id } => ("Draft saved", Some(draft_id.to_string())),
@@ -37,11 +51,5 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
         ),
     ]);
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel("Setup", workspace_focused(model), theme))
-            .wrap(Wrap { trim: false })
-            .scroll((model.workspace_scroll, 0)),
-        area,
-    );
+    lines
 }

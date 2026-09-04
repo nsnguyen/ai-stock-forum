@@ -9,6 +9,7 @@ use crate::ui::interrupt;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiEvent {
     Key(crossterm::event::KeyEvent),
+    Paste(String),
     Resize(u16, u16),
     Interrupt,
 }
@@ -59,6 +60,7 @@ fn translate(event: Event) -> Option<TuiEvent> {
             Some(TuiEvent::Key(key))
         }
         Event::Resize(width, height) => Some(TuiEvent::Resize(width, height)),
+        Event::Paste(text) => Some(TuiEvent::Paste(text)),
         _ => None,
     }
 }
@@ -116,6 +118,13 @@ mod tests {
     #[test]
     fn unsupported_terminal_events_are_ignored() {
         assert_eq!(translate(Event::FocusLost), None);
-        assert_eq!(translate(Event::Paste("ignored".to_owned())), None);
+    }
+
+    #[test]
+    fn paste_becomes_a_typed_tui_event() {
+        assert_eq!(
+            translate(Event::Paste("/status\n".to_owned())),
+            Some(TuiEvent::Paste("/status\n".to_owned()))
+        );
     }
 }

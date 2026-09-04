@@ -63,9 +63,9 @@ pub fn calculate(area: Rect, inspector_open: bool) -> CockpitLayout {
     let (navigation, workspace, inspector) = match mode {
         LayoutMode::Wide => {
             let columns = Layout::horizontal([
-                Constraint::Length(22),
-                Constraint::Fill(2),
-                Constraint::Fill(1),
+                Constraint::Length(20),
+                Constraint::Min(0),
+                Constraint::Length(32),
             ])
             .split(content);
             (Some(columns[0]), columns[1], Some(columns[2]))
@@ -97,6 +97,18 @@ pub fn calculate(area: Rect, inspector_open: bool) -> CockpitLayout {
         inspector,
         message,
         command,
+    }
+}
+
+pub fn workspace_body_size(area: Rect, inspector_open: bool) -> (u16, u16) {
+    let cockpit = calculate(area, inspector_open);
+    if cockpit.mode == LayoutMode::TooSmall {
+        (0, 0)
+    } else {
+        (
+            cockpit.workspace.width.saturating_sub(2),
+            cockpit.workspace.height.saturating_sub(2),
+        )
     }
 }
 
@@ -162,6 +174,19 @@ mod tests {
         assert!(medium.navigation.is_some());
         assert!(medium.inspector.is_some());
         assert!(medium.inspector.unwrap().width < medium.viewport.width);
+    }
+
+    #[test]
+    fn wide_uses_fixed_navigation_and_inspector_widths_at_all_sizes() {
+        let exact = calculate(Rect::new(0, 0, 120, 30), false);
+        assert_eq!(exact.navigation, Some(Rect::new(0, 3, 20, 23)));
+        assert_eq!(exact.workspace, Rect::new(20, 3, 68, 23));
+        assert_eq!(exact.inspector, Some(Rect::new(88, 3, 32, 23)));
+
+        let larger = calculate(Rect::new(5, 7, 160, 40), false);
+        assert_eq!(larger.navigation, Some(Rect::new(5, 10, 20, 33)));
+        assert_eq!(larger.workspace, Rect::new(25, 10, 108, 33));
+        assert_eq!(larger.inspector, Some(Rect::new(133, 10, 32, 33)));
     }
 
     #[test]

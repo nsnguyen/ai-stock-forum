@@ -180,6 +180,8 @@ fn snapshot() -> PresentationSnapshot {
     PresentationSnapshot {
         installation_id: InstallationId::from_uuid(Uuid::from_u128(1)),
         session_id: SessionId::from_uuid(Uuid::from_u128(2)),
+        database_readiness: ai_stock_forum::app::DatabaseReadiness::Ready,
+        process_guard_ownership: ai_stock_forum::app::ProcessGuardOwnership::Held,
         setup_status: SetupStatus::NotStarted,
         recent_audit: Vec::new(),
     }

@@ -230,6 +230,7 @@ fn mode_name(mode: LayoutMode) -> &'static str {
 mod tests {
     use std::io;
 
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{
         Terminal,
         backend::{Backend, ClearType, TestBackend, WindowSize},
@@ -246,6 +247,7 @@ mod tests {
         domain::{Actor, CorrelationId, InstallationId, SessionId},
         setup::SetupStatus,
         ui::tui::{
+            TuiEvent, handle_event,
             model::{Focus, RuntimeStatus, Severity, TuiModel, View},
             theme::Theme,
         },
@@ -322,6 +324,8 @@ mod tests {
             PresentationSnapshot {
                 installation_id: InstallationId::from_uuid(Uuid::from_u128(1)),
                 session_id: SessionId::from_uuid(Uuid::from_u128(2)),
+                database_readiness: crate::app::DatabaseReadiness::Ready,
+                process_guard_ownership: crate::app::ProcessGuardOwnership::Held,
                 setup_status: SetupStatus::NotStarted,
                 recent_audit: vec![AuditEntry {
                     sequence: 7,
@@ -380,7 +384,35 @@ mod tests {
         assert!(text.contains("Installation"));
         assert!(text.contains("Session"));
         assert!(text.contains("Runtime"));
+        assert!(text.contains("Database      Ready"));
+        assert!(text.contains("Process guard Held"));
         assert!(text.contains("Type /help"));
+    }
+
+    #[test]
+    fn end_reveals_final_help_content_and_further_scroll_is_stable_in_every_layout() {
+        for (width, height) in [(60, 18), (80, 24), (120, 30)] {
+            let mut model = model(View::Help);
+            handle_event(&mut model, TuiEvent::Resize(width, height));
+            handle_event(
+                &mut model,
+                TuiEvent::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
+            );
+            let end = model.workspace_scroll;
+            assert!(
+                render_text(model.clone(), width, height, true).contains("/quit"),
+                "size={width}x{height}, scroll={end}"
+            );
+
+            for code in [KeyCode::Down, KeyCode::PageDown, KeyCode::End] {
+                handle_event(
+                    &mut model,
+                    TuiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+                );
+            }
+            assert_eq!(model.workspace_scroll, end, "size={width}x{height}");
+            assert!(render_text(model, width, height, true).contains("/quit"));
+        }
     }
 
     #[test]

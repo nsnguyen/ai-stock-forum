@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use ai_stock_forum::{
     app::{
-        ApplicationCommand, ApplicationEvent, ApplicationService, AuditLimit, EVENT_SCHEMA_VERSION,
-        EventEnvelope, PendingEvent, ShutdownReason,
+        ApplicationCommand, ApplicationEvent, ApplicationService, AuditLimit, DatabaseReadiness,
+        EVENT_SCHEMA_VERSION, EventEnvelope, PendingEvent, ProcessGuardOwnership, ShutdownReason,
     },
     config::AppPaths,
     domain::{Actor, CorrelationId, EventId},
@@ -89,6 +89,8 @@ fn presentation_snapshot_is_typed_bounded_and_does_not_append_events() {
     assert_eq!(snapshot.installation_id, harness.service.installation_id());
     assert_eq!(snapshot.session_id, harness.service.session_id());
     assert_eq!(snapshot.setup_status, SetupStatus::NotStarted);
+    assert_eq!(snapshot.database_readiness, DatabaseReadiness::Ready);
+    assert_eq!(snapshot.process_guard_ownership, ProcessGuardOwnership::Held);
     assert_eq!(
         snapshot
             .recent_audit

@@ -24,6 +24,22 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
     }
 }
 
+pub(super) fn workspace_content_height(model: &TuiModel, width: u16) -> u16 {
+    match model.active_view {
+        View::Overview => overview::content_height(model, width),
+        View::Setup => setup::content_height(model, width),
+        View::Audit => 0,
+        View::Help => help::content_height(width),
+    }
+}
+
+pub(super) fn wrapped_height(lines: Vec<Line<'static>>, width: u16) -> u16 {
+    let count = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .line_count(width);
+    u16::try_from(count).unwrap_or(u16::MAX)
+}
+
 pub(super) fn render_inspector(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     let border_style = if model.focus == Focus::Inspector {
         theme.focus

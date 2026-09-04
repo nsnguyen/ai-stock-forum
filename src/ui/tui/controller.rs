@@ -3,8 +3,9 @@ use ratatui::layout::Rect;
 
 use super::{
     TuiEvent,
-    layout::layout_mode,
+    layout::{layout_mode, workspace_body_size},
     model::{Focus, LayoutMode, RuntimeStatus, Severity, TuiModel, View},
+    views,
 };
 use crate::{
     app::{ApplicationCommand, CommandOutcome, CommandView, ShutdownDisposition, ShutdownReason},
@@ -12,7 +13,6 @@ use crate::{
     ui::command::{ParsedLine, parse_line},
 };
 
-const PAGE_SIZE: u16 = 10;
 const COMMAND_IN_FLIGHT_MESSAGE: &str = "A command is already running.";
 const COMMAND_REJECTED_MESSAGE: &str = "Command rejected. Check the command and try again.";
 
@@ -25,18 +25,24 @@ pub enum ControllerEffect {
 }
 
 pub fn handle_event(model: &mut TuiModel, event: TuiEvent) -> ControllerEffect {
-    match event {
+    let effect = match event {
         TuiEvent::Interrupt => ControllerEffect::RequestShutdown(ShutdownReason::Interrupted),
         TuiEvent::Resize(width, height) => {
-            model.set_layout_mode(layout_mode(Rect::new(0, 0, width, height)));
+            let area = Rect::new(0, 0, width, height);
+            model.set_layout_mode(layout_mode(area));
+            let (body_width, body_height) = workspace_body_size(area, model.inspector_open);
+            model.set_workspace_body_size(body_width, body_height);
             normalize_focus(model);
             ControllerEffect::Redraw
         }
+        TuiEvent::Paste(text) => handle_paste(model, &text),
         TuiEvent::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
             handle_key(model, key)
         }
         TuiEvent::Key(_) => ControllerEffect::None,
-    }
+    };
+    clamp_workspace_scroll(model);
+    effect
 }
 
 pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> ControllerEffect {
@@ -90,6 +96,7 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
     };
 
     merge_committed_audit(model, committed_audit);
+    clamp_workspace_scroll(model);
 
     if requests_shutdown(shutdown) || requests_shutdown(view_shutdown) {
         model.set_runtime_status(RuntimeStatus::Stopping);
@@ -105,7 +112,7 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
     }
 
     if model.layout_mode == LayoutMode::TooSmall {
-        return if model.focus != Focus::Command && is_plain_char(key, 'q') {
+        return if is_plain_char(key, 'q') {
             ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
         } else {
             ControllerEffect::None
@@ -211,6 +218,19 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
     }
 }
 
+fn handle_paste(model: &mut TuiModel, text: &str) -> ControllerEffect {
+    if model.layout_mode == LayoutMode::TooSmall || model.focus != Focus::Command {
+        return ControllerEffect::None;
+    }
+    let before = model.command.text().len();
+    model.command.ingest(text);
+    if model.command.text().len() == before {
+        ControllerEffect::None
+    } else {
+        ControllerEffect::Redraw
+    }
+}
+
 fn select_view(model: &mut TuiModel, view: View) -> ControllerEffect {
     select_workspace_view(model, view);
     ControllerEffect::Redraw
@@ -291,9 +311,7 @@ fn visible_focus_order(model: &TuiModel) -> &'static [Focus] {
 }
 
 fn normalize_focus(model: &mut TuiModel) {
-    if model.layout_mode != LayoutMode::TooSmall
-        && !visible_focus_order(model).contains(&model.focus)
-    {
+    if !visible_focus_order(model).contains(&model.focus) {
         model.set_focus(Focus::Workspace);
     }
 }
@@ -306,7 +324,11 @@ fn move_focused(model: &mut TuiModel, forward: bool, page: bool) -> ControllerEf
     }
 
     if model.active_view == View::Audit {
-        let count = if page { usize::from(PAGE_SIZE) } else { 1 };
+        let count = if page {
+            usize::from(model.workspace_body_height.max(1))
+        } else {
+            1
+        };
         for _ in 0..count {
             if forward {
                 model.select_next_audit();
@@ -315,9 +337,17 @@ fn move_focused(model: &mut TuiModel, forward: bool, page: bool) -> ControllerEf
             }
         }
     } else if forward {
-        model.scroll_down(if page { PAGE_SIZE } else { 1 });
+        model.scroll_down(if page {
+            model.workspace_body_height.max(1)
+        } else {
+            1
+        });
     } else {
-        model.scroll_up(if page { PAGE_SIZE } else { 1 });
+        model.scroll_up(if page {
+            model.workspace_body_height.max(1)
+        } else {
+            1
+        });
     }
     ControllerEffect::Redraw
 }
@@ -332,11 +362,23 @@ fn move_to_bound(model: &mut TuiModel, end: bool) -> ControllerEffect {
             model.select_first_audit();
         }
     } else if end {
-        model.scroll_down(u16::MAX);
+        model.workspace_scroll = workspace_max_scroll(model);
     } else {
         model.scroll_home();
     }
     ControllerEffect::Redraw
+}
+
+fn workspace_max_scroll(model: &TuiModel) -> u16 {
+    if model.active_view == View::Audit {
+        return 0;
+    }
+    views::workspace_content_height(model, model.workspace_body_width)
+        .saturating_sub(model.workspace_body_height)
+}
+
+fn clamp_workspace_scroll(model: &mut TuiModel) {
+    model.workspace_scroll = model.workspace_scroll.min(workspace_max_scroll(model));
 }
 
 fn adjacent_view(view: View, forward: bool) -> View {
@@ -406,8 +448,8 @@ mod tests {
         app::{
             ApplicationCommand, ApplicationEvent, AuditLimit, AuditTailView, CommandOutcome,
             CommandView, EventEnvelope, HelpView, InputRejectedView, InputRejection,
-            InputRejectionCategory, PresentationSnapshot, SetupStatusView, ShutdownDisposition,
-            ShutdownReason, ShutdownView, StatusView,
+            InputRejectionCategory, MAX_INPUT_BYTES, PresentationSnapshot, SetupStatusView,
+            ShutdownDisposition, ShutdownReason, ShutdownView, StatusView,
         },
         audit::AuditEntry,
         domain::{
@@ -426,6 +468,8 @@ mod tests {
             PresentationSnapshot {
                 installation_id: installation_id(1),
                 session_id: session_id(2),
+                database_readiness: crate::app::DatabaseReadiness::Ready,
+                process_guard_ownership: crate::app::ProcessGuardOwnership::Held,
                 setup_status: SetupStatus::NotStarted,
                 recent_audit: Vec::new(),
             },
@@ -719,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn too_small_ignores_keys_except_quit_outside_command_and_ctrl_c() {
+    fn too_small_ignores_keys_except_quit_and_ctrl_c() {
         let mut tiny = model();
         tiny.layout_mode = LayoutMode::TooSmall;
         let before = tiny.clone();
@@ -743,7 +787,7 @@ mod tests {
         command_tiny.layout_mode = LayoutMode::TooSmall;
         assert_eq!(
             handle_event(&mut command_tiny, key('q')),
-            ControllerEffect::None
+            ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
         );
         assert_eq!(command_tiny.command.text(), "");
     }
@@ -935,6 +979,67 @@ mod tests {
                 .iter()
                 .all(|entry| entry.kind == "status_viewed")
         );
+    }
+
+    #[test]
+    fn too_small_q_quits_even_after_command_focus_was_active_before_resize() {
+        let mut model = model();
+        assert_eq!(handle_event(&mut model, key('/')), ControllerEffect::Redraw);
+        assert_eq!(model.focus, Focus::Command);
+        assert_eq!(
+            handle_event(&mut model, TuiEvent::Resize(59, 17)),
+            ControllerEffect::Redraw
+        );
+
+        assert_eq!(
+            handle_event(&mut model, key('q')),
+            ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
+        );
+    }
+
+    #[test]
+    fn paste_is_ignored_outside_command_focus_and_bounded_and_sanitized_inside() {
+        let mut model = model();
+        assert_eq!(
+            handle_event(&mut model, TuiEvent::Paste("/status".to_owned())),
+            ControllerEffect::None
+        );
+        assert!(model.command.text().is_empty());
+
+        model.set_focus(Focus::Command);
+        let pasted = format!("{}\n\t界", "a".repeat(MAX_INPUT_BYTES - 1));
+        assert_eq!(
+            handle_event(&mut model, TuiEvent::Paste(pasted)),
+            ControllerEffect::Redraw
+        );
+        assert_eq!(model.command.text().len(), MAX_INPUT_BYTES - 1);
+        assert!(!model.command.text().chars().any(char::is_control));
+        assert!(model.command.text().is_char_boundary(model.command.text().len()));
+    }
+
+    #[test]
+    fn audit_end_and_page_navigation_remain_selection_based() {
+        let mut model = model();
+        model.select_view(View::Audit);
+        model.replace_audit((1..=30).map(audit_entry).collect());
+        handle_event(&mut model, TuiEvent::Resize(60, 18));
+
+        assert_eq!(
+            handle_event(
+                &mut model,
+                key_code(KeyCode::End, KeyModifiers::NONE)
+            ),
+            ControllerEffect::Redraw
+        );
+        assert_eq!(model.audit_selection, Some(29));
+        assert_eq!(model.workspace_scroll, 0);
+
+        handle_event(
+            &mut model,
+            key_code(KeyCode::PageDown, KeyModifiers::NONE),
+        );
+        assert_eq!(model.audit_selection, Some(29));
+        assert_eq!(model.workspace_scroll, 0);
     }
 
     fn audit_entry_from_event(sequence: u64, event: ApplicationEvent) -> AuditEntry {

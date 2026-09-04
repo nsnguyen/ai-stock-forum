@@ -4,7 +4,7 @@ use super::{
     TuiError,
     controller::{ControllerEffect, apply_outcome, handle_event},
     event::{CrosstermEventSource, EventSource, TuiEvent},
-    layout::layout_mode,
+    layout::{layout_mode, workspace_body_size},
     model::{RuntimeStatus, TuiModel},
     terminal::{CrosstermScreen, Screen},
     theme::Theme,
@@ -118,7 +118,15 @@ impl TuiRunner {
 
     fn update_layout(&mut self, screen: &dyn Screen) -> Result<bool, TuiError> {
         let area = screen.size()?;
-        if layout_mode(area) == self.model.layout_mode {
+        let mode = layout_mode(area);
+        let body_size = workspace_body_size(area, self.model.inspector_open);
+        if mode == self.model.layout_mode
+            && body_size
+                == (
+                    self.model.workspace_body_width,
+                    self.model.workspace_body_height,
+                )
+        {
             return Ok(false);
         }
         let effect = handle_event(&mut self.model, TuiEvent::Resize(area.width, area.height));
@@ -170,14 +178,22 @@ impl TuiRunner {
         let Some(_reason) = self.queued_shutdown.take() else {
             return Ok(());
         };
-        self.model.set_command_in_flight(true);
         self.submit(ApplicationCommand::RequestShutdown)
     }
 
     fn submit(&mut self, command: ApplicationCommand) -> Result<(), TuiError> {
         debug_assert!(self.pending.is_none());
-        self.pending = Some(self.client.try_submit(command)?);
-        Ok(())
+        self.model.set_command_in_flight(true);
+        match self.client.try_submit(command) {
+            Ok(pending) => {
+                self.pending = Some(pending);
+                Ok(())
+            }
+            Err(error) => {
+                self.model.set_command_in_flight(false);
+                Err(error.into())
+            }
+        }
     }
 
     fn begin_stopping(&mut self) {
@@ -199,32 +215,37 @@ enum LoopControl {
 }
 
 fn run_loop(
+    runner: &mut TuiRunner,
+    screen: &mut dyn Screen,
+    events: &mut dyn EventSource,
+    theme: &Theme,
+) -> Result<ShutdownReason, TuiError> {
+    let body = catch_sensitive_unwind(AssertUnwindSafe(|| {
+        runner.event_loop(screen, events, theme)
+    }));
+    match body {
+        Ok(result) => result,
+        Err(_) => Err(TuiError::Panicked),
+    }
+}
+
+fn run_with_screen(
     mut runner: TuiRunner,
     screen: &mut dyn Screen,
     events: &mut dyn EventSource,
     theme: &Theme,
 ) -> Result<(), TuiError> {
-    let body = catch_sensitive_unwind(AssertUnwindSafe(|| {
-        runner.event_loop(screen, events, theme)
-    }));
-    match body {
-        Ok(Ok(reason)) => runner.finish(reason).map_err(TuiError::Runtime),
-        Ok(Err(error)) => finish_with_primary(runner, error),
-        Err(_) => finish_with_primary(runner, TuiError::Panicked),
-    }
-}
-
-fn run_with_screen(
-    runner: TuiRunner,
-    screen: &mut dyn Screen,
-    events: &mut dyn EventSource,
-    theme: &Theme,
-) -> Result<(), TuiError> {
-    let primary = run_loop(runner, screen, events, theme);
+    let primary = run_loop(&mut runner, screen, events, theme);
+    let finish_reason = match primary {
+        Ok(reason) => reason,
+        Err(_) => ShutdownReason::ApplicationError,
+    };
+    runner.begin_stopping();
     let restoration = screen.restore();
+    let finish = runner.finish(finish_reason).map_err(TuiError::Runtime);
     match primary {
         Err(error) => Err(error),
-        Ok(()) => restoration,
+        Ok(_) => restoration.and(finish),
     }
 }
 
@@ -267,11 +288,14 @@ mod tests {
         },
     };
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     struct RecordedFrame {
         layout_mode: LayoutMode,
         active_view: View,
         runtime_status: RuntimeStatus,
+        command_in_flight: bool,
+        history_len: usize,
+        message: Option<String>,
     }
 
     #[derive(Clone)]
@@ -282,6 +306,8 @@ mod tests {
         panic_on_draw: Arc<AtomicBool>,
         fail_restore: Arc<AtomicBool>,
         restore_calls: Arc<AtomicUsize>,
+        order: Option<Arc<Mutex<Vec<&'static str>>>>,
+        restored: Option<Sender<()>>,
     }
 
     impl RecordingScreen {
@@ -293,6 +319,8 @@ mod tests {
                 panic_on_draw: Arc::new(AtomicBool::new(false)),
                 fail_restore: Arc::new(AtomicBool::new(false)),
                 restore_calls: Arc::new(AtomicUsize::new(0)),
+                order: None,
+                restored: None,
             }
         }
 
@@ -311,6 +339,17 @@ mod tests {
         fn failing_restore(area: Rect) -> Self {
             let screen = Self::new(area);
             screen.fail_restore.store(true, Ordering::SeqCst);
+            screen
+        }
+
+        fn observing_restore(
+            area: Rect,
+            order: Arc<Mutex<Vec<&'static str>>>,
+            restored: Sender<()>,
+        ) -> Self {
+            let mut screen = Self::new(area);
+            screen.order = Some(order);
+            screen.restored = Some(restored);
             screen
         }
 
@@ -339,11 +378,20 @@ mod tests {
                 layout_mode: model.layout_mode,
                 active_view: model.active_view,
                 runtime_status: model.runtime_status,
+                command_in_flight: model.command_in_flight,
+                history_len: model.command.history_len(),
+                message: model.message.as_ref().map(|message| message.text.clone()),
             });
             Ok(())
         }
 
         fn restore(&mut self) -> Result<(), TuiError> {
+            if let Some(order) = &self.order {
+                order.lock().unwrap().push("restore");
+            }
+            if let Some(restored) = &self.restored {
+                let _ = restored.try_send(());
+            }
             self.restore_calls.fetch_add(1, Ordering::SeqCst);
             if self.fail_restore.load(Ordering::SeqCst) {
                 Err(TuiError::TerminalOutput)
@@ -428,6 +476,35 @@ mod tests {
         fail_finish: bool,
     }
 
+    struct OrderingExecutor {
+        order: Arc<Mutex<Vec<&'static str>>>,
+        started: Sender<()>,
+        release: Receiver<()>,
+    }
+
+    impl CommandExecutor for OrderingExecutor {
+        fn execute_user(
+            &mut self,
+            command: ApplicationCommand,
+        ) -> Result<CommandOutcome, AppError> {
+            self.started.send(()).unwrap();
+            self.release.recv().unwrap();
+            self.order.lock().unwrap().push("worker_released");
+            Ok(outcome(command))
+        }
+
+        fn finish(&mut self, _reason: ShutdownReason) -> Result<(), AppError> {
+            self.order.lock().unwrap().push("finish");
+            Ok(())
+        }
+    }
+
+    impl Drop for OrderingExecutor {
+        fn drop(&mut self) {
+            self.order.lock().unwrap().push("process_guard_drop");
+        }
+    }
+
     impl CommandExecutor for RecordingExecutor {
         fn execute_user(
             &mut self,
@@ -485,6 +562,8 @@ mod tests {
         PresentationSnapshot {
             installation_id: InstallationId::from_uuid(Uuid::from_u128(1)),
             session_id: SessionId::from_uuid(Uuid::from_u128(2)),
+            database_readiness: crate::app::DatabaseReadiness::Ready,
+            process_guard_ownership: crate::app::ProcessGuardOwnership::Held,
             setup_status: SetupStatus::NotStarted,
             recent_audit: Vec::new(),
         }
@@ -639,6 +718,28 @@ mod tests {
     }
 
     #[test]
+    fn delayed_immediate_shutdown_is_in_flight_and_rejects_history_mutation() {
+        let (runtime, observer, release) = runtime(true, false, false);
+        let mut steps = vec![key('q')];
+        steps.extend(command_steps("/help"));
+        steps.push(key('x'));
+        steps.push(EventStep::Release(release.unwrap()));
+        let mut screen = RecordingScreen::new(Rect::new(0, 0, 140, 40));
+        let mut events = FakeEvents::from(steps);
+
+        let result = execute(runtime, &mut screen, &mut events);
+
+        assert!(result.is_ok());
+        assert_eq!(observer.commands(), [ApplicationCommand::RequestShutdown]);
+        assert!(screen.frames().iter().any(|frame| {
+            frame.runtime_status == RuntimeStatus::Stopping
+                && frame.command_in_flight
+                && frame.history_len == 0
+                && frame.message.as_deref() == Some("A command is already running.")
+        }));
+    }
+
+    #[test]
     fn interrupt_finishes_immediately_without_a_shutdown_command() {
         let (runtime, observer, _) = runtime(false, false, false);
         let mut screen = RecordingScreen::new(Rect::new(0, 0, 140, 40));
@@ -673,6 +774,65 @@ mod tests {
 
         assert!(matches!(result, Err(TuiError::TerminalOutput)));
         assert_eq!(observer.finishes(), [ShutdownReason::ApplicationError]);
+    }
+
+    #[test]
+    fn body_error_wins_when_restoration_and_runtime_finish_both_fail() {
+        let (runtime, observer, _) = runtime(false, false, true);
+        let mut screen = RecordingScreen::failing_restore(Rect::new(0, 0, 140, 40));
+        let mut events = FakeEvents::from([EventStep::InputError]);
+
+        let result = execute(runtime, &mut screen, &mut events);
+
+        assert!(matches!(result, Err(TuiError::TerminalInput)));
+        assert_eq!(observer.finishes(), [ShutdownReason::ApplicationError]);
+        assert_eq!(screen.restore_calls(), 1);
+    }
+
+    #[test]
+    fn restoration_precedes_worker_release_join_and_process_guard_drop() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (started_sender, started_receiver) = bounded(1);
+        let (release_sender, release_receiver) = bounded(1);
+        let runtime = ApplicationRuntime::spawn(
+            OrderingExecutor {
+                order: order.clone(),
+                started: started_sender,
+                release: release_receiver,
+            },
+            1,
+        )
+        .unwrap();
+        let (restored_sender, restored_receiver) = bounded(1);
+        let screen = RecordingScreen::observing_restore(
+            Rect::new(0, 0, 140, 40),
+            order.clone(),
+            restored_sender,
+        );
+        let mut steps = command_steps("/status");
+        steps.push(EventStep::Event(TuiEvent::Interrupt));
+        let events = FakeEvents::from(steps);
+
+        let handle = thread::spawn(move || {
+            let mut screen = screen;
+            let mut events = events;
+            execute(runtime, &mut screen, &mut events)
+        });
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker started");
+        let restored_before_release = restored_receiver
+            .recv_timeout(Duration::from_millis(100))
+            .is_ok();
+        release_sender.send(()).unwrap();
+        let result = handle.join().unwrap();
+
+        assert!(restored_before_release);
+        assert!(result.is_ok());
+        assert_eq!(
+            order.lock().unwrap().as_slice(),
+            ["restore", "worker_released", "finish", "process_guard_drop"]
+        );
     }
 
     #[test]
