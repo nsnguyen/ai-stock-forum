@@ -604,6 +604,37 @@ mod tests {
     }
 
     #[test]
+    fn hyper_modified_enter_is_ignored_without_submitting_or_editing() {
+        let mut model = command_model("/status");
+        let before = model.clone();
+
+        assert_eq!(
+            handle_event(
+                &mut model,
+                key_code(KeyCode::Enter, KeyModifiers::HYPER),
+            ),
+            ControllerEffect::None
+        );
+        assert_eq!(model, before);
+    }
+
+    #[test]
+    fn shifted_question_mark_opens_help_outside_command_focus() {
+        let mut model = model();
+        model.active_view = View::Setup;
+
+        assert_eq!(
+            handle_event(
+                &mut model,
+                key_code(KeyCode::Char('?'), KeyModifiers::SHIFT),
+            ),
+            ControllerEffect::Redraw
+        );
+        assert_eq!(model.active_view, View::Help);
+        assert_eq!(model.focus, Focus::Workspace);
+    }
+
+    #[test]
     fn exact_shift_bindings_enter_text_and_move_focus_backward() {
         let mut command = command_model("a");
         assert_eq!(
