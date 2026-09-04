@@ -12,8 +12,8 @@ use crate::{
     audit::AuditEntry,
     config::{AppPaths, StartupError},
     domain::{
-        Actor, CausationId, Clock, CommandId, CorrelationId, EventId, IdGenerator,
-        InstallationId, SessionId, Sha256Digest, canonical_json_bytes, sha256,
+        Actor, CausationId, Clock, CommandId, CorrelationId, EventId, IdGenerator, InstallationId,
+        SessionId, Sha256Digest, canonical_json_bytes, sha256,
     },
     persistence::{
         CommandReceiptRecord, CommandReceiptRepository, Database, EventRepository,

@@ -79,8 +79,8 @@ fn run_full_screen(
     mut service: ApplicationService,
     previous_session_interrupted: bool,
 ) -> Result<(), MainError> {
-    let default_audit_limit = AuditLimit::new(DEFAULT_AUDIT_LIMIT)
-        .expect("the default audit limit must remain valid");
+    let default_audit_limit =
+        AuditLimit::new(DEFAULT_AUDIT_LIMIT).expect("the default audit limit must remain valid");
     let snapshot = match service.presentation_snapshot(default_audit_limit) {
         Ok(snapshot) => snapshot,
         Err(error) => {

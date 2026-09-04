@@ -1,9 +1,10 @@
 # ai-stock-forum
 
-AI Stock Forum is currently a local Rust foundation for a single-process,
-line-oriented terminal command host. Phase 0 establishes the typed event core,
-SQLite persistence, startup/recovery lifecycle, audit inspection, and the
-fallback command adapter. It does not run agents or perform market or trading
+AI Stock Forum is currently a local Rust foundation for a single-process
+terminal application. Phase 0 establishes the typed event core, SQLite
+persistence, startup/recovery lifecycle, audit inspection, and the fallback
+command adapter. Phase 0B adds an interactive full-screen cockpit while
+preserving that fallback. It does not run agents or perform market or trading
 work.
 
 ## Sources of truth
@@ -32,18 +33,55 @@ historical context and are explicitly marked as superseded.
 - Defensive parsing and rendering for bounded input, malformed commands, and
   audit output.
 
+## Phase 0B Adaptive Cockpit
+
+Phase 0B is a read-only terminal presentation layer over the existing Phase 0
+application boundaries. It adds no agent, market, trading, credential, or
+network behavior. When both stdin and stdout are terminals, the default launch
+opens the Adaptive Cockpit in the alternate screen; otherwise the existing
+line-oriented command host is selected automatically.
+
+The cockpit has four native, non-transcript views: Overview, Setup, Audit, and
+Help. It requires at least `60x18` terminal cells. At matching height
+thresholds it is Narrow from `60x18`, Medium from `80x24`, and Wide from
+`120x30`; any smaller width or height uses the TooSmall guidance screen.
+
+| Control | Result |
+| --- | --- |
+| `1`, `2`, `3`, `4`, `?` | Select Overview, Setup, Audit, or Help. |
+| `Tab`, `Shift+Tab` | Move focus forward or backward among visible regions. |
+| Arrow keys, `PageUp`, `PageDown`, `Home`, `End` | Navigate the focused view or Audit selection. |
+| `i`, `Esc` | Open/focus the inspector; then dismiss the inspector or message. |
+| `/` | Focus the command editor with `/` prefilled. |
+| Command editor: text, `Enter`, arrows, `Home`, `End`, `Backspace`, `Delete`, `Up`, `Down`, `Tab`, `Shift+Tab`, `Esc` | Edit, submit, recall in-memory history, move focus, or cancel command entry. |
+| `q` outside command entry, `Ctrl+C` | Request clean user-quit or interrupted shutdown. |
+
+`NO_COLOR=1` disables foreground and background colors while retaining
+non-color focus distinction. Mouse capture remains disabled. Only one process
+may use a state directory at once; a second process is rejected through the
+existing single-instance guard. `/help`, `/status`, `/setup status`, `/audit`,
+and rejected input continue through the existing parser, runtime, application,
+policy, event, audit, and persistence boundaries.
+
+See [the Phase 0B testing guide](docs/phase-0b-testing.md) for the manual
+acceptance procedure, fallback behavior, restoration checks, and host-specific
+verification record.
+
 ## Build, run, and test
 
 ```bash
 cargo build --workspace --locked
 cargo run --locked
+cargo run --locked -- --command-mode
+printf '/status\n/quit\n' | cargo run --quiet --locked
 cargo test --workspace --all-targets --locked
 ```
 
-The program reads one command per line. `/quit` ends the session cleanly; end
-of input and an interrupt also end the foreground session with an explicit
-shutdown reason. The default test suite is deterministic and does not require
-network access.
+The second launch form always selects the fallback command host. The piped form
+demonstrates its automatic redirected-stdin fallback. The fallback host reads
+one command per line. `/quit` ends the session cleanly; end of input and an
+interrupt also end the foreground session with an explicit shutdown reason.
+The default test suite is deterministic and does not require network access.
 
 ## Supported commands
 
@@ -103,23 +141,25 @@ does not expose local paths or sensitive values.
 
 ## Platform status
 
-The current verification context is Unix/macOS. Windows-specific source paths
-and static contract coverage are present, but the non-Unix process guard
-currently refuses startup; Windows runtime verification has not been performed
-for this phase and is not claimed here.
+Automated and static coverage exercises the supported platform paths. Live
+manual terminal verification is host-specific and must be recorded separately;
+this document does not claim live macOS, Linux, or Windows execution. In
+particular, Windows runtime verification has not been performed for this phase.
 
 ## Explicit non-goals
 
-Phase 0 does not include the full-screen TUI, agent orchestration, model
-providers, live data, network access, credential entry, OAuth, MCP, external
-runtimes, broker connectivity, order placement, trading recommendations,
-financial calculations, guided setup application, web or mobile clients,
-multi-user access, remote access, or an autonomous/background service.
+Phase 0B does not add agent orchestration, model providers, live data, network
+access, credential entry, OAuth, MCP, external runtimes, broker connectivity,
+order placement, trading recommendations, financial calculations, guided setup
+application, web or mobile clients, multi-user access, remote access, or an
+autonomous/background service.
 
 ## Quality gates
 
 ```bash
 cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+# Legacy Phase 0 documentation-contract invocation (equivalent with the lockfile)
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --locked
 cargo build --workspace --locked

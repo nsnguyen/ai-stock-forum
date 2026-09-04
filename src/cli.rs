@@ -28,5 +28,9 @@ pub fn select_launch_mode(
 
 pub fn detect_launch_mode() -> Result<LaunchMode, CliError> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    select_launch_mode(&args, std::io::stdin().is_terminal(), std::io::stdout().is_terminal())
+    select_launch_mode(
+        &args,
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+    )
 }

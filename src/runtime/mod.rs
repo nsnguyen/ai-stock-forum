@@ -8,7 +8,9 @@ use std::{
     time::Duration,
 };
 
-use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded, select_biased, unbounded};
+use crossbeam_channel::{
+    Receiver, Sender, TryRecvError, TrySendError, bounded, select_biased, unbounded,
+};
 use thiserror::Error;
 
 use crate::app::{
@@ -754,7 +756,10 @@ mod tests {
     fn disconnected_pending_outcome() -> PendingOutcome {
         let (sender, response) = bounded(1);
         drop(sender);
-        pending_outcome(response, WorkerState::Exited(Err(RuntimeError::WorkerPanicked)))
+        pending_outcome(
+            response,
+            WorkerState::Exited(Err(RuntimeError::WorkerPanicked)),
+        )
     }
 
     #[test]

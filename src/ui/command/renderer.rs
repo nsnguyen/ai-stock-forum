@@ -158,9 +158,7 @@ impl TextRenderer {
             TuiError::TerminalInitialization => {
                 writer.write_all(b"Terminal interface could not be started.\n")
             }
-            TuiError::TerminalInput => {
-                writer.write_all(b"Terminal input could not be read.\n")
-            }
+            TuiError::TerminalInput => writer.write_all(b"Terminal input could not be read.\n"),
             TuiError::TerminalOutput => {
                 writer.write_all(b"Terminal output could not be written.\n")
             }
@@ -168,9 +166,7 @@ impl TextRenderer {
                 writer.write_all(b"Interrupt handling could not be started.\n")
             }
             TuiError::Runtime(error) => Self::render_runtime_error(error, writer),
-            TuiError::Panicked => {
-                writer.write_all(b"Terminal interface stopped unexpectedly.\n")
-            }
+            TuiError::Panicked => writer.write_all(b"Terminal interface stopped unexpectedly.\n"),
         }
     }
 }

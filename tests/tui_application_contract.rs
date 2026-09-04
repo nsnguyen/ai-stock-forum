@@ -94,7 +94,7 @@ fn presentation_snapshot_is_typed_bounded_and_does_not_append_events() {
             .recent_audit
             .iter()
             .map(|entry| (entry.sequence, entry.kind.as_str()))
-        .collect::<Vec<_>>(),
+            .collect::<Vec<_>>(),
         vec![
             (6, "help_viewed"),
             (7, "process_session_ended"),

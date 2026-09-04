@@ -52,23 +52,12 @@ pub struct UiMessage {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CommandEditor {
     buffer: String,
     cursor_byte: usize,
     history: VecDeque<String>,
     history_index: Option<usize>,
-}
-
-impl Default for CommandEditor {
-    fn default() -> Self {
-        Self {
-            buffer: String::new(),
-            cursor_byte: 0,
-            history: VecDeque::new(),
-            history_index: None,
-        }
-    }
 }
 
 impl CommandEditor {

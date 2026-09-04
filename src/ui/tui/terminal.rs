@@ -81,7 +81,9 @@ impl<C: TerminalControl> TerminalGuard<C> {
             self.alternate_screen_entered = false;
             retain_first_error(
                 &mut first_error,
-                self.control.leave_alt().map_err(|_| TuiError::TerminalOutput),
+                self.control
+                    .leave_alt()
+                    .map_err(|_| TuiError::TerminalOutput),
             );
         }
         if self.raw_enabled {

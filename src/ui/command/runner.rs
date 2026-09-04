@@ -623,8 +623,7 @@ pub struct StdioResources {
 
 impl StdioResources {
     pub fn initialize() -> Result<Self, UiError> {
-        let interrupts = crate::ui::interrupt::receiver()
-            .map_err(|_| UiError::InterruptHandler)?;
+        let interrupts = crate::ui::interrupt::receiver().map_err(|_| UiError::InterruptHandler)?;
         #[cfg(unix)]
         {
             let source = UnixLineSource::stdin().map_err(|_| UiError::LineSourceUnavailable)?;
