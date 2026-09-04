@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, select_biased, unbounded};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded, select_biased, unbounded};
 use thiserror::Error;
 
 use crate::app::{
@@ -358,13 +358,25 @@ pub struct PendingOutcome {
 
 impl PendingOutcome {
     pub fn recv(self) -> Result<CommandOutcome, RuntimeError> {
-        self.response.recv().unwrap_or_else(|_| {
-            self.shared
-                .state
-                .lock()
-                .map(|state| Err(SharedRuntime::terminal_error(&state)))
-                .unwrap_or(Err(RuntimeError::WorkerPanicked))
-        })
+        self.response
+            .recv()
+            .unwrap_or_else(|_| Err(self.disconnection_error()))
+    }
+
+    pub fn try_recv(&self) -> Result<Option<CommandOutcome>, RuntimeError> {
+        match self.response.try_recv() {
+            Ok(outcome) => outcome.map(Some),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err(self.disconnection_error()),
+        }
+    }
+
+    fn disconnection_error(&self) -> RuntimeError {
+        self.shared
+            .state
+            .lock()
+            .map(|state| SharedRuntime::terminal_error(&state))
+            .unwrap_or(RuntimeError::WorkerPanicked)
     }
 }
 
@@ -686,5 +698,97 @@ fn execute_request(executor: &mut dyn CommandExecutor, request: Request, shared:
             let _ = response.send(Err(RuntimeError::WorkerPanicked));
             resume_unwind(payload);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::{
+        app::{CommandView, HelpView, ShutdownDisposition},
+        domain::{CommandId, CorrelationId},
+    };
+    use uuid::Uuid;
+
+    fn outcome() -> CommandOutcome {
+        CommandOutcome {
+            command_id: CommandId::from_uuid(Uuid::from_u128(1)),
+            correlation_id: CorrelationId::from_uuid(Uuid::from_u128(2)),
+            committed_events: Vec::new(),
+            view: CommandView::Help(HelpView),
+            shutdown: ShutdownDisposition::Continue,
+        }
+    }
+
+    fn pending_outcome(response: Receiver<CommandResult>, worker: WorkerState) -> PendingOutcome {
+        let (control, _control_receiver) = unbounded();
+        PendingOutcome {
+            response,
+            shared: Arc::new(SharedRuntime {
+                state: Mutex::new(State {
+                    admission: Admission::Closing,
+                    reservations: 0,
+                    worker,
+                    join_owner: false,
+                    join_waiters: 0,
+                }),
+                changed: Condvar::new(),
+                control,
+            }),
+        }
+    }
+
+    fn gated_pending_outcome() -> (PendingOutcome, Sender<CommandResult>) {
+        let (sender, response) = bounded(1);
+        (pending_outcome(response, WorkerState::Running), sender)
+    }
+
+    fn completed_pending_outcome() -> (PendingOutcome, CommandOutcome) {
+        let (pending, sender) = gated_pending_outcome();
+        let expected = outcome();
+        sender.send(Ok(expected.clone())).unwrap();
+        (pending, expected)
+    }
+
+    fn disconnected_pending_outcome() -> PendingOutcome {
+        let (sender, response) = bounded(1);
+        drop(sender);
+        pending_outcome(response, WorkerState::Exited(Err(RuntimeError::WorkerPanicked)))
+    }
+
+    #[test]
+    fn pending_outcome_poll_returns_none_before_the_worker_replies() {
+        let (pending, _worker_gate) = gated_pending_outcome();
+
+        assert_eq!(pending.try_recv().unwrap(), None);
+    }
+
+    #[test]
+    fn pending_outcome_poll_returns_the_typed_outcome_once() {
+        let (pending, expected) = completed_pending_outcome();
+
+        assert_eq!(pending.try_recv().unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn pending_outcome_poll_preserves_a_typed_application_error() {
+        let (pending, sender) = gated_pending_outcome();
+        sender
+            .send(Err(RuntimeError::Application(AppError::LifecycleFinished)))
+            .unwrap();
+
+        assert_eq!(
+            pending.try_recv(),
+            Err(RuntimeError::Application(AppError::LifecycleFinished))
+        );
+    }
+
+    #[test]
+    fn polling_and_blocking_receive_share_the_disconnection_error() {
+        let polling = disconnected_pending_outcome().try_recv().unwrap_err();
+        let blocking = disconnected_pending_outcome().recv().unwrap_err();
+
+        assert_eq!(polling, blocking);
     }
 }
