@@ -1014,7 +1014,12 @@ mod tests {
         );
         assert_eq!(model.command.text().len(), MAX_INPUT_BYTES - 1);
         assert!(!model.command.text().chars().any(char::is_control));
-        assert!(model.command.text().is_char_boundary(model.command.text().len()));
+        assert!(
+            model
+                .command
+                .text()
+                .is_char_boundary(model.command.text().len())
+        );
     }
 
     #[test]
@@ -1025,19 +1030,13 @@ mod tests {
         handle_event(&mut model, TuiEvent::Resize(60, 18));
 
         assert_eq!(
-            handle_event(
-                &mut model,
-                key_code(KeyCode::End, KeyModifiers::NONE)
-            ),
+            handle_event(&mut model, key_code(KeyCode::End, KeyModifiers::NONE)),
             ControllerEffect::Redraw
         );
         assert_eq!(model.audit_selection, Some(29));
         assert_eq!(model.workspace_scroll, 0);
 
-        handle_event(
-            &mut model,
-            key_code(KeyCode::PageDown, KeyModifiers::NONE),
-        );
+        handle_event(&mut model, key_code(KeyCode::PageDown, KeyModifiers::NONE));
         assert_eq!(model.audit_selection, Some(29));
         assert_eq!(model.workspace_scroll, 0);
     }

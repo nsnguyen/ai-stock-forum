@@ -90,7 +90,10 @@ fn presentation_snapshot_is_typed_bounded_and_does_not_append_events() {
     assert_eq!(snapshot.session_id, harness.service.session_id());
     assert_eq!(snapshot.setup_status, SetupStatus::NotStarted);
     assert_eq!(snapshot.database_readiness, DatabaseReadiness::Ready);
-    assert_eq!(snapshot.process_guard_ownership, ProcessGuardOwnership::Held);
+    assert_eq!(
+        snapshot.process_guard_ownership,
+        ProcessGuardOwnership::Held
+    );
     assert_eq!(
         snapshot
             .recent_audit
