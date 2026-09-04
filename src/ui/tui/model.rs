@@ -40,6 +40,12 @@ pub enum Severity {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeStatus {
+    Ready,
+    Stopping,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UiMessage {
     pub severity: Severity,
@@ -211,6 +217,7 @@ pub struct TuiModel {
     pub workspace_scroll: u16,
     pub message: Option<UiMessage>,
     pub command_in_flight: bool,
+    pub runtime_status: RuntimeStatus,
     pub previous_session_interrupted: bool,
 }
 
@@ -236,6 +243,7 @@ impl TuiModel {
             workspace_scroll: 0,
             message: None,
             command_in_flight: false,
+            runtime_status: RuntimeStatus::Ready,
             previous_session_interrupted,
         };
         model.replace_audit(recent_audit);
@@ -320,6 +328,10 @@ impl TuiModel {
 
     pub fn set_command_in_flight(&mut self, command_in_flight: bool) {
         self.command_in_flight = command_in_flight;
+    }
+
+    pub fn set_runtime_status(&mut self, runtime_status: RuntimeStatus) {
+        self.runtime_status = runtime_status;
     }
 
     fn audit_last_index(&self) -> Option<usize> {
@@ -484,6 +496,16 @@ mod tests {
         assert_eq!(model.audit_selection, Some(0));
         assert_eq!(model.message, None);
         assert!(!model.command_in_flight);
+    }
+
+    #[test]
+    fn model_initializes_ready_runtime_and_updates_typed_status() {
+        let mut model = TuiModel::new(snapshot(), false);
+        assert_eq!(model.runtime_status, RuntimeStatus::Ready);
+
+        model.set_runtime_status(RuntimeStatus::Stopping);
+
+        assert_eq!(model.runtime_status, RuntimeStatus::Stopping);
     }
 
     #[test]

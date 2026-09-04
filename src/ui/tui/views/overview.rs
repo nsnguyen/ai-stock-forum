@@ -3,18 +3,20 @@ use ratatui::{layout::Rect, text::Line, widgets::{Paragraph, Wrap}, Frame};
 use crate::setup::SetupStatus;
 
 use super::{label_value, panel, safe_text, workspace_focused};
-use crate::ui::tui::{model::TuiModel, theme::Theme};
+use crate::ui::tui::{
+    model::{RuntimeStatus, TuiModel},
+    theme::Theme,
+};
 
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
-    let runtime = if model.command_in_flight {
-        "Busy - command in flight"
-    } else {
-        "Ready"
+    let (runtime, runtime_style) = match model.runtime_status {
+        RuntimeStatus::Ready => ("Ready", theme.success),
+        RuntimeStatus::Stopping => ("Stopping", theme.warning),
     };
-    let runtime_style = if model.command_in_flight {
-        theme.warning
+    let (command, command_style) = if model.command_in_flight {
+        ("Running", theme.warning)
     } else {
-        theme.success
+        ("Idle", theme.success)
     };
     let setup = setup_state(&model.setup_status);
     let recent = model
@@ -32,6 +34,10 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
         Line::from(vec![
             ratatui::text::Span::styled(format!("{:<14}", "Runtime"), theme.muted),
             ratatui::text::Span::styled(runtime, runtime_style),
+        ]),
+        Line::from(vec![
+            ratatui::text::Span::styled(format!("{:<14}", "Command"), theme.muted),
+            ratatui::text::Span::styled(command, command_style),
         ]),
         label_value("Setup", setup, theme),
         label_value("Recent", recent, theme),

@@ -210,8 +210,12 @@ fn mode_name(mode: LayoutMode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use ratatui::{
-        backend::TestBackend,
+        backend::{Backend, ClearType, TestBackend, WindowSize},
+        buffer::Cell as BufferCell,
+        layout::{Position, Size},
         style::Modifier,
         Terminal,
     };
@@ -224,10 +228,76 @@ mod tests {
         domain::{Actor, CorrelationId, InstallationId, SessionId},
         setup::SetupStatus,
         ui::tui::{
-            model::{Focus, Severity, TuiModel, View},
+            model::{Focus, RuntimeStatus, Severity, TuiModel, View},
             theme::Theme,
         },
     };
+
+    #[derive(Debug)]
+    struct CursorTrackingBackend {
+        inner: TestBackend,
+        cursor_visible: bool,
+    }
+
+    impl CursorTrackingBackend {
+        fn new(width: u16, height: u16) -> Self {
+            Self {
+                inner: TestBackend::new(width, height),
+                cursor_visible: true,
+            }
+        }
+    }
+
+    impl Backend for CursorTrackingBackend {
+        fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+        where
+            I: Iterator<Item = (u16, u16, &'a BufferCell)>,
+        {
+            self.inner.draw(content)
+        }
+
+        fn append_lines(&mut self, count: u16) -> io::Result<()> {
+            self.inner.append_lines(count)
+        }
+
+        fn hide_cursor(&mut self) -> io::Result<()> {
+            self.cursor_visible = false;
+            self.inner.hide_cursor()
+        }
+
+        fn show_cursor(&mut self) -> io::Result<()> {
+            self.cursor_visible = true;
+            self.inner.show_cursor()
+        }
+
+        fn get_cursor_position(&mut self) -> io::Result<Position> {
+            self.inner.get_cursor_position()
+        }
+
+        fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+            self.inner.set_cursor_position(position)
+        }
+
+        fn clear(&mut self) -> io::Result<()> {
+            self.inner.clear()
+        }
+
+        fn clear_region(&mut self, clear_type: ClearType) -> io::Result<()> {
+            self.inner.clear_region(clear_type)
+        }
+
+        fn size(&self) -> io::Result<Size> {
+            self.inner.size()
+        }
+
+        fn window_size(&mut self) -> io::Result<WindowSize> {
+            self.inner.window_size()
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.inner.flush()
+        }
+    }
 
     fn model(view: View) -> TuiModel {
         let mut model = TuiModel::new(
@@ -260,6 +330,20 @@ mod tests {
         terminal
     }
 
+    fn rendered_with_cursor_tracking(
+        model: TuiModel,
+        width: u16,
+        height: u16,
+    ) -> Terminal<CursorTrackingBackend> {
+        let backend = CursorTrackingBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::from_no_color(false);
+        terminal
+            .draw(|frame| render(frame, &model, &theme))
+            .expect("render model");
+        terminal
+    }
+
     fn render_text(model: TuiModel, width: u16, height: u16, no_color: bool) -> String {
         rendered(model, width, height, no_color)
             .backend()
@@ -279,6 +363,21 @@ mod tests {
         assert!(text.contains("Session"));
         assert!(text.contains("Runtime"));
         assert!(text.contains("Type /help"));
+    }
+
+    #[test]
+    fn overview_renders_runtime_and_command_activity_independently() {
+        let mut ready_running = model(View::Overview);
+        ready_running.set_command_in_flight(true);
+        let text = render_text(ready_running, 140, 40, false);
+        assert!(text.contains("Runtime       Ready"));
+        assert!(text.contains("Command       Running"));
+
+        let mut stopping_idle = model(View::Overview);
+        stopping_idle.set_runtime_status(RuntimeStatus::Stopping);
+        let text = render_text(stopping_idle, 140, 40, false);
+        assert!(text.contains("Runtime       Stopping"));
+        assert!(text.contains("Command       Idle"));
     }
 
     #[test]
@@ -350,14 +449,20 @@ mod tests {
     }
 
     #[test]
-    fn command_focus_renders_unicode_editor_with_visible_insertion_cursor() {
+    fn command_focus_places_cursor_after_wide_unicode_prefix() {
         let mut model = model(View::Overview);
         model.set_focus(Focus::Command);
         model.command.insert('界');
         model.command.insert('x');
         model.command.move_left();
-        let text = render_text(model, 100, 30, false);
-        assert!(text.contains("界 |x"));
+        let mut terminal = rendered(model, 100, 30, false);
+        assert_eq!(terminal.get_cursor_position().expect("cursor position"), Position::new(5, 28));
+    }
+
+    #[test]
+    fn cursor_is_hidden_outside_command_focus() {
+        let terminal = rendered_with_cursor_tracking(model(View::Overview), 100, 30);
+        assert!(!terminal.backend().cursor_visible);
     }
 
     #[test]
