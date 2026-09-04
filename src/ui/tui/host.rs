@@ -1,0 +1,669 @@
+use std::{panic::AssertUnwindSafe, time::Duration};
+
+use super::{
+    TuiError,
+    controller::{ControllerEffect, apply_outcome, handle_event},
+    event::{CrosstermEventSource, EventSource, TuiEvent},
+    layout::layout_mode,
+    model::{RuntimeStatus, TuiModel},
+    terminal::{CrosstermScreen, Screen},
+    theme::Theme,
+};
+use crate::{
+    app::{ApplicationCommand, PresentationSnapshot, ShutdownReason},
+    panic_boundary::catch_sensitive_unwind,
+    runtime::{ApplicationRuntime, PendingOutcome, RuntimeClient, RuntimeError},
+};
+
+const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+pub fn run_tui(
+    runtime: ApplicationRuntime,
+    snapshot: PresentationSnapshot,
+    previous_session_interrupted: bool,
+) -> Result<(), TuiError> {
+    let theme = Theme::from_no_color(std::env::var_os("NO_COLOR").is_some());
+    let runner = TuiRunner::new(runtime, snapshot, previous_session_interrupted);
+    let mut events = match CrosstermEventSource::new() {
+        Ok(events) => events,
+        Err(error) => return finish_with_primary(runner, error),
+    };
+    let mut screen = match CrosstermScreen::new() {
+        Ok(screen) => screen,
+        Err(error) => return finish_with_primary(runner, error),
+    };
+
+    let result = run_loop(runner, &mut screen, &mut events, &theme);
+    drop(screen);
+    result
+}
+
+struct TuiRunner {
+    runtime: Option<ApplicationRuntime>,
+    client: RuntimeClient,
+    model: TuiModel,
+    pending: Option<PendingOutcome>,
+    queued_shutdown: Option<ShutdownReason>,
+}
+
+impl TuiRunner {
+    fn new(
+        runtime: ApplicationRuntime,
+        snapshot: PresentationSnapshot,
+        previous_session_interrupted: bool,
+    ) -> Self {
+        let client = runtime.client();
+        Self {
+            runtime: Some(runtime),
+            client,
+            model: TuiModel::new(snapshot, previous_session_interrupted),
+            pending: None,
+            queued_shutdown: None,
+        }
+    }
+
+    fn event_loop(
+        &mut self,
+        screen: &mut dyn Screen,
+        events: &mut dyn EventSource,
+        theme: &Theme,
+    ) -> Result<ShutdownReason, TuiError> {
+        self.update_layout(screen)?;
+        screen.draw(&self.model, theme)?;
+
+        loop {
+            let mut dirty = false;
+
+            if let Some(effect) = self.poll_pending()? {
+                if let ControllerEffect::RequestShutdown(reason) = effect {
+                    return Ok(reason);
+                }
+                match self.apply_effect(effect)? {
+                    LoopControl::Continue { redraw } => dirty |= redraw,
+                    LoopControl::Finish(reason) => return Ok(reason),
+                }
+            }
+
+            if self.pending.is_none() && self.queued_shutdown.is_some() {
+                self.submit_queued_shutdown()?;
+                dirty = true;
+            }
+
+            dirty |= self.update_layout(screen)?;
+
+            if let Some(event) = events.next_event(EVENT_POLL_INTERVAL)? {
+                let effect = handle_event(&mut self.model, event);
+                match self.apply_effect(effect)? {
+                    LoopControl::Continue { redraw } => dirty |= redraw,
+                    LoopControl::Finish(reason) => return Ok(reason),
+                }
+            }
+
+            if dirty {
+                screen.draw(&self.model, theme)?;
+            }
+        }
+    }
+
+    fn poll_pending(&mut self) -> Result<Option<ControllerEffect>, TuiError> {
+        let Some(pending) = self.pending.as_ref() else {
+            return Ok(None);
+        };
+        let Some(outcome) = pending.try_recv()? else {
+            return Ok(None);
+        };
+        self.pending.take();
+        Ok(Some(apply_outcome(&mut self.model, outcome)))
+    }
+
+    fn update_layout(&mut self, screen: &dyn Screen) -> Result<bool, TuiError> {
+        let area = screen.size()?;
+        if layout_mode(area) == self.model.layout_mode {
+            return Ok(false);
+        }
+        let effect = handle_event(&mut self.model, TuiEvent::Resize(area.width, area.height));
+        Ok(matches!(effect, ControllerEffect::Redraw))
+    }
+
+    fn apply_effect(&mut self, effect: ControllerEffect) -> Result<LoopControl, TuiError> {
+        match effect {
+            ControllerEffect::None => Ok(LoopControl::Continue { redraw: false }),
+            ControllerEffect::Redraw => Ok(LoopControl::Continue { redraw: true }),
+            ControllerEffect::Submit(ApplicationCommand::RequestShutdown) => {
+                self.request_auditable_shutdown(ShutdownReason::UserQuit)
+            }
+            ControllerEffect::Submit(command) => {
+                if self.model.runtime_status == RuntimeStatus::Stopping {
+                    return Ok(LoopControl::Continue { redraw: false });
+                }
+                self.submit(command)?;
+                Ok(LoopControl::Continue { redraw: true })
+            }
+            ControllerEffect::RequestShutdown(ShutdownReason::UserQuit) => {
+                self.request_auditable_shutdown(ShutdownReason::UserQuit)
+            }
+            ControllerEffect::RequestShutdown(reason) => {
+                self.begin_stopping();
+                Ok(LoopControl::Finish(reason))
+            }
+        }
+    }
+
+    fn request_auditable_shutdown(
+        &mut self,
+        reason: ShutdownReason,
+    ) -> Result<LoopControl, TuiError> {
+        if self.model.runtime_status == RuntimeStatus::Stopping {
+            return Ok(LoopControl::Continue { redraw: false });
+        }
+
+        self.begin_stopping();
+        if self.pending.is_some() {
+            self.queued_shutdown = Some(reason);
+        } else {
+            self.submit(ApplicationCommand::RequestShutdown)?;
+        }
+        Ok(LoopControl::Continue { redraw: true })
+    }
+
+    fn submit_queued_shutdown(&mut self) -> Result<(), TuiError> {
+        let Some(_reason) = self.queued_shutdown.take() else {
+            return Ok(());
+        };
+        self.model.set_command_in_flight(true);
+        self.submit(ApplicationCommand::RequestShutdown)
+    }
+
+    fn submit(&mut self, command: ApplicationCommand) -> Result<(), TuiError> {
+        debug_assert!(self.pending.is_none());
+        self.pending = Some(self.client.try_submit(command)?);
+        Ok(())
+    }
+
+    fn begin_stopping(&mut self) {
+        self.model.set_runtime_status(RuntimeStatus::Stopping);
+    }
+
+    fn finish(&mut self, reason: ShutdownReason) -> Result<(), RuntimeError> {
+        self.begin_stopping();
+        let Some(runtime) = self.runtime.take() else {
+            return Ok(());
+        };
+        runtime.finish_and_join(reason)
+    }
+}
+
+enum LoopControl {
+    Continue { redraw: bool },
+    Finish(ShutdownReason),
+}
+
+fn run_loop(
+    mut runner: TuiRunner,
+    screen: &mut dyn Screen,
+    events: &mut dyn EventSource,
+    theme: &Theme,
+) -> Result<(), TuiError> {
+    let body = catch_sensitive_unwind(AssertUnwindSafe(|| {
+        runner.event_loop(screen, events, theme)
+    }));
+    match body {
+        Ok(Ok(reason)) => runner.finish(reason).map_err(TuiError::Runtime),
+        Ok(Err(error)) => finish_with_primary(runner, error),
+        Err(_) => finish_with_primary(runner, TuiError::Panicked),
+    }
+}
+
+fn finish_with_primary(mut runner: TuiRunner, error: TuiError) -> Result<(), TuiError> {
+    runner.begin_stopping();
+    let _ = runner.finish(ShutdownReason::ApplicationError);
+    Err(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::VecDeque,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread,
+        time::Duration,
+    };
+
+    use crossbeam_channel::{Receiver, Sender, bounded};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Rect;
+    use uuid::Uuid;
+
+    use super::{TuiRunner, run_loop};
+    use crate::{
+        app::{
+            AppError, ApplicationCommand, CommandOutcome, CommandView, HelpView,
+            PresentationSnapshot, ShutdownDisposition, ShutdownReason, ShutdownView, StatusView,
+        },
+        domain::{CommandId, CorrelationId, InstallationId, SessionId},
+        runtime::{ApplicationRuntime, CommandExecutor, RuntimeError},
+        setup::SetupStatus,
+        ui::tui::{
+            EventSource, Screen, TuiError, TuiEvent,
+            model::{LayoutMode, RuntimeStatus, TuiModel, View},
+            theme::Theme,
+        },
+    };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct RecordedFrame {
+        layout_mode: LayoutMode,
+        active_view: View,
+        runtime_status: RuntimeStatus,
+    }
+
+    #[derive(Clone)]
+    struct RecordingScreen {
+        area: Rect,
+        frames: Arc<Mutex<Vec<RecordedFrame>>>,
+        fail_draw: Arc<AtomicBool>,
+        panic_on_draw: Arc<AtomicBool>,
+    }
+
+    impl RecordingScreen {
+        fn new(area: Rect) -> Self {
+            Self {
+                area,
+                frames: Arc::new(Mutex::new(Vec::new())),
+                fail_draw: Arc::new(AtomicBool::new(false)),
+                panic_on_draw: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        fn failing_draw(area: Rect) -> Self {
+            let screen = Self::new(area);
+            screen.fail_draw.store(true, Ordering::SeqCst);
+            screen
+        }
+
+        fn panicking_draw(area: Rect) -> Self {
+            let screen = Self::new(area);
+            screen.panic_on_draw.store(true, Ordering::SeqCst);
+            screen
+        }
+
+        fn frames(&self) -> Vec<RecordedFrame> {
+            self.frames.lock().unwrap().clone()
+        }
+    }
+
+    impl Screen for RecordingScreen {
+        fn size(&self) -> Result<Rect, TuiError> {
+            Ok(self.area)
+        }
+
+        fn draw(&mut self, model: &TuiModel, _theme: &Theme) -> Result<(), TuiError> {
+            if self.panic_on_draw.load(Ordering::SeqCst) {
+                panic!("injected screen panic");
+            }
+            if self.fail_draw.load(Ordering::SeqCst) {
+                return Err(TuiError::TerminalOutput);
+            }
+            self.frames.lock().unwrap().push(RecordedFrame {
+                layout_mode: model.layout_mode,
+                active_view: model.active_view,
+                runtime_status: model.runtime_status,
+            });
+            Ok(())
+        }
+    }
+
+    enum EventStep {
+        Event(TuiEvent),
+        Idle,
+        Release(Sender<()>),
+        InputError,
+    }
+
+    struct FakeEvents {
+        steps: VecDeque<EventStep>,
+        timeouts: Arc<Mutex<Vec<Duration>>>,
+        exhausted_polls: usize,
+    }
+
+    impl FakeEvents {
+        fn from(steps: impl IntoIterator<Item = EventStep>) -> Self {
+            Self {
+                steps: steps.into_iter().collect(),
+                timeouts: Arc::new(Mutex::new(Vec::new())),
+                exhausted_polls: 0,
+            }
+        }
+
+        fn timeouts(&self) -> Vec<Duration> {
+            self.timeouts.lock().unwrap().clone()
+        }
+    }
+
+    impl EventSource for FakeEvents {
+        fn next_event(&mut self, timeout: Duration) -> Result<Option<TuiEvent>, TuiError> {
+            self.timeouts.lock().unwrap().push(timeout);
+            match self.steps.pop_front() {
+                Some(EventStep::Event(event)) => Ok(Some(event)),
+                Some(EventStep::Idle) => Ok(None),
+                Some(EventStep::Release(sender)) => {
+                    sender.send(()).unwrap();
+                    thread::yield_now();
+                    Ok(None)
+                }
+                Some(EventStep::InputError) => Err(TuiError::TerminalInput),
+                None => {
+                    self.exhausted_polls = self.exhausted_polls.saturating_add(1);
+                    thread::yield_now();
+                    if self.exhausted_polls > 100_000 {
+                        Ok(Some(TuiEvent::Interrupt))
+                    } else {
+                        Ok(None)
+                    }
+                }
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct RuntimeObserver {
+        commands: Arc<Mutex<Vec<ApplicationCommand>>>,
+        finishes: Arc<Mutex<Vec<ShutdownReason>>>,
+    }
+
+    impl RuntimeObserver {
+        fn commands(&self) -> Vec<ApplicationCommand> {
+            self.commands.lock().unwrap().clone()
+        }
+
+        fn finishes(&self) -> Vec<ShutdownReason> {
+            self.finishes.lock().unwrap().clone()
+        }
+    }
+
+    struct RecordingExecutor {
+        observer: RuntimeObserver,
+        release_first: Option<Receiver<()>>,
+        fail_execute: bool,
+        fail_finish: bool,
+    }
+
+    impl CommandExecutor for RecordingExecutor {
+        fn execute_user(
+            &mut self,
+            command: ApplicationCommand,
+        ) -> Result<CommandOutcome, AppError> {
+            self.observer.commands.lock().unwrap().push(command.clone());
+            if let Some(release) = self.release_first.take() {
+                release.recv().unwrap();
+            }
+            if self.fail_execute {
+                return Err(AppError::LifecycleFinished);
+            }
+            Ok(outcome(command))
+        }
+
+        fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
+            self.observer.finishes.lock().unwrap().push(reason);
+            if self.fail_finish {
+                Err(AppError::LifecycleFinished)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn runtime(
+        block_first: bool,
+        fail_execute: bool,
+        fail_finish: bool,
+    ) -> (ApplicationRuntime, RuntimeObserver, Option<Sender<()>>) {
+        let observer = RuntimeObserver {
+            commands: Arc::new(Mutex::new(Vec::new())),
+            finishes: Arc::new(Mutex::new(Vec::new())),
+        };
+        let (release, release_first) = if block_first {
+            let (sender, receiver) = bounded(1);
+            (Some(sender), Some(receiver))
+        } else {
+            (None, None)
+        };
+        let runtime = ApplicationRuntime::spawn(
+            RecordingExecutor {
+                observer: observer.clone(),
+                release_first,
+                fail_execute,
+                fail_finish,
+            },
+            1,
+        )
+        .unwrap();
+        (runtime, observer, release)
+    }
+
+    fn snapshot() -> PresentationSnapshot {
+        PresentationSnapshot {
+            installation_id: InstallationId::from_uuid(Uuid::from_u128(1)),
+            session_id: SessionId::from_uuid(Uuid::from_u128(2)),
+            setup_status: SetupStatus::NotStarted,
+            recent_audit: Vec::new(),
+        }
+    }
+
+    fn outcome(command: ApplicationCommand) -> CommandOutcome {
+        let (view, shutdown) = match command {
+            ApplicationCommand::ShowStatus => (
+                CommandView::Status(StatusView {
+                    installation_id: InstallationId::from_uuid(Uuid::from_u128(1)),
+                    session_id: SessionId::from_uuid(Uuid::from_u128(2)),
+                }),
+                ShutdownDisposition::Continue,
+            ),
+            ApplicationCommand::RequestShutdown => (
+                CommandView::Shutdown(ShutdownView {
+                    disposition: ShutdownDisposition::Requested,
+                }),
+                ShutdownDisposition::Requested,
+            ),
+            _ => (CommandView::Help(HelpView), ShutdownDisposition::Continue),
+        };
+        CommandOutcome {
+            command_id: CommandId::from_uuid(Uuid::from_u128(3)),
+            correlation_id: CorrelationId::from_uuid(Uuid::from_u128(4)),
+            committed_events: Vec::new(),
+            view,
+            shutdown,
+        }
+    }
+
+    fn key(character: char) -> EventStep {
+        EventStep::Event(TuiEvent::Key(KeyEvent::new(
+            KeyCode::Char(character),
+            KeyModifiers::NONE,
+        )))
+    }
+
+    fn special_key(code: KeyCode) -> EventStep {
+        EventStep::Event(TuiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+    }
+
+    fn command_steps(command: &str) -> Vec<EventStep> {
+        let mut steps = command.chars().map(key).collect::<Vec<_>>();
+        steps.push(special_key(KeyCode::Enter));
+        steps
+    }
+
+    fn execute(
+        runtime: ApplicationRuntime,
+        screen: &mut dyn Screen,
+        events: &mut dyn EventSource,
+    ) -> Result<(), TuiError> {
+        run_loop(
+            TuiRunner::new(runtime, snapshot(), false),
+            screen,
+            events,
+            &Theme::from_no_color(true),
+        )
+    }
+
+    #[test]
+    fn host_draws_processes_resize_and_redraws_only_when_dirty() {
+        let (runtime, observer, _) = runtime(false, false, false);
+        let mut screen = RecordingScreen::new(Rect::new(0, 0, 140, 40));
+        let mut events = FakeEvents::from([
+            EventStep::Idle,
+            EventStep::Idle,
+            EventStep::Event(TuiEvent::Resize(70, 20)),
+            key('2'),
+            EventStep::Idle,
+            key('q'),
+        ]);
+
+        let result = execute(runtime, &mut screen, &mut events);
+
+        assert!(result.is_ok());
+        assert_eq!(observer.finishes(), [ShutdownReason::UserQuit]);
+        assert!(
+            screen
+                .frames()
+                .iter()
+                .any(|frame| frame.layout_mode == LayoutMode::Narrow)
+        );
+        assert!(
+            screen
+                .frames()
+                .iter()
+                .any(|frame| frame.active_view == View::Setup)
+        );
+        assert!(
+            screen
+                .frames()
+                .iter()
+                .any(|frame| frame.runtime_status == RuntimeStatus::Stopping)
+        );
+        assert_eq!(screen.frames().len(), 4);
+        assert!(!events.timeouts().is_empty());
+        assert!(
+            events
+                .timeouts()
+                .iter()
+                .all(|timeout| *timeout <= Duration::from_millis(50))
+        );
+    }
+
+    #[test]
+    fn second_submission_is_prevented_until_the_pending_outcome_arrives() {
+        let (runtime, observer, release) = runtime(true, false, false);
+        let mut steps = command_steps("/status");
+        steps.extend(command_steps("/help"));
+        steps.push(EventStep::Release(release.unwrap()));
+        steps.push(EventStep::Event(TuiEvent::Interrupt));
+        let mut screen = RecordingScreen::new(Rect::new(0, 0, 140, 40));
+        let mut events = FakeEvents::from(steps);
+
+        let result = execute(runtime, &mut screen, &mut events);
+
+        assert!(result.is_ok());
+        assert_eq!(observer.commands(), [ApplicationCommand::ShowStatus]);
+        assert_eq!(observer.finishes(), [ShutdownReason::Interrupted]);
+    }
+
+    #[test]
+    fn shutdown_requested_while_busy_runs_after_the_current_outcome() {
+        let (runtime, observer, release) = runtime(true, false, false);
+        let mut steps = command_steps("/status");
+        steps.push(special_key(KeyCode::Esc));
+        steps.push(key('q'));
+        steps.push(EventStep::Idle);
+        steps.push(EventStep::Release(release.unwrap()));
+        let mut screen = RecordingScreen::new(Rect::new(0, 0, 140, 40));
+        let mut events = FakeEvents::from(steps);
+
+        let result = execute(runtime, &mut screen, &mut events);
+
+        assert!(result.is_ok());
+        assert_eq!(
+            observer.commands(),
+            [
+                ApplicationCommand::ShowStatus,
+                ApplicationCommand::RequestShutdown,
+            ]
+        );
+        assert_eq!(observer.finishes(), [ShutdownReason::UserQuit]);
+        assert!(
+            screen
+                .frames()
+                .iter()
+                .any(|frame| frame.runtime_status == RuntimeStatus::Stopping)
+        );
+    }
+
+    #[test]
+    fn interrupt_finishes_immediately_without_a_shutdown_command() {
+        let (runtime, observer, _) = runtime(false, false, false);
+        let mut screen = RecordingScreen::new(Rect::new(0, 0, 140, 40));
+        let mut events = FakeEvents::from([EventStep::Event(TuiEvent::Interrupt)]);
+
+        let result = execute(runtime, &mut screen, &mut events);
+
+        assert!(result.is_ok());
+        assert!(observer.commands().is_empty());
+        assert_eq!(observer.finishes(), [ShutdownReason::Interrupted]);
+    }
+
+    #[test]
+    fn input_error_is_primary_and_finishes_once_with_application_error() {
+        let (runtime, observer, _) = runtime(false, false, true);
+        let mut screen = RecordingScreen::new(Rect::new(0, 0, 140, 40));
+        let mut events = FakeEvents::from([EventStep::InputError]);
+
+        let result = execute(runtime, &mut screen, &mut events);
+
+        assert!(matches!(result, Err(TuiError::TerminalInput)));
+        assert_eq!(observer.finishes(), [ShutdownReason::ApplicationError]);
+    }
+
+    #[test]
+    fn draw_error_is_primary_even_when_runtime_finish_fails() {
+        let (runtime, observer, _) = runtime(false, false, true);
+        let mut screen = RecordingScreen::failing_draw(Rect::new(0, 0, 140, 40));
+        let mut events = FakeEvents::from([]);
+
+        let result = execute(runtime, &mut screen, &mut events);
+
+        assert!(matches!(result, Err(TuiError::TerminalOutput)));
+        assert_eq!(observer.finishes(), [ShutdownReason::ApplicationError]);
+    }
+
+    #[test]
+    fn runtime_error_is_primary_and_finishes_once_with_application_error() {
+        let (runtime, observer, _) = runtime(false, true, false);
+        let mut screen = RecordingScreen::new(Rect::new(0, 0, 140, 40));
+        let mut events = FakeEvents::from(command_steps("/status"));
+
+        let result = execute(runtime, &mut screen, &mut events);
+
+        assert!(matches!(
+            result,
+            Err(TuiError::Runtime(RuntimeError::Application(
+                AppError::LifecycleFinished
+            )))
+        ));
+        assert_eq!(observer.finishes(), [ShutdownReason::ApplicationError]);
+    }
+
+    #[test]
+    fn loop_panic_becomes_safe_error_and_finishes_with_application_error() {
+        let (runtime, observer, _) = runtime(false, false, false);
+        let mut screen = RecordingScreen::panicking_draw(Rect::new(0, 0, 140, 40));
+        let mut events = FakeEvents::from([]);
+
+        let result = execute(runtime, &mut screen, &mut events);
+
+        assert!(matches!(result, Err(TuiError::Panicked)));
+        assert_eq!(observer.finishes(), [ShutdownReason::ApplicationError]);
+    }
+}
