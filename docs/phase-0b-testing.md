@@ -1,9 +1,9 @@
 # Phase 0B Adaptive Cockpit Acceptance Guide
 
 This guide documents the release acceptance procedure for the Phase 0B
-read-only terminal UI. It does not authorize live testing against a user's
-normal application state. Run live-TTY checks only after task review and only
-with controller-arranged isolated state paths.
+read-only terminal UI. Normal use may launch the application with persistent
+state, but destructive acceptance experiments must use the isolated-state
+procedures below. Run live-TTY checks only after task review.
 
 ## Launch modes and fallback
 
@@ -21,6 +21,69 @@ existing line host. Redirection of either stdin or stdout also selects that
 line host automatically, preserving its existing text rendering and command
 protocol. The piped example is therefore expected to return the `/status`
 output, then process `/quit`, without a full-screen UI.
+
+## Isolated state for acceptance experiments
+
+`AppPaths::discover` uses `BaseDirs::data_dir()` and appends
+`ai-stock-forum`. The application therefore uses the standard macOS data
+directory derived from `HOME`, Linux `XDG_DATA_HOME` when set (otherwise the
+standard `HOME` fallback), and Windows `APPDATA`. Build before replacing those
+environment values so Cargo and Rustup continue to use their normal locations.
+
+On macOS, build first, then run the already-built binary with a temporary
+`HOME`; the application state will be under the temporary home directory:
+
+```sh
+cargo build --locked
+state_root="$(mktemp -d)"
+mkdir -p "$state_root/home" "$state_root/xdg-data"
+HOME="$state_root/home" XDG_DATA_HOME="$state_root/xdg-data" \
+  target/debug/ai-stock-forum
+```
+
+On Linux, build first, then use temporary `HOME` and `XDG_DATA_HOME`; the
+application state will be under `$state_root/xdg-data/ai-stock-forum`:
+
+```sh
+cargo build --locked
+state_root="$(mktemp -d)"
+mkdir -p "$state_root/home" "$state_root/xdg-data"
+HOME="$state_root/home" XDG_DATA_HOME="$state_root/xdg-data" \
+  target/debug/ai-stock-forum
+```
+
+In PowerShell on Windows, build first, then use a generated temporary home and
+`APPDATA`; the application state will be under `$testAppData\ai-stock-forum`:
+
+```powershell
+cargo build --locked
+$stateRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-stock-forum-phase-0b-" + [guid]::NewGuid().ToString("N"))
+$testHome = Join-Path $stateRoot "home"
+$testAppData = Join-Path $stateRoot "appdata"
+New-Item -ItemType Directory -Path $testHome, $testAppData | Out-Null
+$previousHome = $env:HOME
+$previousAppData = $env:APPDATA
+try {
+    $env:HOME = $testHome
+    $env:APPDATA = $testAppData
+    & .\target\debug\ai-stock-forum.exe
+} finally {
+    if ($null -eq $previousHome) { Remove-Item Env:HOME -ErrorAction SilentlyContinue } else { $env:HOME = $previousHome }
+    if ($null -eq $previousAppData) { Remove-Item Env:APPDATA -ErrorAction SilentlyContinue } else { $env:APPDATA = $previousAppData }
+}
+```
+
+After the application exits, inspect the generated temporary directory before
+removing it. Use an interactive deletion only for the `state_root` created by
+the matching procedure, never for a standard application directory:
+
+```sh
+rm -ri -- "$state_root"
+```
+
+```powershell
+Remove-Item -LiteralPath $stateRoot -Recurse -Confirm
+```
 
 ## Interactive controls
 
@@ -75,7 +138,7 @@ safely without corrupting the first session.
 | Widths 59, 60, 79, 80, 119, 120 | TooSmall, Narrow, Narrow, Medium, Medium, Wide when the matching height threshold is met. |
 | Heights 17, 18, 23, 24, 29, 30 | TooSmall below 18; width-dependent Narrow/Medium/Wide above it. |
 | Keys `1`-`4`, Tab, arrows, paging, `/`, Esc, `i`, `?` | Focus and native views update without transcript output. |
-| `/help`, `/status`, `/setup status`, `/audit`, invalid input | Existing application command semantics and audit behavior are preserved. |
+| `/help`, `/status`, `/setup status`, `/audit tail`, `/audit tail N`, invalid input | Existing application command semantics and audit behavior are preserved. Bare `/audit` is rejected as malformed input. |
 | `q` | Auditable clean shutdown, terminal restored, success exit. |
 | Ctrl+C | Clean external-signal shutdown and terminal restoration. |
 | Forced UI error/panic seam | One safe line after restoration; no payload or path leakage. |

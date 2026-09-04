@@ -59,9 +59,10 @@ thresholds it is Narrow from `60x18`, Medium from `80x24`, and Wide from
 `NO_COLOR=1` disables foreground and background colors while retaining
 non-color focus distinction. Mouse capture remains disabled. Only one process
 may use a state directory at once; a second process is rejected through the
-existing single-instance guard. `/help`, `/status`, `/setup status`, `/audit`,
-and rejected input continue through the existing parser, runtime, application,
-policy, event, audit, and persistence boundaries.
+existing single-instance guard. `/help`, `/status`, `/setup status`, `/audit tail`,
+`/audit tail N`, and rejected input continue through the existing parser,
+runtime, application, policy, event, audit, and persistence boundaries. Bare
+`/audit` is rejected as malformed input.
 
 See [the Phase 0B testing guide](docs/phase-0b-testing.md) for the manual
 acceptance procedure, fallback behavior, restoration checks, and host-specific
@@ -82,6 +83,12 @@ demonstrates its automatic redirected-stdin fallback. The fallback host reads
 one command per line. `/quit` ends the session cleanly; end of input and an
 interrupt also end the foreground session with an explicit shutdown reason.
 The default test suite is deterministic and does not require network access.
+
+`cargo run --locked` is the normal application launch and uses the user's
+standard persistent app-state directory described below. It is appropriate for
+normal use, but must not be used for destructive acceptance experiments; use
+the isolated-state procedures in [the Phase 0B testing guide](docs/phase-0b-testing.md)
+for those checks.
 
 ## Supported commands
 
