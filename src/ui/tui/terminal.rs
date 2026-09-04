@@ -70,19 +70,35 @@ impl<C: TerminalControl> TerminalGuard<C> {
 
         if self.cursor_hidden {
             self.cursor_hidden = false;
-            retain_first_output_error(&mut first_error, self.control.show_cursor());
+            retain_first_error(
+                &mut first_error,
+                self.control
+                    .show_cursor()
+                    .map_err(|_| TuiError::TerminalOutput),
+            );
         }
         if self.alternate_screen_entered {
             self.alternate_screen_entered = false;
-            retain_first_output_error(&mut first_error, self.control.leave_alt());
+            retain_first_error(
+                &mut first_error,
+                self.control.leave_alt().map_err(|_| TuiError::TerminalOutput),
+            );
         }
         if self.raw_enabled {
             self.raw_enabled = false;
-            retain_first_output_error(&mut first_error, self.control.disable_raw());
+            retain_first_error(
+                &mut first_error,
+                self.control
+                    .disable_raw()
+                    .map_err(|_| TuiError::TerminalOutput),
+            );
         }
         if self.flush_required {
             self.flush_required = false;
-            retain_first_output_error(&mut first_error, self.control.flush());
+            retain_first_error(
+                &mut first_error,
+                self.control.flush().map_err(|_| TuiError::TerminalOutput),
+            );
         }
 
         first_error.map_or(Ok(()), Err)
@@ -95,9 +111,11 @@ impl<C: TerminalControl> Drop for TerminalGuard<C> {
     }
 }
 
-fn retain_first_output_error(first_error: &mut Option<TuiError>, result: io::Result<()>) {
-    if result.is_err() && first_error.is_none() {
-        *first_error = Some(TuiError::TerminalOutput);
+fn retain_first_error<E>(first_error: &mut Option<E>, result: Result<(), E>) {
+    if let Err(error) = result
+        && first_error.is_none()
+    {
+        *first_error = Some(error);
     }
 }
 
@@ -188,7 +206,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use super::{TerminalControl, TerminalGuard};
+    use super::{TerminalControl, TerminalGuard, retain_first_error};
     use crate::ui::tui::error::TuiError;
 
     #[derive(Clone)]
@@ -258,6 +276,22 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             self.perform("flush")
         }
+    }
+
+    #[test]
+    fn generic_accumulator_retains_the_first_distinct_error() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum SentinelError {
+            First,
+            Later,
+        }
+
+        let mut first_error = None;
+        retain_first_error(&mut first_error, Ok(()));
+        retain_first_error(&mut first_error, Err(SentinelError::First));
+        retain_first_error(&mut first_error, Err(SentinelError::Later));
+
+        assert_eq!(first_error, Some(SentinelError::First));
     }
 
     #[test]

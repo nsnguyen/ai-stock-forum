@@ -1,9 +1,6 @@
 use ai_stock_forum::{
-    app::{
-        ApplicationCommand, CommandOutcome, CommandView, InputRejectedView, PresentationSnapshot,
-        ShutdownDisposition,
-    },
-    domain::{CommandId, CorrelationId, InstallationId, SessionId},
+    app::{ApplicationCommand, ApplicationEvent, PresentationSnapshot, ShutdownReason},
+    domain::{InstallationId, SessionId},
     setup::SetupStatus,
     ui::tui::{
         ControllerEffect, TuiEvent, apply_outcome, handle_event,
@@ -17,6 +14,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use proptest::prelude::*;
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use uuid::Uuid;
+
+mod support;
 
 fn contains(outer: Rect, inner: Rect) -> bool {
     if inner.x < outer.x || inner.y < outer.y {
@@ -129,7 +128,9 @@ proptest! {
 fn rejected_secret_input_is_absent_before_the_next_rendered_frame() {
     const INPUT: &str = "/unknown password=hunter2 token=abc";
     const FORBIDDEN: [&str; 3] = [INPUT, "hunter2", "token=abc"];
+    const GENERIC_REJECTION: &str = "Command rejected. Check the command and try again.";
 
+    let runtime = support::runtime();
     let mut model = TuiModel::new(snapshot(), false);
     for character in INPUT.chars() {
         let effect = handle_event(&mut model, key(KeyCode::Char(character)));
@@ -137,34 +138,42 @@ fn rejected_secret_input_is_absent_before_the_next_rendered_frame() {
     }
 
     let submitted = handle_event(&mut model, key(KeyCode::Enter));
-    let rejection = match submitted {
-        ControllerEffect::Submit(ApplicationCommand::RejectInput(rejection)) => rejection,
+    let command = match submitted {
+        ControllerEffect::Submit(command @ ApplicationCommand::RejectInput(_)) => command,
         other => panic!("expected rejected submission, got {other:?}"),
     };
-    assert_absent(&format!("{rejection:?}"), &FORBIDDEN);
+    assert_absent(&format!("{command:?}"), &FORBIDDEN);
     assert_eq!(model.command.text(), "");
     assert_eq!(model.command.history_len(), 0);
 
-    let effect = apply_outcome(
-        &mut model,
-        CommandOutcome {
-            command_id: CommandId::from_uuid(Uuid::from_u128(3)),
-            correlation_id: CorrelationId::from_uuid(Uuid::from_u128(4)),
-            committed_events: Vec::new(),
-            view: CommandView::InputRejected(InputRejectedView { rejection }),
-            shutdown: ShutdownDisposition::Continue,
-        },
-    );
+    let outcome = runtime
+        .client()
+        .submit(command)
+        .expect("real runtime rejects unknown input");
+    assert_eq!(outcome.committed_events.len(), 1);
+    assert!(matches!(
+        outcome.committed_events[0].event,
+        ApplicationEvent::CommandRejected { .. }
+    ));
+    assert_absent(&format!("{outcome:?}"), &FORBIDDEN);
+
+    let effect = apply_outcome(&mut model, outcome);
     assert_eq!(effect, ControllerEffect::Redraw);
 
     assert_absent(&format!("{model:?}"), &FORBIDDEN);
-    assert_absent(
-        model.message.as_ref().map_or("", |message| &message.text),
-        &FORBIDDEN,
-    );
+    let message = model.message.as_ref().expect("generic rejection message");
+    assert_eq!(message.text, GENERIC_REJECTION);
+    assert_absent(&message.text, &FORBIDDEN);
+    assert_eq!(model.audit_entries.len(), 1);
+    assert_eq!(model.audit_entries[0].kind, "command_rejected");
     assert_absent(&format!("{:?}", model.audit_entries), &FORBIDDEN);
+    assert_eq!(model.command.text(), "");
     assert_eq!(model.command.history_len(), 0);
-    assert_absent(&render_text(&model), &FORBIDDEN);
+    let frame = render_text(&model);
+    assert!(frame.contains(GENERIC_REJECTION));
+    assert_absent(&frame, &FORBIDDEN);
+
+    runtime.finish_and_join(ShutdownReason::ApplicationError);
 }
 
 fn snapshot() -> PresentationSnapshot {

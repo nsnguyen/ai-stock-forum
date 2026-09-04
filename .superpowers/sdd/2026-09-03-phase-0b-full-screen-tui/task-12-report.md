@@ -113,3 +113,85 @@ contracts. No production visibility was widened for testing.
   explicitly rather than manufacturing a failure or making an unsupported
   production change, as directed by the brief.
 - No conflict with an approved breakpoint or Phase 0 invariant was exposed.
+
+## Fix Round 1
+
+### Review Findings Addressed
+
+- End-to-end redaction now uses the existing isolated `support::runtime()`
+  fixture, which bootstraps a real `ApplicationService` and runs it through
+  `ApplicationRuntime`. The exact secret-bearing line still enters through
+  controller key events and `handle_event`; the resulting authoritative
+  `ApplicationCommand::RejectInput` is submitted to the real runtime.
+- The real service outcome is required to contain exactly one committed event,
+  and that event must be `ApplicationEvent::CommandRejected`. `apply_outcome`
+  then converts the committed event into exactly one `command_rejected` audit
+  entry before the next frame is rendered.
+- The stronger contract proves the full raw line, `hunter2`, and `token=abc`
+  are absent from the submitted command metadata, real service outcome,
+  editor, history, generic message, converted audit entry, complete model, and
+  rendered buffer. It also proves the fixed generic rejection message remains
+  in both the model and rendered frame.
+- The lockfile was compared directly with pre-Task 12 commit `9a662f2`. The
+  original `windows-sys 0.61.2` edges for `dirs-sys 0.5.0`, `errno 0.3.14`,
+  `rustix 1.1.4`, and `tempfile 3.27.0` are restored. The original
+  `rustix 0.38.44` edge remains on `windows-sys 0.59.0`.
+- The final base-to-current lock diff contains only the root Proptest
+  development edge, genuinely new Proptest 1.7.0 transitive packages, and the
+  necessary explicit `r-efi 6.0.0` qualification of the unchanged existing
+  edge after adding `r-efi 5.3.0`.
+- Terminal restoration now uses a private generic `retain_first_error` helper.
+  Each OS operation is still attempted before its result is passed to the
+  helper, and each OS error is mapped immediately to fixed
+  `TuiError::TerminalOutput`; public errors remain payload-free and visibility
+  was not widened.
+
+### RED/GREEN Evidence
+
+- RED: the new distinct-sentinel accumulator unit failed to compile with
+  unresolved import `super::retain_first_error`, demonstrating that the
+  required generic helper did not exist.
+- GREEN: after adding the minimal private helper and routing restoration
+  results through it, the exact sentinel unit passed. It proves an initial
+  success stores nothing, the first distinct error is retained, and a later
+  distinct error cannot replace it.
+- The end-to-end redaction replacement passed on its first valid run against
+  the existing production redaction path; no production redaction fix was
+  needed.
+- During lock repair, all-target locked graph validation caught an over-broad
+  intermediate edit to the `rustix 0.38.44` edge. That edge was restored to its
+  exact `9a662f2` value before final verification.
+
+### Fix Round 1 Verification
+
+- `cargo tree --locked --target all -i windows-sys@0.61.2`: passed and showed
+  the preserved root, `dirs-sys`, `errno`, `rustix 1.1.4`, and `tempfile`
+  consumers.
+- `cargo tree --locked --target all -i windows-sys@0.59.0`: passed and showed
+  only the preserved `rustix 0.38.44` consumer path.
+- `cargo test --test tui_hardening_contract --locked`: 3 passed, 0 failed.
+- `cargo test --lib ui::tui::terminal::tests --locked`: 5 passed, 0 failed.
+- `cargo test --lib ui::tui::host::tests --locked`: 11 passed, 0 failed.
+- `cargo test --test windows_source_static_contract --locked`: 5 passed,
+  0 failed.
+- `cargo test --locked --quiet`: 303 passed, 0 failed, including 0 doctest
+  failures.
+
+### Fix Round 1 Files and Self-Review
+
+- `tests/tui_hardening_contract.rs`: replaced the synthetic empty-event outcome
+  with the real isolated service/runtime flow and asserted committed-event audit
+  conversion.
+- `Cargo.lock`: restored all pre-Task 12 production selections and edges while
+  retaining only the required Proptest graph additions.
+- `src/ui/tui/terminal.rs`: added the private generic first-error helper and its
+  distinct-sentinel test.
+- `.superpowers/sdd/2026-09-03-phase-0b-full-screen-tui/task-12-report.md`:
+  appended complete fix-round evidence.
+- Reviewed the complete fix-round diff and the full `9a662f2`-to-current
+  lockfile diff. No unrelated source, dependency version, dependency edge,
+  visibility, feature, or ledger change remains.
+
+### Fix Round 1 Concerns
+
+- None.
