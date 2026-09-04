@@ -702,6 +702,8 @@ mod tests {
 
         assert!(matches!(result, Err(TuiError::Panicked)));
         assert_eq!(observer.finishes(), [ShutdownReason::ApplicationError]);
+        assert_eq!(screen.restore_calls(), 1);
+        assert!(!format!("{result:?}").contains("injected screen panic"));
     }
 
     #[test]

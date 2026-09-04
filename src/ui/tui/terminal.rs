@@ -282,47 +282,75 @@ mod tests {
     }
 
     #[test]
-    fn partial_initialization_failure_restores_acquired_state() {
-        let control = FakeTerminalControl::failing_at("hide_cursor");
-        let result = TerminalGuard::enter(control.clone());
-        assert!(matches!(result, Err(TuiError::TerminalInitialization)));
-        assert_eq!(
-            control.log(),
-            [
-                "enable_raw",
+    fn every_initialization_failure_restores_only_acquired_state() {
+        let cases: [(&str, &[&str]); 3] = [
+            ("enable_raw", &["enable_raw"]),
+            (
                 "enter_alt",
+                &["enable_raw", "enter_alt", "disable_raw", "flush"],
+            ),
+            (
                 "hide_cursor",
-                "leave_alt",
-                "disable_raw",
-                "flush",
-            ]
-        );
+                &[
+                    "enable_raw",
+                    "enter_alt",
+                    "hide_cursor",
+                    "leave_alt",
+                    "disable_raw",
+                    "flush",
+                ],
+            ),
+        ];
+
+        for (operation, expected_log) in cases {
+            let control = FakeTerminalControl::failing_at(operation);
+            let result = TerminalGuard::enter(control.clone());
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("operation {operation} unexpectedly succeeded"),
+            };
+
+            assert!(
+                matches!(error, TuiError::TerminalInitialization),
+                "operation={operation}"
+            );
+            assert_eq!(control.log(), expected_log, "operation={operation}");
+            assert!(!format!("{error:?}").contains("injected terminal failure"));
+        }
     }
 
     #[test]
-    fn restoration_attempts_every_step_and_returns_only_the_first_safe_error() {
-        let control = FakeTerminalControl::failing_at_all(&[
-            "show_cursor",
-            "leave_alt",
-            "disable_raw",
-            "flush",
-        ]);
-        let observer = control.clone();
-        let mut guard = TerminalGuard::enter(control).unwrap();
+    fn every_restoration_failure_attempts_all_steps_and_returns_only_a_safe_error() {
+        let cases = [
+            vec!["show_cursor"],
+            vec!["leave_alt"],
+            vec!["disable_raw"],
+            vec!["flush"],
+            vec!["show_cursor", "leave_alt", "disable_raw", "flush"],
+        ];
 
-        assert!(matches!(guard.restore(), Err(TuiError::TerminalOutput)));
-        assert_eq!(
-            observer.log(),
-            [
-                "enable_raw",
-                "enter_alt",
-                "hide_cursor",
-                "show_cursor",
-                "leave_alt",
-                "disable_raw",
-                "flush",
-            ]
-        );
+        for failures in cases {
+            let control = FakeTerminalControl::failing_at_all(&failures);
+            let observer = control.clone();
+            let mut guard = TerminalGuard::enter(control).unwrap();
+            let result = guard.restore();
+
+            assert!(matches!(result, Err(TuiError::TerminalOutput)));
+            assert_eq!(
+                observer.log(),
+                [
+                    "enable_raw",
+                    "enter_alt",
+                    "hide_cursor",
+                    "show_cursor",
+                    "leave_alt",
+                    "disable_raw",
+                    "flush",
+                ],
+                "failures={failures:?}"
+            );
+            assert!(!format!("{result:?}").contains("injected terminal failure"));
+        }
     }
 
     #[test]
