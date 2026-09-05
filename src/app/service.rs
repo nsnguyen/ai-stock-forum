@@ -352,7 +352,6 @@ impl ApplicationService {
     }
 
     pub fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
-        self.executor.reviews.cancel();
         self.executor.hook.before_finish_lifecycle_write();
         let lifecycle = self.executor.lifecycle.clone();
         let mut phase = lifecycle
@@ -362,6 +361,7 @@ impl ApplicationService {
         if *phase == LifecyclePhase::Closed {
             return Ok(());
         }
+        self.executor.reviews.cancel();
         RecoveryCoordinator::finish_session(
             &mut self.executor.database,
             &mut self.state,
@@ -437,6 +437,7 @@ impl CommandExecutor {
         }
         authorize_passive(self.policy.as_ref(), Capability::AgentProfileEdit)?;
         validate_draft(&candidate)?;
+        let review_operation = self.reviews.operation();
         let projection = ProjectionRepository::load(self.database.connection())?;
         let current = projection
             .agent_profiles
@@ -455,7 +456,7 @@ impl CommandExecutor {
             &diffs,
         )?;
         let review_token = ProfileReviewToken::from_uuid(self.ids.next_uuid());
-        self.reviews.replace(
+        review_operation.replace(
             review_token,
             profile_id,
             expected_active_version_id,
@@ -512,6 +513,29 @@ impl CommandExecutor {
         let request = CommandRequest::from(&envelope);
         let request_json = encode_canonical(&request)?;
         let command_fingerprint = sha256(request_json.as_bytes());
+        let review_operation = if matches!(
+            &request.command,
+            ApplicationCommand::ActivateAgentProfileVersion { .. }
+        ) {
+            let replay_transaction = self.database.immediate_transaction()?;
+            if let Some(receipt) =
+                CommandReceiptRepository::load(&replay_transaction, envelope.command_id)?
+            {
+                let stored = validate_receipt(
+                    &replay_transaction,
+                    &receipt,
+                    &request,
+                    &request_json,
+                    &command_fingerprint,
+                )?;
+                replay_transaction.commit()?;
+                return stored.into_result();
+            }
+            replay_transaction.commit()?;
+            Some(self.reviews.operation())
+        } else {
+            None
+        };
         let transaction = self.database.immediate_transaction()?;
         if let Some(receipt) = CommandReceiptRepository::load(&transaction, envelope.command_id)? {
             let stored = validate_receipt(
@@ -600,7 +624,9 @@ impl CommandExecutor {
                     if &computed_review_digest != supplied_review_digest {
                         return Err(AppError::ReviewDigestMismatch);
                     }
-                    self.reviews
+                    review_operation
+                        .as_ref()
+                        .expect("activation owns the profile review operation")
                         .reserve(
                             envelope.command_id,
                             *review_token,
@@ -690,19 +716,28 @@ impl CommandExecutor {
             Ok(result) => result,
             Err(error) => {
                 if reserved {
-                    self.reviews.release(envelope.command_id);
+                    review_operation
+                        .as_ref()
+                        .expect("reserved review has an operation owner")
+                        .release(envelope.command_id);
                 }
                 return Err(error);
             }
         };
         if let Err(error) = transaction.commit() {
             if reserved {
-                self.reviews.release(envelope.command_id);
+                review_operation
+                    .as_ref()
+                    .expect("reserved review has an operation owner")
+                    .release(envelope.command_id);
             }
             return Err(error.into());
         }
         if reserved {
-            self.reviews.consume(envelope.command_id);
+            review_operation
+                .as_ref()
+                .expect("reserved review has an operation owner")
+                .consume(envelope.command_id);
         }
         if matches!(request.command, ApplicationCommand::RequestShutdown) {
             self.reviews.cancel();

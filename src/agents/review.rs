@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use serde::Serialize;
 
@@ -45,11 +45,27 @@ pub(crate) enum ReviewReservationError {
 
 #[derive(Debug, Default)]
 pub(crate) struct ProfileReviewRegistry {
+    operation: Mutex<()>,
     state: Mutex<Option<ReviewState>>,
 }
 
+pub(crate) struct ProfileReviewOperation<'a> {
+    registry: &'a ProfileReviewRegistry,
+    _ownership: MutexGuard<'a, ()>,
+}
+
 impl ProfileReviewRegistry {
-    pub(crate) fn replace(
+    pub(crate) fn operation(&self) -> ProfileReviewOperation<'_> {
+        ProfileReviewOperation {
+            registry: self,
+            _ownership: self
+                .operation
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        }
+    }
+
+    fn replace(
         &self,
         token: ProfileReviewToken,
         profile_id: AgentProfileId,
@@ -68,7 +84,7 @@ impl ProfileReviewRegistry {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn reserve(
+    fn reserve(
         &self,
         command_id: CommandId,
         token: ProfileReviewToken,
@@ -106,7 +122,7 @@ impl ProfileReviewRegistry {
         }
     }
 
-    pub(crate) fn release(&self, command_id: CommandId) {
+    fn release(&self, command_id: CommandId) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let current = state.take();
         *state = match current {
@@ -118,7 +134,7 @@ impl ProfileReviewRegistry {
         };
     }
 
-    pub(crate) fn consume(&self, command_id: CommandId) {
+    fn consume(&self, command_id: CommandId) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let current = state.take();
         *state = match current {
@@ -130,7 +146,62 @@ impl ProfileReviewRegistry {
     }
 
     pub(crate) fn cancel(&self) {
-        *self.state.lock().unwrap_or_else(|error| error.into_inner()) = None;
+        self.operation().cancel();
+    }
+}
+
+impl ProfileReviewOperation<'_> {
+    pub(crate) fn replace(
+        &self,
+        token: ProfileReviewToken,
+        profile_id: AgentProfileId,
+        expected_active_version_id: AgentProfileVersionId,
+        candidate_digest: Digest,
+        review_digest: Digest,
+    ) {
+        self.registry.replace(
+            token,
+            profile_id,
+            expected_active_version_id,
+            candidate_digest,
+            review_digest,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn reserve(
+        &self,
+        command_id: CommandId,
+        token: ProfileReviewToken,
+        profile_id: AgentProfileId,
+        expected_active_version_id: AgentProfileVersionId,
+        candidate_digest: &Digest,
+        review_digest: &Digest,
+    ) -> Result<(), ReviewReservationError> {
+        self.registry.reserve(
+            command_id,
+            token,
+            profile_id,
+            expected_active_version_id,
+            candidate_digest,
+            review_digest,
+        )
+    }
+
+    pub(crate) fn release(&self, command_id: CommandId) {
+        self.registry.release(command_id);
+    }
+
+    pub(crate) fn consume(&self, command_id: CommandId) {
+        self.registry.consume(command_id);
+    }
+
+    fn cancel(&self) {
+        *self
+            .registry
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
     }
 }
 
