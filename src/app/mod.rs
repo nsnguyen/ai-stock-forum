@@ -31,8 +31,8 @@ pub use outcome::{
 };
 pub use service::{
     ApplicationService, ApplicationWorker, AuthorizationDecision, CommandPolicy,
-    CommandTransactionHook, DatabaseReadiness, NoopCommandTransactionHook, PresentationSnapshot,
-    ProcessGuardOwnership,
+    CommandTransactionHook, DatabaseReadiness, IndependentApplicationService,
+    NoopCommandTransactionHook, PresentationSnapshot, ProcessGuardOwnership,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -78,7 +78,7 @@ impl AppError {
             Self::ApprovalRequired { .. } => "approval_required",
             Self::CommandConflict => "command_conflict",
             Self::AgentProfileNotFound => "unknown_profile",
-            Self::DuplicateProfileName => "duplicate_profile_name",
+            Self::DuplicateProfileName => "active_name_conflict",
             Self::StaleAgentProfileVersion => "stale_profile_version",
             Self::ProfileReviewUnavailable => "profile_review_unavailable",
             Self::ProfileReviewMismatch => "profile_review_mismatch",

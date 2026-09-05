@@ -655,6 +655,41 @@ impl TestApp {
             .unwrap()
     }
 
+    pub fn active_profile_rows(&self) -> Vec<(String, String, i64, String, String)> {
+        let connection = Connection::open(self.paths.database_path()).unwrap();
+        let mut statement = connection
+            .prepare(
+                "SELECT profile_id, profile_version_id, version, normalized_name, readiness
+                 FROM active_agent_profiles ORDER BY profile_id",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    pub fn projection_metadata_row(&self) -> (i64, Option<String>, String) {
+        Connection::open(self.paths.database_path())
+            .unwrap()
+            .query_row(
+                "SELECT last_event_sequence, last_event_digest, projection_digest
+                 FROM projection_metadata WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    }
+
     pub fn event_payloads(&self, kind: &str) -> Vec<String> {
         let connection = Connection::open(self.paths.database_path()).unwrap();
         let mut statement = connection

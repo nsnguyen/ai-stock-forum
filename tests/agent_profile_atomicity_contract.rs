@@ -3,6 +3,7 @@ mod support;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
+    Mutex,
 };
 
 use ai_stock_forum::{
@@ -31,6 +32,8 @@ struct FailOnceHook {
     target: FailureBoundary,
     armed: AtomicBool,
     fired: AtomicBool,
+    expected_projection: Mutex<Option<(i64, String)>>,
+    exact_pointer_seam_seen: AtomicBool,
 }
 
 impl FailOnceHook {
@@ -39,11 +42,17 @@ impl FailOnceHook {
             target,
             armed: AtomicBool::new(false),
             fired: AtomicBool::new(false),
+            expected_projection: Mutex::new(None),
+            exact_pointer_seam_seen: AtomicBool::new(false),
         }
     }
 
     fn arm(&self) {
         self.armed.store(true, Ordering::SeqCst);
+    }
+
+    fn expect_projection(&self, sequence: i64, digest: String) {
+        *self.expected_projection.lock().unwrap() = Some((sequence, digest));
     }
 
     fn inject(&self, boundary: FailureBoundary) -> Result<(), PersistenceError> {
@@ -87,8 +96,21 @@ impl CommandTransactionHook for FailOnceHook {
 
     fn after_active_pointer_update(
         &self,
-        _transaction: &rusqlite::Transaction<'_>,
+        transaction: &rusqlite::Transaction<'_>,
     ) -> Result<(), PersistenceError> {
+        if self.target == FailureBoundary::AfterActivePointerUpdate {
+            let current: (i64, String) = transaction
+                .query_row(
+                    "SELECT last_event_sequence, projection_digest
+                     FROM projection_metadata WHERE singleton = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|_| PersistenceError::QueryFailed)?;
+            let expected = self.expected_projection.lock().unwrap();
+            self.exact_pointer_seam_seen
+                .store(expected.as_ref() == Some(&current), Ordering::SeqCst);
+        }
         self.inject(FailureBoundary::AfterActivePointerUpdate)
     }
 
@@ -121,14 +143,16 @@ impl CommandTransactionHook for FailOnceHook {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DurableSnapshot {
     events: i64,
     versions: i64,
-    active: i64,
+    active_rows: Vec<(String, String, i64, String, String)>,
     receipts: i64,
     refs: i64,
     projected_sequence: u64,
+    projected_event_digest: Option<String>,
+    projection_digest: String,
     max_sequence: u64,
 }
 
@@ -136,10 +160,12 @@ fn snapshot(app: &support::TestApp) -> DurableSnapshot {
     DurableSnapshot {
         events: app.count_rows("event_stream"),
         versions: app.count_rows("agent_profile_versions"),
-        active: app.count_rows("active_agent_profiles"),
+        active_rows: app.active_profile_rows(),
         receipts: app.count_rows("command_receipts"),
         refs: app.count_rows("command_event_refs"),
         projected_sequence: app.persisted_last_sequence(),
+        projected_event_digest: app.projection_metadata_row().1,
+        projection_digest: app.projection_metadata_row().2,
         max_sequence: app.max_event_sequence(),
     }
 }
@@ -243,6 +269,10 @@ fn every_injected_write_boundary_rolls_back_and_releases_the_review_for_retry() 
             ),
         );
         let before = snapshot(&app);
+        hook.expect_projection(
+            i64::try_from(before.projected_sequence).unwrap(),
+            before.projection_digest.clone(),
+        );
 
         hook.arm();
         let error = app.execute(command.clone()).unwrap_err();
@@ -254,6 +284,9 @@ fn every_injected_write_boundary_rolls_back_and_releases_the_review_for_retry() 
             "boundary {boundary:?}"
         );
         assert_eq!(snapshot(&app), before, "boundary {boundary:?}");
+        if boundary == FailureBoundary::AfterActivePointerUpdate {
+            assert!(hook.exact_pointer_seam_seen.load(Ordering::SeqCst));
+        }
         assert!(app.event_ref_rows(command.command_id).is_empty());
 
         let retried = app.execute(command).unwrap();
@@ -264,7 +297,8 @@ fn every_injected_write_boundary_rolls_back_and_releases_the_review_for_retry() 
         let after = snapshot(&app);
         assert_eq!(after.events, before.events + 1, "boundary {boundary:?}");
         assert_eq!(after.versions, before.versions + 1, "boundary {boundary:?}");
-        assert_eq!(after.active, before.active, "boundary {boundary:?}");
+        assert_eq!(after.active_rows.len(), before.active_rows.len());
+        assert_ne!(after.active_rows, before.active_rows);
         assert_eq!(after.receipts, before.receipts + 1, "boundary {boundary:?}");
         assert_eq!(after.refs, before.refs + 1, "boundary {boundary:?}");
         assert_eq!(after.projected_sequence, before.projected_sequence + 1);

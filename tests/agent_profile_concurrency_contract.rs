@@ -4,10 +4,8 @@ use std::{
     sync::{
         Arc, Barrier,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, RecvTimeoutError},
     },
     thread,
-    time::Duration,
 };
 
 use ai_stock_forum::{
@@ -21,9 +19,13 @@ use ai_stock_forum::{
 };
 use uuid::Uuid;
 
+fn command_id(id: u128) -> CommandId {
+    CommandId::from_uuid(Uuid::from_u128(id))
+}
+
 fn envelope(id: u128, command: ApplicationCommand) -> CommandEnvelope {
     CommandEnvelope {
-        command_id: CommandId::from_uuid(Uuid::from_u128(id)),
+        command_id: command_id(id),
         correlation_id: CorrelationId::from_uuid(Uuid::from_u128(id + 100_000)),
         actor: Actor::Human,
         command,
@@ -81,14 +83,105 @@ fn created_profile(
     (view.profile_id, view.profile_version_id)
 }
 
+struct NameBoundaryHook {
+    first: CommandId,
+    second: CommandId,
+    first_inside: AtomicBool,
+    overlap_observed: AtomicBool,
+    first_entered: Barrier,
+    second_entered: Barrier,
+    overlap_recorded: Barrier,
+    release_first: Barrier,
+    review_preflights: Barrier,
+}
+
+impl NameBoundaryHook {
+    fn new(first: CommandId, second: CommandId) -> Self {
+        Self {
+            first,
+            second,
+            first_inside: AtomicBool::new(false),
+            overlap_observed: AtomicBool::new(false),
+            first_entered: Barrier::new(2),
+            second_entered: Barrier::new(2),
+            overlap_recorded: Barrier::new(2),
+            release_first: Barrier::new(2),
+            review_preflights: Barrier::new(2),
+        }
+    }
+
+    fn wait_for_first_precheck(&self) {
+        self.first_entered.wait();
+    }
+
+    fn wait_for_second_attempt(&self) {
+        self.second_entered.wait();
+        self.overlap_recorded.wait();
+    }
+
+    fn release_first(&self) {
+        self.release_first.wait();
+    }
+}
+
+impl CommandTransactionHook for NameBoundaryHook {
+    fn before_outcome_materialization(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn before_receipt_write(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn before_profile_mutation_transaction(&self, contender: CommandId) {
+        if contender == self.second {
+            self.second_entered.wait();
+            self.overlap_observed
+                .store(self.first_inside.load(Ordering::SeqCst), Ordering::SeqCst);
+            self.overlap_recorded.wait();
+        }
+    }
+
+    fn before_profile_review_operation(&self, contender: CommandId) {
+        if contender == self.first || contender == self.second {
+            self.review_preflights.wait();
+        }
+    }
+
+    fn after_profile_name_precheck(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+        contender: CommandId,
+    ) -> Result<(), PersistenceError> {
+        if contender == self.first {
+            self.first_inside.store(true, Ordering::SeqCst);
+            self.first_entered.wait();
+            self.release_first.wait();
+            self.first_inside.store(false, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
 #[test]
-fn folded_name_create_race_has_one_winner_one_conflict_and_no_loser_writes() {
-    let mut app = support::app();
+fn folded_name_create_race_overlaps_at_precheck_and_has_one_deterministic_winner() {
+    let first_id = command_id(10_000);
+    let second_id = command_id(10_001);
+    let hook = Arc::new(NameBoundaryHook::new(first_id, second_id));
+    let mut app = support::app_with_policy_and_hook(
+        Arc::new(support::RecordingPolicy::new(
+            AuthorizationDecision::Granted,
+        )),
+        hook.clone(),
+    );
     let baseline_events = app.count_rows("event_stream");
     let baseline_receipts = app.count_rows("command_receipts");
-    let start = Arc::new(Barrier::new(3));
-    let mut first_worker = app.peer();
-    let mut second_worker = app.peer();
     let first = envelope(
         10_000,
         ApplicationCommand::CreateAgentProfile {
@@ -103,48 +196,25 @@ fn folded_name_create_race_has_one_winner_one_conflict_and_no_loser_writes() {
             template_provenance: None,
         },
     );
+    let mut first_worker = app.peer();
+    let mut second_worker = app.peer();
 
-    let first_start = start.clone();
     let first_command = first.clone();
-    let first_thread = thread::spawn(move || {
-        first_start.wait();
-        first_worker.execute(first_command)
-    });
-    let second_start = start.clone();
+    let first_thread = thread::spawn(move || first_worker.execute(first_command));
+    hook.wait_for_first_precheck();
     let second_command = second.clone();
-    let second_thread = thread::spawn(move || {
-        second_start.wait();
-        second_worker.execute(second_command)
-    });
-    start.wait();
+    let second_thread = thread::spawn(move || second_worker.execute(second_command));
+    hook.wait_for_second_attempt();
+    assert!(hook.overlap_observed.load(Ordering::SeqCst));
+    hook.release_first();
 
-    let results = [
-        (first.clone(), first_thread.join().unwrap()),
-        (second.clone(), second_thread.join().unwrap()),
-    ];
-    assert_eq!(results.iter().filter(|(_, result)| result.is_ok()).count(), 1);
-    assert_eq!(
-        results
-            .iter()
-            .filter(|(_, result)| matches!(result, Err(AppError::DuplicateProfileName)))
-            .count(),
-        1
-    );
+    let winning_outcome = first_thread.join().unwrap().unwrap();
+    let losing_error = second_thread.join().unwrap().unwrap_err();
+    assert_eq!(losing_error, AppError::DuplicateProfileName);
+    assert_eq!(losing_error.code(), "active_name_conflict");
+    assert_eq!(app.execute(first.clone()).unwrap(), winning_outcome);
 
-    let (winning_command, winning_outcome) = results
-        .iter()
-        .find_map(|(command, result)| result.as_ref().ok().map(|outcome| (command, outcome)))
-        .unwrap();
-    let losing_command = results
-        .iter()
-        .find_map(|(command, result)| result.as_ref().err().map(|_| command))
-        .unwrap();
-    assert_eq!(
-        app.execute(winning_command.clone()).unwrap(),
-        *winning_outcome
-    );
-
-    let mut changed = winning_command.clone();
+    let mut changed = first;
     changed.command = ApplicationCommand::CreateAgentProfile {
         draft: draft("Changed Payload Analyst"),
         template_provenance: None,
@@ -157,39 +227,117 @@ fn folded_name_create_race_has_one_winner_one_conflict_and_no_loser_writes() {
     assert_eq!(app.count_rows("active_agent_profiles"), 1);
     assert_eq!(app.count_rows("command_receipts"), baseline_receipts + 1);
     assert_eq!(app.count_rows("command_event_refs"), baseline_receipts + 1);
-    assert!(app.event_ref_rows(losing_command.command_id).is_empty());
+    assert!(app.event_ref_rows(second.command_id).is_empty());
     assert_eq!(app.persisted_last_sequence(), app.max_event_sequence());
 }
 
-struct BlockingOutcomeHook {
-    armed: AtomicBool,
-    entered: Barrier,
-    release: Barrier,
+#[test]
+fn two_independent_services_edit_one_base_with_one_version_two_and_one_stale_loser() {
+    let first_id = command_id(20_001);
+    let second_id = command_id(20_002);
+    let hook = Arc::new(NameBoundaryHook::new(first_id, second_id));
+    let mut app = support::app_with_policy_and_hook(
+        Arc::new(support::RecordingPolicy::new(
+            AuthorizationDecision::Granted,
+        )),
+        hook.clone(),
+    );
+    let (profile_id, base_version_id) = created_profile(&mut app, 20_000);
+    let mut first_service = app.independent_profile_instance().unwrap();
+    let mut second_service = app.independent_profile_instance().unwrap();
+    let first_candidate = draft("First Independent Edit");
+    let second_candidate = draft("Second Independent Edit");
+    let first_preview = first_service
+        .preview_agent_profile_edit(profile_id, base_version_id, first_candidate.clone())
+        .unwrap();
+    let second_preview = second_service
+        .preview_agent_profile_edit(profile_id, base_version_id, second_candidate.clone())
+        .unwrap();
+    let first = envelope(
+        20_001,
+        activation(
+            profile_id,
+            base_version_id,
+            first_candidate,
+            first_preview.review_token,
+            first_preview.review_digest,
+        ),
+    );
+    let second = envelope(
+        20_002,
+        activation(
+            profile_id,
+            base_version_id,
+            second_candidate,
+            second_preview.review_token,
+            second_preview.review_digest,
+        ),
+    );
+    let before_events = app.count_rows("event_stream");
+    let before_receipts = app.count_rows("command_receipts");
+
+    let second_for_thread = second.clone();
+    let first_thread = thread::spawn(move || first_service.execute(first));
+    let second_thread = thread::spawn(move || second_service.execute(second_for_thread));
+    hook.wait_for_first_precheck();
+    hook.wait_for_second_attempt();
+    assert!(hook.overlap_observed.load(Ordering::SeqCst));
+    hook.release_first();
+
+    let first_outcome = first_thread.join().unwrap().unwrap();
+    let second_error = second_thread.join().unwrap().unwrap_err();
+    let CommandView::AgentProfileVersionActivated(view) = first_outcome.view else {
+        panic!("agent profile activation view")
+    };
+    assert_eq!(view.version.get(), 2);
+    assert_eq!(second_error, AppError::StaleAgentProfileVersion);
+    assert_eq!(app.event_count("agent_profile_version_activated"), 1);
+    assert_eq!(app.count_rows("event_stream"), before_events + 1);
+    assert_eq!(app.count_rows("agent_profile_versions"), 2);
+    assert_eq!(app.count_rows("active_agent_profiles"), 1);
+    assert_eq!(app.count_rows("command_receipts"), before_receipts + 1);
+    assert_eq!(app.count_rows("command_event_refs"), before_receipts + 1);
+    assert!(app.event_ref_rows(second.command_id).is_empty());
+    assert_eq!(app.persisted_last_sequence(), app.max_event_sequence());
 }
 
-impl BlockingOutcomeHook {
-    fn new() -> Self {
+struct ReviewReservationHook {
+    first: CommandId,
+    second: CommandId,
+    reservation_inside: AtomicBool,
+    overlap_observed: AtomicBool,
+    first_before_operation: Barrier,
+    second_before_operation: Barrier,
+    allow_first_operation: Barrier,
+    allow_second_operation: Barrier,
+    first_reserved: Barrier,
+    second_attempting: Barrier,
+    release_first: Barrier,
+}
+
+impl ReviewReservationHook {
+    fn new(first: CommandId, second: CommandId) -> Self {
         Self {
-            armed: AtomicBool::new(false),
-            entered: Barrier::new(2),
-            release: Barrier::new(2),
+            first,
+            second,
+            reservation_inside: AtomicBool::new(false),
+            overlap_observed: AtomicBool::new(false),
+            first_before_operation: Barrier::new(2),
+            second_before_operation: Barrier::new(2),
+            allow_first_operation: Barrier::new(2),
+            allow_second_operation: Barrier::new(2),
+            first_reserved: Barrier::new(2),
+            second_attempting: Barrier::new(2),
+            release_first: Barrier::new(2),
         }
     }
-
-    fn arm(&self) {
-        self.armed.store(true, Ordering::SeqCst);
-    }
 }
 
-impl CommandTransactionHook for BlockingOutcomeHook {
+impl CommandTransactionHook for ReviewReservationHook {
     fn before_outcome_materialization(
         &self,
         _transaction: &rusqlite::Transaction<'_>,
     ) -> Result<(), PersistenceError> {
-        if self.armed.swap(false, Ordering::SeqCst) {
-            self.entered.wait();
-            self.release.wait();
-        }
         Ok(())
     }
 
@@ -199,74 +347,48 @@ impl CommandTransactionHook for BlockingOutcomeHook {
     ) -> Result<(), PersistenceError> {
         Ok(())
     }
+
+    fn before_profile_review_operation(&self, contender: CommandId) {
+        if contender == self.first {
+            self.first_before_operation.wait();
+            self.allow_first_operation.wait();
+        } else if contender == self.second {
+            self.second_before_operation.wait();
+            self.allow_second_operation.wait();
+            self.overlap_observed.store(
+                self.reservation_inside.load(Ordering::SeqCst),
+                Ordering::SeqCst,
+            );
+            self.second_attempting.wait();
+        }
+    }
+
+    fn after_profile_review_reservation(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+        contender: CommandId,
+    ) -> Result<(), PersistenceError> {
+        if contender == self.first {
+            self.reservation_inside.store(true, Ordering::SeqCst);
+            self.first_reserved.wait();
+            self.release_first.wait();
+            self.reservation_inside.store(false, Ordering::SeqCst);
+        }
+        Ok(())
+    }
 }
 
 #[test]
-fn two_edits_from_one_base_linearize_to_version_two_then_stale_preview() {
-    let hook = Arc::new(BlockingOutcomeHook::new());
+fn one_review_token_overlaps_at_reservation_and_has_one_deterministic_winner() {
+    let first_id = command_id(30_001);
+    let second_id = command_id(30_002);
+    let hook = Arc::new(ReviewReservationHook::new(first_id, second_id));
     let mut app = support::app_with_policy_and_hook(
         Arc::new(support::RecordingPolicy::new(
             AuthorizationDecision::Granted,
         )),
         hook.clone(),
     );
-    let (profile_id, base_version_id) = created_profile(&mut app, 20_000);
-    let winning_candidate = draft("Winning Version Two Analyst");
-    let preview = app
-        .preview_agent_profile_edit(profile_id, base_version_id, winning_candidate.clone())
-        .unwrap();
-    let mut worker = app.peer();
-
-    hook.arm();
-    let activation_thread = thread::spawn(move || {
-        worker.execute(envelope(
-            20_001,
-            activation(
-                profile_id,
-                base_version_id,
-                winning_candidate,
-                preview.review_token,
-                preview.review_digest,
-            ),
-        ))
-    });
-    hook.entered.wait();
-
-    let preview_started = Arc::new(Barrier::new(2));
-    let preview_started_in_thread = preview_started.clone();
-    let (preview_sender, preview_receiver) = mpsc::sync_channel(1);
-    thread::spawn(move || {
-        preview_started_in_thread.wait();
-        let result = app.preview_agent_profile_edit(
-            profile_id,
-            base_version_id,
-            draft("Losing Stale Analyst"),
-        );
-        preview_sender.send((app, result)).unwrap();
-    });
-    preview_started.wait();
-
-    assert!(matches!(
-        preview_receiver.recv_timeout(Duration::from_millis(250)),
-        Err(RecvTimeoutError::Timeout)
-    ));
-    hook.release.wait();
-    let activated = activation_thread.join().unwrap().unwrap();
-    let (app, stale) = preview_receiver.recv().unwrap();
-
-    let CommandView::AgentProfileVersionActivated(view) = activated.view else {
-        panic!("agent profile activation view")
-    };
-    assert_eq!(view.version.get(), 2);
-    assert_eq!(stale.unwrap_err(), AppError::StaleAgentProfileVersion);
-    assert_eq!(app.event_count("agent_profile_version_activated"), 1);
-    assert_eq!(app.count_rows("agent_profile_versions"), 2);
-    assert_eq!(app.count_rows("active_agent_profiles"), 1);
-}
-
-#[test]
-fn one_review_token_has_one_activation_winner_and_receipt_first_replay() {
-    let mut app = support::app();
     let (profile_id, base_version_id) = created_profile(&mut app, 30_000);
     let candidate = draft("Single Token Winner Analyst");
     let preview = app
@@ -294,62 +416,40 @@ fn one_review_token_has_one_activation_winner_and_receipt_first_replay() {
     );
     let mut first_worker = app.peer();
     let mut second_worker = app.peer();
-    let start = Arc::new(Barrier::new(3));
-    let first_start = start.clone();
+
     let first_command = first.clone();
-    let first_thread = thread::spawn(move || {
-        first_start.wait();
-        first_worker.execute(first_command)
-    });
-    let second_start = start.clone();
+    let first_thread = thread::spawn(move || first_worker.execute(first_command));
+    hook.first_before_operation.wait();
     let second_command = second.clone();
-    let second_thread = thread::spawn(move || {
-        second_start.wait();
-        second_worker.execute(second_command)
-    });
-    start.wait();
+    let second_thread = thread::spawn(move || second_worker.execute(second_command));
+    hook.second_before_operation.wait();
+    hook.allow_first_operation.wait();
+    hook.first_reserved.wait();
+    hook.allow_second_operation.wait();
+    hook.second_attempting.wait();
+    assert!(hook.overlap_observed.load(Ordering::SeqCst));
+    hook.release_first.wait();
 
-    let results = [
-        (first, first_thread.join().unwrap()),
-        (second, second_thread.join().unwrap()),
-    ];
-    assert_eq!(results.iter().filter(|(_, result)| result.is_ok()).count(), 1);
+    let winning_outcome = first_thread.join().unwrap().unwrap();
     assert_eq!(
-        results
-            .iter()
-            .filter(|(_, result)| matches!(result, Err(AppError::ProfileReviewUnavailable)))
-            .count(),
-        1
+        second_thread.join().unwrap().unwrap_err(),
+        AppError::ProfileReviewUnavailable
     );
+    assert_eq!(app.execute(first.clone()).unwrap(), winning_outcome);
 
-    let (winning_command, winning_outcome) = results
-        .iter()
-        .find_map(|(command, result)| result.as_ref().ok().map(|outcome| (command, outcome)))
-        .unwrap();
-    let losing_command = results
-        .iter()
-        .find_map(|(command, result)| result.as_ref().err().map(|_| command))
-        .unwrap();
-    assert_eq!(
-        app.execute(winning_command.clone()).unwrap(),
-        *winning_outcome
-    );
-
-    let mut changed = winning_command.clone();
+    let mut changed = first;
     let ApplicationCommand::ActivateAgentProfileVersion { candidate, .. } = &mut changed.command
     else {
         panic!("activation command")
     };
     candidate.description = "Changed payload after receipt commit.".to_owned();
     assert_eq!(app.execute(changed).unwrap_err(), AppError::CommandConflict);
-
     assert_eq!(app.event_count("agent_profile_version_activated"), 1);
     assert_eq!(app.count_rows("agent_profile_versions"), 2);
     assert_eq!(app.count_rows("active_agent_profiles"), 1);
     assert_eq!(app.count_rows("command_receipts"), 2);
     assert_eq!(app.count_rows("command_event_refs"), 2);
-    assert!(app.event_ref_rows(losing_command.command_id).is_empty());
-    assert_eq!(app.persisted_last_sequence(), app.max_event_sequence());
+    assert!(app.event_ref_rows(second.command_id).is_empty());
 }
 
 struct SqliteNameConflictHook {
@@ -412,7 +512,7 @@ impl CommandTransactionHook for SqliteNameConflictHook {
 }
 
 #[test]
-fn sqlite_normalized_name_conflict_matches_reducer_precheck_and_rolls_back() {
+fn sqlite_normalized_name_conflict_has_the_same_stable_code_and_rolls_back() {
     let hook = Arc::new(SqliteNameConflictHook::new());
     let mut app = support::app_with_policy_and_hook(
         Arc::new(support::RecordingPolicy::new(
@@ -431,25 +531,24 @@ fn sqlite_normalized_name_conflict_matches_reducer_precheck_and_rolls_back() {
     let before = (
         app.count_rows("event_stream"),
         app.count_rows("agent_profile_versions"),
-        app.count_rows("active_agent_profiles"),
+        app.active_profile_rows(),
         app.count_rows("command_receipts"),
         app.count_rows("command_event_refs"),
-        app.persisted_last_sequence(),
+        app.projection_metadata_row(),
     );
 
     hook.arm();
-    assert_eq!(
-        app.execute(command.clone()).unwrap_err(),
-        AppError::DuplicateProfileName
-    );
+    let error = app.execute(command.clone()).unwrap_err();
+    assert_eq!(error, AppError::DuplicateProfileName);
+    assert_eq!(error.code(), "active_name_conflict");
     assert_eq!(
         (
             app.count_rows("event_stream"),
             app.count_rows("agent_profile_versions"),
-            app.count_rows("active_agent_profiles"),
+            app.active_profile_rows(),
             app.count_rows("command_receipts"),
             app.count_rows("command_event_refs"),
-            app.persisted_last_sequence(),
+            app.projection_metadata_row(),
         ),
         before
     );
@@ -458,5 +557,5 @@ fn sqlite_normalized_name_conflict_matches_reducer_precheck_and_rolls_back() {
     let retried = app.execute(command).unwrap();
     assert!(matches!(retried.view, CommandView::AgentProfileCreated(_)));
     assert_eq!(app.count_rows("agent_profile_versions"), before.1 + 1);
-    assert_eq!(app.count_rows("active_agent_profiles"), before.2 + 1);
+    assert_eq!(app.active_profile_rows().len(), before.2.len() + 1);
 }

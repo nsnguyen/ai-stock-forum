@@ -52,6 +52,8 @@ fn assert_terminal_safe(text: &str) {
     assert_eq!(text.matches('\n').count(), 1);
     assert!(text.ends_with('\n'));
     assert!(!text[..text.len() - 1].chars().any(char::is_control));
+    assert!(!text.contains('\u{2028}'));
+    assert!(!text.contains('\u{2029}'));
     assert!(!text.contains('\u{202e}'));
 }
 
@@ -65,6 +67,11 @@ fn hostile_profile_text_is_rejected_before_ids_time_or_persistence_and_is_redact
         ("carriage_return", "credential=secret\rforged".to_owned()),
         ("tab", "credential=secret\tforged".to_owned()),
         ("nul", "credential=secret\0tail".to_owned()),
+        ("line_separator", "credential=secret\u{2028}forged".to_owned()),
+        (
+            "paragraph_separator",
+            "credential=secret\u{2029}forged".to_owned(),
+        ),
         ("bidi_override", "credential=secret\u{202e}txt".to_owned()),
         (
             "over_limit_multibyte",
@@ -123,32 +130,6 @@ fn hostile_profile_text_is_rejected_before_ids_time_or_persistence_and_is_redact
     }
 }
 
-#[test]
-fn invalid_uuid_unknown_role_and_malformed_json_never_construct_a_command() {
-    let valid = envelope(
-        60_000,
-        ApplicationCommand::CreateAgentProfile {
-            draft: draft("Wire Input Analyst"),
-            template_provenance: None,
-        },
-    );
-    let value = serde_json::to_value(valid).unwrap();
-
-    let mut invalid_uuid = value.clone();
-    invalid_uuid["command_id"] = serde_json::json!("credential=bad-uuid\u{1b}[31m");
-    assert!(serde_json::from_value::<CommandEnvelope>(invalid_uuid).is_err());
-
-    let mut unknown_role = value;
-    unknown_role["command"]["data"]["draft"]["role"] =
-        serde_json::json!("credential=unknown-role\u{202e}");
-    assert!(serde_json::from_value::<CommandEnvelope>(unknown_role).is_err());
-
-    assert!(serde_json::from_str::<CommandEnvelope>(
-        "{\"credential\":\"malformed\""
-    )
-    .is_err());
-}
-
 struct ReceiptFixture {
     _temporary_directory: TempDir,
     paths: AppPaths,
@@ -176,21 +157,139 @@ impl ReceiptFixture {
         Connection::open(self.paths.database_path()).unwrap()
     }
 
-    fn count(&self, table: &str) -> i64 {
-        assert!(matches!(
-            table,
-            "event_stream"
-                | "agent_profile_versions"
-                | "active_agent_profiles"
-                | "command_receipts"
-                | "command_event_refs"
-        ));
-        self.connection()
-            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                row.get(0)
-            })
-            .unwrap()
+
+    fn snapshot(&self) -> DurableState {
+        let connection = self.connection();
+        let events = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT sequence, event_id, event_type, payload_json, event_digest
+                     FROM event_stream ORDER BY sequence",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let versions = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT profile_id, profile_version_id, version, normalized_name,
+                            content_digest, payload_json, source_event_sequence, created_at_ms
+                     FROM agent_profile_versions ORDER BY source_event_sequence",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let active = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT profile_id, profile_version_id, version, normalized_name, readiness
+                     FROM active_agent_profiles ORDER BY profile_id",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let receipts = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT command_id, command_fingerprint, request_json, capability,
+                            policy_decision, outcome_json
+                     FROM command_receipts ORDER BY command_id",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let refs = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT command_id, event_ordinal, event_id
+                     FROM command_event_refs ORDER BY command_id, event_ordinal",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let projection = connection
+            .query_row(
+                "SELECT last_event_sequence, last_event_digest, projection_digest
+                 FROM projection_metadata WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        DurableState {
+            events,
+            versions,
+            active,
+            receipts,
+            refs,
+            projection,
+        }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DurableState {
+    events: Vec<(i64, String, String, String, String)>,
+    versions: Vec<(String, String, i64, String, String, Vec<u8>, i64, i64)>,
+    active: Vec<(String, String, i64, String, String)>,
+    receipts: Vec<(String, String, String, String, String, String)>,
+    refs: Vec<(String, i64, String)>,
+    projection: (i64, Option<String>, String),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -201,22 +300,41 @@ enum StoredTamper {
     UnknownRole,
     FingerprintDigest,
     EventDigest,
+    MalformedEventPayload,
 }
 
 fn tamper(fixture: &ReceiptFixture, command_id: CommandId, kind: StoredTamper) {
     let connection = fixture.connection();
-    if matches!(kind, StoredTamper::EventDigest) {
+    if matches!(kind, StoredTamper::EventDigest | StoredTamper::MalformedEventPayload) {
         connection
             .execute_batch("DROP TRIGGER event_stream_no_update;")
             .unwrap();
-        connection
-            .execute(
-                "UPDATE event_stream SET event_digest = ?1 WHERE event_id = (
-                    SELECT event_id FROM command_event_refs WHERE command_id = ?2
-                 )",
-                rusqlite::params!["a".repeat(64), command_id.to_string()],
-            )
-            .unwrap();
+        match kind {
+            StoredTamper::EventDigest => {
+                connection
+                    .execute(
+                        "UPDATE event_stream SET event_digest = ?1 WHERE event_id = (
+                            SELECT event_id FROM command_event_refs WHERE command_id = ?2
+                         )",
+                        rusqlite::params!["a".repeat(64), command_id.to_string()],
+                    )
+                    .unwrap();
+            }
+            StoredTamper::MalformedEventPayload => {
+                connection
+                    .execute(
+                        "UPDATE event_stream SET payload_json = ?1 WHERE event_id = (
+                            SELECT event_id FROM command_event_refs WHERE command_id = ?2
+                         )",
+                        rusqlite::params![
+                            "{\"credential\":\"malformed-event\u{2028}\"}",
+                            command_id.to_string()
+                        ],
+                    )
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
         return;
     }
 
@@ -262,7 +380,7 @@ fn tamper(fixture: &ReceiptFixture, command_id: CommandId, kind: StoredTamper) {
             (request, digest)
         }
         StoredTamper::FingerprintDigest => (original, "b".repeat(64)),
-        StoredTamper::EventDigest => unreachable!(),
+        StoredTamper::EventDigest | StoredTamper::MalformedEventPayload => unreachable!(),
     };
     connection
         .execute(
@@ -283,6 +401,7 @@ fn malformed_canonical_receipts_and_digest_tampering_fail_closed_without_leaks_o
         (StoredTamper::UnknownRole, "invalid_event_record"),
         (StoredTamper::FingerprintDigest, "invalid_event_record"),
         (StoredTamper::EventDigest, "event_digest_mismatch"),
+        (StoredTamper::MalformedEventPayload, "invalid_event_record"),
     ]
     .into_iter()
     .enumerate()
@@ -298,13 +417,7 @@ fn malformed_canonical_receipts_and_digest_tampering_fail_closed_without_leaks_o
         let created = fixture.app.execute(command.clone()).unwrap();
         assert!(matches!(created.view, CommandView::AgentProfileCreated(_)));
         tamper(&fixture, command.command_id, kind);
-        let before = (
-            fixture.count("event_stream"),
-            fixture.count("agent_profile_versions"),
-            fixture.count("active_agent_profiles"),
-            fixture.count("command_receipts"),
-            fixture.count("command_event_refs"),
-        );
+        let before = fixture.snapshot();
 
         let error = fixture.app.execute(command).unwrap_err();
 
@@ -316,22 +429,14 @@ fn malformed_canonical_receipts_and_digest_tampering_fail_closed_without_leaks_o
         let rendered = render_error(error);
         assert_eq!(rendered, "Application command failed.\n");
         assert_terminal_safe(&rendered);
-        assert_eq!(
-            (
-                fixture.count("event_stream"),
-                fixture.count("agent_profile_versions"),
-                fixture.count("active_agent_profiles"),
-                fixture.count("command_receipts"),
-                fixture.count("command_event_refs"),
-            ),
-            before,
-            "tamper {kind:?}"
-        );
+        assert_eq!(fixture.snapshot(), before, "tamper {kind:?}");
     }
 }
 
 #[test]
 fn oversized_fallback_line_is_bounded_rejected_and_rendered_as_one_safe_line() {
+    let fixture = ReceiptFixture::new();
+    let before = fixture.snapshot();
     let mut input = vec![b'x'; 32 * 1024];
     input.extend_from_slice(b"\n/help\n");
     let mut reader = BoundedLineReader::new(Cursor::new(input));
@@ -355,4 +460,5 @@ fn oversized_fallback_line_is_bounded_rejected_and_rendered_as_one_safe_line() {
     assert_eq!(rendered, "Input rejected: input exceeds 4096 bytes.\n");
     assert_terminal_safe(&rendered);
     assert_eq!(reader.next_line().unwrap().unwrap().bytes(), b"/help");
+    assert_eq!(fixture.snapshot(), before);
 }

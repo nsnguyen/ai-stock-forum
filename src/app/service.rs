@@ -45,6 +45,26 @@ pub trait CommandPolicy: Send + Sync {
 }
 
 pub trait CommandTransactionHook: Send + Sync {
+    fn before_profile_mutation_transaction(&self, _command_id: CommandId) {}
+
+    fn before_profile_review_operation(&self, _command_id: CommandId) {}
+
+    fn after_profile_name_precheck(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+        _command_id: CommandId,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn after_profile_review_reservation(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+        _command_id: CommandId,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
     fn before_user_lifecycle_read(&self) {}
 
     fn after_user_lifecycle_read(&self) {}
@@ -250,6 +270,11 @@ pub struct ApplicationService {
     executor: CommandExecutor,
 }
 
+#[doc(hidden)]
+pub struct IndependentApplicationService {
+    executor: CommandExecutor,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseReadiness {
     Ready,
@@ -297,6 +322,16 @@ struct SharedLifecycle {
 }
 
 impl ApplicationService {
+    #[doc(hidden)]
+    pub fn independent_profile_instance(
+        &self,
+    ) -> Result<IndependentApplicationService, StartupError> {
+        let worker = self.worker()?;
+        let mut executor = worker.executor;
+        executor.reviews = Arc::new(ProfileReviewRegistry::default());
+        Ok(IndependentApplicationService { executor })
+    }
+
     pub fn bootstrap(
         paths: &AppPaths,
         clock: Arc<dyn Clock>,
@@ -456,6 +491,25 @@ impl ApplicationService {
     }
 }
 
+impl IndependentApplicationService {
+    pub fn execute(&mut self, envelope: CommandEnvelope) -> Result<CommandOutcome, AppError> {
+        self.executor.execute(envelope)
+    }
+
+    pub fn preview_agent_profile_edit(
+        &self,
+        profile_id: AgentProfileId,
+        expected_active_version_id: AgentProfileVersionId,
+        candidate: AgentProfileDraft,
+    ) -> Result<ProfileEditPreview, AppError> {
+        self.executor.preview_agent_profile_edit(
+            profile_id,
+            expected_active_version_id,
+            candidate,
+        )
+    }
+}
+
 impl ApplicationWorker {
     pub fn execute_user(
         &mut self,
@@ -581,10 +635,20 @@ impl CommandExecutor {
                 return stored.into_result();
             }
             replay_transaction.commit()?;
+            self.hook
+                .before_profile_review_operation(envelope.command_id);
             Some(self.reviews.operation())
         } else {
             None
         };
+        if matches!(
+            &request.command,
+            ApplicationCommand::CreateAgentProfile { .. }
+                | ApplicationCommand::ActivateAgentProfileVersion { .. }
+        ) {
+            self.hook
+                .before_profile_mutation_transaction(envelope.command_id);
+        }
         let transaction = self.database.immediate_transaction()?;
         if let Some(receipt) = CommandReceiptRepository::load(&transaction, envelope.command_id)? {
             let stored = validate_receipt(
@@ -694,6 +758,10 @@ impl CommandExecutor {
                             ReviewReservationError::Mismatch => AppError::ProfileReviewMismatch,
                         })?;
                     reserved = true;
+                    self.hook.after_profile_review_reservation(
+                        transaction.transaction(),
+                        envelope.command_id,
+                    )?;
                     let current = projection
                         .agent_profiles
                         .active_profile(*profile_id)
@@ -702,6 +770,10 @@ impl CommandExecutor {
                         return Err(AppError::StaleAgentProfileVersion);
                     }
                     ensure_name_available(&projection, Some(*profile_id), &candidate.display_name)?;
+                    self.hook.after_profile_name_precheck(
+                        transaction.transaction(),
+                        envelope.command_id,
+                    )?;
                     let profile = AgentProfileVersion::next_version(
                         current,
                         AgentProfileVersionId::from_uuid(self.ids.next_uuid()),
@@ -713,7 +785,15 @@ impl CommandExecutor {
                         previous_version_id: *expected_active_version_id,
                     }
                 }
-                command => prepare_event(command, &projection, self.clock.as_ref(), self.ids.as_ref())?,
+                command => prepare_event(
+                    command,
+                    &projection,
+                    self.clock.as_ref(),
+                    self.ids.as_ref(),
+                    self.hook.as_ref(),
+                    transaction.transaction(),
+                    envelope.command_id,
+                )?,
             };
             let pending = PendingEvent {
                 event_id: EventId::from_uuid(self.ids.next_uuid()),
@@ -741,10 +821,12 @@ impl CommandExecutor {
                 self.hook
                     .after_profile_mirror_insert(transaction.transaction())?;
             }
-            ProjectionRepository::store(&transaction, &projection)
-                .map_err(map_profile_projection_write_error)?;
-            self.hook
-                .after_active_pointer_update(transaction.transaction())?;
+            ProjectionRepository::store_with_after_active_profiles(
+                &transaction,
+                &projection,
+                |transaction| self.hook.after_active_pointer_update(transaction),
+            )
+            .map_err(map_profile_projection_write_error)?;
             self.hook
                 .after_projection_store(transaction.transaction())?;
             self.hook
@@ -897,6 +979,9 @@ fn prepare_event(
     projection: &ProjectionState,
     clock: &dyn Clock,
     ids: &dyn IdGenerator,
+    hook: &dyn CommandTransactionHook,
+    transaction: &rusqlite::Transaction<'_>,
+    command_id: CommandId,
 ) -> Result<ApplicationEvent, AppError> {
     match command {
         ApplicationCommand::CreateAgentProfile {
@@ -911,6 +996,7 @@ fn prepare_event(
                 profile_template_from_provenance(provenance)?;
             }
             ensure_name_available(projection, None, &draft.display_name)?;
+            hook.after_profile_name_precheck(transaction, command_id)?;
             let profile_id = AgentProfileId::from_uuid(ids.next_uuid());
             let created_at_ms = clock.now_millis();
             let profile = AgentProfileVersion::create(

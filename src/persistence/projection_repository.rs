@@ -84,6 +84,21 @@ impl ProjectionRepository {
         store_transaction(transaction.transaction(), state)
     }
 
+    pub fn store_with_after_active_profiles<F>(
+        transaction: &ImmediateTransaction<'_>,
+        state: &ProjectionState,
+        after_active_profiles: F,
+    ) -> Result<(), PersistenceError>
+    where
+        F: FnOnce(&Transaction<'_>) -> Result<(), PersistenceError>,
+    {
+        store_transaction_with_after_active_profiles(
+            transaction.transaction(),
+            state,
+            after_active_profiles,
+        )
+    }
+
     pub fn rebuild(
         connection: &mut Connection,
         events: &[EventEnvelope],
@@ -300,6 +315,17 @@ fn store_transaction(
     transaction: &Transaction<'_>,
     state: &ProjectionState,
 ) -> Result<(), PersistenceError> {
+    store_transaction_with_after_active_profiles(transaction, state, |_| Ok(()))
+}
+
+fn store_transaction_with_after_active_profiles<F>(
+    transaction: &Transaction<'_>,
+    state: &ProjectionState,
+    after_active_profiles: F,
+) -> Result<(), PersistenceError>
+where
+    F: FnOnce(&Transaction<'_>) -> Result<(), PersistenceError>,
+{
     state
         .validate()
         .map_err(|_| PersistenceError::ProjectionStateConflict)?;
@@ -341,7 +367,7 @@ fn store_transaction(
         }
         validate_store_transition(&persisted, state)?;
     }
-    write_projection_rows(transaction, state)
+    write_projection_rows(transaction, state, after_active_profiles)
 }
 
 fn validate_store_transition(
@@ -379,10 +405,14 @@ fn validate_store_transition(
     Ok(())
 }
 
-fn write_projection_rows(
+fn write_projection_rows<F>(
     transaction: &Transaction<'_>,
     state: &ProjectionState,
-) -> Result<(), PersistenceError> {
+    after_active_profiles: F,
+) -> Result<(), PersistenceError>
+where
+    F: FnOnce(&Transaction<'_>) -> Result<(), PersistenceError>,
+{
     if let Some(installation) = &state.installation {
         transaction
             .execute(
@@ -419,6 +449,7 @@ fn write_projection_rows(
             .map_err(|_| PersistenceError::QueryFailed)?;
     }
     replace_active_profiles(transaction, &state.agent_profiles)?;
+    after_active_profiles(transaction)?;
     let digest = state
         .digest()
         .map_err(|_| PersistenceError::ProjectionStateConflict)?;

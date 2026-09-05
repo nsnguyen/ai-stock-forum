@@ -257,3 +257,47 @@ pub(crate) fn review_digest(
     };
     Ok(sha256(&canonical_json_bytes(&material)?))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn only_the_owning_command_can_release_a_reserved_review() {
+        let registry = ProfileReviewRegistry::default();
+        let operation = registry.operation();
+        let owner = CommandId::from_uuid(Uuid::from_u128(1));
+        let other = CommandId::from_uuid(Uuid::from_u128(2));
+        let token = ProfileReviewToken::from_uuid(Uuid::from_u128(3));
+        let profile_id = AgentProfileId::from_uuid(Uuid::from_u128(4));
+        let base = AgentProfileVersionId::from_uuid(Uuid::from_u128(5));
+        let candidate = sha256(b"candidate");
+        let review = sha256(b"review");
+        operation.replace(
+            token,
+            profile_id,
+            base,
+            candidate.clone(),
+            review.clone(),
+        );
+        operation
+            .reserve(owner, token, profile_id, base, &candidate, &review)
+            .unwrap();
+
+        operation.release(other);
+
+        assert!(matches!(
+            *registry.state.lock().unwrap(),
+            Some(ReviewState::Reserved { command_id, .. }) if command_id == owner
+        ));
+        operation.release(owner);
+        assert!(matches!(
+            *registry.state.lock().unwrap(),
+            Some(ReviewState::Available(_))
+        ));
+        operation
+            .reserve(owner, token, profile_id, base, &candidate, &review)
+            .unwrap();
+    }
+}
