@@ -36,6 +36,11 @@ fn profile() -> AgentProfileVersion {
     draft.specialty_tags = vec!["quality".to_owned(), "long-duration".to_owned()];
     draft.personality = "Patient, skeptical, and explicit about uncertainty.".to_owned();
     draft.instructions = "Separate facts from assumptions and cite primary evidence.".to_owned();
+    draft.skill_refs = vec![
+        serde_json::from_str("\"fundamental-research\"").expect("skill ref"),
+        serde_json::from_str("\"risk-review\"").expect("skill ref"),
+    ];
+    draft.mcp_refs = vec![serde_json::from_str("\"market-data\"").expect("mcp ref")];
     AgentProfileVersion::create(
         AgentProfileId::from_uuid(Uuid::from_u128(10)),
         AgentProfileVersionId::from_uuid(Uuid::from_u128(11)),
@@ -130,6 +135,17 @@ fn render_text(model: &TuiModel, width: u16, height: u16) -> String {
         .collect()
 }
 
+fn render_rows(model: &TuiModel, width: u16, height: u16) -> Vec<String> {
+    let terminal = rendered(model, width, height);
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(usize::from(width))
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+        .collect()
+}
+
 #[test]
 fn agents_layout_uses_one_two_and_three_panes_at_exact_width_breakpoints() {
     let list = model(true, AgentsPane::List);
@@ -151,6 +167,44 @@ fn agents_layout_uses_one_two_and_three_panes_at_exact_width_breakpoints() {
     assert!(wide.contains("Agent list"));
     assert!(wide.contains("Agent detail"));
     assert!(wide.contains("Readiness & history"));
+
+    let medium_low = render_text(&detail, 80, 18);
+    assert!(medium_low.contains("Agent list"));
+    assert!(medium_low.contains("Agent detail"));
+    assert!(!medium_low.contains("Readiness & history"));
+
+    let wide_low = render_text(&detail, 120, 18);
+    assert!(wide_low.contains("Agent list"));
+    assert!(wide_low.contains("Agent detail"));
+    assert!(wide_low.contains("Readiness & history"));
+}
+
+#[test]
+fn legacy_views_keep_height_aware_modes_at_low_supported_heights() {
+    for view in [View::Overview, View::Setup, View::Audit, View::Help] {
+        for width in [80, 120] {
+            let mut legacy = model(false, AgentsPane::List);
+            legacy.active_view = view;
+            let text = render_text(&legacy, width, 18);
+            assert!(text.contains("Narrow"), "view={view:?} width={width}");
+            assert!(!text.contains(" Navigation "), "view={view:?} width={width}");
+        }
+    }
+}
+
+#[test]
+fn narrow_header_rows_are_complete_at_sixty_and_seventy_columns() {
+    let model = model(true, AgentsPane::List);
+    for width in [60, 70] {
+        let rows = render_rows(&model, width, 18);
+        assert_eq!(rows[0].trim_end(), "AI STOCK FORUM  /  Agents  /  Narrow");
+        assert_eq!(rows[1].trim_end(), "Active 1  Ready 0  Not Ready 1");
+        assert_eq!(
+            rows[2].trim_end(),
+            "1 Overview  2 Setup  3 Audit  4 Help  a Agents"
+        );
+        assert_eq!(rows[3], "-".repeat(usize::from(width)));
+    }
 }
 
 #[test]
@@ -173,6 +227,11 @@ fn agents_empty_and_populated_states_render_counts_readiness_and_complete_metada
         "Template",
         "builtin.bull",
         "Bindings",
+        "Skill refs",
+        "fundamental-research",
+        "risk-review",
+        "MCP refs",
+        "market-data",
         "Created ms",
         "Memory",
         "Policy",
@@ -182,6 +241,25 @@ fn agents_empty_and_populated_states_render_counts_readiness_and_complete_metada
     }
     assert!(!populated.contains("Failed"));
     assert!(!populated.contains("Error: Not Ready"));
+}
+
+#[test]
+fn list_scroll_is_an_item_offset_and_keeps_the_last_multiline_row_visible() {
+    let mut model = model(true, AgentsPane::List);
+    let base = model.agents.profiles.profiles[0].clone();
+    model.agents.profiles.profiles = (0..12)
+        .map(|index| {
+            let mut profile = base.clone();
+            profile.display_name = format!("Profile {index:02}");
+            profile
+        })
+        .collect();
+    model.agents.selected_profile = 11;
+    model.agents.list_scroll = 11;
+
+    let text = render_text(&model, 60, 18);
+    assert!(text.contains("> Profile 11"));
+    assert!(!text.contains("Profile 00"));
 }
 
 #[test]

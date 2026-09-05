@@ -4,10 +4,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
     agents::{
-        AgentProfileDraft, AgentProfileVersion, AgentReadiness, ProfileEditPreview,
-        ProfileReviewRegistry, ReviewReservationError,
-        candidate_digest, diff_profile, normalize_profile_name_key, profile_template_from_provenance,
-        review_digest,
+        AgentProfileDraft, AgentProfileVersion, AgentReadiness, ProfileEditPreview, ProfileReviewRegistry,
+        ProfileTemplate, ReviewReservationError, builtin_profile_templates, candidate_digest,
+        diff_profile, normalize_profile_name_key, profile_template_from_provenance, review_digest,
     },
     app::{
         AgentProfileCreatedView, AgentProfileHistoryEntry, AgentProfileHistoryView,
@@ -421,6 +420,10 @@ impl ApplicationService {
         self.executor.execute(envelope)
     }
 
+    pub fn agent_profile_templates(&self) -> Result<Vec<ProfileTemplate>, AppError> {
+        self.executor.agent_profile_templates()
+    }
+
     pub fn preview_agent_profile_edit(
         &self,
         profile_id: AgentProfileId,
@@ -434,8 +437,9 @@ impl ApplicationService {
         )
     }
 
-    pub fn cancel_agent_profile_edit(&self) {
+    pub fn cancel_agent_profile_edit(&self) -> Result<(), AppError> {
         self.executor.reviews.cancel();
+        Ok(())
     }
 
     pub fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
@@ -539,6 +543,10 @@ impl IndependentApplicationService {
 }
 
 impl ApplicationWorker {
+    pub fn agent_profile_templates(&self) -> Result<Vec<ProfileTemplate>, AppError> {
+        self.executor.agent_profile_templates()
+    }
+
     pub fn execute_user(
         &mut self,
         command: ApplicationCommand,
@@ -552,6 +560,19 @@ impl ApplicationWorker {
 }
 
 impl CommandExecutor {
+    fn agent_profile_templates(&self) -> Result<Vec<ProfileTemplate>, AppError> {
+        let phase = self
+            .lifecycle
+            .phase
+            .read()
+            .map_err(|_| AppError::LifecycleFinished)?;
+        if *phase == LifecyclePhase::Closed {
+            return Err(AppError::LifecycleFinished);
+        }
+        authorize_passive(self.policy.as_ref(), Capability::AgentProfileRead)?;
+        Ok(builtin_profile_templates().to_vec())
+    }
+
     fn preview_agent_profile_edit(
         &self,
         profile_id: AgentProfileId,

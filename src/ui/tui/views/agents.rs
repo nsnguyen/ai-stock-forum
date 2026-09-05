@@ -14,7 +14,7 @@ use crate::{
     ui::{
         profile_editor::{ProfileEditor, ProfileEditorMode, ProfileEditorStep},
         tui::{
-            layout::{agent_workspace, layout_mode},
+            layout::{agent_layout_mode, agent_workspace},
             model::{AgentsPane, LayoutMode, TuiModel},
             theme::Theme,
         },
@@ -24,7 +24,7 @@ use crate::{
 use super::{label_value, panel, safe_text, workspace_focused};
 
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
-    let mode = layout_mode(frame.area());
+    let mode = agent_layout_mode(frame.area());
     let layout = agent_workspace(area, mode);
     if let Some(list) = layout.list {
         render_list(frame, list, model, theme);
@@ -67,12 +67,19 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Them
             Line::styled("Templates provide a safe starting point.", theme.muted),
         ]
     } else {
+        let profile_count = model.agents.profiles.profiles.len();
+        let first_item = model
+            .agents
+            .list_scroll
+            .min(profile_count.saturating_sub(1))
+            .min(model.agents.selected_profile);
         model
             .agents
             .profiles
             .profiles
             .iter()
             .enumerate()
+            .skip(first_item)
             .flat_map(|(index, profile)| {
                 let selected = index == model.agents.selected_profile;
                 let marker = if selected { ">" } else { " " };
@@ -101,8 +108,7 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Them
     frame.render_widget(
         Paragraph::new(lines)
             .block(panel("Agent list", focused, theme))
-            .wrap(Wrap { trim: false })
-            .scroll((scroll(model.agents.list_scroll, area.height), 0)),
+            .wrap(Wrap { trim: false }),
         area,
     );
 }
@@ -156,8 +162,22 @@ fn detail_lines(detail: &crate::app::AgentProfileView, theme: &Theme) -> Vec<Lin
         Line::styled("ACCEPTED CONTENT", theme.accent),
         label_value("Description", safe_text(profile.description()), theme),
         label_value("Personality", safe_text(profile.personality()), theme),
-        label_value("Instructions", safe_text(profile.instructions()), theme),
-        Line::default(),
+          label_value("Instructions", safe_text(profile.instructions()), theme),
+    ];
+    append_references(
+        &mut lines,
+        "Skill refs",
+        profile.skill_refs().iter().map(|reference| reference.as_str()),
+        theme,
+    );
+    append_references(
+        &mut lines,
+        "MCP refs",
+        profile.mcp_refs().iter().map(|reference| reference.as_str()),
+        theme,
+    );
+    lines.extend([
+          Line::default(),
         Line::styled("IMMUTABLE METADATA", theme.accent),
         label_value("Created ms", profile.created_at_ms().to_string(), theme),
         label_value("Memory", profile.memory_namespace_id().to_string(), theme),
@@ -182,10 +202,26 @@ fn detail_lines(detail: &crate::app::AgentProfileView, theme: &Theme) -> Vec<Lin
             "Model",
             optional_text(profile.bindings().model_name.as_deref()),
             theme,
-        ),
-    ];
+          ),
+      ]);
     append_provenance(&mut lines, profile.template_provenance(), theme);
     lines
+}
+
+fn append_references<'a>(
+    lines: &mut Vec<Line<'static>>,
+    label: &'static str,
+    values: impl Iterator<Item = &'a str>,
+    theme: &Theme,
+) {
+    let values = values.map(safe_text).collect::<Vec<_>>();
+    if values.is_empty() {
+        lines.push(label_value(label, "None".to_owned(), theme));
+        return;
+    }
+    for (index, value) in values.into_iter().enumerate() {
+        lines.push(label_value(if index == 0 { label } else { "" }, value, theme));
+    }
 }
 
 fn render_history(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {

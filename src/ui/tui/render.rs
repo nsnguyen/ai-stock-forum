@@ -6,14 +6,18 @@ use ratatui::{
 };
 
 use super::{
-    layout::{MIN_HEIGHT, MIN_WIDTH, calculate},
+    layout::{MIN_HEIGHT, MIN_WIDTH, calculate, calculate_agents},
     model::{Focus, LayoutMode, Severity, TuiModel, View},
     theme::Theme,
     views,
 };
 
 pub fn render(frame: &mut Frame<'_>, model: &TuiModel, theme: &Theme) {
-    let cockpit = calculate(frame.area(), model.inspector_open);
+    let cockpit = if model.active_view == View::Agents {
+        calculate_agents(frame.area(), model.inspector_open)
+    } else {
+        calculate(frame.area(), model.inspector_open)
+    };
     frame.render_widget(Clear, cockpit.viewport);
     if cockpit.mode == LayoutMode::TooSmall {
         render_too_small(frame, cockpit.viewport);
@@ -40,12 +44,13 @@ fn render_header(
     mode: LayoutMode,
     theme: &Theme,
 ) {
-    let mut identity = vec![
+    let identity = Line::from(vec![
         Span::styled("AI STOCK FORUM", theme.accent),
         Span::raw("  /  "),
         Span::styled(view_name(model.active_view), theme.focus),
         Span::raw(format!("  /  {}", mode_name(mode))),
-    ];
+    ]);
+    let mut lines = vec![identity];
     if model.active_view == View::Agents {
         let active = model.agents.profiles.profiles.len();
         let ready = model
@@ -56,14 +61,13 @@ fn render_header(
             .filter(|profile| profile.readiness == crate::agents::AgentReadiness::Ready)
             .count();
         let not_ready = active.saturating_sub(ready);
-        identity.extend([
-            Span::raw(format!("  /  Active {active}  ")),
+        lines.push(Line::from(vec![
+            Span::raw(format!("Active {active}  ")),
             Span::styled(format!("Ready {ready}"), theme.success),
             Span::raw("  "),
             Span::styled(format!("Not Ready {not_ready}"), theme.warning),
-        ]);
+        ]));
     }
-    let identity = Line::from(identity);
     let second = if mode == LayoutMode::Narrow {
         numbered_tabs(model, theme)
     } else if model.previous_session_interrupted {
@@ -79,7 +83,8 @@ fn render_header(
     } else {
         Line::styled("-".repeat(usize::from(area.width)), theme.muted)
     };
-    frame.render_widget(Paragraph::new(vec![identity, second, third]), area);
+    lines.extend([second, third]);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn numbered_tabs(model: &TuiModel, theme: &Theme) -> Line<'static> {

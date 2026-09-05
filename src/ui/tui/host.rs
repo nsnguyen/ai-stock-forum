@@ -10,7 +10,7 @@ use super::{
     theme::Theme,
 };
 use crate::{
-    agents::{AgentProfileDraft, builtin_profile_templates},
+    agents::AgentProfileDraft,
     app::{
         AppError, ApplicationCommand, CommandOutcome, CommandView, PresentationSnapshot,
         ShutdownReason,
@@ -42,13 +42,11 @@ pub fn execute_agent_effect(
             load_history(client, model, selected_profile)?;
         }
         ControllerEffect::StartProfileCreate { template_index } => {
-            if model.agents.editor.is_none() {
-                model.agents.editor = builtin_profile_templates()
-                    .get(template_index)
-                    .and_then(|template| ProfileEditor::for_create(template).ok());
-            }
-            if model.agents.editor.is_some() {
-                model.agents.pane = super::model::AgentsPane::Editor;
+            model.set_command_in_flight(true);
+            let templates = client.agent_profile_templates();
+            model.set_command_in_flight(false);
+            let templates = templates?;
+            if model.agents.start_profile_create(template_index, &templates) {
                 model.command.clear();
                 model.clear_message();
             } else {
@@ -283,17 +281,36 @@ fn refresh_stale_profile(
     model: &mut TuiModel,
     profile_id: crate::domain::AgentProfileId,
 ) -> Result<(), RuntimeError> {
-    let _ = client.cancel_agent_profile_edit();
-    let outcome = submit_agent_command(
+    let cancel_failed = client.cancel_agent_profile_edit().is_err();
+    let mut refresh_failed = false;
+    match submit_agent_command(client, model, ApplicationCommand::ListAgentProfiles) {
+        Ok(outcome) => apply_agent_outcome(model, outcome),
+        Err(_) => refresh_failed = true,
+    }
+    match submit_agent_command(
         client,
         model,
         ApplicationCommand::ShowAgentProfile { profile_id },
-    )?;
-    apply_agent_outcome(model, outcome);
+    ) {
+        Ok(outcome) => apply_agent_outcome(model, outcome),
+        Err(_) => refresh_failed = true,
+    }
     model.agents.editor = None;
     model.agents.pending_confirmation = None;
     model.agents.pane = super::model::AgentsPane::Detail;
-    model.set_message(super::model::Severity::Warning, STALE_PROFILE_MESSAGE);
+    let message = match (cancel_failed, refresh_failed) {
+        (false, false) => STALE_PROFILE_MESSAGE,
+        (true, false) => {
+            "Profile changed elsewhere. Detail refreshed, but review cleanup could not be confirmed."
+        }
+        (false, true) => {
+            "Profile changed elsewhere. Review was cancelled, but profile refresh failed."
+        }
+        (true, true) => {
+            "Profile changed elsewhere. Review cleanup and profile refresh both failed."
+        }
+    };
+    model.set_message(super::model::Severity::Warning, message);
     Ok(())
 }
 

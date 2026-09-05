@@ -242,7 +242,7 @@ fn preview_is_passive_ordered_and_a_newer_preview_cancel_or_shutdown_invalidates
         AppError::ProfileReviewUnavailable,
     );
 
-    app.cancel_agent_profile_edit();
+    app.cancel_agent_profile_edit().unwrap();
     assert_eq!(
         app.execute(envelope(
             302,

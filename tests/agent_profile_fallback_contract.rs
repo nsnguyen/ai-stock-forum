@@ -436,8 +436,9 @@ impl CommandExecutor for WorkflowExecutor {
         })
     }
 
-    fn cancel_agent_profile_edit(&mut self) {
+    fn cancel_agent_profile_edit(&mut self) -> Result<(), AppError> {
         self.observations.lock().unwrap().cancellations += 1;
+        Ok(())
     }
 
     fn finish(&mut self, _reason: ShutdownReason) -> Result<(), AppError> {

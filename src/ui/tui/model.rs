@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::{
+    agents::ProfileTemplate,
     app::{
         AgentProfileHistoryView, AgentProfileView, AgentProfilesView, ApplicationCommand,
         DatabaseReadiness, MAX_INPUT_BYTES, PresentationSnapshot, ProcessGuardOwnership,
@@ -77,6 +78,7 @@ impl AgentsViewState {
     }
 
     pub fn replace_profiles(&mut self, profiles: AgentProfilesView) {
+        let selected_id = self.selected_summary().map(|summary| summary.profile_id);
         self.profiles = profiles;
         if self.profiles.profiles.is_empty() {
             self.selected_profile = 0;
@@ -85,9 +87,18 @@ impl AgentsViewState {
             self.history = None;
             return;
         }
-        self.selected_profile = self
-            .selected_profile
-            .min(self.profiles.profiles.len().saturating_sub(1));
+        self.selected_profile = selected_id
+            .and_then(|profile_id| {
+                self.profiles
+                    .profiles
+                    .iter()
+                    .position(|summary| summary.profile_id == profile_id)
+            })
+            .unwrap_or_else(|| {
+                self.selected_profile
+                    .min(self.profiles.profiles.len().saturating_sub(1))
+            });
+        self.list_scroll = self.selected_profile;
         let selected_id = self.selected_summary().map(|summary| summary.profile_id);
         if self
             .detail
@@ -118,6 +129,22 @@ impl AgentsViewState {
 
     pub fn replace_history(&mut self, history: AgentProfileHistoryView) {
         self.history = Some(history);
+    }
+
+    pub fn start_profile_create(
+        &mut self,
+        template_index: usize,
+        templates: &[ProfileTemplate],
+    ) -> bool {
+        let Some(editor) = templates
+            .get(template_index)
+            .and_then(|template| ProfileEditor::for_create(template).ok())
+        else {
+            return false;
+        };
+        self.editor = Some(editor);
+        self.pane = AgentsPane::Editor;
+        true
     }
 }
 

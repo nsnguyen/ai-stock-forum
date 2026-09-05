@@ -8,17 +8,19 @@ use std::{
 
 use ai_stock_forum::{
     agents::{
-        AgentProfileDraft, ProfileEditPreview, builtin_profile_templates,
+        AgentProfileDraft, AgentProfileVersion, AgentReadiness, ProfileTemplate,
+        ProfileEditPreview, builtin_profile_templates,
     },
     app::{
-        AgentProfileCreatedView, AgentProfilesView, AppError, ApplicationCommand,
+        AgentProfileCreatedView, AgentProfileSummary, AgentProfileView, AgentProfilesView, AppError,
+        ApplicationCommand,
         ApplicationService, CommandEnvelope, CommandOutcome, CommandView, DatabaseReadiness,
         HelpView, PresentationSnapshot, ProcessGuardOwnership, ShutdownDisposition, ShutdownReason,
     },
     config::AppPaths,
     domain::{
         Actor, AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId,
-        ProfileReviewToken, SessionId, sha256,
+        MemoryNamespaceId, ProfileReviewToken, SessionId, sha256,
     },
     runtime::{ApplicationRuntime, CommandExecutor},
     setup::SetupStatus,
@@ -89,6 +91,69 @@ fn advance_edit_to_preview(editor: &mut ProfileEditor, display_name: &str) -> Pr
         panic!("preview request")
     };
     request
+}
+
+#[derive(Clone)]
+struct TemplateReadRecorder {
+    calls: Arc<Mutex<usize>>,
+    fail: bool,
+}
+
+impl CommandExecutor for TemplateReadRecorder {
+    fn execute_user(&mut self, _command: ApplicationCommand) -> Result<CommandOutcome, AppError> {
+        Err(AppError::AgentProfileNotFound)
+    }
+
+    fn agent_profile_templates(&mut self) -> Result<Vec<ProfileTemplate>, AppError> {
+        *self.calls.lock().unwrap() += 1;
+        if self.fail {
+            Err(AppError::LifecycleFinished)
+        } else {
+            Ok(builtin_profile_templates().to_vec())
+        }
+    }
+
+    fn finish(&mut self, _reason: ShutdownReason) -> Result<(), AppError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn start_create_uses_the_service_template_outcome_and_failure_preserves_model_state() {
+    for fail in [false, true] {
+        let calls = Arc::new(Mutex::new(0));
+        let runtime = ApplicationRuntime::spawn(
+            TemplateReadRecorder {
+                calls: calls.clone(),
+                fail,
+            },
+            4,
+        )
+        .expect("runtime");
+        let mut model = TuiModel::new(empty_snapshot(), false);
+        model.active_view = ai_stock_forum::ui::tui::model::View::Agents;
+
+        let result = execute_agent_effect(
+            &runtime.client(),
+            &mut model,
+            ControllerEffect::StartProfileCreate { template_index: 0 },
+        );
+
+        assert_eq!(*calls.lock().unwrap(), 1);
+        if fail {
+            assert!(result.is_err());
+            assert_eq!(model.agents.pane, AgentsPane::List);
+            assert!(model.agents.editor.is_none());
+            assert!(model.message.is_none());
+        } else {
+            result.expect("typed template read");
+            assert_eq!(model.agents.pane, AgentsPane::Editor);
+            assert!(model.agents.editor.is_some());
+        }
+        runtime
+            .finish_and_join(ShutdownReason::UserQuit)
+            .expect("finish runtime");
+    }
 }
 
 #[test]
@@ -405,13 +470,152 @@ impl CommandExecutor for OrderingExecutor {
         })
     }
 
-    fn cancel_agent_profile_edit(&mut self) {
+    fn agent_profile_templates(&mut self) -> Result<Vec<ProfileTemplate>, AppError> {
+        Ok(builtin_profile_templates().to_vec())
+    }
+
+    fn cancel_agent_profile_edit(&mut self) -> Result<(), AppError> {
         self.order.lock().unwrap().push("cancel");
+        Ok(())
     }
 
     fn finish(&mut self, _reason: ShutdownReason) -> Result<(), AppError> {
         self.order.lock().unwrap().push("finish");
         Ok(())
+    }
+}
+
+struct StaleCleanupExecutor {
+    profile: AgentProfileVersion,
+    commands: Arc<Mutex<Vec<&'static str>>>,
+    fail_refresh: bool,
+}
+
+impl CommandExecutor for StaleCleanupExecutor {
+    fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError> {
+        let label = match command {
+            ApplicationCommand::ListAgentProfiles => "list",
+            ApplicationCommand::ShowAgentProfile { .. } => "detail",
+            _ => "other",
+        };
+        self.commands.lock().unwrap().push(label);
+        if self.fail_refresh {
+            return Err(AppError::AgentProfileNotFound);
+        }
+        let readiness = AgentReadiness::NotReady;
+        let view = match command {
+            ApplicationCommand::ListAgentProfiles => CommandView::AgentProfiles(AgentProfilesView {
+                profiles: vec![AgentProfileSummary {
+                    profile_id: self.profile.profile_id(),
+                    profile_version_id: self.profile.profile_version_id(),
+                    version: self.profile.version(),
+                    display_name: self.profile.display_name().to_owned(),
+                    role: self.profile.role(),
+                    primary_specialty: self.profile.primary_specialty().to_owned(),
+                    readiness,
+                    content_digest: self.profile.content_digest().clone(),
+                }],
+            }),
+            ApplicationCommand::ShowAgentProfile { .. } => CommandView::AgentProfile(AgentProfileView {
+                profile: self.profile.clone(),
+                readiness,
+            }),
+            _ => return Err(AppError::AgentProfileNotFound),
+        };
+        Ok(CommandOutcome {
+            command_id: CommandId::from_uuid(Uuid::from_u128(40_000)),
+            correlation_id: CorrelationId::from_uuid(Uuid::from_u128(40_001)),
+            committed_events: Vec::new(),
+            view,
+            shutdown: ShutdownDisposition::Continue,
+        })
+    }
+
+    fn preview_agent_profile_edit(
+        &mut self,
+        _profile_id: AgentProfileId,
+        _expected_active_version_id: AgentProfileVersionId,
+        _candidate: AgentProfileDraft,
+    ) -> Result<ProfileEditPreview, AppError> {
+        Err(AppError::StaleAgentProfileVersion)
+    }
+
+    fn cancel_agent_profile_edit(&mut self) -> Result<(), AppError> {
+        Err(AppError::LifecycleFinished)
+    }
+
+    fn finish(&mut self, _reason: ShutdownReason) -> Result<(), AppError> {
+        Ok(())
+    }
+}
+
+fn stale_cleanup_profile() -> AgentProfileVersion {
+    let template = &builtin_profile_templates()[0];
+    AgentProfileVersion::create(
+        AgentProfileId::from_uuid(Uuid::from_u128(30_000)),
+        AgentProfileVersionId::from_uuid(Uuid::from_u128(30_001)),
+        MemoryNamespaceId::from_uuid(Uuid::from_u128(30_002)),
+        1_800_000_000_000,
+        template.copy_to_draft().expect("draft"),
+        Some(template.provenance()),
+    )
+    .expect("profile")
+}
+
+#[test]
+fn stale_cleanup_preserves_cancel_failure_when_refresh_succeeds_or_fails() {
+    for fail_refresh in [false, true] {
+        let profile = stale_cleanup_profile();
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let runtime = ApplicationRuntime::spawn(
+            StaleCleanupExecutor {
+                profile: profile.clone(),
+                commands: commands.clone(),
+                fail_refresh,
+            },
+            8,
+        )
+        .expect("runtime");
+        let mut model = TuiModel::new(empty_snapshot(), false);
+        model.active_view = ai_stock_forum::ui::tui::model::View::Agents;
+        model.agents.pane = AgentsPane::Editor;
+        model.agents.editor = Some(ProfileEditor::for_edit(
+            profile.profile_id(),
+            profile.profile_version_id(),
+            builtin_profile_templates()[0].copy_to_draft().expect("draft"),
+        ));
+        let request = PreviewEditRequest {
+            generation: 1,
+            profile_id: profile.profile_id(),
+            expected_active_version_id: profile.profile_version_id(),
+            candidate: builtin_profile_templates()[0].copy_to_draft().expect("candidate"),
+        };
+
+        execute_agent_effect(
+            &runtime.client(),
+            &mut model,
+            ControllerEffect::RequestProfilePreview(request),
+        )
+        .expect("stale cleanup is represented in safe local state");
+
+        assert_eq!(commands.lock().unwrap().as_slice(), ["list", "detail"]);
+        assert_eq!(model.agents.pane, AgentsPane::Detail);
+        assert!(model.agents.editor.is_none());
+        let message = &model.message.as_ref().expect("safe diagnostic").text;
+        if fail_refresh {
+            assert_eq!(
+                message,
+                "Profile changed elsewhere. Review cleanup and profile refresh both failed."
+            );
+        } else {
+            assert_eq!(
+                message,
+                "Profile changed elsewhere. Detail refreshed, but review cleanup could not be confirmed."
+            );
+        }
+        runtime
+            .finish_and_join(ShutdownReason::UserQuit)
+            .expect("finish runtime");
     }
 }
 

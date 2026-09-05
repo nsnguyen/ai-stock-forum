@@ -3,12 +3,11 @@ use ratatui::layout::Rect;
 
 use super::{
     TuiEvent,
-    layout::{layout_mode, workspace_body_size},
+    layout::{agent_layout_mode, agent_workspace_body_size, layout_mode, workspace_body_size},
     model::{AgentsPane, Focus, LayoutMode, ProfileConfirmation, RuntimeStatus, Severity, TuiModel, View},
     views,
 };
 use crate::{
-    agents::builtin_profile_templates,
     app::{ApplicationCommand, CommandOutcome, CommandView, ShutdownDisposition, ShutdownReason},
     audit::AuditEntry,
     ui::command::{ParsedLine, parse_line},
@@ -39,8 +38,17 @@ pub fn handle_event(model: &mut TuiModel, event: TuiEvent) -> ControllerEffect {
         TuiEvent::Interrupt => ControllerEffect::RequestShutdown(ShutdownReason::Interrupted),
         TuiEvent::Resize(width, height) => {
             let area = Rect::new(0, 0, width, height);
-            model.set_layout_mode(layout_mode(area));
-            let (body_width, body_height) = workspace_body_size(area, model.inspector_open);
+            let agents = model.active_view == View::Agents;
+            model.set_layout_mode(if agents {
+                agent_layout_mode(area)
+            } else {
+                layout_mode(area)
+            });
+            let (body_width, body_height) = if agents {
+                agent_workspace_body_size(area, model.inspector_open)
+            } else {
+                workspace_body_size(area, model.inspector_open)
+            };
             model.set_workspace_body_size(body_width, body_height);
             if model.focus != Focus::Command {
                 normalize_focus(model);
@@ -368,13 +376,18 @@ fn apply_profile_editor_effect(model: &mut TuiModel, effect: ProfileEditorEffect
 fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEffect> {
     let effect = match (model.agents.pane, key.code) {
         (AgentsPane::List, KeyCode::Down) if no_modifiers(key.modifiers) => {
-            model.agents.selected_profile = model.agents.selected_profile.saturating_add(1);
-            model.agents.list_scroll = model.agents.list_scroll.saturating_add(1);
+            let last = model.agents.profiles.profiles.len().saturating_sub(1);
+            model.agents.selected_profile = model
+                .agents
+                .selected_profile
+                .saturating_add(1)
+                .min(last);
+            model.agents.list_scroll = model.agents.selected_profile;
             ControllerEffect::Redraw
         }
         (AgentsPane::List, KeyCode::Up) if no_modifiers(key.modifiers) => {
             model.agents.selected_profile = model.agents.selected_profile.saturating_sub(1);
-            model.agents.list_scroll = model.agents.list_scroll.saturating_sub(1);
+            model.agents.list_scroll = model.agents.selected_profile;
             ControllerEffect::Redraw
         }
         (AgentsPane::List, KeyCode::Enter) if no_modifiers(key.modifiers) => {
@@ -383,11 +396,6 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
         }
         (AgentsPane::List | AgentsPane::Detail, KeyCode::Char('c')) if no_modifiers(key.modifiers) => {
             let template_index = model.agents.selected_template;
-            model.agents.editor = builtin_profile_templates()
-                .get(template_index)
-                .and_then(|template| crate::ui::profile_editor::ProfileEditor::for_create(template).ok());
-            model.command.clear();
-            model.agents.pane = AgentsPane::Editor;
             ControllerEffect::StartProfileCreate { template_index }
         }
         (AgentsPane::List, KeyCode::Char('e')) if no_modifiers(key.modifiers) => {

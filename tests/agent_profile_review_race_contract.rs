@@ -169,7 +169,7 @@ fn cancel_waits_for_reserved_activation_and_cannot_claim_its_review() {
     let (cancel_done_tx, cancel_done_rx) = mpsc::sync_channel(1);
     thread::spawn(move || {
         cancel_started_in_thread.wait();
-        app.cancel_agent_profile_edit();
+        app.cancel_agent_profile_edit().unwrap();
         cancel_done_tx.send(app).unwrap();
     });
     cancel_started.wait();

@@ -6,8 +6,8 @@ pub const MIN_WIDTH: u16 = 60;
 pub const MIN_HEIGHT: u16 = 18;
 pub const MEDIUM_WIDTH: u16 = 80;
 pub const WIDE_WIDTH: u16 = 120;
-pub const MEDIUM_HEIGHT: u16 = MIN_HEIGHT;
-pub const WIDE_HEIGHT: u16 = MIN_HEIGHT;
+pub const MEDIUM_HEIGHT: u16 = 24;
+pub const WIDE_HEIGHT: u16 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CockpitLayout {
@@ -28,6 +28,18 @@ pub struct AgentWorkspaceLayout {
 }
 
 pub fn layout_mode(area: Rect) -> LayoutMode {
+    if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
+        LayoutMode::TooSmall
+    } else if area.width >= WIDE_WIDTH && area.height >= WIDE_HEIGHT {
+        LayoutMode::Wide
+    } else if area.width >= MEDIUM_WIDTH && area.height >= MEDIUM_HEIGHT {
+        LayoutMode::Medium
+    } else {
+        LayoutMode::Narrow
+    }
+}
+
+pub fn agent_layout_mode(area: Rect) -> LayoutMode {
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         LayoutMode::TooSmall
     } else if area.width >= WIDE_WIDTH {
@@ -61,6 +73,20 @@ pub fn agent_workspace(area: Rect, mode: LayoutMode) -> AgentWorkspaceLayout {
 
 pub fn calculate(area: Rect, inspector_open: bool) -> CockpitLayout {
     let mode = layout_mode(area);
+    calculate_for_mode(area, inspector_open, mode, 3)
+}
+
+pub fn calculate_agents(area: Rect, inspector_open: bool) -> CockpitLayout {
+    let mode = agent_layout_mode(area);
+    calculate_for_mode(area, inspector_open, mode, 4)
+}
+
+fn calculate_for_mode(
+    area: Rect,
+    inspector_open: bool,
+    mode: LayoutMode,
+    header_height: u16,
+) -> CockpitLayout {
     if mode == LayoutMode::TooSmall {
         return CockpitLayout {
             mode,
@@ -75,7 +101,7 @@ pub fn calculate(area: Rect, inspector_open: bool) -> CockpitLayout {
     }
 
     let bands = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(header_height),
         Constraint::Min(0),
         Constraint::Length(1),
         Constraint::Length(3),
@@ -128,6 +154,18 @@ pub fn calculate(area: Rect, inspector_open: bool) -> CockpitLayout {
 
 pub fn workspace_body_size(area: Rect, inspector_open: bool) -> (u16, u16) {
     let cockpit = calculate(area, inspector_open);
+    if cockpit.mode == LayoutMode::TooSmall {
+        (0, 0)
+    } else {
+        (
+            cockpit.workspace.width.saturating_sub(2),
+            cockpit.workspace.height.saturating_sub(2),
+        )
+    }
+}
+
+pub fn agent_workspace_body_size(area: Rect, inspector_open: bool) -> (u16, u16) {
+    let cockpit = calculate_agents(area, inspector_open);
     if cockpit.mode == LayoutMode::TooSmall {
         (0, 0)
     } else {
