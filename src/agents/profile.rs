@@ -210,7 +210,8 @@ fn validate_bindings(bindings: &AgentBindings) -> Result<(), DomainError> {
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentProfileVersion {
     profile_id: AgentProfileId,
     profile_version_id: AgentProfileVersionId,
@@ -270,6 +271,10 @@ impl AgentProfileVersion {
 
     pub fn content_digest(&self) -> &Digest {
         &self.content_digest
+    }
+
+    pub fn recompute_content_digest(&self) -> Result<Digest, DomainError> {
+        self.compute_digest()
     }
 
     pub fn display_name(&self) -> &str {

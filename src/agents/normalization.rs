@@ -34,7 +34,7 @@ impl ProfileField {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct NormalizedProfileName(String);
 
 impl NormalizedProfileName {

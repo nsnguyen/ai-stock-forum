@@ -66,6 +66,17 @@ fn summary(event: &ApplicationEvent) -> String {
         ApplicationEvent::ProjectionRebuilt { through_sequence } => {
             format!("projection rebuilt through sequence {through_sequence}")
         }
+        ApplicationEvent::AgentProfileCreated { profile } => {
+            format!("agent profile created: {}", profile.profile_id())
+        }
+        ApplicationEvent::AgentProfileVersionActivated {
+            profile,
+            previous_version_id,
+        } => format!(
+            "agent profile version activated: profile={}, version={}, previous_version={previous_version_id}",
+            profile.profile_id(),
+            profile.profile_version_id(),
+        ),
     }
 }
 

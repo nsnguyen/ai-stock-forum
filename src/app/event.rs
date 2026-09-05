@@ -2,9 +2,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 
 use crate::{
+    agents::AgentProfileVersion,
     app::{AuditLimit, InputRejection},
     domain::{
-        Actor, CausationId, CorrelationId, EventId, InstallationId, ObjectRef, SessionId,
+        Actor, AgentProfileVersionId, CausationId, CorrelationId, EventId, InstallationId,
+        ObjectRef, SessionId,
         Sha256Digest, canonical_json_bytes, sha256,
     },
     persistence::RecoveryError,
@@ -51,6 +53,13 @@ pub enum ApplicationEvent {
     ProjectionRebuilt {
         through_sequence: u64,
     },
+    AgentProfileCreated {
+        profile: AgentProfileVersion,
+    },
+    AgentProfileVersionActivated {
+        profile: AgentProfileVersion,
+        previous_version_id: AgentProfileVersionId,
+    },
 }
 
 impl ApplicationEvent {
@@ -67,6 +76,8 @@ impl ApplicationEvent {
             Self::ShutdownRequested => "shutdown_requested",
             Self::ProcessSessionEnded { .. } => "process_session_ended",
             Self::ProjectionRebuilt { .. } => "projection_rebuilt",
+            Self::AgentProfileCreated { .. } => "agent_profile_created",
+            Self::AgentProfileVersionActivated { .. } => "agent_profile_version_activated",
         }
     }
 }
