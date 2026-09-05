@@ -339,7 +339,7 @@ and private-memory editing remain future Phase 2 milestones.
 
 - Implement immutable `AgentProfileVersion` records and current-version
   projections.
-- Add `/agent create|list|show|edit|history` with guided editing, validation,
+- Add `agent create|list|show|edit|history` with guided editing, validation,
   field-level diffs, and activation confirmation.
 - Add TUI list/detail/editor/history views for profiles, skills, memory, and
   proposals; every action maps to the same typed commands as fallback mode.
