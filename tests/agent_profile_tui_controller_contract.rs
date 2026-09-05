@@ -12,11 +12,13 @@ use ai_stock_forum::{
         profile_editor::{ProfileEditor, ProfileEditorMode},
         tui::{
         ControllerEffect, TuiEvent, handle_event,
+            layout::view_geometry,
             model::{AgentsPane, AgentsViewState, ProfileConfirmation, TuiModel, View},
         },
     },
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::Rect;
 use uuid::Uuid;
 
 fn model() -> TuiModel {
@@ -187,6 +189,61 @@ fn profile_refresh_preserves_the_selected_identity_when_order_changes() {
 
     assert_eq!(model.agents.selected_summary().unwrap().profile_id, selected);
     assert_eq!((model.agents.selected_profile, model.agents.list_scroll), (0, 0));
+}
+
+fn assert_cached_geometry(model: &TuiModel, width: u16, height: u16, view: View) {
+    let expected = view_geometry(Rect::new(0, 0, width, height), view, model.inspector_open);
+    assert_eq!(model.active_view, view);
+    assert_eq!((model.terminal_width, model.terminal_height), (width, height));
+    assert_eq!(model.layout_mode, expected.cockpit.mode);
+    assert_eq!(
+        (model.workspace_body_width, model.workspace_body_height),
+        (expected.workspace_body_width, expected.workspace_body_height)
+    );
+}
+
+#[test]
+fn every_view_transition_recomputes_geometry_without_resize_and_preserves_agents_state() {
+    for (width, height) in [(80, 18), (120, 18)] {
+        let mut model = model();
+        model.agents.selected_profile = 3;
+        model.agents.selected_template = 1;
+        model.agents.list_scroll = 3;
+        model.agents.detail_scroll = 4;
+        model.agents.history_scroll = 5;
+        model.agents.editor = Some(create_editor());
+        let expected_agents_state = model.agents.clone();
+
+        assert_eq!(
+            handle_event(&mut model, TuiEvent::Resize(width, height)),
+            ControllerEffect::Redraw
+        );
+        assert_cached_geometry(&model, width, height, View::Overview);
+
+        for (code, view) in [
+            (KeyCode::Char('1'), View::Overview),
+            (KeyCode::Char('2'), View::Setup),
+            (KeyCode::Char('3'), View::Audit),
+            (KeyCode::Char('4'), View::Help),
+        ] {
+            assert_eq!(
+                handle_event(&mut model, key(KeyCode::Char('a'))),
+                ControllerEffect::LoadAgentProfiles
+            );
+            assert_cached_geometry(&model, width, height, View::Agents);
+            assert_eq!(model.agents, expected_agents_state);
+
+            assert_eq!(handle_event(&mut model, key(code)), ControllerEffect::Redraw);
+            assert_cached_geometry(&model, width, height, view);
+            assert_eq!(model.agents, expected_agents_state);
+        }
+
+        model.select_view(View::Agents);
+        assert_cached_geometry(&model, width, height, View::Agents);
+        model.select_view(View::Overview);
+        assert_cached_geometry(&model, width, height, View::Overview);
+        assert_eq!(model.agents, expected_agents_state);
+    }
 }
 
 #[test]

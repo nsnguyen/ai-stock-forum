@@ -365,6 +365,8 @@ pub struct TuiModel {
     pub workspace_scroll: u16,
     pub workspace_body_width: u16,
     pub workspace_body_height: u16,
+    pub terminal_width: u16,
+    pub terminal_height: u16,
     pub message: Option<UiMessage>,
     pub command_in_flight: bool,
     pub runtime_status: RuntimeStatus,
@@ -407,17 +409,21 @@ impl TuiModel {
             workspace_scroll: 0,
             workspace_body_width: 0,
             workspace_body_height: 0,
+            terminal_width: super::layout::WIDE_WIDTH,
+            terminal_height: super::layout::WIDE_HEIGHT,
             message: None,
             command_in_flight: false,
             runtime_status: RuntimeStatus::Ready,
             previous_session_interrupted,
         };
         model.replace_audit(recent_audit);
+        model.synchronize_geometry();
         model
     }
 
     pub fn select_view(&mut self, view: View) {
         self.active_view = view;
+        self.synchronize_geometry();
     }
 
     pub fn set_focus(&mut self, focus: Focus) {
@@ -430,6 +436,7 @@ impl TuiModel {
 
     pub fn toggle_inspector(&mut self) {
         self.inspector_open = !self.inspector_open;
+        self.synchronize_geometry();
     }
 
     pub fn scroll_up(&mut self, amount: u16) {
@@ -447,6 +454,23 @@ impl TuiModel {
     pub fn set_workspace_body_size(&mut self, width: u16, height: u16) {
         self.workspace_body_width = width;
         self.workspace_body_height = height;
+    }
+
+    pub fn set_terminal_size(&mut self, width: u16, height: u16) {
+        self.terminal_width = width;
+        self.terminal_height = height;
+        self.synchronize_geometry();
+    }
+
+    pub fn synchronize_geometry(&mut self) {
+        let geometry = super::layout::view_geometry(
+            ratatui::layout::Rect::new(0, 0, self.terminal_width, self.terminal_height),
+            self.active_view,
+            self.inspector_open,
+        );
+        self.layout_mode = geometry.cockpit.mode;
+        self.workspace_body_width = geometry.workspace_body_width;
+        self.workspace_body_height = geometry.workspace_body_height;
     }
 
     pub fn replace_audit(&mut self, mut entries: Vec<AuditEntry>) {
@@ -727,7 +751,7 @@ mod tests {
         let mut model = TuiModel::new(snapshot(), false);
         model.select_view(View::Audit);
         model.set_focus(Focus::Command);
-        model.set_layout_mode(LayoutMode::Narrow);
+        model.set_terminal_size(70, 20);
         model.toggle_inspector();
         model.scroll_down(u16::MAX);
         model.scroll_down(1);

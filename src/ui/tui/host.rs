@@ -4,7 +4,6 @@ use super::{
     TuiError,
     controller::{ControllerEffect, apply_outcome, handle_event},
     event::{CrosstermEventSource, EventSource, TuiEvent},
-    layout::{layout_mode, workspace_body_size},
     model::{RuntimeStatus, TuiModel},
     terminal::{CrosstermScreen, Screen},
     theme::Theme,
@@ -456,15 +455,7 @@ impl TuiRunner {
 
     fn update_layout(&mut self, screen: &dyn Screen) -> Result<bool, TuiError> {
         let area = screen.size()?;
-        let mode = layout_mode(area);
-        let body_size = workspace_body_size(area, self.model.inspector_open);
-        if mode == self.model.layout_mode
-            && body_size
-                == (
-                    self.model.workspace_body_width,
-                    self.model.workspace_body_height,
-                )
-        {
+        if (area.width, area.height) == (self.model.terminal_width, self.model.terminal_height) {
             return Ok(false);
         }
         let effect = handle_event(&mut self.model, TuiEvent::Resize(area.width, area.height));

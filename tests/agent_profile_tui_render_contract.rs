@@ -18,13 +18,14 @@ use ai_stock_forum::{
         profile_editor::{ProfileEditor, ProfileEditorEffect},
         tui::{
             ProfileConfirmation,
+            layout::view_geometry,
             model::{AgentsPane, TuiModel, View},
             render,
             theme::Theme,
         },
     },
 };
-use ratatui::{Terminal, backend::TestBackend};
+use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use uuid::Uuid;
 
 fn profile() -> AgentProfileVersion {
@@ -204,6 +205,24 @@ fn narrow_header_rows_are_complete_at_sixty_and_seventy_columns() {
             "1 Overview  2 Setup  3 Audit  4 Help  a Agents"
         );
         assert_eq!(rows[3], "-".repeat(usize::from(width)));
+    }
+}
+
+#[test]
+fn view_geometry_accounts_for_the_agents_header_height() {
+    for width in [80, 120] {
+        let area = Rect::new(0, 0, width, 18);
+        let legacy = view_geometry(area, View::Overview, false);
+        let agents = view_geometry(area, View::Agents, false);
+
+        assert_eq!(legacy.cockpit.header.height, 3);
+        assert_eq!(agents.cockpit.header.height, 4);
+        assert_eq!(legacy.workspace_body_height, 9);
+        assert_eq!(agents.workspace_body_height, 8);
+        assert_eq!(
+            legacy.workspace_body_height.saturating_sub(1),
+            agents.workspace_body_height
+        );
     }
 }
 

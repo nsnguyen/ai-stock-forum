@@ -1,6 +1,6 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 
-use super::model::LayoutMode;
+use super::model::{LayoutMode, View};
 
 pub const MIN_WIDTH: u16 = 60;
 pub const MIN_HEIGHT: u16 = 18;
@@ -25,6 +25,34 @@ pub struct CockpitLayout {
 pub struct AgentWorkspaceLayout {
     pub list: Option<Rect>,
     pub active: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewGeometry {
+    pub cockpit: CockpitLayout,
+    pub workspace_body_width: u16,
+    pub workspace_body_height: u16,
+}
+
+pub fn view_geometry(area: Rect, view: View, inspector_open: bool) -> ViewGeometry {
+    let cockpit = if view == View::Agents {
+        calculate_agents(area, inspector_open)
+    } else {
+        calculate(area, inspector_open)
+    };
+    let (workspace_body_width, workspace_body_height) = if cockpit.mode == LayoutMode::TooSmall {
+        (0, 0)
+    } else {
+        (
+            cockpit.workspace.width.saturating_sub(2),
+            cockpit.workspace.height.saturating_sub(2),
+        )
+    };
+    ViewGeometry {
+        cockpit,
+        workspace_body_width,
+        workspace_body_height,
+    }
 }
 
 pub fn layout_mode(area: Rect) -> LayoutMode {
@@ -153,27 +181,19 @@ fn calculate_for_mode(
 }
 
 pub fn workspace_body_size(area: Rect, inspector_open: bool) -> (u16, u16) {
-    let cockpit = calculate(area, inspector_open);
-    if cockpit.mode == LayoutMode::TooSmall {
-        (0, 0)
-    } else {
-        (
-            cockpit.workspace.width.saturating_sub(2),
-            cockpit.workspace.height.saturating_sub(2),
-        )
-    }
+    let geometry = view_geometry(area, View::Overview, inspector_open);
+    (
+        geometry.workspace_body_width,
+        geometry.workspace_body_height,
+    )
 }
 
 pub fn agent_workspace_body_size(area: Rect, inspector_open: bool) -> (u16, u16) {
-    let cockpit = calculate_agents(area, inspector_open);
-    if cockpit.mode == LayoutMode::TooSmall {
-        (0, 0)
-    } else {
-        (
-            cockpit.workspace.width.saturating_sub(2),
-            cockpit.workspace.height.saturating_sub(2),
-        )
-    }
+    let geometry = view_geometry(area, View::Agents, inspector_open);
+    (
+        geometry.workspace_body_width,
+        geometry.workspace_body_height,
+    )
 }
 
 fn centered_overlay(area: Rect) -> Rect {

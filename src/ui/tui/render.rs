@@ -6,18 +6,14 @@ use ratatui::{
 };
 
 use super::{
-    layout::{MIN_HEIGHT, MIN_WIDTH, calculate, calculate_agents},
+    layout::{MIN_HEIGHT, MIN_WIDTH, view_geometry},
     model::{Focus, LayoutMode, Severity, TuiModel, View},
     theme::Theme,
     views,
 };
 
 pub fn render(frame: &mut Frame<'_>, model: &TuiModel, theme: &Theme) {
-    let cockpit = if model.active_view == View::Agents {
-        calculate_agents(frame.area(), model.inspector_open)
-    } else {
-        calculate(frame.area(), model.inspector_open)
-    };
+    let cockpit = view_geometry(frame.area(), model.active_view, model.inspector_open).cockpit;
     frame.render_widget(Clear, cockpit.viewport);
     if cockpit.mode == LayoutMode::TooSmall {
         render_too_small(frame, cockpit.viewport);

@@ -1,9 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::Rect;
-
 use super::{
     TuiEvent,
-    layout::{agent_layout_mode, agent_workspace_body_size, layout_mode, workspace_body_size},
     model::{AgentsPane, Focus, LayoutMode, ProfileConfirmation, RuntimeStatus, Severity, TuiModel, View},
     views,
 };
@@ -37,19 +34,7 @@ pub fn handle_event(model: &mut TuiModel, event: TuiEvent) -> ControllerEffect {
     let effect = match event {
         TuiEvent::Interrupt => ControllerEffect::RequestShutdown(ShutdownReason::Interrupted),
         TuiEvent::Resize(width, height) => {
-            let area = Rect::new(0, 0, width, height);
-            let agents = model.active_view == View::Agents;
-            model.set_layout_mode(if agents {
-                agent_layout_mode(area)
-            } else {
-                layout_mode(area)
-            });
-            let (body_width, body_height) = if agents {
-                agent_workspace_body_size(area, model.inspector_open)
-            } else {
-                workspace_body_size(area, model.inspector_open)
-            };
-            model.set_workspace_body_size(body_width, body_height);
+            model.set_terminal_size(width, height);
             if model.focus != Focus::Command {
                 normalize_focus(model);
             }

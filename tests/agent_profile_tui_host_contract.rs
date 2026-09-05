@@ -28,7 +28,8 @@ use ai_stock_forum::{
         profile_editor::{PreviewEditRequest, ProfileEditor, ProfileEditorEffect},
         tui::{
             ControllerEffect, EventSource, Screen, TuiError, TuiEvent, execute_agent_effect,
-            model::{AgentsPane, TuiModel},
+            layout::view_geometry,
+            model::{AgentsPane, LayoutMode, TuiModel, View},
             run_tui_with_screen,
             theme::Theme,
         },
@@ -683,4 +684,101 @@ fn shutdown_cancels_service_review_before_terminal_restoration() {
     .expect("clean shutdown");
 
     assert_eq!(order.lock().unwrap().as_slice(), ["cancel", "restore", "finish"]);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ObservedGeometry {
+    view: View,
+    mode: LayoutMode,
+    terminal_width: u16,
+    terminal_height: u16,
+    body_width: u16,
+    body_height: u16,
+}
+
+struct GeometryScreen {
+    area: Rect,
+    draws: Arc<Mutex<Vec<ObservedGeometry>>>,
+}
+
+impl Screen for GeometryScreen {
+    fn size(&self) -> Result<Rect, TuiError> {
+        Ok(self.area)
+    }
+
+    fn draw(&mut self, model: &TuiModel, _theme: &Theme) -> Result<(), TuiError> {
+        self.draws.lock().unwrap().push(ObservedGeometry {
+            view: model.active_view,
+            mode: model.layout_mode,
+            terminal_width: model.terminal_width,
+            terminal_height: model.terminal_height,
+            body_width: model.workspace_body_width,
+            body_height: model.workspace_body_height,
+        });
+        Ok(())
+    }
+
+    fn restore(&mut self) -> Result<(), TuiError> {
+        Ok(())
+    }
+}
+
+fn observed(area: Rect, view: View) -> ObservedGeometry {
+    let geometry = view_geometry(area, view, false);
+    ObservedGeometry {
+        view,
+        mode: geometry.cockpit.mode,
+        terminal_width: area.width,
+        terminal_height: area.height,
+        body_width: geometry.workspace_body_width,
+        body_height: geometry.workspace_body_height,
+    }
+}
+
+#[test]
+fn host_initializes_and_round_trips_view_geometry_without_resize() {
+    for area in [Rect::new(0, 0, 80, 18), Rect::new(0, 0, 120, 18)] {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let runtime = ApplicationRuntime::spawn(
+            OrderingExecutor {
+                order: order.clone(),
+            },
+            4,
+        )
+        .expect("runtime");
+        let draws = Arc::new(Mutex::new(Vec::new()));
+        let mut screen = GeometryScreen {
+            area,
+            draws: draws.clone(),
+        };
+        let mut events = OneInterrupt {
+            events: VecDeque::from([
+                TuiEvent::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+                TuiEvent::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
+                TuiEvent::Key(KeyEvent::new(
+                    KeyCode::Char('c'),
+                    KeyModifiers::CONTROL,
+                )),
+            ]),
+        };
+
+        run_tui_with_screen(
+            runtime,
+            empty_snapshot(),
+            false,
+            &mut screen,
+            &mut events,
+            &Theme::from_no_color(true),
+        )
+        .expect("geometry round trip");
+
+        assert_eq!(
+            draws.lock().unwrap().as_slice(),
+            [
+                observed(area, View::Overview),
+                observed(area, View::Agents),
+                observed(area, View::Overview),
+            ]
+        );
+    }
 }
