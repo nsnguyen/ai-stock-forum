@@ -37,6 +37,32 @@ pub enum PersistenceError {
     EventDigestMismatch,
     #[error("projection state conflicts with the authoritative event stream")]
     ProjectionStateConflict,
+    #[error("database agent profile history does not match the authoritative event stream")]
+    AgentProfileHistoryMismatch,
+    #[error("agent profile payload is invalid")]
+    InvalidAgentProfilePayload,
+    #[error("active agent profile projection rebuild failed")]
+    ActiveAgentProfileRebuildFailed,
+}
+
+impl PersistenceError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::QueryFailed => "database_write_failed",
+            Self::InvalidMigrationRecord => "invalid_migration_record",
+            Self::InvalidEventRecord => "invalid_event_record",
+            Self::UnsupportedEventSchema => "unsupported_event_schema",
+            Self::IdempotencyConflict => "event_id_conflict",
+            Self::Contention => "database_write_contended",
+            Self::ImmutableEventStream => "event_stream_immutable",
+            Self::PreviousEventDigestMismatch => "previous_event_digest_mismatch",
+            Self::EventDigestMismatch => "event_digest_mismatch",
+            Self::ProjectionStateConflict => "projection_state_conflict",
+            Self::AgentProfileHistoryMismatch => "database_agent_profile_history_mismatch",
+            Self::InvalidAgentProfilePayload => "invalid_agent_profile_payload",
+            Self::ActiveAgentProfileRebuildFailed => "active_agent_profile_rebuild_failed",
+        }
+    }
 }
 
 pub struct Database {

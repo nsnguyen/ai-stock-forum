@@ -33,6 +33,14 @@ pub enum RecoveryError {
     EventDigestMismatch,
     #[error("event stream query failed")]
     QueryFailed,
+    #[error("database agent profile history does not match the authoritative event stream")]
+    AgentProfileHistoryMismatch,
+    #[error("database contains unexpected agent profile history")]
+    UnexpectedAgentProfileHistory,
+    #[error("agent profile payload is invalid")]
+    InvalidAgentProfilePayload,
+    #[error("active agent profile projection rebuild failed")]
+    ActiveAgentProfileRebuildFailed,
 }
 
 impl RecoveryError {
@@ -46,6 +54,10 @@ impl RecoveryError {
             Self::PreviousEventDigestMismatch => "previous_event_digest_mismatch",
             Self::EventDigestMismatch => "event_digest_mismatch",
             Self::QueryFailed => "event_query_failed",
+            Self::AgentProfileHistoryMismatch => "database_agent_profile_history_mismatch",
+            Self::UnexpectedAgentProfileHistory => "unexpected_agent_profile_history",
+            Self::InvalidAgentProfilePayload => "invalid_agent_profile_payload",
+            Self::ActiveAgentProfileRebuildFailed => "active_agent_profile_rebuild_failed",
         }
     }
 }
@@ -421,6 +433,14 @@ fn persistence_from_recovery(error: RecoveryError) -> PersistenceError {
         RecoveryError::EventDigestMismatch => PersistenceError::EventDigestMismatch,
         RecoveryError::EventSequenceGap
         | RecoveryError::EventSequenceOverflow
-        | RecoveryError::QueryFailed => PersistenceError::QueryFailed,
+        | RecoveryError::QueryFailed
+        | RecoveryError::UnexpectedAgentProfileHistory => PersistenceError::QueryFailed,
+        RecoveryError::AgentProfileHistoryMismatch => {
+            PersistenceError::AgentProfileHistoryMismatch
+        }
+        RecoveryError::InvalidAgentProfilePayload => PersistenceError::InvalidAgentProfilePayload,
+        RecoveryError::ActiveAgentProfileRebuildFailed => {
+            PersistenceError::ActiveAgentProfileRebuildFailed
+        }
     }
 }

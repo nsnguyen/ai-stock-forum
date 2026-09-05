@@ -3,12 +3,17 @@ use std::{collections::BTreeMap, str::FromStr};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
+    agents::AgentProfilesProjection,
     app::{EventEnvelope, ShutdownReason},
     domain::Sha256Digest,
     recovery::{InstallationProjection, ProjectionState, SessionEndProjection, SessionProjection},
 };
 
-use super::{EventRepository, ImmediateTransaction, PersistenceError, RecoveryError};
+use super::{
+    EventRepository, ImmediateTransaction, PersistenceError, RecoveryError,
+    agent_profile_repository::{active_profiles_match, reconcile_expected_versions},
+    replace_active_profiles,
+};
 
 pub struct ProjectionRepository;
 
@@ -21,7 +26,7 @@ impl ProjectionRepository {
         transaction: &ImmediateTransaction<'_>,
     ) -> Result<ProjectionState, RecoveryError> {
         let expected = reduce_verified_stream(transaction.transaction())?;
-        match read_projection_rows(transaction.transaction())? {
+        match read_projection_rows(transaction.transaction(), &expected.agent_profiles)? {
             None if expected == ProjectionState::default() => Ok(expected),
             None => Err(RecoveryError::InvalidEventRecord),
             Some(persisted) if persisted == expected => Ok(persisted),
@@ -60,7 +65,7 @@ impl ProjectionRepository {
             .map_err(|_| RecoveryError::QueryFailed)?;
         let expected = reduce_verified_stream(&transaction)?;
         before_projection_rows();
-        let result = match read_projection_rows(&transaction)? {
+        let result = match read_projection_rows(&transaction, &expected.agent_profiles)? {
             None if expected == ProjectionState::default() => Ok(expected),
             None => Err(RecoveryError::InvalidEventRecord),
             Some(persisted) if persisted == expected => Ok(persisted),
@@ -87,12 +92,29 @@ impl ProjectionRepository {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| RecoveryError::QueryFailed)?;
         let state = prepare_rebuild(&transaction, events)?;
+        reconcile_expected_versions(&transaction, events)?;
         clear_rebuildable_projection_rows(&transaction)?;
         store_transaction(&transaction, &state).map_err(recovery_from_persistence)?;
         transaction
             .commit()
             .map_err(|_| RecoveryError::QueryFailed)?;
         Ok(state)
+    }
+
+    pub(crate) fn reconcile_agent_profiles(
+        connection: &mut Connection,
+        events: &[EventEnvelope],
+    ) -> Result<(), RecoveryError> {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| RecoveryError::QueryFailed)?;
+        let state = prepare_rebuild(&transaction, events)?;
+        reconcile_expected_versions(&transaction, events)?;
+        replace_active_profiles(&transaction, &state.agent_profiles)
+            .map_err(recovery_from_persistence)?;
+        transaction
+            .commit()
+            .map_err(|_| RecoveryError::ActiveAgentProfileRebuildFailed)
     }
 
     /// Clears rebuildable projection rows after proving that `events` is the current,
@@ -103,6 +125,7 @@ impl ProjectionRepository {
         events: &[EventEnvelope],
     ) -> Result<ProjectionState, RecoveryError> {
         let state = prepare_rebuild(transaction.transaction(), events)?;
+        reconcile_expected_versions(transaction.transaction(), events)?;
         clear_rebuildable_projection_rows(transaction.transaction())?;
         Ok(state)
     }
@@ -121,6 +144,9 @@ fn prepare_rebuild(
 }
 
 fn clear_rebuildable_projection_rows(transaction: &Transaction<'_>) -> Result<(), RecoveryError> {
+    transaction
+        .execute("DELETE FROM active_agent_profiles", [])
+        .map_err(|_| RecoveryError::ActiveAgentProfileRebuildFailed)?;
     transaction
         .execute("DELETE FROM projection_metadata", [])
         .map_err(|_| RecoveryError::QueryFailed)?;
@@ -150,7 +176,10 @@ fn reduce_events(events: &[EventEnvelope]) -> Result<ProjectionState, RecoveryEr
     Ok(state)
 }
 
-fn read_projection_rows(connection: &Connection) -> Result<Option<ProjectionState>, RecoveryError> {
+fn read_projection_rows(
+    connection: &Connection,
+    agent_profiles: &AgentProfilesProjection,
+) -> Result<Option<ProjectionState>, RecoveryError> {
     let installation = connection
         .query_row(
             "SELECT installation_id, created_event_id, created_at_ms FROM installation_projection WHERE singleton = 1",
@@ -228,7 +257,12 @@ fn read_projection_rows(connection: &Connection) -> Result<Option<ProjectionStat
         .optional()
         .map_err(|_| RecoveryError::QueryFailed)?;
     if metadata.is_none() {
-        return if installation.is_none() && sessions.is_empty() {
+        let active_count = connection
+            .query_row("SELECT COUNT(*) FROM active_agent_profiles", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(|_| RecoveryError::QueryFailed)?;
+        return if installation.is_none() && sessions.is_empty() && active_count == 0 {
             Ok(None)
         } else {
             Err(RecoveryError::InvalidEventRecord)
@@ -238,6 +272,7 @@ fn read_projection_rows(connection: &Connection) -> Result<Option<ProjectionStat
     let state = ProjectionState {
         installation,
         sessions,
+        agent_profiles: agent_profiles.clone(),
         last_sequence: u64::try_from(sequence).map_err(|_| RecoveryError::InvalidEventRecord)?,
         last_event_digest: digest
             .map(|value| Sha256Digest::parse(&value))
@@ -245,6 +280,9 @@ fn read_projection_rows(connection: &Connection) -> Result<Option<ProjectionStat
             .map_err(|_| RecoveryError::InvalidEventRecord)?,
         ..ProjectionState::default()
     };
+    if !active_profiles_match(connection, agent_profiles).map_err(recovery_from_persistence)? {
+        return Err(RecoveryError::InvalidEventRecord);
+    }
     state.validate()?;
     let stored_digest =
         Sha256Digest::parse(&projection_digest).map_err(|_| RecoveryError::InvalidEventRecord)?;
@@ -270,7 +308,9 @@ fn store_transaction(
     if state != &expected {
         return Err(PersistenceError::ProjectionStateConflict);
     }
-    if let Some(persisted) = read_projection_rows(transaction).map_err(persistence_from_recovery)? {
+    if let Some(persisted) = read_projection_rows(transaction, &expected.agent_profiles)
+        .map_err(persistence_from_recovery)?
+    {
         let prefix = events
             .iter()
             .filter(|event| event.sequence <= persisted.last_sequence)
@@ -358,6 +398,7 @@ fn write_projection_rows(
             )
             .map_err(|_| PersistenceError::QueryFailed)?;
     }
+    replace_active_profiles(transaction, &state.agent_profiles)?;
     let digest = state
         .digest()
         .map_err(|_| PersistenceError::ProjectionStateConflict)?;
@@ -405,9 +446,19 @@ fn persistence_from_recovery(error: RecoveryError) -> PersistenceError {
         | RecoveryError::PreviousEventDigestMismatch
         | RecoveryError::EventDigestMismatch
         | RecoveryError::InvalidEventRecord
-        | RecoveryError::InvalidPredecessorShape => PersistenceError::ProjectionStateConflict,
+        | RecoveryError::InvalidPredecessorShape
+        | RecoveryError::UnexpectedAgentProfileHistory => {
+            PersistenceError::ProjectionStateConflict
+        }
         RecoveryError::UnsupportedEventSchema => PersistenceError::UnsupportedEventSchema,
         RecoveryError::QueryFailed => PersistenceError::QueryFailed,
+        RecoveryError::AgentProfileHistoryMismatch => {
+            PersistenceError::AgentProfileHistoryMismatch
+        }
+        RecoveryError::InvalidAgentProfilePayload => PersistenceError::InvalidAgentProfilePayload,
+        RecoveryError::ActiveAgentProfileRebuildFailed => {
+            PersistenceError::ActiveAgentProfileRebuildFailed
+        }
     }
 }
 
@@ -416,6 +467,13 @@ fn recovery_from_persistence(error: PersistenceError) -> RecoveryError {
         PersistenceError::UnsupportedEventSchema => RecoveryError::UnsupportedEventSchema,
         PersistenceError::ProjectionStateConflict | PersistenceError::InvalidEventRecord => {
             RecoveryError::InvalidEventRecord
+        }
+        PersistenceError::AgentProfileHistoryMismatch => {
+            RecoveryError::AgentProfileHistoryMismatch
+        }
+        PersistenceError::InvalidAgentProfilePayload => RecoveryError::InvalidAgentProfilePayload,
+        PersistenceError::ActiveAgentProfileRebuildFailed => {
+            RecoveryError::ActiveAgentProfileRebuildFailed
         }
         _ => RecoveryError::QueryFailed,
     }

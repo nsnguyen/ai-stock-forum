@@ -100,6 +100,7 @@ impl ProjectionState {
         canonical_json_bytes(&PersistentProjectionState {
             installation: &self.installation,
             sessions: &self.sessions,
+            agent_profiles: &self.agent_profiles,
             setup_status: &self.setup_status,
             last_sequence: self.last_sequence,
             last_event_digest: &self.last_event_digest,
@@ -164,6 +165,7 @@ impl ProjectionState {
 struct PersistentProjectionState<'a> {
     installation: &'a Option<InstallationProjection>,
     sessions: &'a BTreeMap<SessionId, SessionProjection>,
+    agent_profiles: &'a AgentProfilesProjection,
     setup_status: &'a SetupStatus,
     last_sequence: u64,
     last_event_digest: &'a Option<Sha256Digest>,

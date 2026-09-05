@@ -48,3 +48,16 @@ pub enum AppError {
     #[error("application lifecycle is already finished")]
     LifecycleFinished,
 }
+
+impl AppError {
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Persistence(error) => error.code(),
+            Self::Recovery(error) => error.code(),
+            Self::CapabilityDenied { .. } => "capability_denied",
+            Self::ApprovalRequired { .. } => "approval_required",
+            Self::CommandConflict => "command_conflict",
+            Self::LifecycleFinished => "lifecycle_finished",
+        }
+    }
+}
