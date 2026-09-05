@@ -154,6 +154,14 @@ impl TuiRunner {
                 self.begin_stopping();
                 Ok(LoopControl::Finish(reason))
             }
+            ControllerEffect::LoadAgentProfiles
+            | ControllerEffect::LoadAgentProfile { .. }
+            | ControllerEffect::LoadAgentProfileHistory { .. }
+            | ControllerEffect::StartProfileCreate { .. }
+            | ControllerEffect::StartProfileEdit { .. }
+            | ControllerEffect::RequestProfilePreview(_)
+            | ControllerEffect::ExecuteProfile(_)
+            | ControllerEffect::CancelProfileReview => Ok(LoopControl::Continue { redraw: true }),
         }
     }
 

@@ -21,6 +21,7 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
         View::Setup => setup::render(frame, area, model, theme),
         View::Audit => audit::render(frame, area, model, theme),
         View::Help => help::render(frame, area, model, theme),
+        View::Agents => {}
     }
 }
 
@@ -30,6 +31,7 @@ pub(super) fn workspace_content_height(model: &TuiModel, width: u16) -> u16 {
         View::Setup => setup::content_height(model, width),
         View::Audit => 0,
         View::Help => help::content_height(width),
+        View::Agents => 0,
     }
 }
 
@@ -55,6 +57,7 @@ pub(super) fn render_inspector(frame: &mut Frame<'_>, area: Rect, model: &TuiMod
         View::Overview => contextual_lines("Overview", "Runtime and installation health", theme),
         View::Setup => contextual_lines("Setup", "State is read-only in Phase 0B", theme),
         View::Help => contextual_lines("Help", "Approved keyboard and slash grammar", theme),
+        View::Agents => contextual_lines("Agents", "Agent profile controls are loading", theme),
     };
     frame.render_widget(
         Paragraph::new(lines)

@@ -1,10 +1,11 @@
 use std::collections::VecDeque;
 
 use crate::{
-    app::{DatabaseReadiness, MAX_INPUT_BYTES, PresentationSnapshot, ProcessGuardOwnership},
+    app::{ApplicationCommand, DatabaseReadiness, MAX_INPUT_BYTES, PresentationSnapshot, ProcessGuardOwnership},
     audit::AuditEntry,
     domain::{InstallationId, SessionId},
     setup::SetupStatus,
+    ui::profile_editor::ProfileEditor,
 };
 
 pub const COMMAND_HISTORY_CAPACITY: usize = 100;
@@ -15,6 +16,63 @@ pub enum View {
     Setup,
     Audit,
     Help,
+    Agents,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentsPane {
+    List,
+    Detail,
+    History,
+    Editor,
+    Confirmation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileConfirmation {
+    pub command: ApplicationCommand,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentsViewState {
+    pub selected_profile: usize,
+    pub selected_template: usize,
+    pub pane: AgentsPane,
+    pub list_scroll: usize,
+    pub detail_scroll: usize,
+    pub history_scroll: usize,
+    pub editor: Option<ProfileEditor>,
+    pub pending_confirmation: Option<ProfileConfirmation>,
+}
+
+impl PartialEq for AgentsViewState {
+    fn eq(&self, other: &Self) -> bool {
+        self.selected_profile == other.selected_profile
+            && self.selected_template == other.selected_template
+            && self.pane == other.pane
+            && self.list_scroll == other.list_scroll
+            && self.detail_scroll == other.detail_scroll
+            && self.history_scroll == other.history_scroll
+            && self.editor.is_some() == other.editor.is_some()
+            && self.pending_confirmation == other.pending_confirmation
+    }
+}
+
+impl Eq for AgentsViewState {}
+
+impl Default for AgentsViewState {
+    fn default() -> Self {
+        Self {
+            selected_profile: 0,
+            selected_template: 0,
+            pane: AgentsPane::List,
+            list_scroll: 0,
+            detail_scroll: 0,
+            history_scroll: 0,
+            editor: None,
+            pending_confirmation: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,6 +277,7 @@ fn bounded_safe_prefix(input: &str, byte_limit: usize) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiModel {
     pub active_view: View,
+    pub agents: AgentsViewState,
     pub focus: Focus,
     pub layout_mode: LayoutMode,
     pub inspector_open: bool,
@@ -251,6 +310,7 @@ impl TuiModel {
         } = snapshot;
         let mut model = Self {
             active_view: View::Overview,
+            agents: AgentsViewState::default(),
             focus: Focus::Workspace,
             layout_mode: LayoutMode::Wide,
             inspector_open: false,

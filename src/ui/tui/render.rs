@@ -214,6 +214,7 @@ fn view_name(view: View) -> &'static str {
         View::Setup => "Setup",
         View::Audit => "Audit",
         View::Help => "Help",
+        View::Agents => "Agents",
     }
 }
 
