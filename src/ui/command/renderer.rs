@@ -2,7 +2,8 @@ use std::io::{self, Write};
 
 use crate::{
     agents::{
-        AgentProfileDraft, AgentReadiness, ProfileDiffField, ProfileFieldValue, ProfileTemplate,
+        AgentProfileDraft, AgentReadiness, McpRef, ProfileDiffField, ProfileFieldDiff,
+        ProfileFieldValue, ProfileTemplate, SkillRef,
     },
     app::{
         AppError, CommandOutcome, CommandView, InputRejectionCategory, ShutdownDisposition,
@@ -18,6 +19,9 @@ use crate::{
         tui::TuiError,
     },
 };
+
+const MAX_PROFILE_LIST_ROWS: usize = 100;
+const MAX_PROFILE_HISTORY_ROWS: usize = 100;
 
 pub struct TextRenderer;
 
@@ -110,7 +114,7 @@ impl TextRenderer {
             ),
             CommandView::AgentProfiles(view) => {
                 writer.write_all(b"NAME | ROLE | SPECIALTY | READY | VERSION | ID\n")?;
-                for profile in &view.profiles {
+                for profile in view.profiles.iter().take(MAX_PROFILE_LIST_ROWS) {
                     writeln!(
                         writer,
                         "{} | {} | {} | {} | {} | {}",
@@ -121,6 +125,10 @@ impl TextRenderer {
                         profile.version.get(),
                         profile.profile_id,
                     )?;
+                }
+                let omitted = view.profiles.len().saturating_sub(MAX_PROFILE_LIST_ROWS);
+                if omitted > 0 {
+                    writeln!(writer, "... {omitted} profiles omitted.")?;
                 }
                 Ok(())
             }
@@ -148,8 +156,8 @@ impl TextRenderer {
                     escaped_option(profile.bindings().model_provider.as_deref(), 256),
                     escaped_option(profile.bindings().model_name.as_deref(), 256)
                 )?;
-                writeln!(writer, "Skill refs: {}", profile.skill_refs().len())?;
-                writeln!(writer, "MCP refs: {}", profile.mcp_refs().len())?;
+                writeln!(writer, "Skill refs: {}", escaped_skill_refs(profile.skill_refs()))?;
+                writeln!(writer, "MCP refs: {}", escaped_mcp_refs(profile.mcp_refs()))?;
                 match profile.template_provenance() {
                     Some(provenance) => writeln!(
                         writer,
@@ -172,7 +180,7 @@ impl TextRenderer {
                 writeln!(writer, "Agent profile history: {}", view.profile_id)?;
                 writeln!(writer, "Active version ID: {}", view.active_version_id)?;
                 writer.write_all(b"VERSION | VERSION ID | PREDECESSOR | CREATED | READY | DIGEST\n")?;
-                for version in &view.versions {
+                for version in view.versions.iter().take(MAX_PROFILE_HISTORY_ROWS) {
                     writeln!(
                         writer,
                         "{} | {} | {} | {} | {} | {}",
@@ -186,6 +194,10 @@ impl TextRenderer {
                         readiness(version.readiness),
                         version.content_digest,
                     )?;
+                }
+                let omitted = view.versions.len().saturating_sub(MAX_PROFILE_HISTORY_ROWS);
+                if omitted > 0 {
+                    writeln!(writer, "... {omitted} versions omitted.")?;
                 }
                 Ok(())
             }
@@ -222,18 +234,20 @@ impl TextRenderer {
         render_draft(editor.draft(), writer)?;
         if editor.step() == ProfileEditorStep::Review {
             writeln!(writer, "{mode} profile review")?;
-            if let Some(review) = editor.review() {
-                for diff in &review.preview().diffs {
-                    writeln!(
-                        writer,
-                        "  {}: {} -> {}",
-                        diff_field(diff.field),
-                        field_value(&diff.before),
-                        field_value(&diff.after),
-                    )?;
+            match editor.mode() {
+                ProfileEditorMode::Create { .. } => {
+                    if let Some(baseline) = editor.create_baseline() {
+                        render_profile_diffs(&draft_diffs(baseline, editor.draft()), writer)?;
+                        writer.write_all(b"  Unchanged fields omitted.\n")?;
+                    }
                 }
-            } else if matches!(editor.mode(), ProfileEditorMode::Edit { .. }) {
-                writer.write_all(b"  Run :review to request a passive preview.\n")?;
+                ProfileEditorMode::Edit { .. } => {
+                    if let Some(review) = editor.review() {
+                        render_profile_diffs(&review.preview().diffs, writer)?;
+                    } else {
+                        writer.write_all(b"  Run :review to request a passive preview.\n")?;
+                    }
+                }
             }
         }
         if let Some(message) = editor.local_message() {
@@ -356,6 +370,93 @@ fn render_draft<W: Write>(draft: &AgentProfileDraft, writer: &mut W) -> io::Resu
     )
 }
 
+fn render_profile_diffs<W: Write>(
+    diffs: &[ProfileFieldDiff],
+    writer: &mut W,
+) -> io::Result<()> {
+    for diff in diffs {
+        writeln!(
+            writer,
+            "  {}: {} -> {}",
+            diff_field(diff.field),
+            field_value(&diff.before),
+            field_value(&diff.after),
+        )?;
+    }
+    Ok(())
+}
+
+fn draft_diffs(before: &AgentProfileDraft, after: &AgentProfileDraft) -> Vec<ProfileFieldDiff> {
+    let mut diffs = Vec::new();
+    push_text_diff(
+        &mut diffs,
+        ProfileDiffField::DisplayName,
+        &before.display_name,
+        &after.display_name,
+    );
+    push_text_diff(
+        &mut diffs,
+        ProfileDiffField::Description,
+        &before.description,
+        &after.description,
+    );
+    if before.role != after.role {
+        diffs.push(ProfileFieldDiff {
+            field: ProfileDiffField::Role,
+            before: ProfileFieldValue::Role(before.role),
+            after: ProfileFieldValue::Role(after.role),
+        });
+    }
+    push_text_diff(
+        &mut diffs,
+        ProfileDiffField::PrimarySpecialty,
+        &before.primary_specialty,
+        &after.primary_specialty,
+    );
+    if before.specialty_tags != after.specialty_tags {
+        diffs.push(ProfileFieldDiff {
+            field: ProfileDiffField::SpecialtyTags,
+            before: ProfileFieldValue::SpecialtyTags(before.specialty_tags.clone()),
+            after: ProfileFieldValue::SpecialtyTags(after.specialty_tags.clone()),
+        });
+    }
+    push_text_diff(
+        &mut diffs,
+        ProfileDiffField::Personality,
+        &before.personality,
+        &after.personality,
+    );
+    push_text_diff(
+        &mut diffs,
+        ProfileDiffField::Instructions,
+        &before.instructions,
+        &after.instructions,
+    );
+    if before.bindings != after.bindings {
+        diffs.push(ProfileFieldDiff {
+            field: ProfileDiffField::Bindings,
+            before: ProfileFieldValue::Bindings(before.bindings.clone()),
+            after: ProfileFieldValue::Bindings(after.bindings.clone()),
+        });
+    }
+    diffs
+}
+
+fn push_text_diff(
+    diffs: &mut Vec<ProfileFieldDiff>,
+    field: ProfileDiffField,
+    before: &str,
+    after: &str,
+) {
+    if before != after {
+        diffs.push(ProfileFieldDiff {
+            field,
+            before: ProfileFieldValue::Text(before.to_owned()),
+            after: ProfileFieldValue::Text(after.to_owned()),
+        });
+    }
+}
+
 fn diff_field(field: ProfileDiffField) -> &'static str {
     match field {
         ProfileDiffField::DisplayName => "display_name",
@@ -397,6 +498,25 @@ fn escaped_list(values: &[String], maximum_scalars: usize) -> String {
         .map(|value| escaped_bounded(value, maximum_scalars))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn escaped_skill_refs(values: &[SkillRef]) -> String {
+    escaped_refs(values.iter().map(SkillRef::as_str))
+}
+
+fn escaped_mcp_refs(values: &[McpRef]) -> String {
+    escaped_refs(values.iter().map(McpRef::as_str))
+}
+
+fn escaped_refs<'a>(values: impl Iterator<Item = &'a str>) -> String {
+    let values = values
+        .map(|value| escaped_bounded(value, 256))
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        "none".to_owned()
+    } else {
+        values.join(", ")
+    }
 }
 
 fn readiness(readiness: AgentReadiness) -> &'static str {

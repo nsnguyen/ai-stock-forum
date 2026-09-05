@@ -913,10 +913,7 @@ impl FallbackRunner {
                 }
             }
             ProfileWorkflow::Confirming { editor, command } => match line.trim() {
-                "y" | "yes" => {
-                    self.execute_command(command, writer)?;
-                    Ok(())
-                }
+                "y" | "yes" => self.execute_profile_confirmation(editor, command, writer),
                 "n" | "no" => {
                     TextRenderer::render_activation_declined(writer)
                         .map_err(|_| UiError::Write)?;
@@ -954,6 +951,44 @@ impl FallbackRunner {
             self.client.cancel_agent_profile_edit().map_err(UiError::Runtime)?;
         }
         Ok(())
+    }
+
+    fn execute_profile_confirmation<W: Write>(
+        &self,
+        editor: ProfileEditor,
+        command: ApplicationCommand,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        let pending = match self.client.try_submit(command.clone()) {
+            Ok(pending) => pending,
+            Err(error @ RuntimeError::Backpressure) => {
+                *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
+                    Some(ProfileWorkflow::Confirming { editor, command });
+                if TextRenderer::render_runtime_error(&error, writer).is_err() {
+                    let _ = self.cancel_profile_workflow();
+                    return Err(UiError::Write);
+                }
+                return Ok(());
+            }
+            Err(error) => {
+                self.cancel_abandoned_edit(&editor);
+                return Err(UiError::Runtime(error));
+            }
+        };
+        let outcome = match pending.recv() {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.cancel_abandoned_edit(&editor);
+                return Err(UiError::Runtime(error));
+            }
+        };
+        TextRenderer::render_outcome(&outcome, writer).map_err(|_| UiError::Write)
+    }
+
+    fn cancel_abandoned_edit(&self, editor: &ProfileEditor) {
+        if matches!(editor.mode(), ProfileEditorMode::Edit { .. }) {
+            let _ = self.client.cancel_agent_profile_edit();
+        }
     }
 }
 

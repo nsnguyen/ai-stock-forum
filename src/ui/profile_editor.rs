@@ -101,6 +101,7 @@ pub struct ProfileEditor {
     mode: ProfileEditorMode,
     step: ProfileEditorStep,
     draft: AgentProfileDraft,
+    create_baseline: Option<AgentProfileDraft>,
     review: Option<ProfileEditorReview>,
     local_message: Option<SafeUiMessage>,
     identity_field: IdentityField,
@@ -112,12 +113,14 @@ pub struct ProfileEditor {
 
 impl ProfileEditor {
     pub fn for_create(template: &ProfileTemplate) -> Result<Self, DomainError> {
+        let draft = template.copy_to_draft()?;
         Ok(Self {
             mode: ProfileEditorMode::Create {
                 provenance: template.provenance(),
             },
             step: ProfileEditorStep::Template,
-            draft: template.copy_to_draft()?,
+            create_baseline: Some(draft.clone()),
+            draft,
             review: None,
             local_message: None,
             identity_field: IdentityField::DisplayName,
@@ -140,6 +143,7 @@ impl ProfileEditor {
             },
             step: ProfileEditorStep::Template,
             draft,
+            create_baseline: None,
             review: None,
             local_message: None,
             identity_field: IdentityField::DisplayName,
@@ -160,6 +164,10 @@ impl ProfileEditor {
 
     pub fn draft(&self) -> &AgentProfileDraft {
         &self.draft
+    }
+
+    pub fn create_baseline(&self) -> Option<&AgentProfileDraft> {
+        self.create_baseline.as_ref()
     }
 
     pub fn review(&self) -> Option<&ProfileEditorReview> {

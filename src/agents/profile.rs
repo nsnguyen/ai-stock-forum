@@ -55,6 +55,18 @@ pub struct SkillRef(String);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpRef(String);
 
+impl SkillRef {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl McpRef {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum AgentReadiness {
     Ready,
