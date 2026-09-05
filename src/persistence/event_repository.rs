@@ -435,9 +435,7 @@ fn persistence_from_recovery(error: RecoveryError) -> PersistenceError {
         | RecoveryError::EventSequenceOverflow
         | RecoveryError::QueryFailed
         | RecoveryError::UnexpectedAgentProfileHistory => PersistenceError::QueryFailed,
-        RecoveryError::AgentProfileHistoryMismatch => {
-            PersistenceError::AgentProfileHistoryMismatch
-        }
+        RecoveryError::AgentProfileHistoryMismatch => PersistenceError::AgentProfileHistoryMismatch,
         RecoveryError::InvalidAgentProfilePayload => PersistenceError::InvalidAgentProfilePayload,
         RecoveryError::ActiveAgentProfileRebuildFailed => {
             PersistenceError::ActiveAgentProfileRebuildFailed

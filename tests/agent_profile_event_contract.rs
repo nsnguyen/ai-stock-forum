@@ -240,7 +240,10 @@ fn create_then_edit_has_one_active_version_two_historical_versions_and_recovery_
     let profiles = &direct.agent_profiles;
 
     assert_eq!(profiles.active_profiles(), vec![profile_v2.clone()]);
-    assert_eq!(profiles.active_profile(profile_v1.profile_id()), Some(&profile_v2));
+    assert_eq!(
+        profiles.active_profile(profile_v1.profile_id()),
+        Some(&profile_v2)
+    );
     assert_eq!(
         profiles.history(profile_v1.profile_id()),
         vec![profile_v1.clone(), profile_v2.clone()]

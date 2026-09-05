@@ -1,7 +1,8 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use super::{
     TuiEvent,
-    model::{AgentsPane, Focus, LayoutMode, ProfileConfirmation, RuntimeStatus, Severity, TuiModel, View},
+    model::{
+        AgentsPane, Focus, LayoutMode, ProfileConfirmation, RuntimeStatus, Severity, TuiModel, View,
+    },
     views,
 };
 use crate::{
@@ -10,6 +11,7 @@ use crate::{
     ui::command::{ParsedLine, parse_line},
     ui::profile_editor::{PreviewEditRequest, ProfileEditorEffect, ProfileEditorMode},
 };
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 const COMMAND_IN_FLIGHT_MESSAGE: &str = "A command is already running.";
 const COMMAND_REJECTED_MESSAGE: &str = "Command rejected. Check the command and try again.";
@@ -151,10 +153,10 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         };
     }
 
-    if model.active_view == View::Agents {
-        if let Some(effect) = handle_agents_key(model, key) {
-            return effect;
-        }
+    if model.active_view == View::Agents
+        && let Some(effect) = handle_agents_key(model, key)
+    {
+        return effect;
     }
 
     match key.code {
@@ -331,20 +333,37 @@ fn handle_profile_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerE
             model.command.insert(character);
             ControllerEffect::Redraw
         }
-        KeyCode::Backspace if no_modifiers(key.modifiers) => edit(model, |model| model.command.backspace()),
-        KeyCode::Delete if no_modifiers(key.modifiers) => edit(model, |model| model.command.delete()),
-        KeyCode::Left if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_left()),
-        KeyCode::Right if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_right()),
-        KeyCode::Home if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_home()),
-        KeyCode::End if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_end()),
+        KeyCode::Backspace if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.backspace())
+        }
+        KeyCode::Delete if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.delete())
+        }
+        KeyCode::Left if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_left())
+        }
+        KeyCode::Right if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_right())
+        }
+        KeyCode::Home if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_home())
+        }
+        KeyCode::End if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_end())
+        }
         _ => ControllerEffect::None,
     }
 }
 
-fn apply_profile_editor_effect(model: &mut TuiModel, effect: ProfileEditorEffect) -> ControllerEffect {
+fn apply_profile_editor_effect(
+    model: &mut TuiModel,
+    effect: ProfileEditorEffect,
+) -> ControllerEffect {
     match effect {
         ProfileEditorEffect::None => ControllerEffect::Redraw,
-        ProfileEditorEffect::PreviewEdit(request) => ControllerEffect::RequestProfilePreview(request),
+        ProfileEditorEffect::PreviewEdit(request) => {
+            ControllerEffect::RequestProfilePreview(request)
+        }
         ProfileEditorEffect::Execute(command) => {
             model.agents.pending_confirmation = Some(ProfileConfirmation { command });
             model.agents.pane = AgentsPane::Confirmation;
@@ -362,11 +381,8 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
     let effect = match (model.agents.pane, key.code) {
         (AgentsPane::List, KeyCode::Down) if no_modifiers(key.modifiers) => {
             let last = model.agents.profiles.profiles.len().saturating_sub(1);
-            model.agents.selected_profile = model
-                .agents
-                .selected_profile
-                .saturating_add(1)
-                .min(last);
+            model.agents.selected_profile =
+                model.agents.selected_profile.saturating_add(1).min(last);
             model.agents.list_scroll = model.agents.selected_profile;
             ControllerEffect::Redraw
         }
@@ -377,19 +393,27 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
         }
         (AgentsPane::List, KeyCode::Enter) if no_modifiers(key.modifiers) => {
             model.agents.pane = AgentsPane::Detail;
-            ControllerEffect::LoadAgentProfile { selected_profile: model.agents.selected_profile }
+            ControllerEffect::LoadAgentProfile {
+                selected_profile: model.agents.selected_profile,
+            }
         }
-        (AgentsPane::List | AgentsPane::Detail, KeyCode::Char('c')) if no_modifiers(key.modifiers) => {
+        (AgentsPane::List | AgentsPane::Detail, KeyCode::Char('c'))
+            if no_modifiers(key.modifiers) =>
+        {
             let template_index = model.agents.selected_template;
             ControllerEffect::StartProfileCreate { template_index }
         }
         (AgentsPane::List, KeyCode::Char('e')) if no_modifiers(key.modifiers) => {
             model.agents.pane = AgentsPane::Editor;
-            ControllerEffect::StartProfileEdit { selected_profile: model.agents.selected_profile }
+            ControllerEffect::StartProfileEdit {
+                selected_profile: model.agents.selected_profile,
+            }
         }
         (AgentsPane::Detail, KeyCode::Char('h')) if no_modifiers(key.modifiers) => {
             model.agents.pane = AgentsPane::History;
-            ControllerEffect::LoadAgentProfileHistory { selected_profile: model.agents.selected_profile }
+            ControllerEffect::LoadAgentProfileHistory {
+                selected_profile: model.agents.selected_profile,
+            }
         }
         (AgentsPane::Detail, KeyCode::Down) if no_modifiers(key.modifiers) => {
             model.agents.detail_scroll = model.agents.detail_scroll.saturating_add(1);
@@ -401,7 +425,9 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
         }
         (AgentsPane::Detail, KeyCode::Char('e')) if no_modifiers(key.modifiers) => {
             model.agents.pane = AgentsPane::Editor;
-            ControllerEffect::StartProfileEdit { selected_profile: model.agents.selected_profile }
+            ControllerEffect::StartProfileEdit {
+                selected_profile: model.agents.selected_profile,
+            }
         }
         (AgentsPane::History, KeyCode::Down) if no_modifiers(key.modifiers) => {
             model.agents.history_scroll = model.agents.history_scroll.saturating_add(1);
@@ -1209,10 +1235,7 @@ mod tests {
             ControllerEffect::Redraw
         );
 
-        assert_eq!(
-            handle_event(&mut model, key('q')),
-            ControllerEffect::Redraw
-        );
+        assert_eq!(handle_event(&mut model, key('q')), ControllerEffect::Redraw);
         assert_eq!(model.command.text(), "/q");
     }
 

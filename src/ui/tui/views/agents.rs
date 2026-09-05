@@ -29,7 +29,14 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
     if let Some(list) = layout.list {
         render_list(frame, list, model, theme);
     }
-    render_active(frame, layout.active, model, theme, layout.list.is_none(), mode);
+    render_active(
+        frame,
+        layout.active,
+        model,
+        theme,
+        layout.list.is_none(),
+        mode,
+    );
 }
 
 pub(super) fn content_height(_model: &TuiModel, _width: u16) -> u16 {
@@ -151,33 +158,47 @@ fn detail_lines(detail: &crate::app::AgentProfileView, theme: &Theme) -> Vec<Lin
         label_value("Profile ID", profile.profile_id().to_string(), theme),
         label_value(
             "Active version",
-            format!("v{} / {}", profile.version().get(), profile.profile_version_id()),
+            format!(
+                "v{} / {}",
+                profile.version().get(),
+                profile.profile_version_id()
+            ),
             theme,
         ),
         label_value("Role", profile.role().as_str().to_owned(), theme),
         label_value("Specialty", safe_text(profile.primary_specialty()), theme),
-        label_value("Tags", safe_text(&profile.specialty_tags().join(", ")), theme),
+        label_value(
+            "Tags",
+            safe_text(&profile.specialty_tags().join(", ")),
+            theme,
+        ),
         readiness_line("Readiness", detail.readiness, theme),
         Line::default(),
         Line::styled("ACCEPTED CONTENT", theme.accent),
         label_value("Description", safe_text(profile.description()), theme),
         label_value("Personality", safe_text(profile.personality()), theme),
-          label_value("Instructions", safe_text(profile.instructions()), theme),
+        label_value("Instructions", safe_text(profile.instructions()), theme),
     ];
     append_references(
         &mut lines,
         "Skill refs",
-        profile.skill_refs().iter().map(|reference| reference.as_str()),
+        profile
+            .skill_refs()
+            .iter()
+            .map(|reference| reference.as_str()),
         theme,
     );
     append_references(
         &mut lines,
         "MCP refs",
-        profile.mcp_refs().iter().map(|reference| reference.as_str()),
+        profile
+            .mcp_refs()
+            .iter()
+            .map(|reference| reference.as_str()),
         theme,
     );
     lines.extend([
-          Line::default(),
+        Line::default(),
         Line::styled("IMMUTABLE METADATA", theme.accent),
         label_value("Created ms", profile.created_at_ms().to_string(), theme),
         label_value("Memory", profile.memory_namespace_id().to_string(), theme),
@@ -202,8 +223,8 @@ fn detail_lines(detail: &crate::app::AgentProfileView, theme: &Theme) -> Vec<Lin
             "Model",
             optional_text(profile.bindings().model_name.as_deref()),
             theme,
-          ),
-      ]);
+        ),
+    ]);
     append_provenance(&mut lines, profile.template_provenance(), theme);
     lines
 }
@@ -220,7 +241,11 @@ fn append_references<'a>(
         return;
     }
     for (index, value) in values.into_iter().enumerate() {
-        lines.push(label_value(if index == 0 { label } else { "" }, value, theme));
+        lines.push(label_value(
+            if index == 0 { label } else { "" },
+            value,
+            theme,
+        ));
     }
 }
 
@@ -247,7 +272,11 @@ fn history_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
     };
     let mut lines = vec![
         label_value("Profile ID", history.profile_id.to_string(), theme),
-        label_value("Active version", history.active_version_id.to_string(), theme),
+        label_value(
+            "Active version",
+            history.active_version_id.to_string(),
+            theme,
+        ),
         label_value("Versions", history.versions.len().to_string(), theme),
         Line::default(),
     ];
@@ -266,8 +295,16 @@ fn history_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
                 readiness_style(entry.readiness, theme)
             },
         ));
-        lines.push(label_value("Version ID", entry.profile_version_id.to_string(), theme));
-        lines.push(label_value("Created ms", entry.created_at_ms.to_string(), theme));
+        lines.push(label_value(
+            "Version ID",
+            entry.profile_version_id.to_string(),
+            theme,
+        ));
+        lines.push(label_value(
+            "Created ms",
+            entry.created_at_ms.to_string(),
+            theme,
+        ));
         lines.push(label_value(
             "Supersedes",
             entry
@@ -276,7 +313,11 @@ fn history_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
                 .unwrap_or_else(|| "None".to_owned()),
             theme,
         ));
-        lines.push(label_value("Digest", entry.content_digest.to_string(), theme));
+        lines.push(label_value(
+            "Digest",
+            entry.content_digest.to_string(),
+            theme,
+        ));
         lines.push(Line::default());
     }
     lines
@@ -306,7 +347,11 @@ fn editor_lines(editor: &ProfileEditor, theme: &Theme) -> Vec<Line<'static>> {
     };
     let mut lines = vec![
         Line::styled(format!("{mode} agent profile"), theme.accent),
-        label_value("Progress", format!("Step {} of 7", step_number(step)), theme),
+        label_value(
+            "Progress",
+            format!("Step {} of 7", step_number(step)),
+            theme,
+        ),
         label_value("Current step", step.as_str().replace('_', " "), theme),
         Line::styled(step_guidance(step), theme.muted),
         Line::styled("Enter text or a :control in the command bar.", theme.muted),
@@ -375,9 +420,21 @@ fn append_create_diffs(
     theme: &Theme,
 ) {
     let changes = [
-        ("Display name", safe_text(&baseline.display_name), safe_text(&draft.display_name)),
-        ("Description", safe_text(&baseline.description), safe_text(&draft.description)),
-        ("Role", baseline.role.as_str().to_owned(), draft.role.as_str().to_owned()),
+        (
+            "Display name",
+            safe_text(&baseline.display_name),
+            safe_text(&draft.display_name),
+        ),
+        (
+            "Description",
+            safe_text(&baseline.description),
+            safe_text(&draft.description),
+        ),
+        (
+            "Role",
+            baseline.role.as_str().to_owned(),
+            draft.role.as_str().to_owned(),
+        ),
         (
             "Primary specialty",
             safe_text(&baseline.primary_specialty),
@@ -388,9 +445,21 @@ fn append_create_diffs(
             safe_text(&baseline.specialty_tags.join(", ")),
             safe_text(&draft.specialty_tags.join(", ")),
         ),
-        ("Personality", safe_text(&baseline.personality), safe_text(&draft.personality)),
-        ("Instructions", safe_text(&baseline.instructions), safe_text(&draft.instructions)),
-        ("Bindings", bindings_value(&baseline.bindings), bindings_value(&draft.bindings)),
+        (
+            "Personality",
+            safe_text(&baseline.personality),
+            safe_text(&draft.personality),
+        ),
+        (
+            "Instructions",
+            safe_text(&baseline.instructions),
+            safe_text(&draft.instructions),
+        ),
+        (
+            "Bindings",
+            bindings_value(&baseline.bindings),
+            bindings_value(&draft.bindings),
+        ),
     ];
     let mut count = 0;
     for (field, before, after) in changes {
@@ -443,11 +512,16 @@ pub(super) fn inspector_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'stat
         Line::default(),
     ];
     let Some(detail) = &model.agents.detail else {
-        lines.push(Line::raw("Select a profile to inspect readiness and history."));
+        lines.push(Line::raw(
+            "Select a profile to inspect readiness and history.",
+        ));
         return lines;
     };
     let profile = &detail.profile;
-    lines.push(Line::styled(safe_text(profile.display_name()), theme.accent));
+    lines.push(Line::styled(
+        safe_text(profile.display_name()),
+        theme.accent,
+    ));
     lines.push(readiness_line("Readiness", detail.readiness, theme));
     lines.push(label_value(
         "Provider",
@@ -464,8 +538,16 @@ pub(super) fn inspector_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'stat
     lines.push(Line::default());
     if let Some(history) = &model.agents.history {
         lines.push(Line::styled("HISTORY", theme.accent));
-        lines.push(label_value("Versions", history.versions.len().to_string(), theme));
-        lines.push(label_value("Active version", history.active_version_id.to_string(), theme));
+        lines.push(label_value(
+            "Versions",
+            history.versions.len().to_string(),
+            theme,
+        ));
+        lines.push(label_value(
+            "Active version",
+            history.active_version_id.to_string(),
+            theme,
+        ));
         for entry in &history.versions {
             lines.push(Line::from(vec![
                 Span::styled(
@@ -484,7 +566,10 @@ pub(super) fn inspector_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'stat
             ]));
         }
     } else {
-        lines.push(Line::styled("Press h to load version history.", theme.muted));
+        lines.push(Line::styled(
+            "Press h to load version history.",
+            theme.muted,
+        ));
     }
     lines
 }
@@ -496,7 +581,11 @@ fn append_provenance(
 ) {
     lines.push(Line::styled("Template provenance", theme.accent));
     if let Some(provenance) = provenance {
-        lines.push(label_value("Template", provenance.template_id.to_string(), theme));
+        lines.push(label_value(
+            "Template",
+            provenance.template_id.to_string(),
+            theme,
+        ));
         lines.push(label_value(
             "Template ver.",
             provenance.template_version.get().to_string(),
@@ -515,10 +604,7 @@ fn append_provenance(
 fn readiness_line(label: &'static str, readiness: AgentReadiness, theme: &Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{label:<14}"), theme.muted),
-        Span::styled(
-            readiness_name(readiness),
-            readiness_style(readiness, theme),
-        ),
+        Span::styled(readiness_name(readiness), readiness_style(readiness, theme)),
     ])
 }
 
@@ -537,7 +623,9 @@ fn readiness_style(readiness: AgentReadiness, theme: &Theme) -> ratatui::style::
 }
 
 fn optional_text(value: Option<&str>) -> String {
-    value.map(safe_text).unwrap_or_else(|| "Not configured".to_owned())
+    value
+        .map(safe_text)
+        .unwrap_or_else(|| "Not configured".to_owned())
 }
 
 fn bindings_value(bindings: &AgentBindings) -> String {
@@ -585,7 +673,9 @@ fn step_number(step: ProfileEditorStep) -> u8 {
 fn step_guidance(step: ProfileEditorStep) -> &'static str {
     match step {
         ProfileEditorStep::Template => "Choose a template role with :role <role>, then :next.",
-        ProfileEditorStep::Identity => "Set display name and description; use :next between fields.",
+        ProfileEditorStep::Identity => {
+            "Set display name and description; use :next between fields."
+        }
         ProfileEditorStep::Specialty => "Set specialty; use :tag add <tag> or :tag remove <tag>.",
         ProfileEditorStep::Personality => "Describe the agent's working style, then use :next.",
         ProfileEditorStep::Instructions => "Enter operating instructions, then use :next.",
@@ -598,7 +688,9 @@ fn step_guidance(step: ProfileEditorStep) -> &'static str {
 
 fn editor_message(code: &str) -> &'static str {
     match code {
-        "invalid_profile_field" => "Validation: this field is invalid; revise it before continuing.",
+        "invalid_profile_field" => {
+            "Validation: this field is invalid; revise it before continuing."
+        }
         "preview_required" => "Validation: request an authoritative review before activation.",
         "stale_preview" => "Validation: that preview is stale; request another review.",
         "preview_mismatch" => "Validation: preview did not match this edit.",

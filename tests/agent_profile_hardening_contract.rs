@@ -4,9 +4,7 @@ use std::{io::Cursor, sync::Arc};
 
 use ai_stock_forum::{
     agents::{AgentBindings, AgentProfileDraft, AgentRole},
-    app::{
-        AppError, ApplicationCommand, ApplicationService, CommandEnvelope, CommandView,
-    },
+    app::{AppError, ApplicationCommand, ApplicationService, CommandEnvelope, CommandView},
     config::AppPaths,
     domain::{Actor, CommandId, CorrelationId, canonical_json_bytes, sha256},
     runtime::RuntimeError,
@@ -66,7 +64,10 @@ fn hostile_profile_text_is_rejected_before_ids_time_or_persistence_and_is_redact
         ("carriage_return", "credential=secret\rforged".to_owned()),
         ("tab", "credential=secret\tforged".to_owned()),
         ("nul", "credential=secret\0tail".to_owned()),
-        ("line_separator", "credential=secret\u{2028}forged".to_owned()),
+        (
+            "line_separator",
+            "credential=secret\u{2028}forged".to_owned(),
+        ),
         (
             "paragraph_separator",
             "credential=secret\u{2029}forged".to_owned(),
@@ -108,8 +109,7 @@ fn hostile_profile_text_is_rejected_before_ids_time_or_persistence_and_is_redact
         assert!(!displayed.contains(&hostile), "case {label}");
         let rendered = render_error(error);
         assert_eq!(
-            rendered,
-            "Agent profile operation could not be completed.\n",
+            rendered, "Agent profile operation could not be completed.\n",
             "case {label}"
         );
         assert_terminal_safe(&rendered);
@@ -155,7 +155,6 @@ impl ReceiptFixture {
     fn connection(&self) -> Connection {
         Connection::open(self.paths.database_path()).unwrap()
     }
-
 
     fn snapshot(&self) -> DurableState {
         Self::snapshot_path(&self.paths)
@@ -289,10 +288,12 @@ impl ReceiptFixture {
     }
 }
 
+type ImmutableProfileRow = (String, String, i64, String, String, Vec<u8>, i64, i64);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DurableState {
     events: Vec<(i64, String, String, String, String)>,
-    versions: Vec<(String, String, i64, String, String, Vec<u8>, i64, i64)>,
+    versions: Vec<ImmutableProfileRow>,
     active: Vec<(String, String, i64, String, String)>,
     receipts: Vec<(String, String, String, String, String, String)>,
     refs: Vec<(String, i64, String)>,
@@ -312,7 +313,10 @@ enum StoredTamper {
 
 fn tamper(fixture: &ReceiptFixture, command_id: CommandId, kind: StoredTamper) {
     let connection = fixture.connection();
-    if matches!(kind, StoredTamper::EventDigest | StoredTamper::MalformedEventPayload) {
+    if matches!(
+        kind,
+        StoredTamper::EventDigest | StoredTamper::MalformedEventPayload
+    ) {
         connection
             .execute_batch("DROP TRIGGER event_stream_no_update;")
             .unwrap();
@@ -372,8 +376,7 @@ fn tamper(fixture: &ReceiptFixture, command_id: CommandId, kind: StoredTamper) {
         }
         StoredTamper::InvalidUuid => {
             let mut value: serde_json::Value = serde_json::from_str(&original).unwrap();
-            value["correlation_id"] =
-                serde_json::json!("credential=invalid-uuid\u{1b}[31m");
+            value["correlation_id"] = serde_json::json!("credential=invalid-uuid\u{1b}[31m");
             let request = String::from_utf8(canonical_json_bytes(&value).unwrap()).unwrap();
             let digest = sha256(request.as_bytes()).to_string();
             (request, digest)
@@ -445,8 +448,8 @@ fn oversized_fallback_line_is_bounded_rejected_and_rendered_as_one_safe_line() {
     let fixture = ReceiptFixture::new();
     let before = fixture.snapshot();
     let (temporary_directory, paths, service) = fixture.into_parts();
-    let runtime = ai_stock_forum::runtime::ApplicationRuntime::spawn_application(service, 1)
-        .unwrap();
+    let runtime =
+        ai_stock_forum::runtime::ApplicationRuntime::spawn_application(service, 1).unwrap();
     let mut input = b"credential=oversized-secret\x1b[31m".to_vec();
     input.resize(32 * 1024, b'x');
     input.push(b'\n');

@@ -4,23 +4,25 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
     agents::{
-        AgentProfileDraft, AgentProfileVersion, AgentReadiness, ProfileEditPreview, ProfileReviewRegistry,
-        ProfileTemplate, ReviewReservationError, builtin_profile_templates, candidate_digest,
-        diff_profile, normalize_profile_name_key, profile_template_from_provenance, review_digest,
+        AgentProfileDraft, AgentProfileVersion, AgentReadiness, ProfileEditPreview,
+        ProfileReviewRegistry, ProfileTemplate, ReviewReservationError, builtin_profile_templates,
+        candidate_digest, diff_profile, normalize_profile_name_key,
+        profile_template_from_provenance, review_digest,
     },
     app::{
         AgentProfileCreatedView, AgentProfileHistoryEntry, AgentProfileHistoryView,
         AgentProfileSummary, AgentProfileVersionActivatedView, AgentProfileView, AgentProfilesView,
         AppError, ApplicationCommand, ApplicationEvent, AuditTailView, CommandEnvelope,
         CommandOutcome, CommandView, EVENT_SCHEMA_VERSION, HelpView, InputRejectedView,
-        PendingEvent, SetupStatusView, ShutdownDisposition, ShutdownReason, ShutdownView, StatusView,
+        PendingEvent, SetupStatusView, ShutdownDisposition, ShutdownReason, ShutdownView,
+        StatusView,
     },
     audit::AuditEntry,
     config::{AppPaths, StartupError},
     domain::{
-        Actor, AgentProfileId, AgentProfileVersionId, CausationId, Clock, CommandId,
-        CorrelationId, EventId, IdGenerator, InstallationId, MemoryNamespaceId, ProfileReviewToken,
-        SessionId, Sha256Digest, canonical_json_bytes, sha256,
+        Actor, AgentProfileId, AgentProfileVersionId, CausationId, Clock, CommandId, CorrelationId,
+        EventId, IdGenerator, InstallationId, MemoryNamespaceId, ProfileReviewToken, SessionId,
+        Sha256Digest, canonical_json_bytes, sha256,
     },
     persistence::{
         CommandReceiptRecord, CommandReceiptRepository, Database, EventRepository,
@@ -234,6 +236,10 @@ impl StoredPolicyDecision {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "stored exact outcomes retain value semantics through receipt materialization"
+)]
 enum StoredExecution {
     Success {
         outcome: CommandOutcome,
@@ -430,11 +436,8 @@ impl ApplicationService {
         expected_active_version_id: AgentProfileVersionId,
         candidate: AgentProfileDraft,
     ) -> Result<ProfileEditPreview, AppError> {
-        self.executor.preview_agent_profile_edit(
-            profile_id,
-            expected_active_version_id,
-            candidate,
-        )
+        self.executor
+            .preview_agent_profile_edit(profile_id, expected_active_version_id, candidate)
     }
 
     pub fn cancel_agent_profile_edit(&self) -> Result<(), AppError> {
@@ -486,12 +489,10 @@ impl ApplicationService {
                 |row| row.get::<_, i64>(0),
             )
             .map_err(|_| PersistenceError::QueryFailed)?;
-        let projected_sequence = u64::try_from(projected_sequence)
-            .map_err(|_| PersistenceError::InvalidEventRecord)?;
-        let projection = ProjectionRepository::load_at(
-            self.executor.database.connection(),
-            projected_sequence,
-        )?;
+        let projected_sequence =
+            u64::try_from(projected_sequence).map_err(|_| PersistenceError::InvalidEventRecord)?;
+        let projection =
+            ProjectionRepository::load_at(self.executor.database.connection(), projected_sequence)?;
         let events = EventRepository::tail_through(
             self.executor.database.connection(),
             limit,
@@ -534,11 +535,8 @@ impl IndependentApplicationService {
         expected_active_version_id: AgentProfileVersionId,
         candidate: AgentProfileDraft,
     ) -> Result<ProfileEditPreview, AppError> {
-        self.executor.preview_agent_profile_edit(
-            profile_id,
-            expected_active_version_id,
-            candidate,
-        )
+        self.executor
+            .preview_agent_profile_edit(profile_id, expected_active_version_id, candidate)
     }
 }
 
@@ -756,158 +754,161 @@ impl CommandExecutor {
                 outcome_json,
                 &[],
             )?;
-            self.hook
-                .after_receipt_store(transaction.transaction())?;
+            self.hook.after_receipt_store(transaction.transaction())?;
             self.hook.before_commit(transaction.transaction())?;
             transaction.commit()?;
             return stored.into_result();
         }
 
         let mut reserved = false;
-        let precommit = (|| -> Result<(StoredExecution, Vec<crate::app::EventEnvelope>), AppError> {
-            let event = match &request.command {
-                ApplicationCommand::ActivateAgentProfileVersion {
-                    profile_id,
-                    expected_active_version_id,
-                    candidate,
-                    review_token,
-                    review_digest: supplied_review_digest,
-                } => {
-                    validate_draft(candidate)?;
-                    let base = projection
-                        .agent_profiles
-                        .version(*expected_active_version_id)
-                        .ok_or(AppError::StaleAgentProfileVersion)?;
-                    let diffs = diff_profile(base, candidate)?;
-                    let computed_candidate_digest = candidate_digest(candidate)?;
-                    let computed_review_digest = review_digest(
-                        *profile_id,
-                        *expected_active_version_id,
-                        &computed_candidate_digest,
-                        &diffs,
-                    )?;
-                    if &computed_review_digest != supplied_review_digest {
-                        return Err(AppError::ReviewDigestMismatch);
-                    }
-                    review_operation
-                        .as_ref()
-                        .expect("activation owns the profile review operation")
-                        .reserve(
-                            envelope.command_id,
-                            *review_token,
+        let precommit =
+            (|| -> Result<(StoredExecution, Vec<crate::app::EventEnvelope>), AppError> {
+                let event = match &request.command {
+                    ApplicationCommand::ActivateAgentProfileVersion {
+                        profile_id,
+                        expected_active_version_id,
+                        candidate,
+                        review_token,
+                        review_digest: supplied_review_digest,
+                    } => {
+                        validate_draft(candidate)?;
+                        let base = projection
+                            .agent_profiles
+                            .version(*expected_active_version_id)
+                            .ok_or(AppError::StaleAgentProfileVersion)?;
+                        let diffs = diff_profile(base, candidate)?;
+                        let computed_candidate_digest = candidate_digest(candidate)?;
+                        let computed_review_digest = review_digest(
                             *profile_id,
                             *expected_active_version_id,
                             &computed_candidate_digest,
-                            &computed_review_digest,
-                        )
-                        .map_err(|error| match error {
-                            ReviewReservationError::Unavailable => {
-                                AppError::ProfileReviewUnavailable
-                            }
-                            ReviewReservationError::Mismatch => AppError::ProfileReviewMismatch,
-                        })?;
-                    reserved = true;
-                    self.hook.after_profile_review_reservation(
-                        transaction.transaction(),
-                        envelope.command_id,
-                    )?;
-                    let current = projection
-                        .agent_profiles
-                        .active_profile(*profile_id)
-                        .ok_or(AppError::AgentProfileNotFound)?;
-                    if current.profile_version_id() != *expected_active_version_id {
-                        return Err(AppError::StaleAgentProfileVersion);
+                            &diffs,
+                        )?;
+                        if &computed_review_digest != supplied_review_digest {
+                            return Err(AppError::ReviewDigestMismatch);
+                        }
+                        review_operation
+                            .as_ref()
+                            .expect("activation owns the profile review operation")
+                            .reserve(
+                                envelope.command_id,
+                                *review_token,
+                                *profile_id,
+                                *expected_active_version_id,
+                                &computed_candidate_digest,
+                                &computed_review_digest,
+                            )
+                            .map_err(|error| match error {
+                                ReviewReservationError::Unavailable => {
+                                    AppError::ProfileReviewUnavailable
+                                }
+                                ReviewReservationError::Mismatch => AppError::ProfileReviewMismatch,
+                            })?;
+                        reserved = true;
+                        self.hook.after_profile_review_reservation(
+                            transaction.transaction(),
+                            envelope.command_id,
+                        )?;
+                        let current = projection
+                            .agent_profiles
+                            .active_profile(*profile_id)
+                            .ok_or(AppError::AgentProfileNotFound)?;
+                        if current.profile_version_id() != *expected_active_version_id {
+                            return Err(AppError::StaleAgentProfileVersion);
+                        }
+                        ensure_name_available(
+                            &projection,
+                            Some(*profile_id),
+                            &candidate.display_name,
+                        )?;
+                        self.hook.after_profile_name_precheck(
+                            transaction.transaction(),
+                            envelope.command_id,
+                        )?;
+                        let profile = AgentProfileVersion::next_version(
+                            current,
+                            AgentProfileVersionId::from_uuid(self.ids.next_uuid()),
+                            self.clock.now_millis(),
+                            candidate.clone(),
+                        )?;
+                        ApplicationEvent::AgentProfileVersionActivated {
+                            profile,
+                            previous_version_id: *expected_active_version_id,
+                        }
                     }
-                    ensure_name_available(&projection, Some(*profile_id), &candidate.display_name)?;
-                    self.hook.after_profile_name_precheck(
+                    command => prepare_event(
+                        command,
+                        &projection,
+                        self.clock.as_ref(),
+                        self.ids.as_ref(),
+                        self.hook.as_ref(),
                         transaction.transaction(),
                         envelope.command_id,
-                    )?;
-                    let profile = AgentProfileVersion::next_version(
-                        current,
-                        AgentProfileVersionId::from_uuid(self.ids.next_uuid()),
-                        self.clock.now_millis(),
-                        candidate.clone(),
-                    )?;
-                    ApplicationEvent::AgentProfileVersionActivated {
+                    )?,
+                };
+                let pending = PendingEvent {
+                    event_id: EventId::from_uuid(self.ids.next_uuid()),
+                    event_schema_version: EVENT_SCHEMA_VERSION,
+                    actor: request.actor.clone(),
+                    occurred_at_ms: event_occurred_at(&event)
+                        .unwrap_or_else(|| self.clock.now_millis()),
+                    correlation_id: request.correlation_id,
+                    causation_id: Some(CausationId::from_uuid(envelope.command_id.as_uuid())),
+                    object: None,
+                    event,
+                };
+                let committed = EventRepository::append(&transaction, pending)?;
+                self.hook.after_event_append(transaction.transaction())?;
+                reduce(&mut projection, &committed)?;
+                if let ApplicationEvent::AgentProfileCreated { profile }
+                | ApplicationEvent::AgentProfileVersionActivated { profile, .. } =
+                    &committed.event
+                {
+                    insert_expected_version(
+                        transaction.transaction(),
+                        i64::try_from(committed.sequence)
+                            .map_err(|_| PersistenceError::InvalidAgentProfilePayload)?,
                         profile,
-                        previous_version_id: *expected_active_version_id,
-                    }
+                    )?;
+                    self.hook
+                        .after_profile_mirror_insert(transaction.transaction())?;
                 }
-                command => prepare_event(
-                    command,
+                ProjectionRepository::store_with_after_active_profiles(
+                    &transaction,
                     &projection,
-                    self.clock.as_ref(),
-                    self.ids.as_ref(),
-                    self.hook.as_ref(),
-                    transaction.transaction(),
-                    envelope.command_id,
-                )?,
-            };
-            let pending = PendingEvent {
-                event_id: EventId::from_uuid(self.ids.next_uuid()),
-                event_schema_version: EVENT_SCHEMA_VERSION,
-                actor: request.actor.clone(),
-                occurred_at_ms: event_occurred_at(&event).unwrap_or_else(|| self.clock.now_millis()),
-                correlation_id: request.correlation_id,
-                causation_id: Some(CausationId::from_uuid(envelope.command_id.as_uuid())),
-                object: None,
-                event,
-            };
-            let committed = EventRepository::append(&transaction, pending)?;
-            self.hook
-                .after_event_append(transaction.transaction())?;
-            reduce(&mut projection, &committed)?;
-            if let ApplicationEvent::AgentProfileCreated { profile }
-            | ApplicationEvent::AgentProfileVersionActivated { profile, .. } = &committed.event
-            {
-                insert_expected_version(
-                    transaction.transaction(),
-                    i64::try_from(committed.sequence)
-                        .map_err(|_| PersistenceError::InvalidAgentProfilePayload)?,
-                    profile,
-                )?;
+                    |transaction| self.hook.after_active_pointer_update(transaction),
+                )
+                .map_err(map_profile_projection_write_error)?;
                 self.hook
-                    .after_profile_mirror_insert(transaction.transaction())?;
-            }
-            ProjectionRepository::store_with_after_active_profiles(
-                &transaction,
-                &projection,
-                |transaction| self.hook.after_active_pointer_update(transaction),
-            )
-            .map_err(map_profile_projection_write_error)?;
-            self.hook
-                .after_projection_store(transaction.transaction())?;
-            self.hook
-                .before_outcome_materialization(transaction.transaction())?;
-            let events = vec![committed];
-            let outcome = materialize_success(
-                &transaction,
-                envelope.command_id,
-                &request,
-                &events,
-                &projection,
-            )?;
-            self.hook
-                .after_audit_append(transaction.transaction())?;
-            let stored = StoredExecution::Success { outcome };
-            let outcome_json = encode_canonical(&stored)?;
-            self.hook.before_receipt_write(transaction.transaction())?;
-            insert_receipt(
-                &transaction,
-                &envelope,
-                command_fingerprint.clone(),
-                request_json.clone(),
-                capability,
-                StoredPolicyDecision::Granted,
-                outcome_json,
-                &events,
-            )?;
-            self.hook
-                .after_receipt_store(transaction.transaction())?;
-            self.hook.before_commit(transaction.transaction())?;
-            Ok((stored, events))
-        })();
+                    .after_projection_store(transaction.transaction())?;
+                self.hook
+                    .before_outcome_materialization(transaction.transaction())?;
+                let events = vec![committed];
+                let outcome = materialize_success(
+                    &transaction,
+                    envelope.command_id,
+                    &request,
+                    &events,
+                    &projection,
+                )?;
+                self.hook.after_audit_append(transaction.transaction())?;
+                let stored = StoredExecution::Success { outcome };
+                let outcome_json = encode_canonical(&stored)?;
+                self.hook.before_receipt_write(transaction.transaction())?;
+                insert_receipt(
+                    &transaction,
+                    &envelope,
+                    command_fingerprint.clone(),
+                    request_json.clone(),
+                    capability,
+                    StoredPolicyDecision::Granted,
+                    outcome_json,
+                    &events,
+                )?;
+                self.hook.after_receipt_store(transaction.transaction())?;
+                self.hook.before_commit(transaction.transaction())?;
+                Ok((stored, events))
+            })();
 
         let (stored, _) = match precommit {
             Ok(result) => result,
@@ -946,9 +947,10 @@ impl CommandExecutor {
 fn authorize_passive(policy: &dyn CommandPolicy, capability: Capability) -> Result<(), AppError> {
     match policy.authorize(capability) {
         AuthorizationDecision::Granted => Ok(()),
-        AuthorizationDecision::Denied(decision) => {
-            Err(AppError::CapabilityDenied { capability, decision })
-        }
+        AuthorizationDecision::Denied(decision) => Err(AppError::CapabilityDenied {
+            capability,
+            decision,
+        }),
         AuthorizationDecision::ApprovalRequired => Err(AppError::ApprovalRequired { capability }),
     }
 }
@@ -1084,7 +1086,11 @@ fn prepare_event(
                 .agent_profiles
                 .active_profile(*profile_id)
                 .ok_or(AppError::AgentProfileNotFound)?;
-            let count = projection.agent_profiles.history(*profile_id).len().min(100);
+            let count = projection
+                .agent_profiles
+                .history(*profile_id)
+                .len()
+                .min(100);
             Ok(ApplicationEvent::AgentProfileHistoryViewed {
                 profile_id: *profile_id,
                 result_count: u32::try_from(count)
@@ -1341,7 +1347,10 @@ fn materialize_success(
                 template_provenance.clone(),
             )?;
             if &expected != profile
-                || projection.agent_profiles.active_profile(profile.profile_id()) != Some(profile)
+                || projection
+                    .agent_profiles
+                    .active_profile(profile.profile_id())
+                    != Some(profile)
             {
                 return Err(invalid_receipt());
             }
@@ -1507,7 +1516,10 @@ fn materialize_success(
 }
 
 fn profile_readiness(profile: &AgentProfileVersion) -> AgentReadiness {
-    match (&profile.bindings().model_provider, &profile.bindings().model_name) {
+    match (
+        &profile.bindings().model_provider,
+        &profile.bindings().model_name,
+    ) {
         (Some(_), Some(_)) => AgentReadiness::Ready,
         _ => AgentReadiness::NotReady,
     }

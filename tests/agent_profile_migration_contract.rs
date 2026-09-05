@@ -87,15 +87,14 @@ fn failed_v2_migration_rolls_back_every_new_schema_object() {
         .unwrap();
     drop(connection);
 
-    assert!(
-        matches!(Database::open(&paths), Err(error) if error.code() == "database_unavailable")
-    );
+    assert!(matches!(Database::open(&paths), Err(error) if error.code() == "database_unavailable"));
 
     let connection = Connection::open(paths.database_path()).unwrap();
     assert_eq!(pragma_i64(&connection, "user_version"), 1);
     assert_eq!(
         connection
-            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
+                .get::<_, i64>(0))
             .unwrap(),
         1
     );
@@ -147,7 +146,10 @@ fn profile_version_mirror_is_immutable_and_active_pointer_replaces_transactional
 
     let transaction = connection.transaction().unwrap();
     transaction
-        .execute("DELETE FROM active_agent_profiles WHERE profile_id = 'profile-1'", [])
+        .execute(
+            "DELETE FROM active_agent_profiles WHERE profile_id = 'profile-1'",
+            [],
+        )
         .unwrap();
     transaction
         .execute(
@@ -177,14 +179,16 @@ fn foreign_keys_and_binary_folded_name_uniqueness_are_effective() {
     let mut database = Database::open(&AppPaths::for_test(temp.path())).unwrap();
     let connection = database.connection_mut();
 
-    assert!(connection
-        .execute(
-            "INSERT INTO active_agent_profiles
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO active_agent_profiles
                 (profile_id, profile_version_id, version, normalized_name, readiness)
              VALUES ('missing', 'missing-version', 1, 'missing', 'ready')",
-            [],
-        )
-        .is_err());
+                [],
+            )
+            .is_err()
+    );
 
     insert_version(connection, "profile-1", "version-1", 1, "Research", 1);
     insert_version(connection, "profile-2", "version-2", 1, "research", 2);
@@ -192,14 +196,16 @@ fn foreign_keys_and_binary_folded_name_uniqueness_are_effective() {
     insert_active(connection, "profile-1", "version-1", 1, "Research");
     insert_active(connection, "profile-2", "version-2", 1, "research");
 
-    assert!(connection
-        .execute(
-            "INSERT INTO active_agent_profiles
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO active_agent_profiles
                 (profile_id, profile_version_id, version, normalized_name, readiness)
              VALUES ('profile-3', 'version-3', 1, 'Research', 'ready')",
-            [],
-        )
-        .is_err());
+                [],
+            )
+            .is_err()
+    );
 }
 
 #[test]

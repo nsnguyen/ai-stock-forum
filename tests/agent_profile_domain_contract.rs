@@ -1,6 +1,6 @@
 use ai_stock_forum::agents::{
-    builtin_profile_templates, normalize_profile_name_key, AgentBindings, AgentProfileDraft,
-    AgentReadiness, AgentRole,
+    AgentBindings, AgentProfileDraft, AgentReadiness, AgentRole, builtin_profile_templates,
+    normalize_profile_name_key,
 };
 
 fn draft(
@@ -74,7 +74,11 @@ fn builtin_templates_are_pinned_complete_and_copied_into_editable_drafts() {
         ],
     );
     assert!(templates.iter().all(|item| item.version.get() == 1));
-    assert!(templates.iter().all(|item| !item.digest.as_str().is_empty()));
+    assert!(
+        templates
+            .iter()
+            .all(|item| !item.digest.as_str().is_empty())
+    );
 
     let template = &templates[0];
     let mut copied = template.copy_to_draft().unwrap();
@@ -121,46 +125,54 @@ fn profile_draft_rejects_over_limit_and_duplicate_folded_values() {
         .code(),
         "invalid_profile_field",
     );
-    assert!(draft(
-        "name".to_owned(),
-        "d".repeat(257),
-        "specialty".to_owned(),
-        vec![],
-        "personality".to_owned(),
-        "instructions".to_owned(),
-        AgentBindings::default(),
-    )
-    .is_err());
-    assert!(draft(
-        "name".to_owned(),
-        "description".to_owned(),
-        "s".repeat(65),
-        vec![],
-        "personality".to_owned(),
-        "instructions".to_owned(),
-        AgentBindings::default(),
-    )
-    .is_err());
-    assert!(draft(
-        "name".to_owned(),
-        "description".to_owned(),
-        "specialty".to_owned(),
-        vec!["a".repeat(49)],
-        "personality".to_owned(),
-        "instructions".to_owned(),
-        AgentBindings::default(),
-    )
-    .is_err());
-    assert!(draft(
-        "name".to_owned(),
-        "description".to_owned(),
-        "specialty".to_owned(),
-        vec!["one".to_owned(); 6],
-        "personality".to_owned(),
-        "instructions".to_owned(),
-        AgentBindings::default(),
-    )
-    .is_err());
+    assert!(
+        draft(
+            "name".to_owned(),
+            "d".repeat(257),
+            "specialty".to_owned(),
+            vec![],
+            "personality".to_owned(),
+            "instructions".to_owned(),
+            AgentBindings::default(),
+        )
+        .is_err()
+    );
+    assert!(
+        draft(
+            "name".to_owned(),
+            "description".to_owned(),
+            "s".repeat(65),
+            vec![],
+            "personality".to_owned(),
+            "instructions".to_owned(),
+            AgentBindings::default(),
+        )
+        .is_err()
+    );
+    assert!(
+        draft(
+            "name".to_owned(),
+            "description".to_owned(),
+            "specialty".to_owned(),
+            vec!["a".repeat(49)],
+            "personality".to_owned(),
+            "instructions".to_owned(),
+            AgentBindings::default(),
+        )
+        .is_err()
+    );
+    assert!(
+        draft(
+            "name".to_owned(),
+            "description".to_owned(),
+            "specialty".to_owned(),
+            vec!["one".to_owned(); 6],
+            "personality".to_owned(),
+            "instructions".to_owned(),
+            AgentBindings::default(),
+        )
+        .is_err()
+    );
     assert_eq!(
         draft(
             "name".to_owned(),
@@ -175,26 +187,30 @@ fn profile_draft_rejects_over_limit_and_duplicate_folded_values() {
         .code(),
         "duplicate_profile_tag",
     );
-    assert!(draft(
-        "name".to_owned(),
-        "description".to_owned(),
-        "specialty".to_owned(),
-        vec![],
-        "p".repeat(1_025),
-        "instructions".to_owned(),
-        AgentBindings::default(),
-    )
-    .is_err());
-    assert!(draft(
-        "name".to_owned(),
-        "description".to_owned(),
-        "specialty".to_owned(),
-        vec![],
-        "personality".to_owned(),
-        "i".repeat(4_097),
-        AgentBindings::default(),
-    )
-    .is_err());
+    assert!(
+        draft(
+            "name".to_owned(),
+            "description".to_owned(),
+            "specialty".to_owned(),
+            vec![],
+            "p".repeat(1_025),
+            "instructions".to_owned(),
+            AgentBindings::default(),
+        )
+        .is_err()
+    );
+    assert!(
+        draft(
+            "name".to_owned(),
+            "description".to_owned(),
+            "specialty".to_owned(),
+            vec![],
+            "personality".to_owned(),
+            "i".repeat(4_097),
+            AgentBindings::default(),
+        )
+        .is_err()
+    );
 }
 
 #[test]

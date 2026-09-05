@@ -34,7 +34,9 @@ impl ProfileField {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct NormalizedProfileName(String);
 
 impl NormalizedProfileName {
@@ -65,7 +67,13 @@ pub fn validate_visible_text(
 
 pub fn normalize_profile_name_key(value: &str) -> Result<NormalizedProfileName, DomainError> {
     validate_visible_text(ProfileField::DisplayName, value, 64)?;
-    let normalized = fold_whitespace(&value.nfkc().collect::<String>().case_fold().collect::<String>());
+    let normalized = fold_whitespace(
+        &value
+            .nfkc()
+            .collect::<String>()
+            .case_fold()
+            .collect::<String>(),
+    );
 
     if normalized.is_empty() {
         return Err(DomainError::InvalidProfileField {
@@ -78,7 +86,13 @@ pub fn normalize_profile_name_key(value: &str) -> Result<NormalizedProfileName, 
 
 pub fn normalize_tag_key(value: &str) -> Result<String, DomainError> {
     validate_visible_text(ProfileField::SpecialtyTag, value, 48)?;
-    let normalized = fold_whitespace(&value.nfkc().collect::<String>().case_fold().collect::<String>());
+    let normalized = fold_whitespace(
+        &value
+            .nfkc()
+            .collect::<String>()
+            .case_fold()
+            .collect::<String>(),
+    );
 
     if normalized.is_empty() {
         return Err(DomainError::InvalidProfileField {

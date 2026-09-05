@@ -94,7 +94,13 @@ fn create_editor_copies_template_and_walks_the_exact_ordered_steps() {
     assert_eq!(editor.draft().display_name, "Focused Analyst");
     assert_eq!(editor.draft().description, "Covers fundamentals.");
     assert_eq!(editor.draft().primary_specialty, "Long-term investing");
-    assert!(editor.draft().specialty_tags.iter().any(|tag| tag == "valuation"));
+    assert!(
+        editor
+            .draft()
+            .specialty_tags
+            .iter()
+            .any(|tag| tag == "valuation")
+    );
     assert_eq!(
         editor.draft().personality,
         "Calm and evidence-led. States uncertainty plainly."
@@ -103,11 +109,20 @@ fn create_editor_copies_template_and_walks_the_exact_ordered_steps() {
         editor.draft().instructions,
         "Use primary filings. Separate facts from estimates."
     );
-    assert_eq!(editor.draft().bindings.model_provider.as_deref(), Some("local"));
-    assert_eq!(editor.draft().bindings.model_name.as_deref(), Some("analyst-v1"));
+    assert_eq!(
+        editor.draft().bindings.model_provider.as_deref(),
+        Some("local")
+    );
+    assert_eq!(
+        editor.draft().bindings.model_name.as_deref(),
+        Some("analyst-v1")
+    );
 
     assert_eq!(editor.submit_line(":review"), ProfileEditorEffect::None);
-    assert!(matches!(editor.submit_line(":activate"), ProfileEditorEffect::Execute(_)));
+    assert!(matches!(
+        editor.submit_line(":activate"),
+        ProfileEditorEffect::Execute(_)
+    ));
 }
 
 #[test]
@@ -146,14 +161,26 @@ fn specialty_tag_cap_and_binding_clear_are_local_draft_operations() {
     editor.submit_line(":next");
     editor.submit_line("Research");
     for tag in ["one", "two", "three", "four", "five"] {
-        assert_eq!(editor.submit_line(&format!(":tag add {tag}")), ProfileEditorEffect::None);
+        assert_eq!(
+            editor.submit_line(&format!(":tag add {tag}")),
+            ProfileEditorEffect::None
+        );
     }
-    assert_eq!(editor.draft().specialty_tags, vec!["one", "two", "three", "four", "five"]);
-    assert_eq!(editor.submit_line(":tag add six"), ProfileEditorEffect::None);
+    assert_eq!(
+        editor.draft().specialty_tags,
+        vec!["one", "two", "three", "four", "five"]
+    );
+    assert_eq!(
+        editor.submit_line(":tag add six"),
+        ProfileEditorEffect::None
+    );
     assert_eq!(editor.draft().specialty_tags.len(), 5);
     assert!(editor.local_message().is_some());
     editor.submit_line(":tag remove three");
-    assert_eq!(editor.draft().specialty_tags, vec!["one", "two", "four", "five"]);
+    assert_eq!(
+        editor.draft().specialty_tags,
+        vec!["one", "two", "four", "five"]
+    );
 
     editor.submit_line(":next");
     editor.submit_line("Personality");
@@ -176,7 +203,10 @@ fn edit_review_requires_a_fresh_preview_after_any_field_change() {
 
     advance_to_review(&mut editor);
     let request = preview_request(&mut editor);
-    editor.apply_preview(request.generation, preview(profile_id, active_version_id, 3));
+    editor.apply_preview(
+        request.generation,
+        preview(profile_id, active_version_id, 3),
+    );
     assert!(editor.review().is_some());
     assert_eq!(editor.submit_line(":back"), ProfileEditorEffect::None);
     assert_eq!(editor.step(), ProfileEditorStep::OptionalBindings);
@@ -189,7 +219,10 @@ fn edit_review_requires_a_fresh_preview_after_any_field_change() {
     editor.submit_line(":next");
     editor.submit_line(":next");
     assert_eq!(editor.step(), ProfileEditorStep::Review);
-    assert!(matches!(editor.submit_line(":review"), ProfileEditorEffect::PreviewEdit(_)));
+    assert!(matches!(
+        editor.submit_line(":review"),
+        ProfileEditorEffect::PreviewEdit(_)
+    ));
 }
 
 #[test]
@@ -211,14 +244,23 @@ fn delayed_preview_after_candidate_mutation_is_rejected_until_the_current_previe
     let request_b = preview_request(&mut editor);
     assert!(request_b.generation > request_a.generation);
 
-    editor.apply_preview(request_a.generation, preview(profile_id, active_version_id, 22));
+    editor.apply_preview(
+        request_a.generation,
+        preview(profile_id, active_version_id, 22),
+    );
     assert!(editor.review().is_none());
     assert_eq!(editor.submit_line(":activate"), ProfileEditorEffect::None);
     assert_eq!(editor.local_message().unwrap().code(), "stale_preview");
 
-    editor.apply_preview(request_b.generation, preview(profile_id, active_version_id, 23));
+    editor.apply_preview(
+        request_b.generation,
+        preview(profile_id, active_version_id, 23),
+    );
     assert!(editor.review().is_some());
-    assert!(matches!(editor.submit_line(":activate"), ProfileEditorEffect::Execute(_)));
+    assert!(matches!(
+        editor.submit_line(":activate"),
+        ProfileEditorEffect::Execute(_)
+    ));
 }
 
 #[test]
@@ -231,13 +273,22 @@ fn newer_preview_request_wins_when_responses_arrive_out_of_order() {
     let request_b = preview_request(&mut editor);
     assert!(request_b.generation > request_a.generation);
 
-    editor.apply_preview(request_a.generation, preview(profile_id, active_version_id, 32));
+    editor.apply_preview(
+        request_a.generation,
+        preview(profile_id, active_version_id, 32),
+    );
     assert!(editor.review().is_none());
     assert_eq!(editor.local_message().unwrap().code(), "stale_preview");
 
-    editor.apply_preview(request_b.generation, preview(profile_id, active_version_id, 33));
+    editor.apply_preview(
+        request_b.generation,
+        preview(profile_id, active_version_id, 33),
+    );
     assert!(editor.review().is_some());
-    assert!(matches!(editor.submit_line(":activate"), ProfileEditorEffect::Execute(_)));
+    assert!(matches!(
+        editor.submit_line(":activate"),
+        ProfileEditorEffect::Execute(_)
+    ));
 }
 
 #[test]
@@ -247,5 +298,8 @@ fn cancel_is_the_only_terminal_local_effect_and_never_exposes_prose_in_controls(
     editor.submit_line("Private profile prose must remain local.");
     let controls = editor.control_summary();
     assert!(!controls.contains("Private profile prose"));
-    assert_eq!(editor.submit_line(":cancel"), ProfileEditorEffect::Cancelled);
+    assert_eq!(
+        editor.submit_line(":cancel"),
+        ProfileEditorEffect::Cancelled
+    );
 }

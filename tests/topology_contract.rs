@@ -4,7 +4,7 @@ use ai_stock_forum::{
 };
 
 #[test]
-fn phase_zero_exports_the_approved_module_boundaries() {
+fn phase_two_agent_profiles_preserve_the_approved_module_boundaries() {
     let names = [
         agents::MODULE_NAME,
         app::MODULE_NAME,
@@ -26,4 +26,15 @@ fn phase_zero_exports_the_approved_module_boundaries() {
         ui::MODULE_NAME,
     ];
     assert_eq!(names.len(), 18);
+    assert_eq!(
+        [
+            agents::MODULE_NAME,
+            app::MODULE_NAME,
+            persistence::MODULE_NAME,
+            recovery::MODULE_NAME,
+            runtime::MODULE_NAME,
+            ui::MODULE_NAME,
+        ],
+        ["agents", "app", "persistence", "recovery", "runtime", "ui"]
+    );
 }

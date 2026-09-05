@@ -141,7 +141,11 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
         Line::styled(
             format!(
                 "{} a Agents",
-                if model.active_view == View::Agents { ">" } else { " " }
+                if model.active_view == View::Agents {
+                    ">"
+                } else {
+                    " "
+                }
             ),
             if model.active_view == View::Agents {
                 theme.focus

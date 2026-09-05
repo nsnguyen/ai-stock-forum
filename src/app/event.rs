@@ -6,8 +6,7 @@ use crate::{
     app::{AuditLimit, InputRejection},
     domain::{
         Actor, AgentProfileId, AgentProfileVersionId, CausationId, CorrelationId, EventId,
-        InstallationId, ObjectRef, SessionId,
-        Sha256Digest, canonical_json_bytes, sha256,
+        InstallationId, ObjectRef, SessionId, Sha256Digest, canonical_json_bytes, sha256,
     },
     persistence::RecoveryError,
 };

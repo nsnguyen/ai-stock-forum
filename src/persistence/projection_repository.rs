@@ -498,14 +498,10 @@ fn persistence_from_recovery(error: RecoveryError) -> PersistenceError {
         | RecoveryError::EventDigestMismatch
         | RecoveryError::InvalidEventRecord
         | RecoveryError::InvalidPredecessorShape
-        | RecoveryError::UnexpectedAgentProfileHistory => {
-            PersistenceError::ProjectionStateConflict
-        }
+        | RecoveryError::UnexpectedAgentProfileHistory => PersistenceError::ProjectionStateConflict,
         RecoveryError::UnsupportedEventSchema => PersistenceError::UnsupportedEventSchema,
         RecoveryError::QueryFailed => PersistenceError::QueryFailed,
-        RecoveryError::AgentProfileHistoryMismatch => {
-            PersistenceError::AgentProfileHistoryMismatch
-        }
+        RecoveryError::AgentProfileHistoryMismatch => PersistenceError::AgentProfileHistoryMismatch,
         RecoveryError::InvalidAgentProfilePayload => PersistenceError::InvalidAgentProfilePayload,
         RecoveryError::ActiveAgentProfileRebuildFailed => {
             PersistenceError::ActiveAgentProfileRebuildFailed
@@ -519,9 +515,7 @@ fn recovery_from_persistence(error: PersistenceError) -> RecoveryError {
         PersistenceError::ProjectionStateConflict | PersistenceError::InvalidEventRecord => {
             RecoveryError::InvalidEventRecord
         }
-        PersistenceError::AgentProfileHistoryMismatch => {
-            RecoveryError::AgentProfileHistoryMismatch
-        }
+        PersistenceError::AgentProfileHistoryMismatch => RecoveryError::AgentProfileHistoryMismatch,
         PersistenceError::InvalidAgentProfilePayload => RecoveryError::InvalidAgentProfilePayload,
         PersistenceError::ActiveAgentProfileRebuildFailed => {
             RecoveryError::ActiveAgentProfileRebuildFailed

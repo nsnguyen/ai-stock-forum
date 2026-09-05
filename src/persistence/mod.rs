@@ -8,8 +8,7 @@ mod migrations;
 mod projection_repository;
 
 pub use agent_profile_repository::{
-    StoredAgentProfileVersion, insert_expected_version, load_all_versions,
-    replace_active_profiles,
+    StoredAgentProfileVersion, insert_expected_version, load_all_versions, replace_active_profiles,
 };
 pub use command_receipt_repository::{CommandReceiptRecord, CommandReceiptRepository};
 pub use database::{Database, ImmediateTransaction, PersistenceError};

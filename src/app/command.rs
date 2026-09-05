@@ -2,6 +2,7 @@ use std::ops::Deref;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::policy::Capability;
 use crate::{
     agents::{AgentProfileDraft, ProfileTemplateProvenance},
     domain::{
@@ -9,7 +10,6 @@ use crate::{
         ProfileReviewToken, Sha256Digest, sha256,
     },
 };
-use crate::policy::Capability;
 
 pub const MAX_INPUT_BYTES: usize = 4096;
 pub const DEFAULT_AUDIT_LIMIT: u16 = 20;
@@ -67,7 +67,9 @@ pub enum ApplicationCommand {
     ShowHelp,
     ShowStatus,
     ShowSetupStatus,
-    ShowAuditTail { limit: AuditLimit },
+    ShowAuditTail {
+        limit: AuditLimit,
+    },
     CreateAgentProfile {
         draft: AgentProfileDraft,
         template_provenance: Option<ProfileTemplateProvenance>,
@@ -80,8 +82,12 @@ pub enum ApplicationCommand {
         review_digest: Digest,
     },
     ListAgentProfiles,
-    ShowAgentProfile { profile_id: AgentProfileId },
-    ShowAgentProfileHistory { profile_id: AgentProfileId },
+    ShowAgentProfile {
+        profile_id: AgentProfileId,
+    },
+    ShowAgentProfileHistory {
+        profile_id: AgentProfileId,
+    },
     RejectInput(InputRejection),
     RequestShutdown,
 }

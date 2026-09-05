@@ -652,6 +652,10 @@ pub struct FallbackRunner {
     profile_workflow: Mutex<Option<ProfileWorkflow>>,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the fallback workflow intentionally owns one complete local editor and candidate"
+)]
 enum ProfileWorkflow {
     SelectingTemplate,
     Editing(ProfileEditor),
@@ -719,7 +723,12 @@ impl FallbackRunner {
             return Ok(None);
         }
 
-        if self.profile_workflow.lock().map_err(|_| UiError::Panicked)?.is_some() {
+        if self
+            .profile_workflow
+            .lock()
+            .map_err(|_| UiError::Panicked)?
+            .is_some()
+        {
             let line = match std::str::from_utf8(line.bytes()) {
                 Ok(line) => line,
                 Err(_) => {
@@ -780,14 +789,14 @@ impl FallbackRunner {
     ) -> Result<(), UiError> {
         match command {
             AgentWorkflowCommand::SelectCreateTemplate => {
-                *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
-                    Some(ProfileWorkflow::SelectingTemplate);
+                *self
+                    .profile_workflow
+                    .lock()
+                    .map_err(|_| UiError::Panicked)? = Some(ProfileWorkflow::SelectingTemplate);
                 TextRenderer::render_profile_templates(builtin_profile_templates(), writer)
                     .map_err(|_| UiError::Write)
             }
-            AgentWorkflowCommand::Create { template_id } => {
-                self.start_create(template_id, writer)
-            }
+            AgentWorkflowCommand::Create { template_id } => self.start_create(template_id, writer),
             AgentWorkflowCommand::Edit { profile_id } => {
                 let outcome = self
                     .client
@@ -815,10 +824,11 @@ impl FallbackRunner {
                     profile.profile_version_id(),
                     draft,
                 );
-                TextRenderer::render_profile_editor(&editor, writer)
-                    .map_err(|_| UiError::Write)?;
-                *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
-                    Some(ProfileWorkflow::Editing(editor));
+                TextRenderer::render_profile_editor(&editor, writer).map_err(|_| UiError::Write)?;
+                *self
+                    .profile_workflow
+                    .lock()
+                    .map_err(|_| UiError::Panicked)? = Some(ProfileWorkflow::Editing(editor));
                 Ok(())
             }
         }
@@ -836,16 +846,14 @@ impl FallbackRunner {
         let editor = ProfileEditor::for_create(template)
             .map_err(|error| UiError::Runtime(RuntimeError::Application(error.into())))?;
         TextRenderer::render_profile_editor(&editor, writer).map_err(|_| UiError::Write)?;
-        *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
-            Some(ProfileWorkflow::Editing(editor));
+        *self
+            .profile_workflow
+            .lock()
+            .map_err(|_| UiError::Panicked)? = Some(ProfileWorkflow::Editing(editor));
         Ok(())
     }
 
-    fn process_profile_line<W: Write>(
-        &self,
-        line: &str,
-        writer: &mut W,
-    ) -> Result<(), UiError> {
+    fn process_profile_line<W: Write>(&self, line: &str, writer: &mut W) -> Result<(), UiError> {
         let state = self
             .profile_workflow
             .lock()
@@ -856,9 +864,10 @@ impl FallbackRunner {
             ProfileWorkflow::SelectingTemplate => {
                 let input = line.trim();
                 if input == ":cancel" {
-                    self.client.cancel_agent_profile_edit().map_err(UiError::Runtime)?;
-                    TextRenderer::render_profile_cancelled(true, writer)
-                        .map_err(|_| UiError::Write)
+                    self.client
+                        .cancel_agent_profile_edit()
+                        .map_err(UiError::Runtime)?;
+                    TextRenderer::render_profile_cancelled(true, writer).map_err(|_| UiError::Write)
                 } else if let Some(template) = builtin_profile_templates()
                     .iter()
                     .find(|template| template.id.as_str() == input)
@@ -867,8 +876,10 @@ impl FallbackRunner {
                 } else {
                     TextRenderer::render_profile_templates(builtin_profile_templates(), writer)
                         .map_err(|_| UiError::Write)?;
-                    *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
-                        Some(ProfileWorkflow::SelectingTemplate);
+                    *self
+                        .profile_workflow
+                        .lock()
+                        .map_err(|_| UiError::Panicked)? = Some(ProfileWorkflow::SelectingTemplate);
                     Ok(())
                 }
             }
@@ -878,7 +889,10 @@ impl FallbackRunner {
                     ProfileEditorEffect::None => {
                         TextRenderer::render_profile_editor(&editor, writer)
                             .map_err(|_| UiError::Write)?;
-                        *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
+                        *self
+                            .profile_workflow
+                            .lock()
+                            .map_err(|_| UiError::Panicked)? =
                             Some(ProfileWorkflow::Editing(editor));
                         Ok(())
                     }
@@ -894,19 +908,27 @@ impl FallbackRunner {
                         editor.apply_preview(request.generation, preview);
                         TextRenderer::render_profile_editor(&editor, writer)
                             .map_err(|_| UiError::Write)?;
-                        *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
+                        *self
+                            .profile_workflow
+                            .lock()
+                            .map_err(|_| UiError::Panicked)? =
                             Some(ProfileWorkflow::Editing(editor));
                         Ok(())
                     }
                     ProfileEditorEffect::Execute(command) => {
                         TextRenderer::render_activation_confirmation(writer)
                             .map_err(|_| UiError::Write)?;
-                        *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
+                        *self
+                            .profile_workflow
+                            .lock()
+                            .map_err(|_| UiError::Panicked)? =
                             Some(ProfileWorkflow::Confirming { editor, command });
                         Ok(())
                     }
                     ProfileEditorEffect::Cancelled => {
-                        self.client.cancel_agent_profile_edit().map_err(UiError::Runtime)?;
+                        self.client
+                            .cancel_agent_profile_edit()
+                            .map_err(UiError::Runtime)?;
                         TextRenderer::render_profile_cancelled(create, writer)
                             .map_err(|_| UiError::Write)
                     }
@@ -915,24 +937,30 @@ impl FallbackRunner {
             ProfileWorkflow::Confirming { editor, command } => match line.trim() {
                 "y" | "yes" => self.execute_profile_confirmation(editor, command, writer),
                 "n" | "no" => {
-                    TextRenderer::render_activation_declined(writer)
-                        .map_err(|_| UiError::Write)?;
+                    TextRenderer::render_activation_declined(writer).map_err(|_| UiError::Write)?;
                     TextRenderer::render_profile_editor(&editor, writer)
                         .map_err(|_| UiError::Write)?;
-                    *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
-                        Some(ProfileWorkflow::Editing(editor));
+                    *self
+                        .profile_workflow
+                        .lock()
+                        .map_err(|_| UiError::Panicked)? = Some(ProfileWorkflow::Editing(editor));
                     Ok(())
                 }
                 ":cancel" => {
                     let create = matches!(editor.mode(), ProfileEditorMode::Create { .. });
-                    self.client.cancel_agent_profile_edit().map_err(UiError::Runtime)?;
+                    self.client
+                        .cancel_agent_profile_edit()
+                        .map_err(UiError::Runtime)?;
                     TextRenderer::render_profile_cancelled(create, writer)
                         .map_err(|_| UiError::Write)
                 }
                 _ => {
                     TextRenderer::render_activation_confirmation(writer)
                         .map_err(|_| UiError::Write)?;
-                    *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
+                    *self
+                        .profile_workflow
+                        .lock()
+                        .map_err(|_| UiError::Panicked)? =
                         Some(ProfileWorkflow::Confirming { editor, command });
                     Ok(())
                 }
@@ -948,7 +976,9 @@ impl FallbackRunner {
             .take()
             .is_some();
         if active {
-            self.client.cancel_agent_profile_edit().map_err(UiError::Runtime)?;
+            self.client
+                .cancel_agent_profile_edit()
+                .map_err(UiError::Runtime)?;
         }
         Ok(())
     }
@@ -962,7 +992,10 @@ impl FallbackRunner {
         let pending = match self.client.try_submit(command.clone()) {
             Ok(pending) => pending,
             Err(error @ RuntimeError::Backpressure) => {
-                *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
+                *self
+                    .profile_workflow
+                    .lock()
+                    .map_err(|_| UiError::Panicked)? =
                     Some(ProfileWorkflow::Confirming { editor, command });
                 if TextRenderer::render_runtime_error(&error, writer).is_err() {
                     let _ = self.cancel_profile_workflow();

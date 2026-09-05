@@ -1,11 +1,9 @@
 use ai_stock_forum::{
     agents::{
-        diff_profile, AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentRole,
-        ProfileDiffField, ProfileFieldValue,
+        AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentRole, ProfileDiffField,
+        ProfileFieldValue, diff_profile,
     },
-    domain::{
-        canonical_json_bytes, AgentProfileId, AgentProfileVersionId, MemoryNamespaceId,
-    },
+    domain::{AgentProfileId, AgentProfileVersionId, MemoryNamespaceId, canonical_json_bytes},
 };
 use proptest::prelude::*;
 use uuid::Uuid;
@@ -157,10 +155,7 @@ fn semantic_diff_lists_only_changed_fields_in_fixed_order() {
             ProfileDiffField::Bindings,
         ],
     );
-    assert_eq!(
-        diff[2].before,
-        ProfileFieldValue::Role(AgentRole::Custom),
-    );
+    assert_eq!(diff[2].before, ProfileFieldValue::Role(AgentRole::Custom),);
     assert_eq!(diff[2].after, ProfileFieldValue::Role(AgentRole::Bull));
     assert_eq!(
         diff[4].after,
@@ -195,7 +190,14 @@ fn valid_profile_drafts() -> impl Strategy<Value = AgentProfileDraft> {
         "[A-Za-z]{1,20}",
     )
         .prop_map(
-            |(display_name, description, primary_specialty, specialty_tag, personality, instructions)| {
+            |(
+                display_name,
+                description,
+                primary_specialty,
+                specialty_tag,
+                personality,
+                instructions,
+            )| {
                 AgentProfileDraft::new(
                     display_name,
                     description,

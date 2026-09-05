@@ -1,8 +1,8 @@
 //! Agent profile vocabulary and template foundations.
 pub const MODULE_NAME: &str = "agents";
 
-mod normalization;
 mod diff;
+mod normalization;
 mod profile;
 mod projection;
 mod review;

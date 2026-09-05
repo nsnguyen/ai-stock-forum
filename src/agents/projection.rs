@@ -33,8 +33,7 @@ impl AgentProfilesProjection {
             .cloned()
             .collect::<Vec<_>>();
         profiles.sort_by(|left, right| {
-            left
-                .normalized_name()
+            left.normalized_name()
                 .as_str()
                 .cmp(right.normalized_name().as_str())
                 .then_with(|| left.profile_id().cmp(&right.profile_id()))
@@ -56,8 +55,7 @@ impl AgentProfilesProjection {
             .cloned()
             .collect::<Vec<_>>();
         versions.sort_by(|left, right| {
-            left
-                .version()
+            left.version()
                 .get()
                 .cmp(&right.version().get())
                 .then_with(|| left.profile_version_id().cmp(&right.profile_version_id()))
@@ -84,13 +82,17 @@ impl AgentProfilesProjection {
         self.verify_digest(profile)?;
         if profile.version().get() != 1
             || profile.supersedes().is_some()
-            || self.versions_by_id.contains_key(&profile.profile_version_id())
+            || self
+                .versions_by_id
+                .contains_key(&profile.profile_version_id())
             || self.active_by_profile.contains_key(&profile.profile_id())
             || self
                 .versions_by_id
                 .values()
                 .any(|existing| existing.profile_id() == profile.profile_id())
-            || self.active_name_index.contains_key(profile.normalized_name())
+            || self
+                .active_name_index
+                .contains_key(profile.normalized_name())
         {
             return Err(RecoveryError::InvalidEventRecord);
         }
@@ -109,7 +111,10 @@ impl AgentProfilesProjection {
         previous_version_id: AgentProfileVersionId,
     ) -> Result<(), RecoveryError> {
         self.verify_digest(profile)?;
-        if self.versions_by_id.contains_key(&profile.profile_version_id()) {
+        if self
+            .versions_by_id
+            .contains_key(&profile.profile_version_id())
+        {
             return Err(RecoveryError::InvalidEventRecord);
         }
         let current_version_id = *self

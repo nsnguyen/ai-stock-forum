@@ -94,10 +94,7 @@ fn draft(name: &str) -> AgentProfileDraft {
     .unwrap()
 }
 
-fn create_profile(
-    app: &mut support::TestApp,
-    id: u128,
-) -> (AgentProfileId, AgentProfileVersionId) {
+fn create_profile(app: &mut support::TestApp, id: u128) -> (AgentProfileId, AgentProfileVersionId) {
     let outcome = app
         .execute(envelope(
             id,
@@ -251,7 +248,7 @@ fn old_base_preview_waits_for_activation_then_fails_without_installing_a_token()
     assert!(!preview_completed_before_commit);
     assert!(matches!(
         preview_result,
-        Err(AppError::StaleAgentProfileVersion { .. })
+        Err(AppError::StaleAgentProfileVersion)
     ));
     assert_eq!(app.count_rows("agent_profile_versions"), 2);
 }

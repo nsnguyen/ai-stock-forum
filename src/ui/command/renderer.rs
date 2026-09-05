@@ -355,13 +355,37 @@ impl TextRenderer {
 }
 
 fn render_draft<W: Write>(draft: &AgentProfileDraft, writer: &mut W) -> io::Result<()> {
-    writeln!(writer, "  Display name: {}", escaped_bounded(&draft.display_name, 64))?;
-    writeln!(writer, "  Description: {}", escaped_bounded(&draft.description, 256))?;
+    writeln!(
+        writer,
+        "  Display name: {}",
+        escaped_bounded(&draft.display_name, 64)
+    )?;
+    writeln!(
+        writer,
+        "  Description: {}",
+        escaped_bounded(&draft.description, 256)
+    )?;
     writeln!(writer, "  Role: {}", draft.role.as_str())?;
-    writeln!(writer, "  Primary specialty: {}", escaped_bounded(&draft.primary_specialty, 64))?;
-    writeln!(writer, "  Specialty tags: {}", escaped_list(&draft.specialty_tags, 48))?;
-    writeln!(writer, "  Personality: {}", escaped_bounded(&draft.personality, 1_024))?;
-    writeln!(writer, "  Instructions: {}", escaped_bounded(&draft.instructions, 4_096))?;
+    writeln!(
+        writer,
+        "  Primary specialty: {}",
+        escaped_bounded(&draft.primary_specialty, 64)
+    )?;
+    writeln!(
+        writer,
+        "  Specialty tags: {}",
+        escaped_list(&draft.specialty_tags, 48)
+    )?;
+    writeln!(
+        writer,
+        "  Personality: {}",
+        escaped_bounded(&draft.personality, 1_024)
+    )?;
+    writeln!(
+        writer,
+        "  Instructions: {}",
+        escaped_bounded(&draft.instructions, 4_096)
+    )?;
     writeln!(
         writer,
         "  Bindings: provider={} model={}",
@@ -370,10 +394,7 @@ fn render_draft<W: Write>(draft: &AgentProfileDraft, writer: &mut W) -> io::Resu
     )
 }
 
-fn render_profile_diffs<W: Write>(
-    diffs: &[ProfileFieldDiff],
-    writer: &mut W,
-) -> io::Result<()> {
+fn render_profile_diffs<W: Write>(diffs: &[ProfileFieldDiff], writer: &mut W) -> io::Result<()> {
     for diff in diffs {
         writeln!(
             writer,

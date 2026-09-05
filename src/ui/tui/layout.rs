@@ -86,11 +86,9 @@ pub fn agent_workspace(area: Rect, mode: LayoutMode) -> AgentWorkspaceLayout {
             active: area,
         },
         LayoutMode::Medium | LayoutMode::Wide => {
-            let columns = Layout::horizontal([
-                Constraint::Percentage(38),
-                Constraint::Percentage(62),
-            ])
-            .split(area);
+            let columns =
+                Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)])
+                    .split(area);
             AgentWorkspaceLayout {
                 list: Some(columns[0]),
                 active: columns[1],

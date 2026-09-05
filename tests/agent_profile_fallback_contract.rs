@@ -14,7 +14,7 @@ use ai_stock_forum::{
     },
     app::{
         AgentProfileCreatedView, AgentProfileHistoryEntry, AgentProfileHistoryView,
-        AgentProfileSummary, AgentProfileView, AgentProfileVersionActivatedView, AppError,
+        AgentProfileSummary, AgentProfileVersionActivatedView, AgentProfileView, AppError,
         ApplicationCommand, CommandOutcome, CommandView, HelpView, ShutdownDisposition,
         ShutdownReason,
     },
@@ -61,7 +61,9 @@ fn create_profile(
 }
 
 fn profile_count(client: &ai_stock_forum::runtime::RuntimeClient) -> usize {
-    let outcome = client.submit(ApplicationCommand::ListAgentProfiles).unwrap();
+    let outcome = client
+        .submit(ApplicationCommand::ListAgentProfiles)
+        .unwrap();
     let CommandView::AgentProfiles(view) = outcome.view else {
         panic!("expected agent profile list");
     };
@@ -201,7 +203,9 @@ fn create_selects_a_pinned_template_edits_fields_and_waits_for_yes() {
     assert!(output.contains("Confirm activation? [y/yes or n/no]"));
     assert!(output.contains("Agent profile created:"));
 
-    let listed = client.submit(ApplicationCommand::ListAgentProfiles).unwrap();
+    let listed = client
+        .submit(ApplicationCommand::ListAgentProfiles)
+        .unwrap();
     let CommandView::AgentProfiles(listed) = listed.view else {
         panic!("expected list view");
     };
@@ -233,8 +237,7 @@ fn edit_loads_active_version_previews_ordered_diffs_and_no_returns_to_review() {
         .rsplit("Edit profile review")
         .next()
         .expect("edit review section is rendered");
-    let positions = names
-        .map(|name| review.find(name).expect("ordered diff field is rendered"));
+    let positions = names.map(|name| review.find(name).expect("ordered diff field is rendered"));
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(rejected.contains("Activation declined; returned to review."));
     assert_eq!(profile_history_len(&client, created.profile_id), 1);
@@ -324,7 +327,10 @@ fn list_and_history_cap_rows_and_render_deterministic_omitted_counts() {
     )
     .unwrap();
     let list = String::from_utf8(list).unwrap();
-    assert_eq!(list.lines().filter(|line| line.contains(" | ")).count(), 101);
+    assert_eq!(
+        list.lines().filter(|line| line.contains(" | ")).count(),
+        101
+    );
     assert!(list.contains("... 2 profiles omitted."));
     assert!(list.contains("Profile 000"));
     assert!(list.contains("Profile 099"));
@@ -334,9 +340,8 @@ fn list_and_history_cap_rows_and_render_deterministic_omitted_counts() {
         .map(|offset| AgentProfileHistoryEntry {
             profile_version_id: AgentProfileVersionId::from_uuid(Uuid::from_u128(3_000 + offset)),
             version: ObjectVersion::new(u64::try_from(offset + 1).unwrap()).unwrap(),
-            supersedes: (offset > 0).then(|| {
-                AgentProfileVersionId::from_uuid(Uuid::from_u128(2_999 + offset))
-            }),
+            supersedes: (offset > 0)
+                .then(|| AgentProfileVersionId::from_uuid(Uuid::from_u128(2_999 + offset))),
             created_at_ms: i64::try_from(offset).unwrap(),
             readiness: AgentReadiness::Ready,
             content_digest: sha256(&offset.to_le_bytes()),
@@ -353,7 +358,10 @@ fn list_and_history_cap_rows_and_render_deterministic_omitted_counts() {
     )
     .unwrap();
     let history = String::from_utf8(history).unwrap();
-    assert_eq!(history.lines().filter(|line| line.contains(" | ")).count(), 101);
+    assert_eq!(
+        history.lines().filter(|line| line.contains(" | ")).count(),
+        101
+    );
     assert!(history.contains("... 2 versions omitted."));
 }
 
@@ -399,7 +407,9 @@ impl CommandExecutor for WorkflowExecutor {
                 Ok(workflow_outcome(CommandView::AgentProfileCreated(
                     AgentProfileCreatedView {
                         profile_id: AgentProfileId::from_uuid(Uuid::from_u128(8_000)),
-                        profile_version_id: AgentProfileVersionId::from_uuid(Uuid::from_u128(8_001)),
+                        profile_version_id: AgentProfileVersionId::from_uuid(Uuid::from_u128(
+                            8_001,
+                        )),
                         version: ObjectVersion::new(1).unwrap(),
                         readiness: AgentReadiness::Ready,
                     },
@@ -407,15 +417,17 @@ impl CommandExecutor for WorkflowExecutor {
             }
             ApplicationCommand::ActivateAgentProfileVersion { .. } => {
                 self.observations.lock().unwrap().activations += 1;
-                Ok(workflow_outcome(
-                    CommandView::AgentProfileVersionActivated(AgentProfileVersionActivatedView {
+                Ok(workflow_outcome(CommandView::AgentProfileVersionActivated(
+                    AgentProfileVersionActivatedView {
                         profile_id: self.profile.profile_id(),
-                        profile_version_id: AgentProfileVersionId::from_uuid(Uuid::from_u128(8_002)),
+                        profile_version_id: AgentProfileVersionId::from_uuid(Uuid::from_u128(
+                            8_002,
+                        )),
                         previous_version_id: self.profile.profile_version_id(),
                         version: ObjectVersion::new(2).unwrap(),
                         readiness: AgentReadiness::Ready,
-                    }),
-                ))
+                    },
+                )))
             }
             _ => Ok(workflow_outcome(CommandView::Help(HelpView))),
         }
@@ -644,9 +656,9 @@ impl WorkflowHarness {
 #[test]
 fn create_confirmation_survives_backpressure_and_yes_retries_successfully() {
     let harness = WorkflowHarness::new();
-    harness.send(concat!(
+    harness.send(
         "agent create builtin.custom\n:next\nRetry Create\n:next\nDescription\n:next\nresearch\n:next\nPatient\n:next\nCite evidence\n:next\n:provider local\n:model model\n:next\n:review\n:activate\n"
-    ));
+    );
     harness.wait("Confirm activation? [y/yes or n/no]");
     let (blocked, queued) = harness.saturate();
     harness.send("yes\n");

@@ -164,6 +164,10 @@ pub enum ShutdownDisposition {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "typed command views remain value-semantic at the application boundary"
+)]
 pub enum CommandView {
     Help(HelpView),
     Status(StatusView),

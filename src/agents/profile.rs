@@ -5,8 +5,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::{
     agents::{normalize_profile_name_key, normalize_tag_key, validate_visible_text},
     domain::{
-        AgentProfileId, AgentProfileVersionId, Digest, MemoryNamespaceId, ObjectVersion,
-        DomainError, canonical_json_bytes, sha256,
+        AgentProfileId, AgentProfileVersionId, Digest, DomainError, MemoryNamespaceId,
+        ObjectVersion, canonical_json_bytes, sha256,
     },
 };
 
@@ -278,8 +278,8 @@ impl<'de> Deserialize<'de> for AgentProfileVersion {
         D: Deserializer<'de>,
     {
         let wire = AgentProfileVersionWire::deserialize(deserializer)?;
-        let normalized_name = normalize_profile_name_key(&wire.display_name)
-            .map_err(serde::de::Error::custom)?;
+        let normalized_name =
+            normalize_profile_name_key(&wire.display_name).map_err(serde::de::Error::custom)?;
         if normalized_name != wire.normalized_name
             || wire.default_policy_ref != DEFAULT_POLICY_REF
             || (wire.version.get() == 1) != wire.supersedes.is_none()
@@ -317,7 +317,9 @@ impl<'de> Deserialize<'de> for AgentProfileVersion {
         )
         .map_err(serde::de::Error::custom)?;
         if profile.content_digest != wire.content_digest {
-            return Err(serde::de::Error::custom("agent profile content digest is invalid"));
+            return Err(serde::de::Error::custom(
+                "agent profile content digest is invalid",
+            ));
         }
         Ok(profile)
     }

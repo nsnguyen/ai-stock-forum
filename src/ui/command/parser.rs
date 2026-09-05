@@ -14,6 +14,10 @@ pub enum AgentWorkflowCommand {
     Edit { profile_id: AgentProfileId },
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "fallback parsing returns owned typed commands without a second allocation contract"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FallbackParsedLine {
     Command(ApplicationCommand),
@@ -21,6 +25,10 @@ pub enum FallbackParsedLine {
     Ignored,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "command parsing returns owned typed commands without a second allocation contract"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedLine {
     Command(ApplicationCommand),
@@ -50,11 +58,7 @@ pub fn parse_line(input: &[u8]) -> ParsedLine {
 
 pub fn parse_fallback_line(input: &[u8]) -> FallbackParsedLine {
     if input.len() > MAX_INPUT_BYTES {
-        return FallbackParsedLine::Command(reject(
-            InputRejectionCategory::Oversized,
-            None,
-            input,
-        ));
+        return FallbackParsedLine::Command(reject(InputRejectionCategory::Oversized, None, input));
     }
 
     let line = match std::str::from_utf8(input) {
@@ -126,9 +130,10 @@ pub fn parse_fallback_line(input: &[u8]) -> FallbackParsedLine {
             Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
         },
         ["/quit"] => ApplicationCommand::RequestShutdown,
-        ["agent" | "/help" | "/status" | "/setup" | "/audit" | "/quit", ..] => {
-            reject(InputRejectionCategory::Malformed, safe_token(line), input)
-        }
+        [
+            "agent" | "/help" | "/status" | "/setup" | "/audit" | "/quit",
+            ..,
+        ] => reject(InputRejectionCategory::Malformed, safe_token(line), input),
         _ => reject(InputRejectionCategory::Unknown, safe_token(line), input),
     };
 

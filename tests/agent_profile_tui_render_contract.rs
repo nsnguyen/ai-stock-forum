@@ -188,7 +188,10 @@ fn legacy_views_keep_height_aware_modes_at_low_supported_heights() {
             legacy.active_view = view;
             let text = render_text(&legacy, width, 18);
             assert!(text.contains("Narrow"), "view={view:?} width={width}");
-            assert!(!text.contains(" Navigation "), "view={view:?} width={width}");
+            assert!(
+                !text.contains(" Navigation "),
+                "view={view:?} width={width}"
+            );
         }
     }
 }
@@ -372,12 +375,14 @@ fn long_safe_content_wraps_and_scrolls_while_escape_controls_never_reach_the_buf
 
     for (width, height) in [(60, 18), (79, 24), (80, 24), (120, 30), (160, 44)] {
         let terminal = rendered(&model, width, height);
-        assert!(terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .all(|cell| !cell.symbol().contains('\u{1b}')));
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .all(|cell| !cell.symbol().contains('\u{1b}'))
+        );
     }
 
     let tiny = render_text(&model, 59, 18);

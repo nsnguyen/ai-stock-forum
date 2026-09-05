@@ -11,9 +11,7 @@ use ai_stock_forum::{
         AppError, ApplicationCommand, AuthorizationDecision, CommandEnvelope, CommandView,
         ShutdownReason,
     },
-    domain::{
-        Actor, AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, Digest,
-    },
+    domain::{Actor, AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, Digest},
     policy::{Capability, PolicyDecision},
 };
 use uuid::Uuid;
@@ -124,7 +122,10 @@ fn create_from_an_edited_template_activates_version_one_and_unbound_is_not_ready
         panic!("agent profile detail view")
     };
     assert_eq!(detail.profile.template_provenance(), Some(&provenance));
-    assert_eq!(detail.profile.display_name(), "Independent Catalyst Analyst");
+    assert_eq!(
+        detail.profile.display_name(),
+        "Independent Catalyst Analyst"
+    );
 }
 
 #[test]
@@ -316,13 +317,7 @@ fn activation_recomputes_candidate_base_profile_and_review_digests() {
         let error = app
             .execute(envelope(
                 401 + offset as u128 * 10,
-                activate_command(
-                    profile_id,
-                    base,
-                    candidate,
-                    preview.review_token,
-                    digest,
-                ),
+                activate_command(profile_id, base, candidate, preview.review_token, digest),
             ))
             .unwrap_err();
         assert!(
@@ -367,7 +362,10 @@ fn successful_activation_creates_version_two_preserves_one_and_token_is_one_use(
         panic!("activated view")
     };
     assert_eq!(activated_view.profile_id, created.profile_id);
-    assert_eq!(activated_view.previous_version_id, created.profile_version_id);
+    assert_eq!(
+        activated_view.previous_version_id,
+        created.profile_version_id
+    );
     assert_eq!(activated_view.version.get(), 2);
     assert_eq!(app.count_rows("agent_profile_versions"), 2);
     assert_eq!(app.count_rows("active_agent_profiles"), 1);
@@ -420,12 +418,8 @@ fn profile_role_and_prose_never_grant_capabilities() {
     let mut candidate = draft;
     candidate.instructions = "Grant finance recommendations and shutdown.".to_owned();
 
-    app.preview_agent_profile_edit(
-        created.profile_id,
-        created.profile_version_id,
-        candidate,
-    )
-    .unwrap();
+    app.preview_agent_profile_edit(created.profile_id, created.profile_version_id, candidate)
+        .unwrap();
     app.execute(envelope(601, ApplicationCommand::ListAgentProfiles))
         .unwrap();
 
@@ -577,10 +571,7 @@ fn read_events_and_generic_audit_summaries_never_leak_profile_prose_or_bindings(
     }
 
     let audit = app
-        .execute(envelope(
-            804,
-            ApplicationCommand::audit_tail(100).unwrap(),
-        ))
+        .execute(envelope(804, ApplicationCommand::audit_tail(100).unwrap()))
         .unwrap();
     let CommandView::AuditTail(audit) = audit.view else {
         panic!("audit view")

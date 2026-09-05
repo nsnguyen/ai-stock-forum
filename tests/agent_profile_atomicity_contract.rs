@@ -1,9 +1,8 @@
 mod support;
 
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
-    Mutex,
 };
 
 use ai_stock_forum::{
@@ -195,10 +194,7 @@ fn draft(name: &str) -> AgentProfileDraft {
     .unwrap()
 }
 
-fn create_profile(
-    app: &mut support::TestApp,
-    id: u128,
-) -> (AgentProfileId, AgentProfileVersionId) {
+fn create_profile(app: &mut support::TestApp, id: u128) -> (AgentProfileId, AgentProfileVersionId) {
     let outcome = app
         .execute(envelope(
             id,
@@ -278,7 +274,11 @@ fn every_injected_write_boundary_rolls_back_and_releases_the_review_for_retry() 
         let error = app.execute(command.clone()).unwrap_err();
 
         assert!(hook.fired.load(Ordering::SeqCst), "boundary {boundary:?}");
-        assert_eq!(error.code(), "database_write_failed", "boundary {boundary:?}");
+        assert_eq!(
+            error.code(),
+            "database_write_failed",
+            "boundary {boundary:?}"
+        );
         assert!(
             !error.to_string().contains("credential=must-never-appear"),
             "boundary {boundary:?}"

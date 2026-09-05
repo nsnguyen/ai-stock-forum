@@ -198,7 +198,9 @@ fn append_activation(
     );
 }
 
-fn immutable_snapshot(database: &Database) -> Vec<(String, String, i64, String, String, Vec<u8>, i64, i64)> {
+type ImmutableSnapshotRow = (String, String, i64, String, String, Vec<u8>, i64, i64);
+
+fn immutable_snapshot(database: &Database) -> Vec<ImmutableSnapshotRow> {
     let mut statement = database
         .connection()
         .prepare(
@@ -244,7 +246,10 @@ fn missing_immutable_row_is_backfilled_and_activated_from_verified_events() {
             .active_profile(profile.profile_id()),
         Some(&profile)
     );
-    assert_eq!(fixture.active_version_id(), Some(profile.profile_version_id().to_string()));
+    assert_eq!(
+        fixture.active_version_id(),
+        Some(profile.profile_version_id().to_string())
+    );
 }
 
 #[test]
@@ -274,7 +279,8 @@ fn altered_immutable_payload_digest_sequence_or_identity_refuses_startup() {
             fixture
                 .database
                 .connection()
-                .query_row("SELECT COUNT(*) FROM event_stream", [], |row| row.get::<_, i64>(0))
+                .query_row("SELECT COUNT(*) FROM event_stream", [], |row| row
+                    .get::<_, i64>(0))
                 .unwrap(),
             1
         );
@@ -316,7 +322,11 @@ fn missing_stale_and_corrupt_active_rows_are_rebuilt_from_verified_events() {
         fixture.materialize(1, &first);
         fixture.materialize(2, &second);
         if active_fixture != "missing" {
-            fixture.insert_active(if active_fixture == "stale" { &first } else { &second });
+            fixture.insert_active(if active_fixture == "stale" {
+                &first
+            } else {
+                &second
+            });
         }
         if active_fixture == "corrupt" {
             fixture
@@ -332,7 +342,10 @@ fn missing_stale_and_corrupt_active_rows_are_rebuilt_from_verified_events() {
         let immutable_before = immutable_snapshot(&fixture.database);
         let state = fixture.bootstrap().unwrap();
 
-        assert_eq!(fixture.active_version_id(), Some(second.profile_version_id().to_string()));
+        assert_eq!(
+            fixture.active_version_id(),
+            Some(second.profile_version_id().to_string())
+        );
         assert_eq!(
             state
                 .projection()
@@ -367,9 +380,20 @@ fn active_rebuild_failure_rolls_back_pointer_replacement_and_missing_history_bac
     let error = fixture.bootstrap().unwrap_err();
 
     assert_eq!(error.code(), "active_agent_profile_rebuild_failed");
-    assert_eq!(fixture.active_version_id(), Some(first.profile_version_id().to_string()));
-    assert_eq!(load_all_versions(fixture.database.connection()).unwrap().len(), 1);
-    assert_eq!(immutable_snapshot(&fixture.database)[0].1, first.profile_version_id().to_string());
+    assert_eq!(
+        fixture.active_version_id(),
+        Some(first.profile_version_id().to_string())
+    );
+    assert_eq!(
+        load_all_versions(fixture.database.connection())
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        immutable_snapshot(&fixture.database)[0].1,
+        first.profile_version_id().to_string()
+    );
 }
 
 #[test]
@@ -379,14 +403,26 @@ fn legacy_event_stream_without_profile_events_recovers_as_empty_profile_state() 
 
     let state = fixture.bootstrap().unwrap();
 
-    assert!(state.projection().agent_profiles.active_profiles().is_empty());
-    assert!(load_all_versions(fixture.database.connection()).unwrap().is_empty());
+    assert!(
+        state
+            .projection()
+            .agent_profiles
+            .active_profiles()
+            .is_empty()
+    );
+    assert!(
+        load_all_versions(fixture.database.connection())
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         fixture
             .database
             .connection()
             .query_row("SELECT COUNT(*) FROM active_agent_profiles", [], |row| row
-                .get::<_, i64>(0))
+                .get::<_, i64>(
+                0
+            ))
             .unwrap(),
         0
     );
@@ -416,7 +452,10 @@ fn non_empty_agent_profiles_change_the_projection_digest() {
     let mut without_profile = with_profile.clone();
     without_profile.agent_profiles = Default::default();
 
-    assert_ne!(with_profile.digest().unwrap(), without_profile.digest().unwrap());
+    assert_ne!(
+        with_profile.digest().unwrap(),
+        without_profile.digest().unwrap()
+    );
     assert!(
         std::str::from_utf8(&canonical_json_bytes(&with_profile).unwrap())
             .unwrap()

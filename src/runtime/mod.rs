@@ -357,7 +357,9 @@ impl RuntimeClient {
             .is_ok();
         drop(sender);
         self.shared.resolve_reservation(accepted)?;
-        response.recv().unwrap_or_else(|_| Err(self.disconnection_error()))
+        response
+            .recv()
+            .unwrap_or_else(|_| Err(self.disconnection_error()))
     }
 
     pub fn try_submit(&self, command: ApplicationCommand) -> Result<PendingOutcome, RuntimeError> {
@@ -419,7 +421,9 @@ impl RuntimeClient {
             .is_ok();
         drop(sender);
         self.shared.resolve_reservation(accepted)?;
-        response.recv().unwrap_or_else(|_| Err(self.disconnection_error()))
+        response
+            .recv()
+            .unwrap_or_else(|_| Err(self.disconnection_error()))
     }
 
     pub fn cancel_agent_profile_edit(&self) -> Result<(), RuntimeError> {
@@ -432,7 +436,9 @@ impl RuntimeClient {
             .is_ok();
         drop(sender);
         self.shared.resolve_reservation(accepted)?;
-        response.recv().unwrap_or_else(|_| Err(self.disconnection_error()))
+        response
+            .recv()
+            .unwrap_or_else(|_| Err(self.disconnection_error()))
     }
 
     fn disconnection_error(&self) -> RuntimeError {
@@ -715,11 +721,8 @@ impl CommandExecutor for ServiceWorker {
         expected_active_version_id: AgentProfileVersionId,
         candidate: AgentProfileDraft,
     ) -> Result<ProfileEditPreview, AppError> {
-        self.service.preview_agent_profile_edit(
-            profile_id,
-            expected_active_version_id,
-            candidate,
-        )
+        self.service
+            .preview_agent_profile_edit(profile_id, expected_active_version_id, candidate)
     }
 
     fn cancel_agent_profile_edit(&mut self) -> Result<(), AppError> {
@@ -853,9 +856,8 @@ fn execute_request(executor: &mut dyn CommandExecutor, request: Request, shared:
             }
         }
         Request::CancelAgentProfileEdit { response } => {
-            match catch_sensitive_unwind(AssertUnwindSafe(|| {
-                executor.cancel_agent_profile_edit()
-            })) {
+            match catch_sensitive_unwind(AssertUnwindSafe(|| executor.cancel_agent_profile_edit()))
+            {
                 Ok(result) => {
                     let _ = response.send(result.map_err(RuntimeError::Application));
                 }

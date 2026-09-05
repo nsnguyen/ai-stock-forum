@@ -8,19 +8,19 @@ use std::{
 
 use ai_stock_forum::{
     agents::{
-        AgentProfileDraft, AgentProfileVersion, AgentReadiness, ProfileTemplate,
-        ProfileEditPreview, builtin_profile_templates,
+        AgentProfileDraft, AgentProfileVersion, AgentReadiness, ProfileEditPreview,
+        ProfileTemplate, builtin_profile_templates,
     },
     app::{
-        AgentProfileCreatedView, AgentProfileSummary, AgentProfileView, AgentProfilesView, AppError,
-        ApplicationCommand,
-        ApplicationService, CommandEnvelope, CommandOutcome, CommandView, DatabaseReadiness,
-        HelpView, PresentationSnapshot, ProcessGuardOwnership, ShutdownDisposition, ShutdownReason,
+        AgentProfileCreatedView, AgentProfileSummary, AgentProfileView, AgentProfilesView,
+        AppError, ApplicationCommand, ApplicationService, CommandEnvelope, CommandOutcome,
+        CommandView, DatabaseReadiness, HelpView, PresentationSnapshot, ProcessGuardOwnership,
+        ShutdownDisposition, ShutdownReason,
     },
     config::AppPaths,
     domain::{
-        Actor, AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId,
-        MemoryNamespaceId, ProfileReviewToken, SessionId, sha256,
+        Actor, AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, MemoryNamespaceId,
+        ProfileReviewToken, SessionId, sha256,
     },
     runtime::{ApplicationRuntime, CommandExecutor},
     setup::SetupStatus,
@@ -68,7 +68,10 @@ fn service() -> (TempDir, AppPaths, ApplicationService) {
     (temporary_directory, paths, service)
 }
 
-fn create_profile(service: &mut ApplicationService, template_index: usize) -> AgentProfileCreatedView {
+fn create_profile(
+    service: &mut ApplicationService,
+    template_index: usize,
+) -> AgentProfileCreatedView {
     let template = &builtin_profile_templates()[template_index];
     let outcome = service
         .execute_user(ApplicationCommand::CreateAgentProfile {
@@ -158,7 +161,8 @@ fn start_create_uses_the_service_template_outcome_and_failure_preserves_model_st
 }
 
 #[test]
-fn presentation_snapshot_and_host_effects_cover_load_create_edit_preview_activate_history_and_cancel() {
+fn presentation_snapshot_and_host_effects_cover_load_create_edit_preview_activate_history_and_cancel()
+ {
     let (_temporary_directory, _paths, mut service) = service();
     let created = create_profile(&mut service, 0);
     let snapshot = service
@@ -187,9 +191,15 @@ fn presentation_snapshot_and_host_effects_cover_load_create_edit_preview_activat
 
     for effect in [
         ControllerEffect::LoadAgentProfiles,
-        ControllerEffect::LoadAgentProfile { selected_profile: 0 },
-        ControllerEffect::LoadAgentProfileHistory { selected_profile: 0 },
-        ControllerEffect::StartProfileEdit { selected_profile: 0 },
+        ControllerEffect::LoadAgentProfile {
+            selected_profile: 0,
+        },
+        ControllerEffect::LoadAgentProfileHistory {
+            selected_profile: 0,
+        },
+        ControllerEffect::StartProfileEdit {
+            selected_profile: 0,
+        },
     ] {
         execute_agent_effect(&client, &mut model, effect).expect("host effect");
     }
@@ -262,12 +272,8 @@ fn presentation_snapshot_and_host_effects_cover_load_create_edit_preview_activat
     .expect("create effect");
     assert_eq!(model.agents.profiles.profiles.len(), 2);
 
-    execute_agent_effect(
-        &client,
-        &mut model,
-        ControllerEffect::CancelProfileReview,
-    )
-    .expect("cancel effect");
+    execute_agent_effect(&client, &mut model, ControllerEffect::CancelProfileReview)
+        .expect("cancel effect");
     runtime
         .finish_and_join(ShutdownReason::UserQuit)
         .expect("finish runtime");
@@ -289,11 +295,10 @@ impl CommandExecutor for PreviewRecorder {
         expected_active_version_id: AgentProfileVersionId,
         candidate: AgentProfileDraft,
     ) -> Result<ProfileEditPreview, AppError> {
-        self.previews.lock().unwrap().push((
-            profile_id,
-            expected_active_version_id,
-            candidate,
-        ));
+        self.previews
+            .lock()
+            .unwrap()
+            .push((profile_id, expected_active_version_id, candidate));
         Ok(ProfileEditPreview {
             profile_id,
             expected_active_version_id,
@@ -389,7 +394,9 @@ fn stale_preview_refreshes_current_detail_and_never_rebases_or_activates() {
     execute_agent_effect(
         &client,
         &mut model,
-        ControllerEffect::StartProfileEdit { selected_profile: 0 },
+        ControllerEffect::StartProfileEdit {
+            selected_profile: 0,
+        },
     )
     .expect("start stale editor");
 
@@ -441,7 +448,9 @@ fn stale_preview_refreshes_current_detail_and_never_rebases_or_activates() {
     execute_agent_effect(
         &client,
         &mut model,
-        ControllerEffect::LoadAgentProfileHistory { selected_profile: 0 },
+        ControllerEffect::LoadAgentProfileHistory {
+            selected_profile: 0,
+        },
     )
     .expect("history refresh");
     assert_eq!(model.agents.history.as_ref().unwrap().versions.len(), 2);
@@ -457,9 +466,11 @@ struct OrderingExecutor {
 impl CommandExecutor for OrderingExecutor {
     fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError> {
         let view = match command {
-            ApplicationCommand::ListAgentProfiles => CommandView::AgentProfiles(AgentProfilesView {
-                profiles: Vec::new(),
-            }),
+            ApplicationCommand::ListAgentProfiles => {
+                CommandView::AgentProfiles(AgentProfilesView {
+                    profiles: Vec::new(),
+                })
+            }
             _ => CommandView::Help(HelpView),
         };
         Ok(CommandOutcome {
@@ -505,22 +516,26 @@ impl CommandExecutor for StaleCleanupExecutor {
         }
         let readiness = AgentReadiness::NotReady;
         let view = match command {
-            ApplicationCommand::ListAgentProfiles => CommandView::AgentProfiles(AgentProfilesView {
-                profiles: vec![AgentProfileSummary {
-                    profile_id: self.profile.profile_id(),
-                    profile_version_id: self.profile.profile_version_id(),
-                    version: self.profile.version(),
-                    display_name: self.profile.display_name().to_owned(),
-                    role: self.profile.role(),
-                    primary_specialty: self.profile.primary_specialty().to_owned(),
+            ApplicationCommand::ListAgentProfiles => {
+                CommandView::AgentProfiles(AgentProfilesView {
+                    profiles: vec![AgentProfileSummary {
+                        profile_id: self.profile.profile_id(),
+                        profile_version_id: self.profile.profile_version_id(),
+                        version: self.profile.version(),
+                        display_name: self.profile.display_name().to_owned(),
+                        role: self.profile.role(),
+                        primary_specialty: self.profile.primary_specialty().to_owned(),
+                        readiness,
+                        content_digest: self.profile.content_digest().clone(),
+                    }],
+                })
+            }
+            ApplicationCommand::ShowAgentProfile { .. } => {
+                CommandView::AgentProfile(AgentProfileView {
+                    profile: self.profile.clone(),
                     readiness,
-                    content_digest: self.profile.content_digest().clone(),
-                }],
-            }),
-            ApplicationCommand::ShowAgentProfile { .. } => CommandView::AgentProfile(AgentProfileView {
-                profile: self.profile.clone(),
-                readiness,
-            }),
+                })
+            }
             _ => return Err(AppError::AgentProfileNotFound),
         };
         Ok(CommandOutcome {
@@ -583,13 +598,17 @@ fn stale_cleanup_preserves_cancel_failure_when_refresh_succeeds_or_fails() {
         model.agents.editor = Some(ProfileEditor::for_edit(
             profile.profile_id(),
             profile.profile_version_id(),
-            builtin_profile_templates()[0].copy_to_draft().expect("draft"),
+            builtin_profile_templates()[0]
+                .copy_to_draft()
+                .expect("draft"),
         ));
         let request = PreviewEditRequest {
             generation: 1,
             profile_id: profile.profile_id(),
             expected_active_version_id: profile.profile_version_id(),
-            candidate: builtin_profile_templates()[0].copy_to_draft().expect("candidate"),
+            candidate: builtin_profile_templates()[0]
+                .copy_to_draft()
+                .expect("candidate"),
         };
 
         execute_agent_effect(
@@ -666,10 +685,7 @@ fn shutdown_cancels_service_review_before_terminal_restoration() {
         events: VecDeque::from([
             TuiEvent::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
             TuiEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
-            TuiEvent::Key(KeyEvent::new(
-                KeyCode::Char('c'),
-                KeyModifiers::CONTROL,
-            )),
+            TuiEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
         ]),
     };
 
@@ -683,7 +699,10 @@ fn shutdown_cancels_service_review_before_terminal_restoration() {
     )
     .expect("clean shutdown");
 
-    assert_eq!(order.lock().unwrap().as_slice(), ["cancel", "restore", "finish"]);
+    assert_eq!(
+        order.lock().unwrap().as_slice(),
+        ["cancel", "restore", "finish"]
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -755,10 +774,7 @@ fn host_initializes_and_round_trips_view_geometry_without_resize() {
             events: VecDeque::from([
                 TuiEvent::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
                 TuiEvent::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
-                TuiEvent::Key(KeyEvent::new(
-                    KeyCode::Char('c'),
-                    KeyModifiers::CONTROL,
-                )),
+                TuiEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             ]),
         };
 

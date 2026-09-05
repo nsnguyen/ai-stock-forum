@@ -208,13 +208,19 @@ fn active_pointer_replacement_tracks_the_latest_projection_version() {
         .unwrap();
     assert_eq!(
         active,
-        (second.profile_version_id().to_string(), 2, "not_ready".to_owned())
+        (
+            second.profile_version_id().to_string(),
+            2,
+            "not_ready".to_owned()
+        )
     );
     assert_eq!(
         database
             .connection()
             .query_row("SELECT COUNT(*) FROM active_agent_profiles", [], |row| row
-                .get::<_, i64>(0))
+                .get::<_, i64>(
+                0
+            ))
             .unwrap(),
         1
     );
@@ -241,13 +247,15 @@ fn immutable_and_active_writes_roll_back_together() {
     let counts = (
         database
             .connection()
-            .query_row("SELECT COUNT(*) FROM agent_profile_versions", [], |row| row
-                .get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM agent_profile_versions", [], |row| {
+                row.get::<_, i64>(0)
+            })
             .unwrap(),
         database
             .connection()
-            .query_row("SELECT COUNT(*) FROM active_agent_profiles", [], |row| row
-                .get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM active_agent_profiles", [], |row| {
+                row.get::<_, i64>(0)
+            })
             .unwrap(),
     );
     assert_eq!(counts, (0, 0));

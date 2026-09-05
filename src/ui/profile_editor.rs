@@ -189,7 +189,11 @@ impl ProfileEditor {
         format!(
             "profile_editor mode={mode} step={} review={}",
             self.step.as_str(),
-            if self.review.is_some() { "ready" } else { "none" }
+            if self.review.is_some() {
+                "ready"
+            } else {
+                "none"
+            }
         )
     }
 
@@ -325,14 +329,22 @@ impl ProfileEditor {
                         self.local_message = None;
                     }
                 }
-                IdentityField::Description => self.advance_after_validation(ProfileEditorStep::Specialty),
+                IdentityField::Description => {
+                    self.advance_after_validation(ProfileEditorStep::Specialty)
+                }
             },
-            ProfileEditorStep::Specialty => self.advance_after_validation(ProfileEditorStep::Personality),
-            ProfileEditorStep::Personality => self.advance_after_validation(ProfileEditorStep::Instructions),
+            ProfileEditorStep::Specialty => {
+                self.advance_after_validation(ProfileEditorStep::Personality)
+            }
+            ProfileEditorStep::Personality => {
+                self.advance_after_validation(ProfileEditorStep::Instructions)
+            }
             ProfileEditorStep::Instructions => {
                 self.advance_after_validation(ProfileEditorStep::OptionalBindings)
             }
-            ProfileEditorStep::OptionalBindings => self.advance_after_validation(ProfileEditorStep::Review),
+            ProfileEditorStep::OptionalBindings => {
+                self.advance_after_validation(ProfileEditorStep::Review)
+            }
             ProfileEditorStep::Review => self.message("editor_last_step"),
         }
         ProfileEditorEffect::None
@@ -370,9 +382,11 @@ impl ProfileEditor {
                     self.draft.description.clear();
                 }),
             },
-            ProfileEditorStep::Specialty => self.draft.primary_specialty.is_empty().not_then(|| {
-                self.draft.primary_specialty.clear();
-            }),
+            ProfileEditorStep::Specialty => {
+                self.draft.primary_specialty.is_empty().not_then(|| {
+                    self.draft.primary_specialty.clear();
+                })
+            }
             ProfileEditorStep::Personality => self.draft.personality.is_empty().not_then(|| {
                 self.draft.personality.clear();
                 self.personality_started = true;
@@ -529,12 +543,12 @@ impl ProfileEditor {
             return ProfileEditorEffect::None;
         }
         match &self.mode {
-            ProfileEditorMode::Create { provenance } => ProfileEditorEffect::Execute(
-                ApplicationCommand::CreateAgentProfile {
+            ProfileEditorMode::Create { provenance } => {
+                ProfileEditorEffect::Execute(ApplicationCommand::CreateAgentProfile {
                     draft: self.draft.clone(),
                     template_provenance: Some(provenance.clone()),
-                },
-            ),
+                })
+            }
             ProfileEditorMode::Edit {
                 profile_id,
                 expected_active_version_id,

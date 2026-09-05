@@ -274,13 +274,7 @@ mod tests {
         let base = AgentProfileVersionId::from_uuid(Uuid::from_u128(5));
         let candidate = sha256(b"candidate");
         let review = sha256(b"review");
-        operation.replace(
-            token,
-            profile_id,
-            base,
-            candidate.clone(),
-            review.clone(),
-        );
+        operation.replace(token, profile_id, base, candidate.clone(), review.clone());
         operation
             .reserve(owner, token, profile_id, base, &candidate, &review)
             .unwrap();

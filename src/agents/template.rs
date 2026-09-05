@@ -73,7 +73,10 @@ impl ProfileTemplate {
             self.description.to_owned(),
             self.role,
             self.primary_specialty.to_owned(),
-            self.specialty_tags.iter().map(|tag| (*tag).to_owned()).collect(),
+            self.specialty_tags
+                .iter()
+                .map(|tag| (*tag).to_owned())
+                .collect(),
             self.personality.to_owned(),
             self.instructions.to_owned(),
             AgentBindings::default(),

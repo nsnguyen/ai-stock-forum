@@ -104,7 +104,10 @@ fn summary(event: &ApplicationEvent) -> String {
 }
 
 fn readiness(profile: &AgentProfileVersion) -> &'static str {
-    match (&profile.bindings().model_provider, &profile.bindings().model_name) {
+    match (
+        &profile.bindings().model_provider,
+        &profile.bindings().model_name,
+    ) {
         (Some(_), Some(_)) => "ready",
         _ => "not_ready",
     }

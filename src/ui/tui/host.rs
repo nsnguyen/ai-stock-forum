@@ -31,7 +31,8 @@ pub fn execute_agent_effect(
 ) -> Result<(), RuntimeError> {
     match effect {
         ControllerEffect::LoadAgentProfiles => {
-            let outcome = submit_agent_command(client, model, ApplicationCommand::ListAgentProfiles)?;
+            let outcome =
+                submit_agent_command(client, model, ApplicationCommand::ListAgentProfiles)?;
             apply_agent_outcome(model, outcome);
         }
         ControllerEffect::LoadAgentProfile { selected_profile } => {
@@ -45,7 +46,10 @@ pub fn execute_agent_effect(
             let templates = client.agent_profile_templates();
             model.set_command_in_flight(false);
             let templates = templates?;
-            if model.agents.start_profile_create(template_index, &templates) {
+            if model
+                .agents
+                .start_profile_create(template_index, &templates)
+            {
                 model.command.clear();
                 model.clear_message();
             } else {
@@ -124,12 +128,7 @@ fn selected_profile_id(
         .get(selected_profile)
         .map(|summary| summary.profile_id);
     if profile_id.is_none() {
-        model.agents.selected_profile = model
-            .agents
-            .profiles
-            .profiles
-            .len()
-            .saturating_sub(1);
+        model.agents.selected_profile = model.agents.profiles.profiles.len().saturating_sub(1);
         model.agents.pane = super::model::AgentsPane::List;
         model.set_message(
             super::model::Severity::Warning,
@@ -185,11 +184,8 @@ fn execute_preview(
         candidate,
     } = request;
     model.set_command_in_flight(true);
-    let result = client.preview_agent_profile_edit(
-        profile_id,
-        expected_active_version_id,
-        candidate,
-    );
+    let result =
+        client.preview_agent_profile_edit(profile_id, expected_active_version_id, candidate);
     model.set_command_in_flight(false);
     match result {
         Ok(preview) => {
@@ -228,9 +224,10 @@ fn execute_profile_command(
         CommandView::AgentProfileCreated(created) => {
             (Some(created.profile_id), "Agent profile created.")
         }
-        CommandView::AgentProfileVersionActivated(activated) => {
-            (Some(activated.profile_id), "Agent profile version activated.")
-        }
+        CommandView::AgentProfileVersionActivated(activated) => (
+            Some(activated.profile_id),
+            "Agent profile version activated.",
+        ),
         _ => (None, "Agent profile action completed."),
     };
     apply_agent_outcome(model, outcome);
@@ -549,9 +546,7 @@ impl TuiRunner {
     }
 
     fn cancel_active_profile_review(&self) -> Result<(), RuntimeError> {
-        if self.model.agents.editor.is_some()
-            || self.model.agents.pending_confirmation.is_some()
-        {
+        if self.model.agents.editor.is_some() || self.model.agents.pending_confirmation.is_some() {
             self.client.cancel_agent_profile_edit()
         } else {
             Ok(())

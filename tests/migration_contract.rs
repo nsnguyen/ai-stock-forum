@@ -878,10 +878,7 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
             ),
             ("index".to_owned(), "event_stream_type_idx".to_owned()),
             ("index".to_owned(), "setup_drafts_state_idx".to_owned()),
-            (
-                "table".to_owned(),
-                "active_agent_profiles".to_owned()
-            ),
+            ("table".to_owned(), "active_agent_profiles".to_owned()),
             (
                 "table".to_owned(),
                 "active_installation_configuration".to_owned()

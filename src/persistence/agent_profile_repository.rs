@@ -250,10 +250,7 @@ fn decode_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
     })
 }
 
-fn insert_row(
-    transaction: &Transaction<'_>,
-    row: &StoredRow,
-) -> Result<(), PersistenceError> {
+fn insert_row(transaction: &Transaction<'_>, row: &StoredRow) -> Result<(), PersistenceError> {
     transaction
         .execute(
             "INSERT INTO agent_profile_versions (
@@ -300,9 +297,7 @@ fn profile_readiness(profile: &AgentProfileVersion) -> AgentReadiness {
 
 fn map_insert_error(error: SqliteError) -> PersistenceError {
     match error {
-        SqliteError::SqliteFailure(error, _)
-            if error.code == ErrorCode::ConstraintViolation =>
-        {
+        SqliteError::SqliteFailure(error, _) if error.code == ErrorCode::ConstraintViolation => {
             PersistenceError::AgentProfileHistoryMismatch
         }
         _ => PersistenceError::QueryFailed,
@@ -313,8 +308,7 @@ fn map_active_profile_insert_error(error: SqliteError) -> PersistenceError {
     match error {
         SqliteError::SqliteFailure(error, Some(message))
             if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
-                && message
-                    == "UNIQUE constraint failed: active_agent_profiles.normalized_name" =>
+                && message == "UNIQUE constraint failed: active_agent_profiles.normalized_name" =>
         {
             PersistenceError::AgentProfileHistoryMismatch
         }
