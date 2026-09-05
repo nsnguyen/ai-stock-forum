@@ -60,6 +60,55 @@ pub trait CommandTransactionHook: Send + Sync {
         &self,
         transaction: &rusqlite::Transaction<'_>,
     ) -> Result<(), PersistenceError>;
+
+    fn after_event_append(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn after_profile_mirror_insert(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn after_active_pointer_update(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn after_projection_store(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn after_audit_append(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn after_receipt_store(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn before_commit(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
 }
 
 pub struct NoopCommandTransactionHook;
@@ -594,6 +643,9 @@ impl CommandExecutor {
                 outcome_json,
                 &[],
             )?;
+            self.hook
+                .after_receipt_store(transaction.transaction())?;
+            self.hook.before_commit(transaction.transaction())?;
             transaction.commit()?;
             return stored.into_result();
         }
@@ -674,6 +726,8 @@ impl CommandExecutor {
                 event,
             };
             let committed = EventRepository::append(&transaction, pending)?;
+            self.hook
+                .after_event_append(transaction.transaction())?;
             reduce(&mut projection, &committed)?;
             if let ApplicationEvent::AgentProfileCreated { profile }
             | ApplicationEvent::AgentProfileVersionActivated { profile, .. } = &committed.event
@@ -684,8 +738,15 @@ impl CommandExecutor {
                         .map_err(|_| PersistenceError::InvalidAgentProfilePayload)?,
                     profile,
                 )?;
+                self.hook
+                    .after_profile_mirror_insert(transaction.transaction())?;
             }
-            ProjectionRepository::store(&transaction, &projection)?;
+            ProjectionRepository::store(&transaction, &projection)
+                .map_err(map_profile_projection_write_error)?;
+            self.hook
+                .after_active_pointer_update(transaction.transaction())?;
+            self.hook
+                .after_projection_store(transaction.transaction())?;
             self.hook
                 .before_outcome_materialization(transaction.transaction())?;
             let events = vec![committed];
@@ -696,6 +757,8 @@ impl CommandExecutor {
                 &events,
                 &projection,
             )?;
+            self.hook
+                .after_audit_append(transaction.transaction())?;
             let stored = StoredExecution::Success { outcome };
             let outcome_json = encode_canonical(&stored)?;
             self.hook.before_receipt_write(transaction.transaction())?;
@@ -709,6 +772,9 @@ impl CommandExecutor {
                 outcome_json,
                 &events,
             )?;
+            self.hook
+                .after_receipt_store(transaction.transaction())?;
+            self.hook.before_commit(transaction.transaction())?;
             Ok((stored, events))
         })();
 
@@ -757,6 +823,24 @@ fn authorize_passive(policy: &dyn CommandPolicy, capability: Capability) -> Resu
 }
 
 fn validate_draft(draft: &AgentProfileDraft) -> Result<(), AppError> {
+    for (field, value) in [
+        ("display_name", draft.display_name.as_str()),
+        ("description", draft.description.as_str()),
+        ("primary_specialty", draft.primary_specialty.as_str()),
+        ("personality", draft.personality.as_str()),
+        ("instructions", draft.instructions.as_str()),
+    ] {
+        reject_forbidden_profile_tab(field, value)?;
+    }
+    for tag in &draft.specialty_tags {
+        reject_forbidden_profile_tab("specialty_tag", tag)?;
+    }
+    if let Some(provider) = &draft.bindings.model_provider {
+        reject_forbidden_profile_tab("model_provider", provider)?;
+    }
+    if let Some(model_name) = &draft.bindings.model_name {
+        reject_forbidden_profile_tab("model_name", model_name)?;
+    }
     AgentProfileDraft::new(
         draft.display_name.clone(),
         draft.description.clone(),
@@ -770,6 +854,21 @@ fn validate_draft(draft: &AgentProfileDraft) -> Result<(), AppError> {
         draft.mcp_refs.clone(),
     )?;
     Ok(())
+}
+
+fn reject_forbidden_profile_tab(field: &'static str, value: &str) -> Result<(), AppError> {
+    if value.contains('\t') {
+        Err(crate::domain::DomainError::UnsafeProfileText { field }.into())
+    } else {
+        Ok(())
+    }
+}
+
+fn map_profile_projection_write_error(error: PersistenceError) -> AppError {
+    match error {
+        PersistenceError::AgentProfileHistoryMismatch => AppError::DuplicateProfileName,
+        error => AppError::Persistence(error),
+    }
 }
 
 fn ensure_name_available(
