@@ -6,8 +6,8 @@ pub const MIN_WIDTH: u16 = 60;
 pub const MIN_HEIGHT: u16 = 18;
 pub const MEDIUM_WIDTH: u16 = 80;
 pub const WIDE_WIDTH: u16 = 120;
-pub const MEDIUM_HEIGHT: u16 = 24;
-pub const WIDE_HEIGHT: u16 = 30;
+pub const MEDIUM_HEIGHT: u16 = MIN_HEIGHT;
+pub const WIDE_HEIGHT: u16 = MIN_HEIGHT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CockpitLayout {
@@ -21,15 +21,41 @@ pub struct CockpitLayout {
     pub command: Rect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentWorkspaceLayout {
+    pub list: Option<Rect>,
+    pub active: Rect,
+}
+
 pub fn layout_mode(area: Rect) -> LayoutMode {
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         LayoutMode::TooSmall
-    } else if area.width >= WIDE_WIDTH && area.height >= WIDE_HEIGHT {
+    } else if area.width >= WIDE_WIDTH {
         LayoutMode::Wide
-    } else if area.width >= MEDIUM_WIDTH && area.height >= MEDIUM_HEIGHT {
+    } else if area.width >= MEDIUM_WIDTH {
         LayoutMode::Medium
     } else {
         LayoutMode::Narrow
+    }
+}
+
+pub fn agent_workspace(area: Rect, mode: LayoutMode) -> AgentWorkspaceLayout {
+    match mode {
+        LayoutMode::Narrow | LayoutMode::TooSmall => AgentWorkspaceLayout {
+            list: None,
+            active: area,
+        },
+        LayoutMode::Medium | LayoutMode::Wide => {
+            let columns = Layout::horizontal([
+                Constraint::Percentage(38),
+                Constraint::Percentage(62),
+            ])
+            .split(area);
+            AgentWorkspaceLayout {
+                list: Some(columns[0]),
+                active: columns[1],
+            }
+        }
     }
 }
 

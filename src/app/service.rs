@@ -293,6 +293,9 @@ pub struct PresentationSnapshot {
     pub process_guard_ownership: ProcessGuardOwnership,
     pub setup_status: SetupStatus,
     pub recent_audit: Vec<AuditEntry>,
+    pub agent_profiles: AgentProfilesView,
+    pub selected_agent_profile: Option<AgentProfileView>,
+    pub selected_agent_profile_history: Option<AgentProfileHistoryView>,
 }
 
 pub struct ApplicationWorker {
@@ -469,12 +472,32 @@ impl ApplicationService {
         &self,
         limit: crate::app::AuditLimit,
     ) -> Result<PresentationSnapshot, AppError> {
-        let projection = self.state.projection();
+        let projected_sequence = self
+            .executor
+            .database
+            .connection()
+            .query_row(
+                "SELECT last_event_sequence FROM projection_metadata WHERE singleton = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|_| PersistenceError::QueryFailed)?;
+        let projected_sequence = u64::try_from(projected_sequence)
+            .map_err(|_| PersistenceError::InvalidEventRecord)?;
+        let projection = ProjectionRepository::load_at(
+            self.executor.database.connection(),
+            projected_sequence,
+        )?;
         let events = EventRepository::tail_through(
             self.executor.database.connection(),
             limit,
             projection.last_sequence,
         )?;
+        let active_profiles = projection.agent_profiles.active_profiles();
+        let selected_agent_profile = active_profiles.first().map(profile_view);
+        let selected_agent_profile_history = active_profiles
+            .first()
+            .and_then(|profile| profile_history_view(&projection, profile.profile_id()));
 
         Ok(PresentationSnapshot {
             installation_id: self.state.installation_id(),
@@ -483,6 +506,11 @@ impl ApplicationService {
             process_guard_ownership: ProcessGuardOwnership::Held,
             setup_status: projection.setup_status.clone(),
             recent_audit: events.iter().map(AuditEntry::from_event).collect(),
+            agent_profiles: AgentProfilesView {
+                profiles: active_profiles.iter().map(profile_summary).collect(),
+            },
+            selected_agent_profile,
+            selected_agent_profile_history,
         })
     }
 
@@ -1462,6 +1490,40 @@ fn profile_readiness(profile: &AgentProfileVersion) -> AgentReadiness {
         (Some(_), Some(_)) => AgentReadiness::Ready,
         _ => AgentReadiness::NotReady,
     }
+}
+
+fn profile_view(profile: &AgentProfileVersion) -> AgentProfileView {
+    AgentProfileView {
+        profile: profile.clone(),
+        readiness: profile_readiness(profile),
+    }
+}
+
+fn profile_history_view(
+    projection: &ProjectionState,
+    profile_id: AgentProfileId,
+) -> Option<AgentProfileHistoryView> {
+    let active = projection.agent_profiles.active_profile(profile_id)?;
+    let versions = projection
+        .agent_profiles
+        .history(profile_id)
+        .into_iter()
+        .rev()
+        .take(100)
+        .map(|profile| AgentProfileHistoryEntry {
+            profile_version_id: profile.profile_version_id(),
+            version: profile.version(),
+            supersedes: profile.supersedes(),
+            created_at_ms: profile.created_at_ms(),
+            readiness: profile_readiness(&profile),
+            content_digest: profile.content_digest().clone(),
+        })
+        .collect();
+    Some(AgentProfileHistoryView {
+        profile_id,
+        active_version_id: active.profile_version_id(),
+        versions,
+    })
 }
 
 fn profile_summary(profile: &AgentProfileVersion) -> AgentProfileSummary {

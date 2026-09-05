@@ -23,6 +23,11 @@ fn model() -> TuiModel {
             process_guard_ownership: ProcessGuardOwnership::Held,
             setup_status: SetupStatus::NotStarted,
             recent_audit: Vec::new(),
+            agent_profiles: ai_stock_forum::app::AgentProfilesView {
+                profiles: Vec::new(),
+            },
+            selected_agent_profile: None,
+            selected_agent_profile_history: None,
         },
         false,
     )

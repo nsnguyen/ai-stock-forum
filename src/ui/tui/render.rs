@@ -40,12 +40,30 @@ fn render_header(
     mode: LayoutMode,
     theme: &Theme,
 ) {
-    let identity = Line::from(vec![
+    let mut identity = vec![
         Span::styled("AI STOCK FORUM", theme.accent),
         Span::raw("  /  "),
         Span::styled(view_name(model.active_view), theme.focus),
         Span::raw(format!("  /  {}", mode_name(mode))),
-    ]);
+    ];
+    if model.active_view == View::Agents {
+        let active = model.agents.profiles.profiles.len();
+        let ready = model
+            .agents
+            .profiles
+            .profiles
+            .iter()
+            .filter(|profile| profile.readiness == crate::agents::AgentReadiness::Ready)
+            .count();
+        let not_ready = active.saturating_sub(ready);
+        identity.extend([
+            Span::raw(format!("  /  Active {active}  ")),
+            Span::styled(format!("Ready {ready}"), theme.success),
+            Span::raw("  "),
+            Span::styled(format!("Not Ready {not_ready}"), theme.warning),
+        ]);
+    }
+    let identity = Line::from(identity);
     let second = if mode == LayoutMode::Narrow {
         numbered_tabs(model, theme)
     } else if model.previous_session_interrupted {
@@ -83,6 +101,15 @@ fn numbered_tabs(model: &TuiModel, theme: &Theme) -> Line<'static> {
             style,
         ));
     }
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        "a Agents",
+        if model.active_view == View::Agents {
+            theme.focus
+        } else {
+            theme.muted
+        },
+    ));
     Line::from(spans)
 }
 
@@ -109,6 +136,18 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
         ));
     }
     lines.extend([
+        Line::default(),
+        Line::styled(
+            format!(
+                "{} a Agents",
+                if model.active_view == View::Agents { ">" } else { " " }
+            ),
+            if model.active_view == View::Agents {
+                theme.focus
+            } else {
+                theme.muted
+            },
+        ),
         Line::default(),
         Line::styled("/ command", theme.muted),
         Line::styled("? help", theme.muted),
@@ -148,12 +187,17 @@ fn render_message(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
 
 fn render_command(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     let focused = model.focus == Focus::Command;
+    let title = if model.active_view == View::Agents
+        && model.agents.pane == crate::ui::tui::model::AgentsPane::Editor
+    {
+        " Profile input "
+    } else if model.command_in_flight {
+        " Command - working "
+    } else {
+        " Command "
+    };
     let block = Block::default()
-        .title(if model.command_in_flight {
-            " Command - working "
-        } else {
-            " Command "
-        })
+        .title(title)
         .borders(Borders::ALL)
         .border_style(if focused { theme.focus } else { theme.muted });
     let line = if focused {
@@ -336,6 +380,11 @@ mod tests {
                     correlation_id: CorrelationId::from_uuid(Uuid::from_u128(3)),
                     summary: "status viewed".to_owned(),
                 }],
+                agent_profiles: crate::app::AgentProfilesView {
+                    profiles: Vec::new(),
+                },
+                selected_agent_profile: None,
+                selected_agent_profile_history: None,
             },
             false,
         );

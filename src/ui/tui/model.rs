@@ -1,7 +1,10 @@
 use std::collections::VecDeque;
 
 use crate::{
-    app::{ApplicationCommand, DatabaseReadiness, MAX_INPUT_BYTES, PresentationSnapshot, ProcessGuardOwnership},
+    app::{
+        AgentProfileHistoryView, AgentProfileView, AgentProfilesView, ApplicationCommand,
+        DatabaseReadiness, MAX_INPUT_BYTES, PresentationSnapshot, ProcessGuardOwnership,
+    },
     audit::AuditEntry,
     domain::{InstallationId, SessionId},
     setup::SetupStatus,
@@ -43,6 +46,9 @@ pub struct AgentsViewState {
     pub history_scroll: usize,
     pub editor: Option<ProfileEditor>,
     pub pending_confirmation: Option<ProfileConfirmation>,
+    pub profiles: AgentProfilesView,
+    pub detail: Option<AgentProfileView>,
+    pub history: Option<AgentProfileHistoryView>,
 }
 
 impl Default for AgentsViewState {
@@ -56,7 +62,62 @@ impl Default for AgentsViewState {
             history_scroll: 0,
             editor: None,
             pending_confirmation: None,
+            profiles: AgentProfilesView {
+                profiles: Vec::new(),
+            },
+            detail: None,
+            history: None,
         }
+    }
+}
+
+impl AgentsViewState {
+    pub fn selected_summary(&self) -> Option<&crate::app::AgentProfileSummary> {
+        self.profiles.profiles.get(self.selected_profile)
+    }
+
+    pub fn replace_profiles(&mut self, profiles: AgentProfilesView) {
+        self.profiles = profiles;
+        if self.profiles.profiles.is_empty() {
+            self.selected_profile = 0;
+            self.list_scroll = 0;
+            self.detail = None;
+            self.history = None;
+            return;
+        }
+        self.selected_profile = self
+            .selected_profile
+            .min(self.profiles.profiles.len().saturating_sub(1));
+        let selected_id = self.selected_summary().map(|summary| summary.profile_id);
+        if self
+            .detail
+            .as_ref()
+            .map(|detail| detail.profile.profile_id())
+            != selected_id
+        {
+            self.detail = None;
+            self.history = None;
+        }
+    }
+
+    pub fn replace_detail(&mut self, detail: AgentProfileView) {
+        let profile_id = detail.profile.profile_id();
+        if let Some(index) = self
+            .profiles
+            .profiles
+            .iter()
+            .position(|summary| summary.profile_id == profile_id)
+        {
+            self.selected_profile = index;
+        }
+        if self.history.as_ref().map(|history| history.profile_id) != Some(profile_id) {
+            self.history = None;
+        }
+        self.detail = Some(detail);
+    }
+
+    pub fn replace_history(&mut self, history: AgentProfileHistoryView) {
+        self.history = Some(history);
     }
 }
 
@@ -292,10 +353,19 @@ impl TuiModel {
             process_guard_ownership,
             setup_status,
             recent_audit,
+            agent_profiles,
+            selected_agent_profile,
+            selected_agent_profile_history,
         } = snapshot;
+        let agents = AgentsViewState {
+            profiles: agent_profiles,
+            detail: selected_agent_profile,
+            history: selected_agent_profile_history,
+            ..AgentsViewState::default()
+        };
         let mut model = Self {
             active_view: View::Overview,
-            agents: AgentsViewState::default(),
+            agents,
             focus: Focus::Workspace,
             layout_mode: LayoutMode::Wide,
             inspector_open: false,
@@ -437,6 +507,11 @@ mod tests {
             process_guard_ownership: crate::app::ProcessGuardOwnership::Held,
             setup_status: SetupStatus::NotStarted,
             recent_audit: vec![audit_entry(1)],
+            agent_profiles: crate::app::AgentProfilesView {
+                profiles: Vec::new(),
+            },
+            selected_agent_profile: None,
+            selected_agent_profile_history: None,
         }
     }
 

@@ -692,6 +692,11 @@ mod tests {
                 process_guard_ownership: crate::app::ProcessGuardOwnership::Held,
                 setup_status: SetupStatus::NotStarted,
                 recent_audit: Vec::new(),
+                agent_profiles: crate::app::AgentProfilesView {
+                    profiles: Vec::new(),
+                },
+                selected_agent_profile: None,
+                selected_agent_profile_history: None,
             },
             false,
         )
