@@ -1,0 +1,187 @@
+use ai_stock_forum::{
+    agents::{
+        AgentBindings, AgentProfileDraft, AgentRole, ProfileEditPreview, builtin_profile_templates,
+    },
+    domain::{AgentProfileId, AgentProfileVersionId, ProfileReviewToken, sha256},
+    ui::profile_editor::{
+        ProfileEditor, ProfileEditorEffect, ProfileEditorMode, ProfileEditorStep,
+    },
+};
+use uuid::Uuid;
+
+fn template_draft() -> AgentProfileDraft {
+    builtin_profile_templates()[0].copy_to_draft().unwrap()
+}
+
+fn create_editor() -> ProfileEditor {
+    ProfileEditor::for_create(&builtin_profile_templates()[0]).unwrap()
+}
+
+fn empty_draft() -> AgentProfileDraft {
+    AgentProfileDraft::new(
+        "Name".to_owned(),
+        "Description".to_owned(),
+        AgentRole::Custom,
+        "Research".to_owned(),
+        Vec::new(),
+        "Personality".to_owned(),
+        "Instructions".to_owned(),
+        AgentBindings::default(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap()
+}
+
+fn advance_to_review(editor: &mut ProfileEditor) {
+    assert_eq!(editor.step(), ProfileEditorStep::Template);
+    assert_eq!(editor.submit_line(":next"), ProfileEditorEffect::None);
+    assert_eq!(editor.step(), ProfileEditorStep::Identity);
+    editor.submit_line("Focused Analyst");
+    editor.submit_line(":next");
+    editor.submit_line("Covers fundamentals.");
+    editor.submit_line(":next");
+    assert_eq!(editor.step(), ProfileEditorStep::Specialty);
+    editor.submit_line("Long-term investing");
+    editor.submit_line(":tag add valuation");
+    editor.submit_line(":next");
+    assert_eq!(editor.step(), ProfileEditorStep::Personality);
+    editor.submit_line("Calm and evidence-led.");
+    editor.submit_line("States uncertainty plainly.");
+    editor.submit_line(":next");
+    assert_eq!(editor.step(), ProfileEditorStep::Instructions);
+    editor.submit_line("Use primary filings.");
+    editor.submit_line("Separate facts from estimates.");
+    editor.submit_line(":next");
+    assert_eq!(editor.step(), ProfileEditorStep::OptionalBindings);
+    editor.submit_line(":provider local");
+    editor.submit_line(":model analyst-v1");
+    editor.submit_line(":next");
+    assert_eq!(editor.step(), ProfileEditorStep::Review);
+}
+
+#[test]
+fn create_editor_copies_template_and_walks_the_exact_ordered_steps() {
+    let mut editor = create_editor();
+    assert!(matches!(editor.mode(), ProfileEditorMode::Create { .. }));
+    assert_eq!(editor.step(), ProfileEditorStep::Template);
+    assert_eq!(editor.draft(), &template_draft());
+
+    advance_to_review(&mut editor);
+
+    assert_eq!(editor.draft().display_name, "Focused Analyst");
+    assert_eq!(editor.draft().description, "Covers fundamentals.");
+    assert_eq!(editor.draft().primary_specialty, "Long-term investing");
+    assert!(editor.draft().specialty_tags.iter().any(|tag| tag == "valuation"));
+    assert_eq!(
+        editor.draft().personality,
+        "Calm and evidence-led. States uncertainty plainly."
+    );
+    assert_eq!(
+        editor.draft().instructions,
+        "Use primary filings. Separate facts from estimates."
+    );
+    assert_eq!(editor.draft().bindings.model_provider.as_deref(), Some("local"));
+    assert_eq!(editor.draft().bindings.model_name.as_deref(), Some("analyst-v1"));
+
+    assert_eq!(editor.submit_line(":review"), ProfileEditorEffect::None);
+    assert!(matches!(editor.submit_line(":activate"), ProfileEditorEffect::Execute(_)));
+}
+
+#[test]
+fn editor_keeps_invalid_input_and_supports_back_navigation_without_terminal_state() {
+    let mut editor = create_editor();
+    editor.submit_line(":next");
+    editor.submit_line("   ");
+    assert_eq!(editor.submit_line(":next"), ProfileEditorEffect::None);
+    assert_eq!(editor.step(), ProfileEditorStep::Identity);
+    assert_eq!(editor.draft().display_name, "   ");
+    assert!(editor.local_message().is_some());
+
+    editor.submit_line("Valid Name");
+    editor.submit_line(":next");
+    editor.submit_line("A description");
+    editor.submit_line(":next");
+    assert_eq!(editor.step(), ProfileEditorStep::Specialty);
+    assert_eq!(editor.submit_line(":back"), ProfileEditorEffect::None);
+    assert_eq!(editor.step(), ProfileEditorStep::Identity);
+    assert_eq!(editor.draft().description, "A description");
+    assert_eq!(editor.submit_line(":bogus"), ProfileEditorEffect::None);
+    assert!(editor.local_message().is_some());
+}
+
+#[test]
+fn specialty_tag_cap_and_binding_clear_are_local_draft_operations() {
+    let mut editor = ProfileEditor::for_edit(
+        AgentProfileId::from_uuid(Uuid::from_u128(10)),
+        AgentProfileVersionId::from_uuid(Uuid::from_u128(11)),
+        empty_draft(),
+    );
+    editor.submit_line(":next");
+    editor.submit_line("Name");
+    editor.submit_line(":next");
+    editor.submit_line("Description");
+    editor.submit_line(":next");
+    editor.submit_line("Research");
+    for tag in ["one", "two", "three", "four", "five"] {
+        assert_eq!(editor.submit_line(&format!(":tag add {tag}")), ProfileEditorEffect::None);
+    }
+    assert_eq!(editor.draft().specialty_tags, vec!["one", "two", "three", "four", "five"]);
+    assert_eq!(editor.submit_line(":tag add six"), ProfileEditorEffect::None);
+    assert_eq!(editor.draft().specialty_tags.len(), 5);
+    assert!(editor.local_message().is_some());
+    editor.submit_line(":tag remove three");
+    assert_eq!(editor.draft().specialty_tags, vec!["one", "two", "four", "five"]);
+
+    editor.submit_line(":next");
+    editor.submit_line("Personality");
+    editor.submit_line(":next");
+    editor.submit_line("Instructions");
+    editor.submit_line(":next");
+    editor.submit_line(":provider local");
+    editor.submit_line(":model analyst-v1");
+    editor.submit_line(":clear");
+    assert_eq!(editor.draft().bindings.model_provider, None);
+    assert_eq!(editor.draft().bindings.model_name, None);
+}
+
+#[test]
+fn edit_review_requires_a_fresh_preview_after_any_field_change() {
+    let profile_id = AgentProfileId::from_uuid(Uuid::from_u128(1));
+    let active_version_id = AgentProfileVersionId::from_uuid(Uuid::from_u128(2));
+    let mut editor = ProfileEditor::for_edit(profile_id, active_version_id, template_draft());
+    assert!(matches!(editor.mode(), ProfileEditorMode::Edit { .. }));
+
+    advance_to_review(&mut editor);
+    assert!(matches!(editor.submit_line(":review"), ProfileEditorEffect::PreviewEdit(_)));
+    editor.apply_preview(ProfileEditPreview {
+        profile_id,
+        expected_active_version_id: active_version_id,
+        diffs: Vec::new(),
+        review_token: ProfileReviewToken::from_uuid(Uuid::from_u128(3)),
+        review_digest: sha256(b"review"),
+    });
+    assert!(editor.review().is_some());
+    assert_eq!(editor.submit_line(":back"), ProfileEditorEffect::None);
+    assert_eq!(editor.step(), ProfileEditorStep::OptionalBindings);
+    editor.submit_line(":back");
+    editor.submit_line(":back");
+    assert_eq!(editor.step(), ProfileEditorStep::Personality);
+    editor.submit_line("Updated personality.");
+    assert!(editor.review().is_none());
+    editor.submit_line(":next");
+    editor.submit_line(":next");
+    editor.submit_line(":next");
+    assert_eq!(editor.step(), ProfileEditorStep::Review);
+    assert!(matches!(editor.submit_line(":review"), ProfileEditorEffect::PreviewEdit(_)));
+}
+
+#[test]
+fn cancel_is_the_only_terminal_local_effect_and_never_exposes_prose_in_controls() {
+    let mut editor = create_editor();
+    editor.submit_line(":next");
+    editor.submit_line("Private profile prose must remain local.");
+    let controls = editor.control_summary();
+    assert!(!controls.contains("Private profile prose"));
+    assert_eq!(editor.submit_line(":cancel"), ProfileEditorEffect::Cancelled);
+}
