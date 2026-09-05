@@ -2,7 +2,13 @@ use std::ops::Deref;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::domain::{Actor, CommandId, CorrelationId, Sha256Digest, sha256};
+use crate::{
+    agents::{AgentProfileDraft, ProfileTemplateProvenance},
+    domain::{
+        Actor, AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, Digest,
+        ProfileReviewToken, Sha256Digest, sha256,
+    },
+};
 use crate::policy::Capability;
 
 pub const MAX_INPUT_BYTES: usize = 4096;
@@ -62,6 +68,20 @@ pub enum ApplicationCommand {
     ShowStatus,
     ShowSetupStatus,
     ShowAuditTail { limit: AuditLimit },
+    CreateAgentProfile {
+        draft: AgentProfileDraft,
+        template_provenance: Option<ProfileTemplateProvenance>,
+    },
+    ActivateAgentProfileVersion {
+        profile_id: AgentProfileId,
+        expected_active_version_id: AgentProfileVersionId,
+        candidate: AgentProfileDraft,
+        review_token: ProfileReviewToken,
+        review_digest: Digest,
+    },
+    ListAgentProfiles,
+    ShowAgentProfile { profile_id: AgentProfileId },
+    ShowAgentProfileHistory { profile_id: AgentProfileId },
     RejectInput(InputRejection),
     RequestShutdown,
 }
@@ -79,6 +99,11 @@ impl ApplicationCommand {
             Self::ShowStatus => Capability::StatusRead,
             Self::ShowSetupStatus => Capability::SetupStatusRead,
             Self::ShowAuditTail { .. } => Capability::AuditRead,
+            Self::CreateAgentProfile { .. } => Capability::AgentProfileCreate,
+            Self::ActivateAgentProfileVersion { .. } => Capability::AgentProfileEdit,
+            Self::ListAgentProfiles
+            | Self::ShowAgentProfile { .. }
+            | Self::ShowAgentProfileHistory { .. } => Capability::AgentProfileRead,
             Self::RequestShutdown => Capability::Shutdown,
         }
     }

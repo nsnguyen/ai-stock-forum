@@ -249,7 +249,10 @@ pub fn reduce(
         | ApplicationEvent::CommandRejected { .. }
         | ApplicationEvent::ShutdownRequested
         | ApplicationEvent::AgentProfileCreated { .. }
-        | ApplicationEvent::AgentProfileVersionActivated { .. } => {}
+        | ApplicationEvent::AgentProfileVersionActivated { .. }
+        | ApplicationEvent::AgentProfilesListed { .. }
+        | ApplicationEvent::AgentProfileViewed { .. }
+        | ApplicationEvent::AgentProfileHistoryViewed { .. } => {}
     }
     next.agent_profiles.reduce(&event.event)?;
     next.last_sequence = event.sequence;

@@ -5,6 +5,7 @@ mod normalization;
 mod diff;
 mod profile;
 mod projection;
+mod review;
 mod template;
 
 pub use diff::{ProfileDiffField, ProfileFieldDiff, ProfileFieldValue, diff_profile};
@@ -17,6 +18,10 @@ pub use profile::{
     SkillRef,
 };
 pub use projection::AgentProfilesProjection;
+pub use review::ProfileEditPreview;
+pub(crate) use review::{
+    ProfileReviewRegistry, ReviewReservationError, candidate_digest, review_digest,
+};
 pub use template::{
     ProfileTemplate, ProfileTemplateId, ProfileTemplateProvenance, ProfileTemplateVersion,
     builtin_profile_templates, profile_template_from_provenance,

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    agents::AgentProfileVersion,
     app::{ApplicationEvent, EventEnvelope, InputRejectionCategory, SafeToken},
     domain::{Actor, CorrelationId},
 };
@@ -67,16 +68,45 @@ fn summary(event: &ApplicationEvent) -> String {
             format!("projection rebuilt through sequence {through_sequence}")
         }
         ApplicationEvent::AgentProfileCreated { profile } => {
-            format!("agent profile created: {}", profile.profile_id())
+            format!(
+                "agent profile created: profile={}, version={}, readiness={}",
+                profile.profile_id(),
+                profile.version().get(),
+                readiness(profile),
+            )
         }
         ApplicationEvent::AgentProfileVersionActivated {
             profile,
             previous_version_id,
         } => format!(
-            "agent profile version activated: profile={}, version={}, previous_version={previous_version_id}",
+            "agent profile version activated: profile={}, version={}, previous_version={previous_version_id}, readiness={}",
             profile.profile_id(),
-            profile.profile_version_id(),
+            profile.version().get(),
+            readiness(profile),
         ),
+        ApplicationEvent::AgentProfilesListed { result_count, .. } => {
+            format!("agent profiles listed: result_count={result_count}")
+        }
+        ApplicationEvent::AgentProfileViewed {
+            profile_id,
+            active_version_id,
+        } => format!(
+            "agent profile viewed: profile={profile_id}, active_version={active_version_id}"
+        ),
+        ApplicationEvent::AgentProfileHistoryViewed {
+            profile_id,
+            result_count,
+            active_version_id,
+        } => format!(
+            "agent profile history viewed: profile={profile_id}, active_version={active_version_id}, result_count={result_count}"
+        ),
+    }
+}
+
+fn readiness(profile: &AgentProfileVersion) -> &'static str {
+    match (&profile.bindings().model_provider, &profile.bindings().model_name) {
+        (Some(_), Some(_)) => "ready",
+        _ => "not_ready",
     }
 }
 

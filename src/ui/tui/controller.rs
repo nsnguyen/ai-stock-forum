@@ -93,6 +93,11 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
             model.set_runtime_status(RuntimeStatus::Stopping);
             shutdown.disposition
         }
+        CommandView::AgentProfileCreated(_)
+        | CommandView::AgentProfileVersionActivated(_)
+        | CommandView::AgentProfiles(_)
+        | CommandView::AgentProfile(_)
+        | CommandView::AgentProfileHistory(_) => ShutdownDisposition::Continue,
     };
 
     merge_committed_audit(model, committed_audit);

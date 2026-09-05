@@ -88,6 +88,11 @@ impl TextRenderer {
                 }
                 ShutdownDisposition::Requested => writer.write_all(b"Shutting down.\n"),
             },
+            CommandView::AgentProfileCreated(_)
+            | CommandView::AgentProfileVersionActivated(_)
+            | CommandView::AgentProfiles(_)
+            | CommandView::AgentProfile(_)
+            | CommandView::AgentProfileHistory(_) => Ok(()),
         }
     }
 
@@ -178,6 +183,13 @@ fn app_error_message(error: &AppError) -> &'static str {
             "Command is unavailable."
         }
         AppError::CommandConflict => "Command could not be completed.",
+        AppError::Domain(_)
+        | AppError::AgentProfileNotFound
+        | AppError::DuplicateProfileName
+        | AppError::StaleAgentProfileVersion
+        | AppError::ProfileReviewUnavailable
+        | AppError::ProfileReviewMismatch
+        | AppError::ReviewDigestMismatch => "Agent profile operation could not be completed.",
         AppError::LifecycleFinished => "Application is shutting down.",
     }
 }

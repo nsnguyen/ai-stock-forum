@@ -489,7 +489,8 @@ fn migration_records_and_complete_schema_are_exact() {
                 ),
                 request_json TEXT NOT NULL CHECK (json_valid(request_json)),
                 capability TEXT NOT NULL CHECK (capability IN (
-                    'help_read', 'status_read', 'setup_status_read', 'audit_read', 'shutdown',
+                    'help_read', 'status_read', 'setup_status_read', 'audit_read',
+                    'agent_profile_read', 'agent_profile_create', 'agent_profile_edit', 'shutdown',
                     'discussion_run', 'mcp_use', 'engineering_job_run', 'git_merge', 'git_push',
                     'finance_recommendation'
                 )),

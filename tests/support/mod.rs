@@ -644,6 +644,8 @@ impl TestApp {
                 | "approval_records"
                 | "command_receipts"
                 | "command_event_refs"
+                | "agent_profile_versions"
+                | "active_agent_profiles"
         ));
         Connection::open(self.paths.database_path())
             .unwrap()
@@ -651,6 +653,21 @@ impl TestApp {
                 row.get(0)
             })
             .unwrap()
+    }
+
+    pub fn event_payloads(&self, kind: &str) -> Vec<String> {
+        let connection = Connection::open(self.paths.database_path()).unwrap();
+        let mut statement = connection
+            .prepare(
+                "SELECT payload_json FROM event_stream
+                 WHERE event_type = ?1 ORDER BY sequence",
+            )
+            .unwrap();
+        statement
+            .query_map([kind], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
     }
 
     pub fn event_count(&self, kind: &str) -> i64 {

@@ -308,15 +308,35 @@ fn store_transaction(
     if state != &expected {
         return Err(PersistenceError::ProjectionStateConflict);
     }
-    if let Some(persisted) = read_projection_rows(transaction, &expected.agent_profiles)
+    let persisted_sequence = transaction
+        .query_row(
+            "SELECT last_event_sequence FROM projection_metadata WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|_| PersistenceError::QueryFailed)?;
+    let persisted_prefix = persisted_sequence
+        .map(|sequence| {
+            u64::try_from(sequence)
+                .map(|sequence| {
+                    events
+                        .iter()
+                        .filter(|event| event.sequence <= sequence)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|_| PersistenceError::ProjectionStateConflict)
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let persisted_agent_profiles = reduce_events(&persisted_prefix)
+        .map_err(persistence_from_recovery)?
+        .agent_profiles;
+    if let Some(persisted) = read_projection_rows(transaction, &persisted_agent_profiles)
         .map_err(persistence_from_recovery)?
     {
-        let prefix = events
-            .iter()
-            .filter(|event| event.sequence <= persisted.last_sequence)
-            .cloned()
-            .collect::<Vec<_>>();
-        if reduce_events(&prefix).map_err(persistence_from_recovery)? != persisted {
+        if reduce_events(&persisted_prefix).map_err(persistence_from_recovery)? != persisted {
             return Err(PersistenceError::ProjectionStateConflict);
         }
         validate_store_transition(&persisted, state)?;

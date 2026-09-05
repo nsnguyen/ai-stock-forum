@@ -5,8 +5,8 @@ use crate::{
     agents::AgentProfileVersion,
     app::{AuditLimit, InputRejection},
     domain::{
-        Actor, AgentProfileVersionId, CausationId, CorrelationId, EventId, InstallationId,
-        ObjectRef, SessionId,
+        Actor, AgentProfileId, AgentProfileVersionId, CausationId, CorrelationId, EventId,
+        InstallationId, ObjectRef, SessionId,
         Sha256Digest, canonical_json_bytes, sha256,
     },
     persistence::RecoveryError,
@@ -60,6 +60,19 @@ pub enum ApplicationEvent {
         profile: AgentProfileVersion,
         previous_version_id: AgentProfileVersionId,
     },
+    AgentProfilesListed {
+        result_count: u32,
+        active_version_ids: Vec<AgentProfileVersionId>,
+    },
+    AgentProfileViewed {
+        profile_id: AgentProfileId,
+        active_version_id: AgentProfileVersionId,
+    },
+    AgentProfileHistoryViewed {
+        profile_id: AgentProfileId,
+        result_count: u32,
+        active_version_id: AgentProfileVersionId,
+    },
 }
 
 impl ApplicationEvent {
@@ -78,6 +91,9 @@ impl ApplicationEvent {
             Self::ProjectionRebuilt { .. } => "projection_rebuilt",
             Self::AgentProfileCreated { .. } => "agent_profile_created",
             Self::AgentProfileVersionActivated { .. } => "agent_profile_version_activated",
+            Self::AgentProfilesListed { .. } => "agent_profiles_listed",
+            Self::AgentProfileViewed { .. } => "agent_profile_viewed",
+            Self::AgentProfileHistoryViewed { .. } => "agent_profile_history_viewed",
         }
     }
 }
