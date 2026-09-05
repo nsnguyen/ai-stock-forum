@@ -13,8 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
     app::{
-        ApplicationCommand, InputRejection, InputRejectionCategory, ShutdownDisposition,
-        ShutdownReason,
+        InputRejection, InputRejectionCategory, ShutdownDisposition, ShutdownReason,
     },
     panic_boundary::catch_sensitive_unwind,
     runtime::{ApplicationRuntime, RuntimeClient, RuntimeError},
@@ -687,18 +686,24 @@ impl FallbackRunner {
         line: RawLine,
         writer: &mut W,
     ) -> Result<Option<ShutdownReason>, UiError> {
-        let command = if line.was_oversized() {
-            ApplicationCommand::RejectInput(InputRejection {
+        if line.was_oversized() {
+            let rejection = InputRejection {
                 category: InputRejectionCategory::Oversized,
                 safe_token: None,
                 byte_length: line.full_byte_length(),
                 input_digest: line.input_digest().clone(),
-            })
-        } else {
-            let ParsedLine::Command(command) = parse_line(line.bytes()) else {
-                return Ok(None);
             };
-            command
+            TextRenderer::render_view(
+                &crate::app::CommandView::InputRejected(crate::app::InputRejectedView {
+                    rejection,
+                }),
+                writer,
+            )
+            .map_err(|_| UiError::Write)?;
+            return Ok(None);
+        }
+        let ParsedLine::Command(command) = parse_line(line.bytes()) else {
+            return Ok(None);
         };
 
         let pending = match self.client.try_submit(command) {

@@ -103,7 +103,7 @@ impl CommandExecutor for RecordingExecutor {
 }
 
 #[test]
-fn runner_constructs_oversized_rejection_from_authoritative_metadata() {
+fn runner_renders_oversized_rejection_before_application_dispatch() {
     let (command_sender, command_receiver) = bounded(1);
     let runtime = ApplicationRuntime::spawn(
         RecordingExecutor {
@@ -115,19 +115,12 @@ fn runner_constructs_oversized_rejection_from_authoritative_metadata() {
     let mut physical = vec![0xff; 32 * 1024];
     physical.push(b'\n');
 
+    let mut output = Vec::new();
     let reason = FallbackRunner::new(runtime.client(), false)
-        .run(Cursor::new(physical), Vec::new())
+        .run(Cursor::new(physical), &mut output)
         .unwrap();
-    let ApplicationCommand::RejectInput(rejection) = receive(&command_receiver) else {
-        panic!("oversized input must bypass parsing and become a typed rejection");
-    };
-    assert_eq!(rejection.category, InputRejectionCategory::Oversized);
-    assert_eq!(rejection.byte_length, 32 * 1024);
-    assert_eq!(
-        rejection.input_digest.as_str(),
-        "2d864c0b789a43214eee8524d3182075125e5ca2cd527f3582ec87ffd94076bc"
-    );
-    assert!(rejection.safe_token.is_none());
+    assert_eq!(output, b"Input rejected: input exceeds 4096 bytes.\n");
+    assert!(command_receiver.try_recv().is_err());
     runtime.finish_and_join(reason).unwrap();
 }
 

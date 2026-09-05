@@ -6,12 +6,11 @@ use ai_stock_forum::{
     agents::{AgentBindings, AgentProfileDraft, AgentRole},
     app::{
         AppError, ApplicationCommand, ApplicationService, CommandEnvelope, CommandView,
-        InputRejectedView, InputRejectionCategory,
     },
     config::AppPaths,
     domain::{Actor, CommandId, CorrelationId, canonical_json_bytes, sha256},
     runtime::RuntimeError,
-    ui::command::{BoundedLineReader, ParsedLine, TextRenderer, parse_line},
+    ui::command::TextRenderer,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -159,7 +158,11 @@ impl ReceiptFixture {
 
 
     fn snapshot(&self) -> DurableState {
-        let connection = self.connection();
+        Self::snapshot_path(&self.paths)
+    }
+
+    fn snapshot_path(paths: &AppPaths) -> DurableState {
+        let connection = Connection::open(paths.database_path()).unwrap();
         let events = {
             let mut statement = connection
                 .prepare(
@@ -279,6 +282,10 @@ impl ReceiptFixture {
             refs,
             projection,
         }
+    }
+
+    fn into_parts(self) -> (TempDir, AppPaths, ApplicationService) {
+        (self._temporary_directory, self.paths, self.app)
     }
 }
 
@@ -437,28 +444,26 @@ fn malformed_canonical_receipts_and_digest_tampering_fail_closed_without_leaks_o
 fn oversized_fallback_line_is_bounded_rejected_and_rendered_as_one_safe_line() {
     let fixture = ReceiptFixture::new();
     let before = fixture.snapshot();
-    let mut input = vec![b'x'; 32 * 1024];
-    input.extend_from_slice(b"\n/help\n");
-    let mut reader = BoundedLineReader::new(Cursor::new(input));
-    let oversized = reader.next_line().unwrap().unwrap();
-    assert!(oversized.was_oversized());
-    assert_eq!(oversized.bytes().len(), 4097);
+    let (temporary_directory, paths, service) = fixture.into_parts();
+    let runtime = ai_stock_forum::runtime::ApplicationRuntime::spawn_application(service, 1)
+        .unwrap();
+    let mut input = b"credential=oversized-secret\x1b[31m".to_vec();
+    input.resize(32 * 1024, b'x');
+    input.push(b'\n');
+    let mut output = Vec::new();
 
-    let ParsedLine::Command(ApplicationCommand::RejectInput(rejection)) =
-        parse_line(oversized.bytes())
-    else {
-        panic!("oversized line must be rejected")
-    };
-    assert_eq!(rejection.category, InputRejectionCategory::Oversized);
-    let mut rendered = Vec::new();
-    TextRenderer::render_view(
-        &CommandView::InputRejected(InputRejectedView { rejection }),
-        &mut rendered,
-    )
-    .unwrap();
-    let rendered = String::from_utf8(rendered).unwrap();
+    let reason = ai_stock_forum::ui::command::FallbackRunner::new(runtime.client(), false)
+        .run(Cursor::new(input), &mut output)
+        .unwrap();
+    let rendered = String::from_utf8(output).unwrap();
+
+    assert_eq!(reason, ai_stock_forum::app::ShutdownReason::InputClosed);
     assert_eq!(rendered, "Input rejected: input exceeds 4096 bytes.\n");
     assert_terminal_safe(&rendered);
-    assert_eq!(reader.next_line().unwrap().unwrap().bytes(), b"/help");
-    assert_eq!(fixture.snapshot(), before);
+    assert!(!rendered.contains("credential"));
+    assert!(!rendered.contains("oversized-secret"));
+    assert_eq!(ReceiptFixture::snapshot_path(&paths), before);
+
+    runtime.finish_and_join(reason).unwrap();
+    drop(temporary_directory);
 }
