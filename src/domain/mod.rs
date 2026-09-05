@@ -6,6 +6,7 @@ mod object;
 
 pub use clock::{Clock, IdGenerator, SystemClock, UuidGenerator};
 pub use digest::{Sha256Digest, canonical_json_bytes, sha256};
+pub type Digest = Sha256Digest;
 pub use error::DomainError;
 pub use id::{
     Actor, AgentProfileId, AgentProfileVersionId, ApprovalId, CausationId, CommandId,

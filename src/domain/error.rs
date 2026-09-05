@@ -24,6 +24,8 @@ pub enum DomainError {
     UnknownProfileTemplate,
     #[error("agent profile template provenance is invalid")]
     InvalidProfileTemplateProvenance,
+    #[error("agent profile candidate has no semantic changes")]
+    AgentProfileUnchanged,
 }
 
 impl DomainError {
@@ -40,6 +42,7 @@ impl DomainError {
             Self::DuplicateProfileTag => "duplicate_profile_tag",
             Self::UnknownProfileTemplate => "unknown_profile_template",
             Self::InvalidProfileTemplateProvenance => "invalid_profile_template_provenance",
+            Self::AgentProfileUnchanged => "agent_profile_unchanged",
         }
     }
 }
