@@ -1,7 +1,7 @@
 use std::{
     io::{self, BufRead, Write},
     panic::{AssertUnwindSafe, resume_unwind},
-    sync::Arc,
+    sync::{Arc, Mutex},
     thread,
 };
 
@@ -12,11 +12,14 @@ use thiserror::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
+    agents::{AgentProfileDraft, ProfileTemplateId, builtin_profile_templates},
     app::{
-        InputRejection, InputRejectionCategory, ShutdownDisposition, ShutdownReason,
+        ApplicationCommand, CommandView, InputRejection, InputRejectionCategory,
+        ShutdownDisposition, ShutdownReason,
     },
     panic_boundary::catch_sensitive_unwind,
     runtime::{ApplicationRuntime, RuntimeClient, RuntimeError},
+    ui::profile_editor::{ProfileEditor, ProfileEditorEffect, ProfileEditorMode},
 };
 
 #[cfg(windows)]
@@ -25,7 +28,8 @@ use super::windows::{
     classify_read_error, may_begin_read,
 };
 use super::{
-    BoundedLineReader, ParsedLine, RawLine, TextRenderer, parse_line, reader::LineAccumulator,
+    AgentWorkflowCommand, BoundedLineReader, FallbackParsedLine, RawLine, TextRenderer,
+    parse_fallback_line, reader::LineAccumulator,
 };
 
 #[derive(Debug, Error)]
@@ -645,6 +649,16 @@ impl StdioResources {
 pub struct FallbackRunner {
     client: RuntimeClient,
     show_prompt: bool,
+    profile_workflow: Mutex<Option<ProfileWorkflow>>,
+}
+
+enum ProfileWorkflow {
+    SelectingTemplate,
+    Editing(ProfileEditor),
+    Confirming {
+        editor: ProfileEditor,
+        command: ApplicationCommand,
+    },
 }
 
 impl FallbackRunner {
@@ -652,6 +666,7 @@ impl FallbackRunner {
         Self {
             client,
             show_prompt,
+            profile_workflow: Mutex::new(None),
         }
     }
 
@@ -665,6 +680,7 @@ impl FallbackRunner {
             self.prompt(&mut writer)?;
             let line = reader.next_line().map_err(|_| UiError::Read)?;
             let Some(line) = line else {
+                self.cancel_profile_workflow()?;
                 return Ok(ShutdownReason::InputClosed);
             };
             if let Some(reason) = self.process_line(line, &mut writer)? {
@@ -702,10 +718,44 @@ impl FallbackRunner {
             .map_err(|_| UiError::Write)?;
             return Ok(None);
         }
-        let ParsedLine::Command(command) = parse_line(line.bytes()) else {
-            return Ok(None);
-        };
 
+        if self.profile_workflow.lock().map_err(|_| UiError::Panicked)?.is_some() {
+            let line = match std::str::from_utf8(line.bytes()) {
+                Ok(line) => line,
+                Err(_) => {
+                    TextRenderer::render_view(
+                        &CommandView::InputRejected(crate::app::InputRejectedView {
+                            rejection: InputRejection::from_input(
+                                InputRejectionCategory::InvalidEncoding,
+                                None,
+                                line.bytes(),
+                            ),
+                        }),
+                        writer,
+                    )
+                    .map_err(|_| UiError::Write)?;
+                    return Ok(None);
+                }
+            };
+            self.process_profile_line(line, writer)?;
+            return Ok(None);
+        }
+
+        match parse_fallback_line(line.bytes()) {
+            FallbackParsedLine::Ignored => Ok(None),
+            FallbackParsedLine::Command(command) => self.execute_command(command, writer),
+            FallbackParsedLine::AgentWorkflow(command) => {
+                self.start_profile_workflow(command, writer)?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn execute_command<W: Write>(
+        &self,
+        command: ApplicationCommand,
+        writer: &mut W,
+    ) -> Result<Option<ShutdownReason>, UiError> {
         let pending = match self.client.try_submit(command) {
             Ok(pending) => pending,
             Err(error @ RuntimeError::Backpressure) => {
@@ -721,6 +771,189 @@ impl FallbackRunner {
         } else {
             Ok(None)
         }
+    }
+
+    fn start_profile_workflow<W: Write>(
+        &self,
+        command: AgentWorkflowCommand,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        match command {
+            AgentWorkflowCommand::SelectCreateTemplate => {
+                *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
+                    Some(ProfileWorkflow::SelectingTemplate);
+                TextRenderer::render_profile_templates(builtin_profile_templates(), writer)
+                    .map_err(|_| UiError::Write)
+            }
+            AgentWorkflowCommand::Create { template_id } => {
+                self.start_create(template_id, writer)
+            }
+            AgentWorkflowCommand::Edit { profile_id } => {
+                let outcome = self
+                    .client
+                    .submit(ApplicationCommand::ShowAgentProfile { profile_id })
+                    .map_err(UiError::Runtime)?;
+                let CommandView::AgentProfile(view) = outcome.view else {
+                    return Err(UiError::Panicked);
+                };
+                let profile = view.profile;
+                let draft = AgentProfileDraft::new(
+                    profile.display_name().to_owned(),
+                    profile.description().to_owned(),
+                    profile.role(),
+                    profile.primary_specialty().to_owned(),
+                    profile.specialty_tags().to_vec(),
+                    profile.personality().to_owned(),
+                    profile.instructions().to_owned(),
+                    profile.bindings().clone(),
+                    profile.skill_refs().to_vec(),
+                    profile.mcp_refs().to_vec(),
+                )
+                .map_err(|error| UiError::Runtime(RuntimeError::Application(error.into())))?;
+                let editor = ProfileEditor::for_edit(
+                    profile.profile_id(),
+                    profile.profile_version_id(),
+                    draft,
+                );
+                TextRenderer::render_profile_editor(&editor, writer)
+                    .map_err(|_| UiError::Write)?;
+                *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
+                    Some(ProfileWorkflow::Editing(editor));
+                Ok(())
+            }
+        }
+    }
+
+    fn start_create<W: Write>(
+        &self,
+        template_id: ProfileTemplateId,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        let template = builtin_profile_templates()
+            .iter()
+            .find(|template| template.id == template_id)
+            .ok_or(UiError::Panicked)?;
+        let editor = ProfileEditor::for_create(template)
+            .map_err(|error| UiError::Runtime(RuntimeError::Application(error.into())))?;
+        TextRenderer::render_profile_editor(&editor, writer).map_err(|_| UiError::Write)?;
+        *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
+            Some(ProfileWorkflow::Editing(editor));
+        Ok(())
+    }
+
+    fn process_profile_line<W: Write>(
+        &self,
+        line: &str,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        let state = self
+            .profile_workflow
+            .lock()
+            .map_err(|_| UiError::Panicked)?
+            .take()
+            .ok_or(UiError::Panicked)?;
+        match state {
+            ProfileWorkflow::SelectingTemplate => {
+                let input = line.trim();
+                if input == ":cancel" {
+                    self.client.cancel_agent_profile_edit().map_err(UiError::Runtime)?;
+                    TextRenderer::render_profile_cancelled(true, writer)
+                        .map_err(|_| UiError::Write)
+                } else if let Some(template) = builtin_profile_templates()
+                    .iter()
+                    .find(|template| template.id.as_str() == input)
+                {
+                    self.start_create(template.id.clone(), writer)
+                } else {
+                    TextRenderer::render_profile_templates(builtin_profile_templates(), writer)
+                        .map_err(|_| UiError::Write)?;
+                    *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
+                        Some(ProfileWorkflow::SelectingTemplate);
+                    Ok(())
+                }
+            }
+            ProfileWorkflow::Editing(mut editor) => {
+                let create = matches!(editor.mode(), ProfileEditorMode::Create { .. });
+                match editor.submit_line(line) {
+                    ProfileEditorEffect::None => {
+                        TextRenderer::render_profile_editor(&editor, writer)
+                            .map_err(|_| UiError::Write)?;
+                        *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
+                            Some(ProfileWorkflow::Editing(editor));
+                        Ok(())
+                    }
+                    ProfileEditorEffect::PreviewEdit(request) => {
+                        let preview = self
+                            .client
+                            .preview_agent_profile_edit(
+                                request.profile_id,
+                                request.expected_active_version_id,
+                                request.candidate,
+                            )
+                            .map_err(UiError::Runtime)?;
+                        editor.apply_preview(request.generation, preview);
+                        TextRenderer::render_profile_editor(&editor, writer)
+                            .map_err(|_| UiError::Write)?;
+                        *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
+                            Some(ProfileWorkflow::Editing(editor));
+                        Ok(())
+                    }
+                    ProfileEditorEffect::Execute(command) => {
+                        TextRenderer::render_activation_confirmation(writer)
+                            .map_err(|_| UiError::Write)?;
+                        *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
+                            Some(ProfileWorkflow::Confirming { editor, command });
+                        Ok(())
+                    }
+                    ProfileEditorEffect::Cancelled => {
+                        self.client.cancel_agent_profile_edit().map_err(UiError::Runtime)?;
+                        TextRenderer::render_profile_cancelled(create, writer)
+                            .map_err(|_| UiError::Write)
+                    }
+                }
+            }
+            ProfileWorkflow::Confirming { editor, command } => match line.trim() {
+                "y" | "yes" => {
+                    self.execute_command(command, writer)?;
+                    Ok(())
+                }
+                "n" | "no" => {
+                    TextRenderer::render_activation_declined(writer)
+                        .map_err(|_| UiError::Write)?;
+                    TextRenderer::render_profile_editor(&editor, writer)
+                        .map_err(|_| UiError::Write)?;
+                    *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
+                        Some(ProfileWorkflow::Editing(editor));
+                    Ok(())
+                }
+                ":cancel" => {
+                    let create = matches!(editor.mode(), ProfileEditorMode::Create { .. });
+                    self.client.cancel_agent_profile_edit().map_err(UiError::Runtime)?;
+                    TextRenderer::render_profile_cancelled(create, writer)
+                        .map_err(|_| UiError::Write)
+                }
+                _ => {
+                    TextRenderer::render_activation_confirmation(writer)
+                        .map_err(|_| UiError::Write)?;
+                    *self.profile_workflow.lock().map_err(|_| UiError::Panicked)? =
+                        Some(ProfileWorkflow::Confirming { editor, command });
+                    Ok(())
+                }
+            },
+        }
+    }
+
+    fn cancel_profile_workflow(&self) -> Result<(), UiError> {
+        let active = self
+            .profile_workflow
+            .lock()
+            .map_err(|_| UiError::Panicked)?
+            .take()
+            .is_some();
+        if active {
+            self.client.cancel_agent_profile_edit().map_err(UiError::Runtime)?;
+        }
+        Ok(())
     }
 }
 
@@ -830,6 +1063,7 @@ fn run_host_loop<W: Write>(
             select_biased! {
                 recv(interrupts) -> signal => match signal {
                     Ok(()) => {
+                        runner.cancel_profile_workflow()?;
                         TextRenderer::render_shutdown_reason(ShutdownReason::Interrupted, writer)
                             .map_err(|_| UiError::Write)?;
                         return Ok(ShutdownReason::Interrupted);
@@ -846,7 +1080,10 @@ fn run_host_loop<W: Write>(
                         }
                         break;
                     }
-                    Ok(Ok(LineSourceEvent::Eof)) => return Ok(ShutdownReason::InputClosed),
+                    Ok(Ok(LineSourceEvent::Eof)) => {
+                        runner.cancel_profile_workflow()?;
+                        return Ok(ShutdownReason::InputClosed);
+                    }
                     Ok(Ok(LineSourceEvent::Cancelled)) => return Err(UiError::ReaderThread),
                     Ok(Err(_)) => return Err(UiError::Read),
                     Err(_) => return Err(UiError::ReaderThread),

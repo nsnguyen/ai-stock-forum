@@ -1,6 +1,9 @@
 use std::io::{self, Write};
 
 use crate::{
+    agents::{
+        AgentProfileDraft, AgentReadiness, ProfileDiffField, ProfileFieldValue, ProfileTemplate,
+    },
     app::{
         AppError, CommandOutcome, CommandView, InputRejectionCategory, ShutdownDisposition,
         ShutdownReason,
@@ -10,7 +13,10 @@ use crate::{
     domain::Actor,
     runtime::RuntimeError,
     setup::SetupStatus,
-    ui::tui::TuiError,
+    ui::{
+        profile_editor::{ProfileEditor, ProfileEditorMode, ProfileEditorStep},
+        tui::TuiError,
+    },
 };
 
 pub struct TextRenderer;
@@ -88,11 +94,169 @@ impl TextRenderer {
                 }
                 ShutdownDisposition::Requested => writer.write_all(b"Shutting down.\n"),
             },
-            CommandView::AgentProfileCreated(_)
-            | CommandView::AgentProfileVersionActivated(_)
-            | CommandView::AgentProfiles(_)
-            | CommandView::AgentProfile(_)
-            | CommandView::AgentProfileHistory(_) => Ok(()),
+            CommandView::AgentProfileCreated(view) => writeln!(
+                writer,
+                "Agent profile created: {} version {} ({})",
+                view.profile_id,
+                view.version.get(),
+                readiness(view.readiness)
+            ),
+            CommandView::AgentProfileVersionActivated(view) => writeln!(
+                writer,
+                "Agent profile version activated: {} version {} ({})",
+                view.profile_id,
+                view.version.get(),
+                readiness(view.readiness)
+            ),
+            CommandView::AgentProfiles(view) => {
+                writer.write_all(b"NAME | ROLE | SPECIALTY | READY | VERSION | ID\n")?;
+                for profile in &view.profiles {
+                    writeln!(
+                        writer,
+                        "{} | {} | {} | {} | {} | {}",
+                        escaped_bounded(&profile.display_name, 64),
+                        profile.role.as_str(),
+                        escaped_bounded(&profile.primary_specialty, 64),
+                        readiness(profile.readiness),
+                        profile.version.get(),
+                        profile.profile_id,
+                    )?;
+                }
+                Ok(())
+            }
+            CommandView::AgentProfile(view) => {
+                let profile = &view.profile;
+                writeln!(writer, "Agent profile: {}", profile.profile_id())?;
+                writeln!(writer, "Display name: {}", escaped_bounded(profile.display_name(), 64))?;
+                writeln!(writer, "Description: {}", escaped_bounded(profile.description(), 256))?;
+                writeln!(writer, "Role: {}", profile.role().as_str())?;
+                writeln!(
+                    writer,
+                    "Primary specialty: {}",
+                    escaped_bounded(profile.primary_specialty(), 64)
+                )?;
+                writeln!(
+                    writer,
+                    "Specialty tags: {}",
+                    escaped_list(profile.specialty_tags(), 48)
+                )?;
+                writeln!(writer, "Personality: {}", escaped_bounded(profile.personality(), 1_024))?;
+                writeln!(writer, "Instructions: {}", escaped_bounded(profile.instructions(), 4_096))?;
+                writeln!(
+                    writer,
+                    "Bindings: provider={} model={}",
+                    escaped_option(profile.bindings().model_provider.as_deref(), 256),
+                    escaped_option(profile.bindings().model_name.as_deref(), 256)
+                )?;
+                writeln!(writer, "Skill refs: {}", profile.skill_refs().len())?;
+                writeln!(writer, "MCP refs: {}", profile.mcp_refs().len())?;
+                match profile.template_provenance() {
+                    Some(provenance) => writeln!(
+                        writer,
+                        "Template provenance: {}@{} {}",
+                        escaped_bounded(provenance.template_id.as_str(), 64),
+                        provenance.template_version.get(),
+                        provenance.template_digest,
+                    )?,
+                    None => writer.write_all(b"Template provenance: none\n")?,
+                }
+                writeln!(writer, "Bindings readiness: {}", readiness(view.readiness))?;
+                writeln!(writer, "Memory namespace ID: {}", profile.memory_namespace_id())?;
+                writeln!(writer, "Policy reference: {}", escaped_bounded(profile.default_policy_ref(), 128))?;
+                writeln!(writer, "Created time: {}", profile.created_at_ms())?;
+                writeln!(writer, "Version: {}", profile.version().get())?;
+                writeln!(writer, "Version ID: {}", profile.profile_version_id())?;
+                writeln!(writer, "Digest: {}", profile.content_digest())
+            }
+            CommandView::AgentProfileHistory(view) => {
+                writeln!(writer, "Agent profile history: {}", view.profile_id)?;
+                writeln!(writer, "Active version ID: {}", view.active_version_id)?;
+                writer.write_all(b"VERSION | VERSION ID | PREDECESSOR | CREATED | READY | DIGEST\n")?;
+                for version in &view.versions {
+                    writeln!(
+                        writer,
+                        "{} | {} | {} | {} | {} | {}",
+                        version.version.get(),
+                        version.profile_version_id,
+                        version
+                            .supersedes
+                            .map(|id| id.to_string())
+                            .unwrap_or_else(|| "none".to_owned()),
+                        version.created_at_ms,
+                        readiness(version.readiness),
+                        version.content_digest,
+                    )?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub fn render_profile_templates<W: Write>(
+        templates: &[ProfileTemplate],
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writer.write_all(b"Profile templates:\n")?;
+        for template in templates {
+            writeln!(
+                writer,
+                "  {} | {} | {} | version {}",
+                escaped_bounded(template.id.as_str(), 64),
+                template.role.as_str(),
+                escaped_bounded(template.suggested_name, 64),
+                template.version.get(),
+            )?;
+        }
+        writer.write_all(b"Enter a template ID, or :cancel.\n")
+    }
+
+    pub fn render_profile_editor<W: Write>(
+        editor: &ProfileEditor,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        let mode = match editor.mode() {
+            ProfileEditorMode::Create { .. } => "Create",
+            ProfileEditorMode::Edit { .. } => "Edit",
+        };
+        writeln!(writer, "{mode} profile editor [{}]", editor.step().as_str())?;
+        render_draft(editor.draft(), writer)?;
+        if editor.step() == ProfileEditorStep::Review {
+            writeln!(writer, "{mode} profile review")?;
+            if let Some(review) = editor.review() {
+                for diff in &review.preview().diffs {
+                    writeln!(
+                        writer,
+                        "  {}: {} -> {}",
+                        diff_field(diff.field),
+                        field_value(&diff.before),
+                        field_value(&diff.after),
+                    )?;
+                }
+            } else if matches!(editor.mode(), ProfileEditorMode::Edit { .. }) {
+                writer.write_all(b"  Run :review to request a passive preview.\n")?;
+            }
+        }
+        if let Some(message) = editor.local_message() {
+            writeln!(writer, "Editor message: {}", message.code())?;
+        }
+        writer.write_all(
+            b"Controls: :role <bull|bear|chief|engineering|custom> :next :back :show :clear :review :activate :cancel\n",
+        )
+    }
+
+    pub fn render_activation_confirmation<W: Write>(writer: &mut W) -> io::Result<()> {
+        writer.write_all(b"Confirm activation? [y/yes or n/no]\n")
+    }
+
+    pub fn render_activation_declined<W: Write>(writer: &mut W) -> io::Result<()> {
+        writer.write_all(b"Activation declined; returned to review.\n")
+    }
+
+    pub fn render_profile_cancelled<W: Write>(create: bool, writer: &mut W) -> io::Result<()> {
+        if create {
+            writer.write_all(b"Profile creation cancelled.\n")
+        } else {
+            writer.write_all(b"Profile edit cancelled.\n")
         }
     }
 
@@ -173,6 +337,72 @@ impl TextRenderer {
             TuiError::Runtime(error) => Self::render_runtime_error(error, writer),
             TuiError::Panicked => writer.write_all(b"Terminal interface stopped unexpectedly.\n"),
         }
+    }
+}
+
+fn render_draft<W: Write>(draft: &AgentProfileDraft, writer: &mut W) -> io::Result<()> {
+    writeln!(writer, "  Display name: {}", escaped_bounded(&draft.display_name, 64))?;
+    writeln!(writer, "  Description: {}", escaped_bounded(&draft.description, 256))?;
+    writeln!(writer, "  Role: {}", draft.role.as_str())?;
+    writeln!(writer, "  Primary specialty: {}", escaped_bounded(&draft.primary_specialty, 64))?;
+    writeln!(writer, "  Specialty tags: {}", escaped_list(&draft.specialty_tags, 48))?;
+    writeln!(writer, "  Personality: {}", escaped_bounded(&draft.personality, 1_024))?;
+    writeln!(writer, "  Instructions: {}", escaped_bounded(&draft.instructions, 4_096))?;
+    writeln!(
+        writer,
+        "  Bindings: provider={} model={}",
+        escaped_option(draft.bindings.model_provider.as_deref(), 256),
+        escaped_option(draft.bindings.model_name.as_deref(), 256),
+    )
+}
+
+fn diff_field(field: ProfileDiffField) -> &'static str {
+    match field {
+        ProfileDiffField::DisplayName => "display_name",
+        ProfileDiffField::Description => "description",
+        ProfileDiffField::Role => "role",
+        ProfileDiffField::PrimarySpecialty => "primary_specialty",
+        ProfileDiffField::SpecialtyTags => "specialty_tags",
+        ProfileDiffField::Personality => "personality",
+        ProfileDiffField::Instructions => "instructions",
+        ProfileDiffField::Bindings => "bindings",
+    }
+}
+
+fn field_value(value: &ProfileFieldValue) -> String {
+    match value {
+        ProfileFieldValue::Text(value) => escaped_bounded(value, 4_096),
+        ProfileFieldValue::Role(value) => value.as_str().to_owned(),
+        ProfileFieldValue::SpecialtyTags(values) => escaped_list(values, 48),
+        ProfileFieldValue::Bindings(bindings) => format!(
+            "provider={} model={}",
+            escaped_option(bindings.model_provider.as_deref(), 256),
+            escaped_option(bindings.model_name.as_deref(), 256),
+        ),
+    }
+}
+
+fn escaped_option(value: Option<&str>, maximum_scalars: usize) -> String {
+    value
+        .map(|value| escaped_bounded(value, maximum_scalars))
+        .unwrap_or_else(|| "none".to_owned())
+}
+
+fn escaped_list(values: &[String], maximum_scalars: usize) -> String {
+    if values.is_empty() {
+        return "none".to_owned();
+    }
+    values
+        .iter()
+        .map(|value| escaped_bounded(value, maximum_scalars))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn readiness(readiness: AgentReadiness) -> &'static str {
+    match readiness {
+        AgentReadiness::Ready => "ready",
+        AgentReadiness::NotReady => "not_ready",
     }
 }
 

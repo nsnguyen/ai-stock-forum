@@ -7,8 +7,8 @@
 
 use crate::{
     agents::{
-        AgentProfileDraft, ProfileEditPreview, ProfileTemplate, ProfileTemplateProvenance,
-        normalize_tag_key,
+        AgentProfileDraft, AgentRole, ProfileEditPreview, ProfileTemplate,
+        ProfileTemplateProvenance, normalize_tag_key,
     },
     app::ApplicationCommand,
     domain::{AgentProfileId, AgentProfileVersionId, DomainError},
@@ -263,6 +263,10 @@ impl ProfileEditor {
                 self.set_model(&control[6..]);
                 ProfileEditorEffect::None
             }
+            _ if control.starts_with("role ") => {
+                self.set_role(&control[5..]);
+                ProfileEditorEffect::None
+            }
             _ => {
                 self.message("unknown_editor_control");
                 ProfileEditorEffect::None
@@ -432,6 +436,29 @@ impl ProfileEditor {
         let next = Some(value.to_owned());
         if self.draft.bindings.model_provider != next {
             self.draft.bindings.model_provider = next;
+            self.invalidate_review();
+        }
+        self.local_message = None;
+    }
+
+    fn set_role(&mut self, value: &str) {
+        if self.step != ProfileEditorStep::Template {
+            self.message("editor_field_unavailable");
+            return;
+        }
+        let role = match value {
+            "bull" => AgentRole::Bull,
+            "bear" => AgentRole::Bear,
+            "chief" => AgentRole::Chief,
+            "engineering" => AgentRole::Engineering,
+            "custom" => AgentRole::Custom,
+            _ => {
+                self.message("invalid_profile_field");
+                return;
+            }
+        };
+        if self.draft.role != role {
+            self.draft.role = role;
             self.invalidate_review();
         }
         self.local_message = None;
