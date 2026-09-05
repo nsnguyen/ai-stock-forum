@@ -4,7 +4,8 @@ use ai_stock_forum::{
     },
     domain::{AgentProfileId, AgentProfileVersionId, ProfileReviewToken, sha256},
     ui::profile_editor::{
-        ProfileEditor, ProfileEditorEffect, ProfileEditorMode, ProfileEditorStep,
+        PreviewEditRequest, ProfileEditor, ProfileEditorEffect, ProfileEditorMode,
+        ProfileEditorStep,
     },
 };
 use uuid::Uuid;
@@ -31,6 +32,27 @@ fn empty_draft() -> AgentProfileDraft {
         Vec::new(),
     )
     .unwrap()
+}
+
+fn preview_request(editor: &mut ProfileEditor) -> PreviewEditRequest {
+    match editor.submit_line(":review") {
+        ProfileEditorEffect::PreviewEdit(request) => request,
+        effect => panic!("expected preview request, received {effect:?}"),
+    }
+}
+
+fn preview(
+    profile_id: AgentProfileId,
+    expected_active_version_id: AgentProfileVersionId,
+    token: u128,
+) -> ProfileEditPreview {
+    ProfileEditPreview {
+        profile_id,
+        expected_active_version_id,
+        diffs: Vec::new(),
+        review_token: ProfileReviewToken::from_uuid(Uuid::from_u128(token)),
+        review_digest: sha256(&token.to_be_bytes()),
+    }
 }
 
 fn advance_to_review(editor: &mut ProfileEditor) {
@@ -153,14 +175,8 @@ fn edit_review_requires_a_fresh_preview_after_any_field_change() {
     assert!(matches!(editor.mode(), ProfileEditorMode::Edit { .. }));
 
     advance_to_review(&mut editor);
-    assert!(matches!(editor.submit_line(":review"), ProfileEditorEffect::PreviewEdit(_)));
-    editor.apply_preview(ProfileEditPreview {
-        profile_id,
-        expected_active_version_id: active_version_id,
-        diffs: Vec::new(),
-        review_token: ProfileReviewToken::from_uuid(Uuid::from_u128(3)),
-        review_digest: sha256(b"review"),
-    });
+    let request = preview_request(&mut editor);
+    editor.apply_preview(request.generation, preview(profile_id, active_version_id, 3));
     assert!(editor.review().is_some());
     assert_eq!(editor.submit_line(":back"), ProfileEditorEffect::None);
     assert_eq!(editor.step(), ProfileEditorStep::OptionalBindings);
@@ -174,6 +190,54 @@ fn edit_review_requires_a_fresh_preview_after_any_field_change() {
     editor.submit_line(":next");
     assert_eq!(editor.step(), ProfileEditorStep::Review);
     assert!(matches!(editor.submit_line(":review"), ProfileEditorEffect::PreviewEdit(_)));
+}
+
+#[test]
+fn delayed_preview_after_candidate_mutation_is_rejected_until_the_current_preview_arrives() {
+    let profile_id = AgentProfileId::from_uuid(Uuid::from_u128(20));
+    let active_version_id = AgentProfileVersionId::from_uuid(Uuid::from_u128(21));
+    let mut editor = ProfileEditor::for_edit(profile_id, active_version_id, template_draft());
+    advance_to_review(&mut editor);
+    let request_a = preview_request(&mut editor);
+
+    editor.submit_line(":back");
+    editor.submit_line(":back");
+    editor.submit_line(":back");
+    assert_eq!(editor.step(), ProfileEditorStep::Personality);
+    editor.submit_line("Updated local personality.");
+    editor.submit_line(":next");
+    editor.submit_line(":next");
+    editor.submit_line(":next");
+    let request_b = preview_request(&mut editor);
+    assert!(request_b.generation > request_a.generation);
+
+    editor.apply_preview(request_a.generation, preview(profile_id, active_version_id, 22));
+    assert!(editor.review().is_none());
+    assert_eq!(editor.submit_line(":activate"), ProfileEditorEffect::None);
+    assert_eq!(editor.local_message().unwrap().code(), "stale_preview");
+
+    editor.apply_preview(request_b.generation, preview(profile_id, active_version_id, 23));
+    assert!(editor.review().is_some());
+    assert!(matches!(editor.submit_line(":activate"), ProfileEditorEffect::Execute(_)));
+}
+
+#[test]
+fn newer_preview_request_wins_when_responses_arrive_out_of_order() {
+    let profile_id = AgentProfileId::from_uuid(Uuid::from_u128(30));
+    let active_version_id = AgentProfileVersionId::from_uuid(Uuid::from_u128(31));
+    let mut editor = ProfileEditor::for_edit(profile_id, active_version_id, template_draft());
+    advance_to_review(&mut editor);
+    let request_a = preview_request(&mut editor);
+    let request_b = preview_request(&mut editor);
+    assert!(request_b.generation > request_a.generation);
+
+    editor.apply_preview(request_a.generation, preview(profile_id, active_version_id, 32));
+    assert!(editor.review().is_none());
+    assert_eq!(editor.local_message().unwrap().code(), "stale_preview");
+
+    editor.apply_preview(request_b.generation, preview(profile_id, active_version_id, 33));
+    assert!(editor.review().is_some());
+    assert!(matches!(editor.submit_line(":activate"), ProfileEditorEffect::Execute(_)));
 }
 
 #[test]

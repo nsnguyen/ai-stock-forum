@@ -54,6 +54,7 @@ impl ProfileEditorStep {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewEditRequest {
+    pub generation: u64,
     pub profile_id: AgentProfileId,
     pub expected_active_version_id: AgentProfileVersionId,
     pub candidate: AgentProfileDraft,
@@ -105,6 +106,8 @@ pub struct ProfileEditor {
     identity_field: IdentityField,
     personality_started: bool,
     instructions_started: bool,
+    preview_generation: u64,
+    pending_preview_generation: Option<u64>,
 }
 
 impl ProfileEditor {
@@ -120,6 +123,8 @@ impl ProfileEditor {
             identity_field: IdentityField::DisplayName,
             personality_started: false,
             instructions_started: false,
+            preview_generation: 0,
+            pending_preview_generation: None,
         })
     }
 
@@ -140,6 +145,8 @@ impl ProfileEditor {
             identity_field: IdentityField::DisplayName,
             personality_started: false,
             instructions_started: false,
+            preview_generation: 0,
+            pending_preview_generation: None,
         }
     }
 
@@ -181,7 +188,7 @@ impl ProfileEditor {
     /// Accepts the authoritative result of a previously emitted preview
     /// request. Mismatched results are retained nowhere and receive a safe
     /// local error instead.
-    pub fn apply_preview(&mut self, preview: ProfileEditPreview) {
+    pub fn apply_preview(&mut self, generation: u64, preview: ProfileEditPreview) {
         let ProfileEditorMode::Edit {
             profile_id,
             expected_active_version_id,
@@ -191,16 +198,23 @@ impl ProfileEditor {
             return;
         };
 
-        if preview.profile_id != profile_id
-            || preview.expected_active_version_id != expected_active_version_id
+        if self.pending_preview_generation != Some(generation)
             || self.step != ProfileEditorStep::Review
         {
-            self.review = None;
+            self.message("stale_preview");
+            return;
+        }
+
+        if preview.profile_id != profile_id
+            || preview.expected_active_version_id != expected_active_version_id
+        {
+            self.invalidate_review();
             self.message("preview_mismatch");
             return;
         }
 
         self.review = Some(ProfileEditorReview { preview });
+        self.pending_preview_generation = None;
         self.local_message = None;
     }
 
@@ -229,7 +243,7 @@ impl ProfileEditor {
             "review" => self.request_review(),
             "activate" => self.activate(),
             "cancel" => {
-                self.review = None;
+                self.invalidate_review();
                 self.local_message = None;
                 ProfileEditorEffect::Cancelled
             }
@@ -313,6 +327,9 @@ impl ProfileEditor {
     }
 
     fn back(&mut self) -> ProfileEditorEffect {
+        if self.step != ProfileEditorStep::Template {
+            self.invalidate_review();
+        }
         match self.step {
             ProfileEditorStep::Template => self.message("editor_first_step"),
             ProfileEditorStep::Identity => {
@@ -450,9 +467,16 @@ impl ProfileEditor {
                 profile_id,
                 expected_active_version_id,
             } => {
-                self.review = None;
+                self.invalidate_review();
+                let Some(generation) = self.preview_generation.checked_add(1) else {
+                    self.message("preview_generation_exhausted");
+                    return ProfileEditorEffect::None;
+                };
+                self.preview_generation = generation;
+                self.pending_preview_generation = Some(generation);
                 self.local_message = None;
                 ProfileEditorEffect::PreviewEdit(PreviewEditRequest {
+                    generation,
                     profile_id,
                     expected_active_version_id,
                     candidate: self.draft.clone(),
@@ -481,7 +505,9 @@ impl ProfileEditor {
                 expected_active_version_id,
             } => {
                 let Some(review) = &self.review else {
-                    self.message("preview_required");
+                    if self.local_message.is_none() {
+                        self.message("preview_required");
+                    }
                     return ProfileEditorEffect::None;
                 };
                 ProfileEditorEffect::Execute(ApplicationCommand::ActivateAgentProfileVersion {
@@ -525,6 +551,7 @@ impl ProfileEditor {
 
     fn invalidate_review(&mut self) {
         self.review = None;
+        self.pending_preview_generation = None;
     }
 
     fn message(&mut self, code: &'static str) {
