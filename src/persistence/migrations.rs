@@ -1,6 +1,6 @@
 use crate::domain::{Sha256Digest, sha256};
 
-pub const LATEST_SCHEMA_VERSION: u32 = 1;
+pub const LATEST_SCHEMA_VERSION: u32 = 2;
 
 pub(crate) const APPLICATION_ID: i64 = 0x4149_4653;
 pub(crate) const SCHEMA_MIGRATIONS_SQL: &str = "
@@ -37,12 +37,21 @@ impl Migration {
     }
 }
 
-pub(crate) fn ordered() -> [Migration; 1] {
-    [Migration {
-        version: 1,
-        sql: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/migrations/0001_phase0.sql"
-        )),
-    }]
+pub(crate) fn ordered() -> [Migration; 2] {
+    [
+        Migration {
+            version: 1,
+            sql: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/0001_phase0.sql"
+            )),
+        },
+        Migration {
+            version: 2,
+            sql: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/0002_agent_profiles.sql"
+            )),
+        },
+    ]
 }

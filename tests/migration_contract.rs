@@ -42,7 +42,7 @@ fn reopening_is_idempotent() {
             .applied_migrations()
             .unwrap()
             .len(),
-        1
+        LATEST_SCHEMA_VERSION as usize
     );
 }
 
@@ -116,7 +116,7 @@ fn migration_records_ahead_of_user_version_are_rejected() {
     let raw = rusqlite::Connection::open(paths.database_path()).unwrap();
     raw.execute(
         "INSERT INTO schema_migrations (version, checksum) VALUES (?1, ?2)",
-        (2_i64, "0".repeat(64)),
+        (3_i64, "0".repeat(64)),
     )
     .unwrap();
     drop(raw);
@@ -161,12 +161,20 @@ fn migration_records_and_complete_schema_are_exact() {
     let connection = database.connection();
 
     let migration = database.applied_migrations().unwrap();
-    assert_eq!(migration.len(), 1);
+    assert_eq!(migration.len(), 2);
     assert_eq!(migration[0].version(), 1);
     assert_eq!(
         migration[0].checksum().as_str(),
         ai_stock_forum::domain::sha256(include_str!("../migrations/0001_phase0.sql").as_bytes())
             .as_str()
+    );
+    assert_eq!(migration[1].version(), 2);
+    assert_eq!(
+        migration[1].checksum().as_str(),
+        ai_stock_forum::domain::sha256(
+            include_str!("../migrations/0002_agent_profiles.sql").as_bytes()
+        )
+        .as_str()
     );
 
     for (table, expected_columns) in [
@@ -850,6 +858,14 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
     assert_eq!(
         objects,
         vec![
+            (
+                "index".to_owned(),
+                "active_agent_profiles_normalized_name_idx".to_owned()
+            ),
+            (
+                "index".to_owned(),
+                "agent_profile_versions_history_idx".to_owned()
+            ),
             ("index".to_owned(), "approval_records_status_idx".to_owned()),
             (
                 "index".to_owned(),
@@ -863,8 +879,13 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
             ("index".to_owned(), "setup_drafts_state_idx".to_owned()),
             (
                 "table".to_owned(),
+                "active_agent_profiles".to_owned()
+            ),
+            (
+                "table".to_owned(),
                 "active_installation_configuration".to_owned()
             ),
+            ("table".to_owned(), "agent_profile_versions".to_owned()),
             ("table".to_owned(), "approval_records".to_owned()),
             ("table".to_owned(), "capability_readiness".to_owned()),
             ("table".to_owned(), "command_event_refs".to_owned()),
@@ -880,6 +901,14 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
             ("table".to_owned(), "schema_migrations".to_owned()),
             ("table".to_owned(), "setup_drafts".to_owned()),
             ("table".to_owned(), "setup_step_outcomes".to_owned()),
+            (
+                "trigger".to_owned(),
+                "agent_profile_versions_no_delete".to_owned()
+            ),
+            (
+                "trigger".to_owned(),
+                "agent_profile_versions_no_update".to_owned()
+            ),
             (
                 "trigger".to_owned(),
                 "command_event_refs_no_delete".to_owned()
@@ -915,6 +944,29 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
             &[
                 column("version", "INTEGER", false, 1),
                 column("checksum", "TEXT", true, 0),
+            ],
+        ),
+        (
+            "agent_profile_versions",
+            &[
+                column("profile_id", "TEXT", true, 1),
+                column("profile_version_id", "TEXT", true, 0),
+                column("version", "INTEGER", true, 2),
+                column("normalized_name", "TEXT", true, 0),
+                column("content_digest", "TEXT", true, 0),
+                column("payload_json", "BLOB", true, 0),
+                column("source_event_sequence", "INTEGER", true, 0),
+                column("created_at_ms", "INTEGER", true, 0),
+            ],
+        ),
+        (
+            "active_agent_profiles",
+            &[
+                column("profile_id", "TEXT", true, 1),
+                column("profile_version_id", "TEXT", true, 0),
+                column("version", "INTEGER", true, 0),
+                column("normalized_name", "TEXT", true, 0),
+                column("readiness", "TEXT", true, 0),
             ],
         ),
         (
@@ -1132,6 +1184,18 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
     foreign_keys.sort();
     let mut expected_foreign_keys = vec![
         (
+            "active_agent_profiles",
+            "profile_id",
+            "agent_profile_versions",
+            "profile_id",
+        ),
+        (
+            "active_agent_profiles",
+            "profile_version_id",
+            "agent_profile_versions",
+            "profile_version_id",
+        ),
+        (
             "active_installation_configuration",
             "activated_event_id",
             "event_stream",
@@ -1222,6 +1286,63 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
         connection,
         &application_tables,
         &[
+            semantic_index(
+                "agent_profile_versions",
+                "c",
+                false,
+                false,
+                &["profile_id", "version"],
+            ),
+            semantic_index(
+                "agent_profile_versions",
+                "pk",
+                true,
+                false,
+                &["profile_id", "version"],
+            ),
+            semantic_index(
+                "agent_profile_versions",
+                "u",
+                true,
+                false,
+                &["profile_version_id"],
+            ),
+            semantic_index(
+                "agent_profile_versions",
+                "u",
+                true,
+                false,
+                &["profile_id", "profile_version_id"],
+            ),
+            semantic_index(
+                "agent_profile_versions",
+                "u",
+                true,
+                false,
+                &["source_event_sequence"],
+            ),
+            semantic_index(
+                "active_agent_profiles",
+                "c",
+                false,
+                false,
+                &["normalized_name"],
+            ),
+            semantic_index("active_agent_profiles", "pk", true, false, &["profile_id"]),
+            semantic_index(
+                "active_agent_profiles",
+                "u",
+                true,
+                false,
+                &["profile_version_id"],
+            ),
+            semantic_index(
+                "active_agent_profiles",
+                "u",
+                true,
+                false,
+                &["normalized_name"],
+            ),
             semantic_index(
                 "event_stream",
                 "c",
@@ -1317,6 +1438,16 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
     .unwrap();
     for (name, table, columns) in [
         (
+            "agent_profile_versions_history_idx",
+            "agent_profile_versions",
+            &["profile_id", "version DESC"][..],
+        ),
+        (
+            "active_agent_profiles_normalized_name_idx",
+            "active_agent_profiles",
+            &["normalized_name"][..],
+        ),
+        (
             "event_stream_correlation_idx",
             "event_stream",
             &["correlation_id", "sequence"][..],
@@ -1364,6 +1495,14 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
     }
 
     for (name, expected_sql) in [
+        (
+            "agent_profile_versions_no_update",
+            "create trigger agent_profile_versions_no_update before update on agent_profile_versions begin select raise(abort, 'agent_profile_versions_immutable'); end",
+        ),
+        (
+            "agent_profile_versions_no_delete",
+            "create trigger agent_profile_versions_no_delete before delete on agent_profile_versions begin select raise(abort, 'agent_profile_versions_immutable'); end",
+        ),
         (
             "event_stream_no_update",
             "create trigger event_stream_no_update before update on event_stream begin select raise(abort, 'event_stream is append-only'); end",
