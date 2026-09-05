@@ -12,8 +12,8 @@ use crate::{
     audit::AuditEntry,
     config::{AppPaths, StartupError},
     domain::{
-        Actor, CausationId, Clock, CommandId, CorrelationId, EventId, IdGenerator, SessionId,
-        Sha256Digest, canonical_json_bytes, sha256,
+        Actor, CausationId, Clock, CommandId, CorrelationId, EventId, IdGenerator, InstallationId,
+        SessionId, Sha256Digest, canonical_json_bytes, sha256,
     },
     persistence::{
         CommandReceiptRecord, CommandReceiptRepository, Database, EventRepository,
@@ -21,6 +21,7 @@ use crate::{
     },
     policy::{Capability, Effect, PolicyDecision, PolicyRule, evaluate},
     recovery::{BootstrapState, ProjectionState, RecoveryCoordinator, reduce},
+    setup::SetupStatus,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,6 +189,26 @@ pub struct ApplicationService {
     executor: CommandExecutor,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseReadiness {
+    Ready,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessGuardOwnership {
+    Held,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentationSnapshot {
+    pub installation_id: InstallationId,
+    pub session_id: SessionId,
+    pub database_readiness: DatabaseReadiness,
+    pub process_guard_ownership: ProcessGuardOwnership,
+    pub setup_status: SetupStatus,
+    pub recent_audit: Vec<AuditEntry>,
+}
+
 pub struct ApplicationWorker {
     executor: CommandExecutor,
 }
@@ -324,6 +345,27 @@ impl ApplicationService {
 
     pub fn session_id(&self) -> crate::domain::SessionId {
         self.state.session_id()
+    }
+
+    pub fn presentation_snapshot(
+        &self,
+        limit: crate::app::AuditLimit,
+    ) -> Result<PresentationSnapshot, AppError> {
+        let projection = self.state.projection();
+        let events = EventRepository::tail_through(
+            self.executor.database.connection(),
+            limit,
+            projection.last_sequence,
+        )?;
+
+        Ok(PresentationSnapshot {
+            installation_id: self.state.installation_id(),
+            session_id: self.state.session_id(),
+            database_readiness: DatabaseReadiness::Ready,
+            process_guard_ownership: ProcessGuardOwnership::Held,
+            setup_status: projection.setup_status.clone(),
+            recent_audit: events.iter().map(AuditEntry::from_event).collect(),
+        })
     }
 
     pub const fn previous_session_interrupted(&self) -> bool {

@@ -5,10 +5,12 @@ use crate::{
         AppError, CommandOutcome, CommandView, InputRejectionCategory, ShutdownDisposition,
         ShutdownReason,
     },
+    cli::CliError,
     config::StartupError,
     domain::Actor,
     runtime::RuntimeError,
     setup::SetupStatus,
+    ui::tui::TuiError,
 };
 
 pub struct TextRenderer;
@@ -93,6 +95,14 @@ impl TextRenderer {
         writeln!(writer, "Startup failed [{}].", error.code())
     }
 
+    pub fn render_cli_error<W: Write>(error: &CliError, writer: &mut W) -> io::Result<()> {
+        match error {
+            CliError::InvalidArguments => {
+                writer.write_all(b"Command-line arguments are invalid.\n")
+            }
+        }
+    }
+
     pub fn render_runtime_error<W: Write>(error: &RuntimeError, writer: &mut W) -> io::Result<()> {
         let message = match error {
             RuntimeError::InvalidCapacity => "Runtime configuration is invalid.",
@@ -140,6 +150,23 @@ impl TextRenderer {
                 writer.write_all(b"Terminal input is unavailable on this platform.\n")
             }
             super::UiError::Panicked => writer.write_all(b"Command host stopped unexpectedly.\n"),
+        }
+    }
+
+    pub fn render_tui_error<W: Write>(error: &TuiError, writer: &mut W) -> io::Result<()> {
+        match error {
+            TuiError::TerminalInitialization => {
+                writer.write_all(b"Terminal interface could not be started.\n")
+            }
+            TuiError::TerminalInput => writer.write_all(b"Terminal input could not be read.\n"),
+            TuiError::TerminalOutput => {
+                writer.write_all(b"Terminal output could not be written.\n")
+            }
+            TuiError::InterruptHandler => {
+                writer.write_all(b"Interrupt handling could not be started.\n")
+            }
+            TuiError::Runtime(error) => Self::render_runtime_error(error, writer),
+            TuiError::Panicked => writer.write_all(b"Terminal interface stopped unexpectedly.\n"),
         }
     }
 }

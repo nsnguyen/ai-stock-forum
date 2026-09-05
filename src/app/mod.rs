@@ -26,7 +26,8 @@ pub use outcome::{
 };
 pub use service::{
     ApplicationService, ApplicationWorker, AuthorizationDecision, CommandPolicy,
-    CommandTransactionHook, NoopCommandTransactionHook,
+    CommandTransactionHook, DatabaseReadiness, NoopCommandTransactionHook, PresentationSnapshot,
+    ProcessGuardOwnership,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]

@@ -3,6 +3,7 @@ mod panic_boundary;
 pub mod agents;
 pub mod app;
 pub mod audit;
+pub mod cli;
 pub mod config;
 pub mod domain;
 pub mod domains;

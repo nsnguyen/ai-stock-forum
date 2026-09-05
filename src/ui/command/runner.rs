@@ -1,7 +1,7 @@
 use std::{
     io::{self, BufRead, Write},
     panic::{AssertUnwindSafe, resume_unwind},
-    sync::{Arc, OnceLock},
+    sync::Arc,
     thread,
 };
 
@@ -623,7 +623,7 @@ pub struct StdioResources {
 
 impl StdioResources {
     pub fn initialize() -> Result<Self, UiError> {
-        let interrupts = interrupt_receiver()?;
+        let interrupts = crate::ui::interrupt::receiver().map_err(|_| UiError::InterruptHandler)?;
         #[cfg(unix)]
         {
             let source = UnixLineSource::stdin().map_err(|_| UiError::LineSourceUnavailable)?;
@@ -849,31 +849,6 @@ fn run_host_loop<W: Write>(
             }
         }
     }
-}
-
-struct InterruptBus {
-    receiver: Receiver<()>,
-}
-
-static INTERRUPT_BUS: OnceLock<Result<InterruptBus, ()>> = OnceLock::new();
-
-fn interrupt_receiver() -> Result<Receiver<()>, UiError> {
-    let bus = INTERRUPT_BUS.get_or_init(|| {
-        let (sender, receiver) = bounded(1);
-        let handler_sender = sender.clone();
-        ctrlc::set_handler(move || {
-            let _ = handler_sender.try_send(());
-        })
-        .map_err(|_| ())?;
-        Ok(InterruptBus { receiver })
-    });
-    let receiver = bus
-        .as_ref()
-        .map_err(|_| UiError::InterruptHandler)?
-        .receiver
-        .clone();
-    while receiver.try_recv().is_ok() {}
-    Ok(receiver)
 }
 
 pub fn run_stdio(
