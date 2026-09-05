@@ -781,3 +781,15 @@ Provider connections and real model readiness arrive in Phase 3. First-run
 setup reuses these profile validators and templates in Phase 5. Rooms pin exact
 profile versions in Phase 6. None of those later phases may bypass the immutable
 version, review, policy, or event boundaries defined here.
+
+## 21. Implementation Consistency Clarification: Immutable Version Mirror
+
+The agent_profile_versions table is an immutable materialized mirror of verified profile mutation events, not a disposable projection. Recovery compares it with the verified event stream using these rules:
+
+1. A missing expected immutable row may be backfilled from its verified event.
+2. An existing byte-equivalent row is retained unchanged.
+3. An existing row that differs from its verified event causes safe startup refusal.
+4. A row with no corresponding verified event causes safe startup refusal.
+5. Recovery never updates or deletes an immutable version row to repair suspicious history.
+
+Only active_agent_profiles is a disposable projection. Recovery may transactionally clear and rebuild that active pointer after immutable-history reconciliation succeeds. This clarification controls wherever earlier recovery wording could be read as allowing all profile rows to be deleted and rebuilt.
