@@ -42,7 +42,9 @@ pub fn handle_event(model: &mut TuiModel, event: TuiEvent) -> ControllerEffect {
             model.set_layout_mode(layout_mode(area));
             let (body_width, body_height) = workspace_body_size(area, model.inspector_open);
             model.set_workspace_body_size(body_width, body_height);
-            normalize_focus(model);
+            if model.focus != Focus::Command {
+                normalize_focus(model);
+            }
             ControllerEffect::Redraw
         }
         TuiEvent::Paste(text) => handle_paste(model, &text),
@@ -126,18 +128,6 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         return ControllerEffect::RequestShutdown(ShutdownReason::Interrupted);
     }
 
-    if model.layout_mode == LayoutMode::TooSmall {
-        return if is_plain_char(key, 'q') {
-            if agents_input_owner_active(model) {
-                ControllerEffect::None
-            } else {
-                ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
-            }
-        } else {
-            ControllerEffect::None
-        };
-    }
-
     if active_confirmation(model) {
         return handle_confirmation_key(model, key);
     }
@@ -148,6 +138,24 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
 
     if model.focus == Focus::Command {
         return handle_command_key(model, key);
+    }
+
+    if model.layout_mode == LayoutMode::TooSmall {
+        if model.active_view == View::Agents
+            && matches!(key.code, KeyCode::Esc)
+            && no_modifiers(key.modifiers)
+        {
+            return unwind_agents(model);
+        }
+        return if is_plain_char(key, 'q') {
+            if agents_input_owner_active(model) {
+                ControllerEffect::None
+            } else {
+                ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
+            }
+        } else {
+            ControllerEffect::None
+        };
     }
 
     if model.active_view == View::Agents {
@@ -253,9 +261,7 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
 }
 
 fn handle_paste(model: &mut TuiModel, text: &str) -> ControllerEffect {
-    if model.layout_mode == LayoutMode::TooSmall
-        || (!active_profile_editor(model) && model.focus != Focus::Command)
-    {
+    if !active_profile_editor(model) && model.focus != Focus::Command {
         return ControllerEffect::None;
     }
     let before = model.command.text().len();
@@ -391,6 +397,14 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
         (AgentsPane::Detail, KeyCode::Char('h')) if no_modifiers(key.modifiers) => {
             model.agents.pane = AgentsPane::History;
             ControllerEffect::LoadAgentProfileHistory { selected_profile: model.agents.selected_profile }
+        }
+        (AgentsPane::Detail, KeyCode::Down) if no_modifiers(key.modifiers) => {
+            model.agents.detail_scroll = model.agents.detail_scroll.saturating_add(1);
+            ControllerEffect::Redraw
+        }
+        (AgentsPane::Detail, KeyCode::Up) if no_modifiers(key.modifiers) => {
+            model.agents.detail_scroll = model.agents.detail_scroll.saturating_sub(1);
+            ControllerEffect::Redraw
         }
         (AgentsPane::Detail, KeyCode::Char('e')) if no_modifiers(key.modifiers) => {
             model.agents.pane = AgentsPane::Editor;
@@ -969,7 +983,7 @@ mod tests {
     }
 
     #[test]
-    fn too_small_keeps_quit_inactive_while_command_text_owns_input() {
+    fn too_small_routes_quit_to_command_text_owner() {
         let mut tiny = model();
         tiny.layout_mode = LayoutMode::TooSmall;
         let before = tiny.clone();
@@ -993,9 +1007,9 @@ mod tests {
         command_tiny.layout_mode = LayoutMode::TooSmall;
         assert_eq!(
             handle_event(&mut command_tiny, key('q')),
-            ControllerEffect::None
+            ControllerEffect::Redraw
         );
-        assert_eq!(command_tiny.command.text(), "");
+        assert_eq!(command_tiny.command.text(), "q");
     }
 
     #[test]
@@ -1188,7 +1202,7 @@ mod tests {
     }
 
     #[test]
-    fn too_small_q_quits_even_after_command_focus_was_active_before_resize() {
+    fn too_small_resize_keeps_command_text_owner_active() {
         let mut model = model();
         assert_eq!(handle_event(&mut model, key('/')), ControllerEffect::Redraw);
         assert_eq!(model.focus, Focus::Command);
@@ -1199,8 +1213,9 @@ mod tests {
 
         assert_eq!(
             handle_event(&mut model, key('q')),
-            ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
+            ControllerEffect::Redraw
         );
+        assert_eq!(model.command.text(), "/q");
     }
 
     #[test]

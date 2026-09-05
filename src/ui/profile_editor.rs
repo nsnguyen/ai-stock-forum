@@ -96,7 +96,7 @@ enum IdentityField {
     Description,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileEditor {
     mode: ProfileEditorMode,
     step: ProfileEditorStep,

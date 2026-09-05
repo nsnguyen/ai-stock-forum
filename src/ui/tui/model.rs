@@ -33,7 +33,7 @@ pub struct ProfileConfirmation {
     pub command: ApplicationCommand,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentsViewState {
     pub selected_profile: usize,
     pub selected_template: usize,
@@ -44,21 +44,6 @@ pub struct AgentsViewState {
     pub editor: Option<ProfileEditor>,
     pub pending_confirmation: Option<ProfileConfirmation>,
 }
-
-impl PartialEq for AgentsViewState {
-    fn eq(&self, other: &Self) -> bool {
-        self.selected_profile == other.selected_profile
-            && self.selected_template == other.selected_template
-            && self.pane == other.pane
-            && self.list_scroll == other.list_scroll
-            && self.detail_scroll == other.detail_scroll
-            && self.history_scroll == other.history_scroll
-            && self.editor.is_some() == other.editor.is_some()
-            && self.pending_confirmation == other.pending_confirmation
-    }
-}
-
-impl Eq for AgentsViewState {}
 
 impl Default for AgentsViewState {
     fn default() -> Self {
