@@ -14,6 +14,7 @@ use crate::{
 pub struct ProjectionState {
     pub installation: Option<InstallationProjection>,
     pub sessions: BTreeMap<SessionId, SessionProjection>,
+    #[serde(skip_serializing_if = "AgentProfilesProjection::is_empty")]
     pub agent_profiles: AgentProfilesProjection,
     pub setup_status: SetupStatus,
     pub last_sequence: u64,
@@ -165,10 +166,15 @@ impl ProjectionState {
 struct PersistentProjectionState<'a> {
     installation: &'a Option<InstallationProjection>,
     sessions: &'a BTreeMap<SessionId, SessionProjection>,
+    #[serde(skip_serializing_if = "agent_profiles_are_empty")]
     agent_profiles: &'a AgentProfilesProjection,
     setup_status: &'a SetupStatus,
     last_sequence: u64,
     last_event_digest: &'a Option<Sha256Digest>,
+}
+
+fn agent_profiles_are_empty(profiles: &&AgentProfilesProjection) -> bool {
+    profiles.is_empty()
 }
 
 pub fn reduce(

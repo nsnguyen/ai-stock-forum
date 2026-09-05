@@ -96,3 +96,87 @@ None.
 Commit message: `feat: reconcile durable agent profile history`
 
 This report is included in that commit; the resulting commit hash is returned in the task response.
+
+## Fix Round 1: Preserve Legacy Projection Digests
+
+### Compatibility Finding
+
+Task 5 initially included `agent_profiles` unconditionally in `ProjectionState` and persistent digest serialization. An empty profile projection therefore changed valid pre-Phase-2 canonical bytes and digests, causing startup to rebuild an otherwise valid projection and append `projection_rebuilt` unnecessarily.
+
+### RED Evidence
+
+Command:
+
+```text
+cargo test --test agent_profile_recovery_contract
+```
+
+Result: exit 101; 8 passed, 2 failed.
+
+Expected failures:
+
+- `empty_agent_profiles_preserve_legacy_canonical_bytes_and_digest` showed that empty `agent_profiles` bytes were present in the canonical projection.
+- `pre_phase_two_projection_digest_starts_without_a_recovery_event` observed one unexpected `projection_rebuilt` event from a database seeded with the actual legacy canonical projection shape and its digest.
+
+The independent `non_empty_agent_profiles_change_the_projection_digest` protection test passed during RED.
+
+### GREEN Evidence
+
+Command:
+
+```text
+cargo test --test agent_profile_recovery_contract
+```
+
+Result: exit 0; 10 passed, 0 failed.
+
+Command:
+
+```text
+cargo test --test agent_profile_persistence_contract
+```
+
+Result: exit 0; 5 passed, 0 failed.
+
+Command:
+
+```text
+cargo test --test recovery_contract
+```
+
+Result: exit 0; 22 passed, 0 failed.
+
+### Full Suite
+
+Command:
+
+```text
+cargo test
+```
+
+Result: exit 0; 354 passed, 0 failed, 0 ignored across unit, integration, and documentation test targets.
+
+### Files
+
+- Modified `src/agents/projection.rs`
+- Modified `src/recovery/reducer.rs`
+- Modified `tests/agent_profile_recovery_contract.rs`
+- Appended `.superpowers/sdd/2026-09-05-phase-2-agent-profile-foundation/task-5-report.md`
+
+### Self-Review
+
+- `AgentProfilesProjection::is_empty` checks all three deterministic maps.
+- Empty profile projections are omitted from both public canonical serialization and internal persistent digest material.
+- `ProjectionStateWire` continues to accept the omitted field through its existing deserialization default.
+- Non-empty profile projections remain canonicalized and materially change the projection digest.
+- The upgrade fixture seeds the exact legacy field shape and digest, then verifies startup retains the installation state and appends no recovery event.
+- Digest verification remains strict and no schema column or migration was added.
+- No plan, specification, worktree, application-command, or immutable-history behavior was changed.
+
+### Concerns
+
+None.
+
+### Commit
+
+Commit message: `fix: preserve legacy projection digests`

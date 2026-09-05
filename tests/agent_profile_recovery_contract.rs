@@ -6,12 +6,12 @@ use ai_stock_forum::{
     config::{AppPaths, StartupError},
     domain::{
         Actor, AgentProfileId, AgentProfileVersionId, Clock, CorrelationId, EventId, IdGenerator,
-        MemoryNamespaceId,
+        InstallationId, MemoryNamespaceId, canonical_json_bytes, sha256,
     },
     persistence::{
         Database, EventRepository, RecoveryError, insert_expected_version, load_all_versions,
     },
-    recovery::{BootstrapState, RecoveryCoordinator},
+    recovery::{BootstrapState, ProjectionState, RecoveryCoordinator, reduce},
 };
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -63,9 +63,13 @@ impl Fixture {
         }
     }
 
-    fn append(&mut self, event_id: u128, event: ApplicationEvent) {
+    fn append(
+        &mut self,
+        event_id: u128,
+        event: ApplicationEvent,
+    ) -> ai_stock_forum::app::EventEnvelope {
         let transaction = self.database.immediate_transaction().unwrap();
-        EventRepository::append(
+        let envelope = EventRepository::append(
             &transaction,
             PendingEvent {
                 event_id: EventId::from_uuid(Uuid::from_u128(event_id)),
@@ -80,6 +84,7 @@ impl Fixture {
         )
         .unwrap();
         transaction.commit().unwrap();
+        envelope
     }
 
     fn bootstrap(&mut self) -> Result<BootstrapState, StartupError> {
@@ -384,6 +389,112 @@ fn legacy_event_stream_without_profile_events_recovers_as_empty_profile_state() 
                 .get::<_, i64>(0))
             .unwrap(),
         0
+    );
+}
+
+#[test]
+fn empty_agent_profiles_preserve_legacy_canonical_bytes_and_digest() {
+    let state = ProjectionState::default();
+    let legacy_bytes = br#"{"installation":null,"last_event_digest":null,"last_sequence":0,"sessions":{},"setup_status":"not_started"}"#;
+
+    assert_eq!(canonical_json_bytes(&state).unwrap(), legacy_bytes);
+    assert_eq!(state.digest().unwrap(), sha256(legacy_bytes));
+}
+
+#[test]
+fn non_empty_agent_profiles_change_the_projection_digest() {
+    let mut fixture = Fixture::new();
+    let profile = profile_v1();
+    let created = fixture.append(
+        601,
+        ApplicationEvent::AgentProfileCreated {
+            profile: profile.clone(),
+        },
+    );
+    let mut with_profile = ProjectionState::default();
+    reduce(&mut with_profile, &created).unwrap();
+    let mut without_profile = with_profile.clone();
+    without_profile.agent_profiles = Default::default();
+
+    assert_ne!(with_profile.digest().unwrap(), without_profile.digest().unwrap());
+    assert!(
+        std::str::from_utf8(&canonical_json_bytes(&with_profile).unwrap())
+            .unwrap()
+            .contains("\"agent_profiles\"")
+    );
+}
+
+#[test]
+fn pre_phase_two_projection_digest_starts_without_a_recovery_event() {
+    let mut fixture = Fixture::new();
+    let installation_id = InstallationId::from_uuid(Uuid::from_u128(701));
+    let initialized = fixture.append(
+        701,
+        ApplicationEvent::InstallationInitialized { installation_id },
+    );
+    let legacy_bytes = format!(
+        "{{\"installation\":{{\"created_at_ms\":{},\"created_event_id\":\"{}\",\"installation_id\":\"{}\"}},\"last_event_digest\":\"{}\",\"last_sequence\":1,\"sessions\":{{}},\"setup_status\":\"not_started\"}}",
+        initialized.occurred_at_ms,
+        initialized.event_id,
+        installation_id,
+        initialized.event_digest,
+    )
+    .into_bytes();
+    let legacy_digest = sha256(&legacy_bytes);
+    fixture
+        .database
+        .connection()
+        .execute(
+            "INSERT INTO installation_projection
+                (singleton, installation_id, created_event_id, created_at_ms)
+             VALUES (1, ?1, ?2, ?3)",
+            rusqlite::params![
+                installation_id.to_string(),
+                initialized.event_id.to_string(),
+                initialized.occurred_at_ms,
+            ],
+        )
+        .unwrap();
+    fixture
+        .database
+        .connection()
+        .execute(
+            "INSERT INTO projection_metadata
+                (singleton, last_event_sequence, last_event_digest, projection_digest)
+             VALUES (1, 1, ?1, ?2)",
+            rusqlite::params![initialized.event_digest.as_str(), legacy_digest.as_str()],
+        )
+        .unwrap();
+
+    let state = fixture.bootstrap().unwrap();
+
+    assert_eq!(state.installation_id(), installation_id);
+    let retained = state.projection().installation.as_ref().unwrap();
+    assert_eq!(retained.created_event_id, initialized.event_id);
+    assert_eq!(retained.created_at_ms, initialized.occurred_at_ms);
+    assert_eq!(
+        fixture
+            .database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM event_stream WHERE event_type = 'projection_rebuilt'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        fixture
+            .database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM event_stream WHERE event_type = 'installation_initialized'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
     );
 }
 

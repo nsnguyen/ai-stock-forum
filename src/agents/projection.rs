@@ -19,6 +19,12 @@ pub struct AgentProfilesProjection {
 }
 
 impl AgentProfilesProjection {
+    pub fn is_empty(&self) -> bool {
+        self.versions_by_id.is_empty()
+            && self.active_by_profile.is_empty()
+            && self.active_name_index.is_empty()
+    }
+
     pub fn active_profiles(&self) -> Vec<AgentProfileVersion> {
         let mut profiles = self
             .active_by_profile
