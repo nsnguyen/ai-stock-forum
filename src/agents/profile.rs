@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
     agents::{normalize_profile_name_key, normalize_tag_key, validate_visible_text},
@@ -19,6 +19,7 @@ const SPECIALTY_TAG_MAX_BYTES: usize = 48;
 const MAX_SPECIALTY_TAGS: usize = 5;
 const PERSONALITY_MAX_BYTES: usize = 1_024;
 const INSTRUCTIONS_MAX_BYTES: usize = 4_096;
+const DEFAULT_POLICY_REF: &str = "profile-default/v1";
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -210,8 +211,7 @@ fn validate_bindings(bindings: &AgentBindings) -> Result<(), DomainError> {
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AgentProfileVersion {
     profile_id: AgentProfileId,
     profile_version_id: AgentProfileVersionId,
@@ -235,6 +235,82 @@ pub struct AgentProfileVersion {
     supersedes: Option<AgentProfileVersionId>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentProfileVersionWire {
+    profile_id: AgentProfileId,
+    profile_version_id: AgentProfileVersionId,
+    version: ObjectVersion,
+    content_digest: Digest,
+    display_name: String,
+    normalized_name: super::NormalizedProfileName,
+    description: String,
+    role: AgentRole,
+    primary_specialty: String,
+    specialty_tags: Vec<String>,
+    personality: String,
+    instructions: String,
+    bindings: AgentBindings,
+    skill_refs: Vec<SkillRef>,
+    mcp_refs: Vec<McpRef>,
+    memory_namespace_id: MemoryNamespaceId,
+    default_policy_ref: String,
+    template_provenance: Option<ProfileTemplateProvenance>,
+    created_at_ms: i64,
+    supersedes: Option<AgentProfileVersionId>,
+}
+
+impl<'de> Deserialize<'de> for AgentProfileVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = AgentProfileVersionWire::deserialize(deserializer)?;
+        let normalized_name = normalize_profile_name_key(&wire.display_name)
+            .map_err(serde::de::Error::custom)?;
+        if normalized_name != wire.normalized_name
+            || wire.default_policy_ref != DEFAULT_POLICY_REF
+            || (wire.version.get() == 1) != wire.supersedes.is_none()
+        {
+            return Err(serde::de::Error::custom("agent profile version is invalid"));
+        }
+        if let Some(provenance) = &wire.template_provenance {
+            super::profile_template_from_provenance(provenance)
+                .map_err(serde::de::Error::custom)?;
+        }
+        let draft = AgentProfileDraft::new_with_provenance(
+            wire.display_name,
+            wire.description,
+            wire.role,
+            wire.primary_specialty,
+            wire.specialty_tags,
+            wire.personality,
+            wire.instructions,
+            wire.bindings,
+            wire.skill_refs,
+            wire.mcp_refs,
+            wire.template_provenance.clone(),
+        )
+        .map_err(serde::de::Error::custom)?;
+        let profile = Self::from_draft(
+            wire.profile_id,
+            wire.profile_version_id,
+            wire.version,
+            wire.memory_namespace_id,
+            wire.default_policy_ref,
+            wire.created_at_ms,
+            wire.supersedes,
+            wire.template_provenance,
+            draft,
+        )
+        .map_err(serde::de::Error::custom)?;
+        if profile.content_digest != wire.content_digest {
+            return Err(serde::de::Error::custom("agent profile content digest is invalid"));
+        }
+        Ok(profile)
+    }
+}
+
 impl AgentProfileVersion {
     pub fn create(
         profile_id: AgentProfileId,
@@ -249,7 +325,7 @@ impl AgentProfileVersion {
             profile_version_id,
             ObjectVersion::new(1)?,
             memory_namespace_id,
-            "profile-default/v1".to_owned(),
+            DEFAULT_POLICY_REF.to_owned(),
             created_at_ms,
             None,
             provenance,

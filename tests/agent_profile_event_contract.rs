@@ -6,7 +6,7 @@ use ai_stock_forum::{
         Actor, AgentProfileId, AgentProfileVersionId, CorrelationId, EventId, MemoryNamespaceId,
         sha256,
     },
-    persistence::{Database, EventRepository, RecoveryError},
+    persistence::{Database, EventRepository, ProjectionRepository, RecoveryError},
     recovery::{ProjectionState, reduce},
 };
 use serde_json::json;
@@ -137,22 +137,21 @@ fn unknown_profile_event_kind_fails_safely() {
 }
 
 #[test]
-fn reducer_rejects_a_profile_with_an_altered_content_digest() {
-    let mut database = database();
+fn profile_wire_rejects_a_normalized_name_that_does_not_match_the_visible_name() {
+    let profile = profile(1, 2, "Research Analyst");
+    let mut profile_json = serde_json::to_value(profile).unwrap();
+    profile_json["normalized_name"] = json!("forged unique name");
+
+    assert!(serde_json::from_value::<AgentProfileVersion>(profile_json).is_err());
+}
+
+#[test]
+fn profile_wire_rejects_an_altered_content_digest_before_reduction() {
     let profile = profile(1, 2, "Research Analyst");
     let mut profile_json = serde_json::to_value(profile).unwrap();
     profile_json["content_digest"] = json!(sha256(b"altered-profile"));
-    let altered = serde_json::from_value(profile_json).unwrap();
-    let event = append(
-        &mut database,
-        10,
-        ApplicationEvent::AgentProfileCreated { profile: altered },
-    );
 
-    assert_eq!(
-        reduce(&mut ProjectionState::default(), &event),
-        Err(RecoveryError::InvalidEventRecord)
-    );
+    assert!(serde_json::from_value::<AgentProfileVersion>(profile_json).is_err());
 }
 
 #[test]
@@ -235,8 +234,9 @@ fn create_then_edit_has_one_active_version_two_historical_versions_and_recovery_
         },
     );
 
-    let direct = reduce_all(&[created.clone(), activated.clone()]);
-    let recovered = reduce_all(&[created, activated]);
+    let events = vec![created, activated];
+    let direct = reduce_all(&events);
+    let recovered = ProjectionRepository::rebuild(database.connection_mut(), &events).unwrap();
     let profiles = &direct.agent_profiles;
 
     assert_eq!(profiles.active_profiles(), vec![profile_v2.clone()]);
@@ -253,5 +253,8 @@ fn create_then_edit_has_one_active_version_two_historical_versions_and_recovery_
         profiles.version(profile_v2.profile_version_id()),
         Some(&profile_v2)
     );
-    assert_eq!(serde_json::to_vec(&direct).unwrap(), serde_json::to_vec(&recovered).unwrap());
+    assert_eq!(
+        serde_json::to_vec(&direct.agent_profiles).unwrap(),
+        serde_json::to_vec(&recovered.agent_profiles).unwrap()
+    );
 }
