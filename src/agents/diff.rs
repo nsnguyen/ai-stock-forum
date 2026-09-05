@@ -7,7 +7,7 @@ use crate::{
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ProfileField {
+pub enum ProfileDiffField {
     DisplayName,
     Description,
     Role,
@@ -29,7 +29,7 @@ pub enum ProfileFieldValue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileFieldDiff {
-    pub field: ProfileField,
+    pub field: ProfileDiffField,
     pub before: ProfileFieldValue,
     pub after: ProfileFieldValue,
 }
@@ -42,52 +42,52 @@ pub fn diff_profile(
 
     push_text_change(
         &mut changes,
-        ProfileField::DisplayName,
-        &current.display_name,
+        ProfileDiffField::DisplayName,
+        current.display_name(),
         &candidate.display_name,
     );
     push_text_change(
         &mut changes,
-        ProfileField::Description,
-        &current.description,
+        ProfileDiffField::Description,
+        current.description(),
         &candidate.description,
     );
-    if current.role != candidate.role {
+    if current.role() != candidate.role {
         changes.push(ProfileFieldDiff {
-            field: ProfileField::Role,
-            before: ProfileFieldValue::Role(current.role),
+            field: ProfileDiffField::Role,
+            before: ProfileFieldValue::Role(current.role()),
             after: ProfileFieldValue::Role(candidate.role),
         });
     }
     push_text_change(
         &mut changes,
-        ProfileField::PrimarySpecialty,
-        &current.primary_specialty,
+        ProfileDiffField::PrimarySpecialty,
+        current.primary_specialty(),
         &candidate.primary_specialty,
     );
-    if current.specialty_tags != candidate.specialty_tags {
+    if current.specialty_tags() != candidate.specialty_tags {
         changes.push(ProfileFieldDiff {
-            field: ProfileField::SpecialtyTags,
-            before: ProfileFieldValue::SpecialtyTags(current.specialty_tags.clone()),
+            field: ProfileDiffField::SpecialtyTags,
+            before: ProfileFieldValue::SpecialtyTags(current.specialty_tags().to_vec()),
             after: ProfileFieldValue::SpecialtyTags(candidate.specialty_tags.clone()),
         });
     }
     push_text_change(
         &mut changes,
-        ProfileField::Personality,
-        &current.personality,
+        ProfileDiffField::Personality,
+        current.personality(),
         &candidate.personality,
     );
     push_text_change(
         &mut changes,
-        ProfileField::Instructions,
-        &current.instructions,
+        ProfileDiffField::Instructions,
+        current.instructions(),
         &candidate.instructions,
     );
-    if current.bindings != candidate.bindings {
+    if current.bindings() != &candidate.bindings {
         changes.push(ProfileFieldDiff {
-            field: ProfileField::Bindings,
-            before: ProfileFieldValue::Bindings(current.bindings.clone()),
+            field: ProfileDiffField::Bindings,
+            before: ProfileFieldValue::Bindings(current.bindings().clone()),
             after: ProfileFieldValue::Bindings(candidate.bindings.clone()),
         });
     }
@@ -101,7 +101,7 @@ pub fn diff_profile(
 
 fn push_text_change(
     changes: &mut Vec<ProfileFieldDiff>,
-    field: ProfileField,
+    field: ProfileDiffField,
     before: &str,
     after: &str,
 ) {

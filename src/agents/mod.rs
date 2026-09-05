@@ -6,9 +6,10 @@ mod diff;
 mod profile;
 mod template;
 
-pub use diff::{ProfileField, ProfileFieldDiff, ProfileFieldValue, diff_profile};
+pub use diff::{ProfileDiffField, ProfileFieldDiff, ProfileFieldValue, diff_profile};
 pub use normalization::{
-    NormalizedProfileName, normalize_profile_name_key, normalize_tag_key, validate_visible_text,
+    NormalizedProfileName, ProfileField, normalize_profile_name_key, normalize_tag_key,
+    validate_visible_text,
 };
 pub use profile::{
     AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentReadiness, AgentRole, McpRef,

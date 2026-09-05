@@ -212,26 +212,26 @@ fn validate_bindings(bindings: &AgentBindings) -> Result<(), DomainError> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentProfileVersion {
-    pub profile_id: AgentProfileId,
-    pub profile_version_id: AgentProfileVersionId,
-    pub version: ObjectVersion,
-    pub content_digest: Digest,
-    pub display_name: String,
-    pub normalized_name: super::NormalizedProfileName,
-    pub description: String,
-    pub role: AgentRole,
-    pub primary_specialty: String,
-    pub specialty_tags: Vec<String>,
-    pub personality: String,
-    pub instructions: String,
-    pub bindings: AgentBindings,
-    pub skill_refs: Vec<SkillRef>,
-    pub mcp_refs: Vec<McpRef>,
-    pub memory_namespace_id: MemoryNamespaceId,
-    pub default_policy_ref: String,
-    pub template_provenance: Option<ProfileTemplateProvenance>,
-    pub created_at_ms: i64,
-    pub supersedes: Option<AgentProfileVersionId>,
+    profile_id: AgentProfileId,
+    profile_version_id: AgentProfileVersionId,
+    version: ObjectVersion,
+    content_digest: Digest,
+    display_name: String,
+    normalized_name: super::NormalizedProfileName,
+    description: String,
+    role: AgentRole,
+    primary_specialty: String,
+    specialty_tags: Vec<String>,
+    personality: String,
+    instructions: String,
+    bindings: AgentBindings,
+    skill_refs: Vec<SkillRef>,
+    mcp_refs: Vec<McpRef>,
+    memory_namespace_id: MemoryNamespaceId,
+    default_policy_ref: String,
+    template_provenance: Option<ProfileTemplateProvenance>,
+    created_at_ms: i64,
+    supersedes: Option<AgentProfileVersionId>,
 }
 
 impl AgentProfileVersion {
@@ -254,6 +254,86 @@ impl AgentProfileVersion {
             provenance,
             draft,
         )
+    }
+
+    pub fn profile_id(&self) -> AgentProfileId {
+        self.profile_id
+    }
+
+    pub fn profile_version_id(&self) -> AgentProfileVersionId {
+        self.profile_version_id
+    }
+
+    pub fn version(&self) -> ObjectVersion {
+        self.version
+    }
+
+    pub fn content_digest(&self) -> &Digest {
+        &self.content_digest
+    }
+
+    pub fn display_name(&self) -> &str {
+        &self.display_name
+    }
+
+    pub fn normalized_name(&self) -> &super::NormalizedProfileName {
+        &self.normalized_name
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    pub fn role(&self) -> AgentRole {
+        self.role
+    }
+
+    pub fn primary_specialty(&self) -> &str {
+        &self.primary_specialty
+    }
+
+    pub fn specialty_tags(&self) -> &[String] {
+        &self.specialty_tags
+    }
+
+    pub fn personality(&self) -> &str {
+        &self.personality
+    }
+
+    pub fn instructions(&self) -> &str {
+        &self.instructions
+    }
+
+    pub fn bindings(&self) -> &AgentBindings {
+        &self.bindings
+    }
+
+    pub fn skill_refs(&self) -> &[SkillRef] {
+        &self.skill_refs
+    }
+
+    pub fn mcp_refs(&self) -> &[McpRef] {
+        &self.mcp_refs
+    }
+
+    pub fn memory_namespace_id(&self) -> MemoryNamespaceId {
+        self.memory_namespace_id
+    }
+
+    pub fn default_policy_ref(&self) -> &str {
+        &self.default_policy_ref
+    }
+
+    pub fn template_provenance(&self) -> Option<&ProfileTemplateProvenance> {
+        self.template_provenance.as_ref()
+    }
+
+    pub fn created_at_ms(&self) -> i64 {
+        self.created_at_ms
+    }
+
+    pub fn supersedes(&self) -> Option<AgentProfileVersionId> {
+        self.supersedes
     }
 
     pub fn next_version(

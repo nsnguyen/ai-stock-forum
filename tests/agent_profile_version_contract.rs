@@ -1,12 +1,10 @@
-use std::collections::BTreeMap;
-
 use ai_stock_forum::{
     agents::{
         diff_profile, AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentRole,
-        ProfileField, ProfileFieldValue,
+        ProfileDiffField, ProfileFieldValue,
     },
     domain::{
-        canonical_json_bytes, sha256, AgentProfileId, AgentProfileVersionId, MemoryNamespaceId,
+        canonical_json_bytes, AgentProfileId, AgentProfileVersionId, MemoryNamespaceId,
     },
 };
 use proptest::prelude::*;
@@ -54,26 +52,46 @@ fn create(draft: AgentProfileDraft) -> AgentProfileVersion {
 
 #[test]
 fn canonical_profile_digest_is_independent_of_json_map_order() {
-    let mut first = BTreeMap::new();
-    first.insert("display_name", "Research Analyst");
-    first.insert("role", "custom");
-    let mut second = BTreeMap::new();
-    second.insert("role", "custom");
-    second.insert("display_name", "Research Analyst");
+    // Profile inputs contain no maps: bindings and provenance are structs, while tags and
+    // references are ordered vectors. Equivalent bindings therefore cover the relevant
+    // canonical profile payload ordering without inventing a map-only test fixture.
+    let mut first_draft = valid_draft();
+    first_draft.bindings = AgentBindings {
+        model_provider: Some("openai".to_owned()),
+        model_name: Some("gpt-5".to_owned()),
+    };
+    let mut second_draft = valid_draft();
+    second_draft.bindings = AgentBindings {
+        model_name: Some("gpt-5".to_owned()),
+        model_provider: Some("openai".to_owned()),
+    };
+
+    let first = create(first_draft);
+    let second = create(second_draft);
 
     assert_eq!(
-        sha256(&canonical_json_bytes(&first).unwrap()),
-        sha256(&canonical_json_bytes(&second).unwrap()),
+        canonical_json_bytes(first.bindings()).unwrap(),
+        canonical_json_bytes(second.bindings()).unwrap(),
     );
-    assert_eq!(create(valid_draft()).content_digest, create(valid_draft()).content_digest);
+    assert_eq!(first.content_digest(), second.content_digest());
+}
+
+#[test]
+fn changing_semantic_profile_content_changes_content_digest() {
+    let original = create(valid_draft());
+    let mut changed_draft = valid_draft();
+    changed_draft.instructions = "State assumptions before making a claim.".to_owned();
+    let changed = create(changed_draft);
+
+    assert_ne!(original.content_digest(), changed.content_digest());
 }
 
 #[test]
 fn version_one_has_no_predecessor_and_edit_increments_once() {
     let current = create(valid_draft());
-    assert_eq!(current.version.get(), 1);
-    assert_eq!(current.supersedes, None);
-    assert_eq!(current.default_policy_ref, "profile-default/v1");
+    assert_eq!(current.version().get(), 1);
+    assert_eq!(current.supersedes(), None);
+    assert_eq!(current.default_policy_ref(), "profile-default/v1");
 
     let candidate = AgentProfileDraft::new(
         "Research Analyst".to_owned(),
@@ -96,12 +114,12 @@ fn version_one_has_no_predecessor_and_edit_increments_once() {
     )
     .unwrap();
 
-    assert_eq!(next.version.get(), 2);
-    assert_eq!(next.supersedes, Some(current.profile_version_id));
-    assert_eq!(next.profile_id, current.profile_id);
-    assert_eq!(next.memory_namespace_id, current.memory_namespace_id);
-    assert_eq!(next.default_policy_ref, current.default_policy_ref);
-    assert_eq!(next.template_provenance, current.template_provenance);
+    assert_eq!(next.version().get(), 2);
+    assert_eq!(next.supersedes(), Some(current.profile_version_id()));
+    assert_eq!(next.profile_id(), current.profile_id());
+    assert_eq!(next.memory_namespace_id(), current.memory_namespace_id());
+    assert_eq!(next.default_policy_ref(), current.default_policy_ref());
+    assert_eq!(next.template_provenance(), current.template_provenance());
 }
 
 #[test]
@@ -129,14 +147,14 @@ fn semantic_diff_lists_only_changed_fields_in_fixed_order() {
     assert_eq!(
         diff.iter().map(|change| change.field).collect::<Vec<_>>(),
         vec![
-            ProfileField::DisplayName,
-            ProfileField::Description,
-            ProfileField::Role,
-            ProfileField::PrimarySpecialty,
-            ProfileField::SpecialtyTags,
-            ProfileField::Personality,
-            ProfileField::Instructions,
-            ProfileField::Bindings,
+            ProfileDiffField::DisplayName,
+            ProfileDiffField::Description,
+            ProfileDiffField::Role,
+            ProfileDiffField::PrimarySpecialty,
+            ProfileDiffField::SpecialtyTags,
+            ProfileDiffField::Personality,
+            ProfileDiffField::Instructions,
+            ProfileDiffField::Bindings,
         ],
     );
     assert_eq!(
@@ -202,6 +220,6 @@ proptest! {
         let second = create(draft);
 
         prop_assert_eq!(&first, &second);
-        prop_assert_eq!(&first.content_digest, &second.content_digest);
+        prop_assert_eq!(first.content_digest(), second.content_digest());
     }
 }
