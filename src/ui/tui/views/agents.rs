@@ -17,7 +17,7 @@ use crate::{
         profile_editor::{ProfileEditor, ProfileEditorMode, ProfileEditorStep},
         tui::{
             layout::{agent_layout_mode, agent_workspace},
-            model::{AgentsPane, LayoutMode, TuiModel},
+            model::{AgentsPane, TuiModel},
             theme::Theme,
         },
     },
@@ -31,14 +31,7 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
     if let Some(list) = layout.list {
         render_list(frame, list, model, theme);
     }
-    render_active(
-        frame,
-        layout.active,
-        model,
-        theme,
-        layout.list.is_none(),
-        mode,
-    );
+    render_active(frame, layout.active, model, theme, layout.list.is_none());
 }
 
 pub(super) fn content_height(_model: &TuiModel, _width: u16) -> u16 {
@@ -51,18 +44,13 @@ fn render_active(
     model: &TuiModel,
     theme: &Theme,
     one_pane: bool,
-    mode: LayoutMode,
 ) {
     match model.agents.pane {
         AgentsPane::List if one_pane => render_list(frame, area, model, theme),
         AgentsPane::Editor => render_editor(frame, area, model, theme),
         AgentsPane::Confirmation => render_confirmation(frame, area, model, theme),
-        AgentsPane::History if mode != LayoutMode::Wide => {
-            render_history(frame, area, model, theme)
-        }
-        AgentsPane::List | AgentsPane::Detail | AgentsPane::History => {
-            render_detail(frame, area, model, theme)
-        }
+        AgentsPane::History => render_history(frame, area, model, theme),
+        AgentsPane::List | AgentsPane::Detail => render_detail(frame, area, model, theme),
     }
 }
 
@@ -285,7 +273,21 @@ fn history_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
             Line::raw("Press h from profile detail to load version history."),
         ];
     };
-    let mut lines = vec![
+    let mut lines = Vec::new();
+    if let Some(detail) = &model.agents.version_detail {
+        lines.push(Line::styled("HISTORICAL VERSION", theme.accent));
+        lines.extend(profile_version_lines(
+            &detail.profile,
+            detail.readiness,
+            "Historical version",
+            theme,
+        ));
+        lines.push(Line::default());
+        lines.push(Line::styled("PREDECESSOR DIFF", theme.accent));
+        append_diffs(&mut lines, &detail.predecessor_diff, theme);
+        lines.push(Line::default());
+    }
+    lines.extend([
         label_value("Profile ID", history.profile_id.to_string(), theme),
         label_value(
             "Active version",
@@ -296,7 +298,7 @@ fn history_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
         label_value("Returned", history.returned_count.to_string(), theme),
         label_value("Truncated", history.truncated.to_string(), theme),
         Line::default(),
-    ];
+    ]);
     for (index, entry) in history.versions.iter().enumerate() {
         let active = entry.profile_version_id == history.active_version_id;
         let selected = index == model.agents.selected_history_version;
@@ -339,18 +341,7 @@ fn history_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
         ));
         lines.push(Line::default());
     }
-    if let Some(detail) = &model.agents.version_detail {
-        lines.push(Line::styled("HISTORICAL VERSION", theme.accent));
-        lines.extend(profile_version_lines(
-            &detail.profile,
-            detail.readiness,
-            "Historical version",
-            theme,
-        ));
-        lines.push(Line::default());
-        lines.push(Line::styled("PREDECESSOR DIFF", theme.accent));
-        append_diffs(&mut lines, &detail.predecessor_diff, theme);
-    } else if !history.versions.is_empty() {
+    if model.agents.version_detail.is_none() && !history.versions.is_empty() {
         lines.push(Line::styled(
             "Use Up/Down to select a version, then Enter to inspect it.",
             theme.muted,

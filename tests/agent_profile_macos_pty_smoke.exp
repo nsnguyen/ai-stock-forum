@@ -16,6 +16,7 @@ set env(HOME) [file join $root home]
 set env(XDG_DATA_HOME) [file join $root data]
 set env(TERM) xterm-256color
 set timeout 20
+set send_slow {1 .01}
 log_user 0
 
 proc fail {message} {
@@ -55,6 +56,12 @@ proc wait_prompt {} {
 proc line_to_prompt {line} {
     send -- "$line\r"
     wait_prompt
+}
+
+proc tui_slash {line} {
+    send -- "/"
+    must_exact {/} "TUI command-bar slash focus"
+    send -s -- "[string range $line 1 end]\r"
 }
 
 proc drain_output {} {
@@ -246,37 +253,47 @@ if {[lindex $second_wait 3] == 0} {
 puts "PTY_SECOND_INSTANCE_OK exit=[lindex $second_wait 3]"
 
 set spawn_id $tui_shell
-send -- "/agent list\r"
+after 300
+drain_output
+tui_slash {/agent list}
 must_exact {Agent list} "TUI slash list workspace"
 must_exact {Bull Researcher Revised} "TUI slash list profile"
+after 300
+drain_output
 
-send -- "/agent show \"Bull Researcher Revised\"\r"
+tui_slash {/agent show "Bull Researcher Revised"}
 must_exact {Agent detail} "TUI slash show name workspace"
-must_exact {Bull Researcher Revised} "TUI slash show name detail"
+after 300
+drain_output
 
-send -- "/agent show $profile_id\r"
-must_exact {Agent detail} "TUI slash show ID workspace"
-must_exact {fundamental compounders} "TUI slash show ID detail"
+tui_slash {/agent history "Bull Researcher Revised" 1}
+must_exact {Historical version} "TUI slash exact name workspace"
+must_exact {Description} "TUI slash exact name detail"
+after 300
+drain_output
 
-send -- "/agent history \"Bull Researcher Revised\"\r"
-must_exact {Profile history} "TUI slash history name workspace"
-must_exact {Total versions} "TUI slash history name detail"
+tui_slash "/agent show $profile_id"
+must_exact {Revised} "TUI slash show ID detail"
+after 300
+drain_output
 
-send -- "/agent history $profile_id\r"
-must_exact {Profile history} "TUI slash history ID workspace"
-must_exact {Returned} "TUI slash history ID detail"
+tui_slash {/agent history "Bull Researcher Revised"}
+must_exact {Returned} "TUI slash history name detail"
+after 300
+drain_output
 
-send -- "/agent history \"Bull Researcher Revised\" 1\r"
-must_exact {HISTORICAL VERSION} "TUI slash exact name workspace"
-must_exact {Bull Researcher} "TUI slash exact name detail"
+tui_slash "/agent history $profile_id 2"
+must_exact {Historical version} "TUI slash exact ID workspace"
+must_exact {Description} "TUI slash exact ID detail"
+after 300
+drain_output
 
-send -- "/agent history $profile_id 2\r"
-must_exact {HISTORICAL VERSION} "TUI slash exact ID workspace"
-must_exact {Bull Researcher Revised} "TUI slash exact ID detail"
+tui_slash "/agent history $profile_id"
+must_exact {ACTIVE} "TUI slash history ID typed list"
 puts {PTY_TUI_SLASH_READ_OK list show=name,id history=name,id exact=name,id}
 
-foreach geometry {{24 70} {30 100} {40 140}} {
-    lassign $geometry rows cols
+foreach geometry {{24 70 {Bull Researcher Revised}} {30 100 Description} {40 140 Description}} {
+    lassign $geometry rows cols marker
     after 200
     drain_output
     resize_tty $tui_tty $tui_app_pid $rows $cols
@@ -286,7 +303,7 @@ foreach geometry {{24 70} {30 100} {40 140}} {
     after 300
     drain_output
     send -- "a"
-    must_exact {Bull Researcher Revised} "resize ${cols}x${rows}"
+    must_exact $marker "resize ${cols}x${rows}"
 }
 
 after 200

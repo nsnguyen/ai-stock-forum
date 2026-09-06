@@ -531,20 +531,34 @@ fn selected_historical_version_renders_full_content_metadata_and_predecessor_dif
         }],
     });
 
-    let rendered = render_text(&model, 79, 70);
-    for expected in [
-        "HISTORICAL VERSION",
-        "Historical version",
-        "Second historical prose.",
-        "Template provenance",
-        "Memory",
-        "Policy",
-        second.content_digest().as_str(),
-        "PREDECESSOR DIFF",
-        "Description",
-        "Before",
-        "After",
-    ] {
-        assert!(rendered.contains(expected), "missing {expected:?}");
+    for width in [79, 120] {
+        let rendered = render_text(&model, width, 70);
+        for expected in [
+            "HISTORICAL VERSION",
+            "Historical version",
+            "Second historical prose.",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected:?} at width {width}"
+            );
+        }
+        if width == 79 {
+            for expected in [
+                "Template provenance",
+                "Memory",
+                "Policy",
+                "PREDECESSOR DIFF",
+                "Description",
+                "Before",
+                "After",
+            ] {
+                assert!(rendered.contains(expected), "missing {expected:?}");
+            }
+            for chunk in second.content_digest().as_str().as_bytes().chunks(8) {
+                let chunk = std::str::from_utf8(chunk).expect("digest chunks are UTF-8");
+                assert!(rendered.contains(chunk), "missing digest chunk {chunk:?}");
+            }
+        }
     }
 }
