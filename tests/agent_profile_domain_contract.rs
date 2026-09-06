@@ -1,6 +1,6 @@
 use ai_stock_forum::agents::{
-    AgentBindings, AgentProfileDraft, AgentReadiness, AgentRole, builtin_profile_templates,
-    normalize_profile_name_key,
+    AgentBindingCatalogSnapshot, AgentBindings, AgentProfileDraft, AgentReadiness, AgentRole,
+    BindingReferenceId, InferenceBindingRef, builtin_profile_templates, normalize_profile_name_key,
 };
 
 fn draft(
@@ -42,7 +42,7 @@ fn valid_draft() -> AgentProfileDraft {
 #[test]
 fn active_name_key_uses_nfkc_casefold_and_whitespace_fold() {
     assert_eq!(
-        normalize_profile_name_key("  Maße\tDesk  ").unwrap(),
+        normalize_profile_name_key("  Maße\u{2003}Desk  ").unwrap(),
         normalize_profile_name_key("MASSE desk").unwrap(),
     );
     assert_eq!(
@@ -106,7 +106,7 @@ fn profile_draft_accepts_exact_utf8_byte_boundaries_and_absent_bindings() {
     )
     .unwrap();
 
-    assert_eq!(profile.readiness(), AgentReadiness::NotReady);
+    assert_eq!(profile.readiness(), AgentReadiness::Unbound);
 }
 
 #[test]
@@ -238,21 +238,27 @@ fn profile_draft_rejects_whitespace_only_and_terminal_unsafe_text() {
             )
             .unwrap_err()
             .code(),
-            if unsafe_value.trim().is_empty() {
-                "invalid_profile_field"
-            } else {
-                "unsafe_profile_text"
-            },
+            "unsafe_profile_text",
         );
     }
 }
 
 #[test]
-fn profile_readiness_requires_both_model_binding_values_without_rejecting_partial_binding() {
+fn profile_readiness_uses_typed_references_and_catalog_availability() {
     let mut profile = valid_draft();
-    profile.bindings.model_provider = Some("openai".to_owned());
-    assert_eq!(profile.readiness(), AgentReadiness::NotReady);
+    let inference = InferenceBindingRef::new(
+        BindingReferenceId::new("connection.openai").unwrap(),
+        BindingReferenceId::new("model.gpt-5").unwrap(),
+    );
+    profile.bindings = AgentBindings::new(Some(inference.clone()), None);
+    assert_eq!(
+        AgentBindingCatalogSnapshot::default().readiness(profile.role, &profile.bindings),
+        AgentReadiness::BindingUnavailable
+    );
 
-    profile.bindings.model_name = Some("gpt-5".to_owned());
-    assert_eq!(profile.readiness(), AgentReadiness::Ready);
+    let catalog = AgentBindingCatalogSnapshot::new(vec![inference], Vec::new());
+    assert_eq!(
+        catalog.readiness(profile.role, &profile.bindings),
+        AgentReadiness::Ready
+    );
 }

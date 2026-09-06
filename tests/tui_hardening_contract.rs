@@ -186,6 +186,9 @@ fn snapshot() -> PresentationSnapshot {
         recent_audit: Vec::new(),
         agent_profiles: ai_stock_forum::app::AgentProfilesView {
             profiles: Vec::new(),
+            total_count: 0,
+            returned_count: 0,
+            truncated: false,
         },
         selected_agent_profile: None,
         selected_agent_profile_history: None,

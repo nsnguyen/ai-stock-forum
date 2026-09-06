@@ -102,13 +102,14 @@ impl Fixture {
             .connection()
             .execute(
                 "INSERT INTO active_agent_profiles (
-                    profile_id, profile_version_id, version, normalized_name, readiness
-                 ) VALUES (?1, ?2, ?3, ?4, 'not_ready')",
+                    profile_id, profile_version_id, version, normalized_name, content_digest
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![
                     profile.profile_id().to_string(),
                     profile.profile_version_id().to_string(),
                     i64::try_from(profile.version().get()).unwrap(),
                     profile.normalized_name().as_str(),
+                    profile.content_digest().as_str(),
                 ],
             )
             .unwrap();

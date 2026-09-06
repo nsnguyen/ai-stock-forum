@@ -14,9 +14,9 @@ use ai_stock_forum::{
     },
     app::{
         AgentProfileCreatedView, AgentProfileHistoryEntry, AgentProfileHistoryView,
-        AgentProfileSummary, AgentProfileVersionActivatedView, AgentProfileView, AppError,
-        ApplicationCommand, CommandOutcome, CommandView, HelpView, ShutdownDisposition,
-        ShutdownReason,
+        AgentProfileSummary, AgentProfileVersionActivatedView, AgentProfileVersionView,
+        AgentProfileView, AppError, ApplicationCommand, CommandOutcome, CommandView, HelpView,
+        ShutdownDisposition, ShutdownReason,
     },
     domain::{
         AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, MemoryNamespaceId,
@@ -75,7 +75,9 @@ fn profile_history_len(
     profile_id: AgentProfileId,
 ) -> usize {
     let outcome = client
-        .submit(ApplicationCommand::ShowAgentProfileHistory { profile_id })
+        .submit(ApplicationCommand::ShowAgentProfileHistory {
+            selector: profile_id.into(),
+        })
         .unwrap();
     let CommandView::AgentProfileHistory(view) = outcome.view else {
         panic!("expected agent profile history");
@@ -89,7 +91,7 @@ fn edited_script(profile_id: AgentProfileId, confirmation: &str) -> String {
 
 fn edited_workflow(profile_id: AgentProfileId) -> String {
     format!(
-        "agent edit {profile_id}\n:role custom\n:next\nFallback Editor\n:next\nEdited in the fallback workflow.\n:next\nquality research\n:tag remove growth\n:tag remove catalysts\n:tag add quality\n:next\nCalm and exact.\n:next\nCite primary evidence.\n:next\n:provider local\n:model analyst-v2\n:next\n:review\n:activate\n"
+        "agent edit {profile_id}\n:role custom\n:next\nFallback Editor\n:next\nEdited in the fallback workflow.\n:next\nquality research\n:tag remove growth\n:tag remove catalysts\n:tag add quality\n:next\nCalm and exact.\n:next\nCite primary evidence.\n:next\n:next\n:review\n:activate\n"
     )
 }
 
@@ -127,10 +129,9 @@ fn parser_accepts_only_the_six_exact_agent_forms_and_typed_ids() {
         "agent",
         "agent list extra",
         "agent show",
-        "agent show not-a-uuid",
-        "agent history not-a-uuid",
+        "agent show \"unterminated",
+        "agent history \"unterminated",
         "agent create unknown-template",
-        "agent edit not-a-uuid",
         "agent edit 00000000-0000-0000-0000-00000000002a extra",
         "agent delete 00000000-0000-0000-0000-00000000002a",
     ] {
@@ -145,7 +146,7 @@ fn parser_accepts_only_the_six_exact_agent_forms_and_typed_ids() {
 }
 
 #[test]
-fn create_selects_a_pinned_template_edits_fields_and_waits_for_yes() {
+fn create_selects_a_pinned_template_and_requires_exact_create_confirmation() {
     let fixture = support::runtime();
     let client = fixture.client();
 
@@ -172,12 +173,10 @@ fn create_selects_a_pinned_template_edits_fields_and_waits_for_yes() {
         ":next\n",
         "Separate facts from estimates.\n",
         ":next\n",
-        ":provider local\n",
-        ":model analyst-v1\n",
         ":next\n",
         ":review\n",
-        ":activate\n",
-        "yes\n",
+        ":create\n",
+        "create\n",
     );
     let (_, output) = run_script(client.clone(), script);
     assert!(output.contains("Create profile review"));
@@ -193,14 +192,14 @@ fn create_selects_a_pinned_template_edits_fields_and_waits_for_yes() {
         "specialty_tags",
         "personality",
         "instructions",
-        "bindings",
     ]
     .map(|field| review.find(field).expect("create diff field is rendered"));
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(review.contains("Bull Researcher -> Fallback Analyst"));
     assert!(review.contains("role: bull -> custom"));
     assert!(review.contains("Unchanged fields omitted."));
-    assert!(output.contains("Confirm activation? [y/yes or n/no]"));
+    assert!(output.contains("Create and activate from builtin.bull@1"));
+    assert!(output.contains("Type exactly: create"));
     assert!(output.contains("Agent profile created:"));
 
     let listed = client
@@ -216,7 +215,7 @@ fn create_selects_a_pinned_template_edits_fields_and_waits_for_yes() {
 }
 
 #[test]
-fn edit_loads_active_version_previews_ordered_diffs_and_no_returns_to_review() {
+fn edit_loads_active_version_and_rejects_generic_confirmation_without_losing_draft() {
     let fixture = support::runtime();
     let client = fixture.client();
     let created = create_profile(&client, "Original Analyst");
@@ -231,7 +230,6 @@ fn edit_loads_active_version_previews_ordered_diffs_and_no_returns_to_review() {
         "specialty_tags",
         "personality",
         "instructions",
-        "bindings",
     ];
     let review = rejected
         .rsplit("Edit profile review")
@@ -239,11 +237,46 @@ fn edit_loads_active_version_previews_ordered_diffs_and_no_returns_to_review() {
         .expect("edit review section is rendered");
     let positions = names.map(|name| review.find(name).expect("ordered diff field is rendered"));
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
-    assert!(rejected.contains("Activation declined; returned to review."));
+    assert!(rejected.contains("Confirmation did not match; draft retained."));
     assert_eq!(profile_history_len(&client, created.profile_id), 1);
 
-    let (_, accepted) = run_script(client.clone(), edited_script(created.profile_id, "y"));
-    assert!(accepted.contains("Confirm activation? [y/yes or n/no]"));
+    let profile = match client
+        .submit(ApplicationCommand::ShowAgentProfile {
+            selector: created.profile_id.into(),
+        })
+        .unwrap()
+        .view
+    {
+        CommandView::AgentProfile(view) => view.profile,
+        _ => panic!("expected profile"),
+    };
+    let candidate = AgentProfileDraft::new(
+        "Fallback Editor".to_owned(),
+        "Edited in the fallback workflow.".to_owned(),
+        AgentRole::Custom,
+        "quality research".to_owned(),
+        vec!["quality".to_owned()],
+        "Calm and exact.".to_owned(),
+        "Cite primary evidence.".to_owned(),
+        profile.bindings().clone(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let digest = client
+        .preview_agent_profile_edit(
+            profile.profile_id(),
+            profile.profile_version_id(),
+            candidate,
+        )
+        .unwrap()
+        .review_digest;
+    let confirmation = format!("activate {digest}");
+    let (_, accepted) = run_script(
+        client.clone(),
+        edited_script(created.profile_id, &confirmation),
+    );
+    assert!(accepted.contains(&format!("Type exactly: {confirmation}")));
     assert!(accepted.contains("Agent profile version activated:"));
     assert_eq!(profile_history_len(&client, created.profile_id), 2);
     fixture.finish_and_join(ShutdownReason::InputClosed);
@@ -307,6 +340,64 @@ fn list_show_and_history_are_deterministic_terminal_safe_typed_views() {
 }
 
 #[test]
+fn oversized_and_invalid_utf8_editor_lines_are_authoritative_rejection_commands() {
+    let fixture = support::runtime();
+    let client = fixture.client();
+
+    let mut oversized = b"/agent create bull\n".to_vec();
+    oversized.extend(std::iter::repeat_n(b'x', 4_097));
+    oversized.extend_from_slice(b"\n:cancel\n");
+    let (_, oversized_output) = run_script(client.clone(), oversized);
+    assert!(oversized_output.contains("Input rejected: input exceeds 4096 bytes."));
+
+    let mut invalid = b"/agent create bull\n".to_vec();
+    invalid.extend_from_slice(&[0xff, b'\n']);
+    invalid.extend_from_slice(b":cancel\n");
+    let (_, invalid_output) = run_script(client.clone(), invalid);
+    assert!(invalid_output.contains("Input rejected: invalid encoding."));
+
+    let (_, audit) = run_script(client.clone(), "/audit tail 100\n");
+    assert!(audit.contains("command rejected: category=oversized"));
+    assert!(audit.contains("command rejected: category=invalid_encoding"));
+    fixture.finish_and_join(ShutdownReason::InputClosed);
+}
+
+#[test]
+fn duplicate_name_failure_keeps_the_confirmation_and_private_draft() {
+    let fixture = support::runtime();
+    let client = fixture.client();
+    create_profile(&client, "Retained Duplicate");
+
+    let script = concat!(
+        "/agent create bull\n",
+        ":next\n",
+        "Retained Duplicate\n",
+        ":next\n",
+        "Description\n",
+        ":next\n",
+        "research\n",
+        ":tag remove growth\n",
+        ":tag remove catalysts\n",
+        ":next\n",
+        "Patient\n",
+        ":next\n",
+        "Cite evidence\n",
+        ":next\n",
+        ":next\n",
+        ":review\n",
+        ":create\n",
+        "create\n",
+        ":back\n",
+    );
+    let (_, output) = run_script(client.clone(), script);
+
+    assert!(output.contains("Retained Duplicate"));
+    assert!(output.contains("Confirmation cancelled; returned to review."));
+    assert_eq!(profile_count(&client), 1);
+    fixture.finish_and_join(ShutdownReason::InputClosed);
+}
+
+#[test]
 fn list_and_history_cap_rows_and_render_deterministic_omitted_counts() {
     let profiles = (0..102_u128)
         .map(|offset| AgentProfileSummary {
@@ -316,13 +407,18 @@ fn list_and_history_cap_rows_and_render_deterministic_omitted_counts() {
             display_name: format!("Profile {offset:03}"),
             role: AgentRole::Custom,
             primary_specialty: "research".to_owned(),
-            readiness: AgentReadiness::NotReady,
+            readiness: AgentReadiness::Unbound,
             content_digest: sha256(&offset.to_be_bytes()),
         })
         .collect::<Vec<_>>();
     let mut list = Vec::new();
     TextRenderer::render_view(
-        &CommandView::AgentProfiles(ai_stock_forum::app::AgentProfilesView { profiles }),
+        &CommandView::AgentProfiles(ai_stock_forum::app::AgentProfilesView {
+            profiles,
+            total_count: 102,
+            returned_count: 100,
+            truncated: true,
+        }),
         &mut list,
     )
     .unwrap();
@@ -353,6 +449,9 @@ fn list_and_history_cap_rows_and_render_deterministic_omitted_counts() {
             profile_id: AgentProfileId::from_uuid(Uuid::from_u128(4_000)),
             active_version_id: AgentProfileVersionId::from_uuid(Uuid::from_u128(4_001)),
             versions,
+            total_count: 102,
+            returned_count: 100,
+            truncated: true,
         }),
         &mut history,
     )
@@ -363,6 +462,65 @@ fn list_and_history_cap_rows_and_render_deterministic_omitted_counts() {
         101
     );
     assert!(history.contains("... 2 versions omitted."));
+}
+
+#[test]
+fn exact_historical_version_renders_complete_accepted_content_and_predecessor_diff() {
+    let first = workflow_profile();
+    let mut candidate = first.to_draft();
+    candidate.display_name = "Historical Renderer Analyst".to_owned();
+    candidate.description = "Accepted historical description.".to_owned();
+    let second = AgentProfileVersion::next_version(
+        &first,
+        AgentProfileVersionId::from_uuid(Uuid::from_u128(7_003)),
+        1_700_000_000_001,
+        candidate.clone(),
+    )
+    .unwrap();
+    let predecessor_diff = diff_profile(&first, &candidate).unwrap();
+    let mut output = Vec::new();
+
+    TextRenderer::render_view(
+        &CommandView::AgentProfileVersion(AgentProfileVersionView {
+            profile: second,
+            readiness: AgentReadiness::Unbound,
+            predecessor_diff,
+        }),
+        &mut output,
+    )
+    .unwrap();
+    let output = String::from_utf8(output).unwrap();
+
+    for expected in [
+        "Agent profile historical version:",
+        "Display name: Historical Renderer Analyst",
+        "Description: Accepted historical description.",
+        "Role: bull",
+        "Primary specialty: upside research",
+        "Specialty tags: catalysts, growth",
+        "Personality: Constructive, precise, and evidence-led.",
+        "Instructions: Develop the strongest evidence-backed bull case.",
+        "Bindings: inference=none engineering=none",
+        "Skill refs: none",
+        "MCP refs: none",
+        "Template provenance: builtin.bull@1",
+        "Readiness: unbound",
+        "Memory namespace ID:",
+        "Policy reference: profile-default/v1",
+        "Created time: 1700000000001",
+        "Predecessor version ID:",
+        "Version: 2",
+        "Version ID:",
+        "Digest:",
+        "Predecessor diff:",
+        "display_name: Original Backpressure Analyst -> Historical Renderer Analyst",
+        "description: Develops evidence-led upside research. -> Accepted historical description.",
+    ] {
+        assert!(
+            output.contains(expected),
+            "missing historical field: {expected}"
+        );
+    }
 }
 
 #[derive(Default)]
@@ -388,13 +546,7 @@ impl CommandExecutor for WorkflowExecutor {
                 Ok(workflow_outcome(CommandView::Help(HelpView)))
             }
             ApplicationCommand::ShowAgentProfile { .. } => {
-                let readiness = match (
-                    &self.profile.bindings().model_provider,
-                    &self.profile.bindings().model_name,
-                ) {
-                    (Some(_), Some(_)) => AgentReadiness::Ready,
-                    _ => AgentReadiness::NotReady,
-                };
+                let readiness = self.profile.readiness();
                 Ok(workflow_outcome(CommandView::AgentProfile(
                     AgentProfileView {
                         profile: self.profile.clone(),
@@ -654,17 +806,17 @@ impl WorkflowHarness {
 }
 
 #[test]
-fn create_confirmation_survives_backpressure_and_yes_retries_successfully() {
+fn create_confirmation_survives_backpressure_and_exact_action_retries_successfully() {
     let harness = WorkflowHarness::new();
     harness.send(
-        "agent create builtin.custom\n:next\nRetry Create\n:next\nDescription\n:next\nresearch\n:next\nPatient\n:next\nCite evidence\n:next\n:provider local\n:model model\n:next\n:review\n:activate\n"
+        "agent create builtin.custom\n:next\nRetry Create\n:next\nDescription\n:next\nresearch\n:next\nPatient\n:next\nCite evidence\n:next\n:next\n:review\n:create\n"
     );
-    harness.wait("Confirm activation? [y/yes or n/no]");
+    harness.wait("Type exactly: create");
     let (blocked, queued) = harness.saturate();
-    harness.send("yes\n");
+    harness.send("create\n");
     harness.wait("Command queue is busy; try again.");
     harness.release_queue(blocked, queued);
-    harness.send("y\n");
+    harness.send("create\n");
     harness.wait("Agent profile created:");
     let observations = harness.finish();
     assert_eq!(observations.lock().unwrap().creates, 1);
@@ -674,9 +826,10 @@ fn create_confirmation_survives_backpressure_and_yes_retries_successfully() {
 fn edit_confirmation_survives_backpressure_and_cancel_cleans_service_review() {
     let harness = WorkflowHarness::new();
     harness.send(&edited_workflow(workflow_profile().profile_id()));
-    harness.wait("Confirm activation? [y/yes or n/no]");
+    let confirmation = format!("activate {}", sha256(b"review"));
+    harness.wait(&format!("Type exactly: {confirmation}"));
     let (blocked, queued) = harness.saturate();
-    harness.send("yes\n");
+    harness.send(&format!("{confirmation}\n"));
     harness.wait("Command queue is busy; try again.");
     harness.send(":cancel\n");
     harness.release_queue(blocked, queued);

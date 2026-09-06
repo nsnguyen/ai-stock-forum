@@ -10,22 +10,23 @@ use std::{
 
 use ai_stock_forum::{
     agents::{
-        AgentBindings, AgentProfileDraft, AgentReadiness, ProfileDiffField, ProfileEditPreview,
-        ProfileTemplate, builtin_profile_templates,
+        AgentBindings, AgentProfileDraft, AgentReadiness, AgentRole, BindingReferenceId,
+        InferenceBindingRef, ProfileDiffField, ProfileEditPreview, ProfileTemplate,
+        builtin_profile_templates,
     },
     app::{
-        AppError, ApplicationCommand, ApplicationService, AuthorizationDecision,
-        CommandTransactionHook, CommandView, InputRejection, InputRejectionCategory,
-        ShutdownReason,
+        AgentProfileSelector, AppError, ApplicationCommand, ApplicationService,
+        AuthorizationDecision, CommandTransactionHook, CommandView, InputRejection,
+        InputRejectionCategory, ShutdownReason,
     },
     config::AppPaths,
     persistence::PersistenceError,
-    runtime::{ApplicationRuntime, CommandExecutor, RuntimeError},
+    runtime::{ApplicationRuntime, CommandExecutor},
     ui::{
-        command::{FallbackRunner, UiError},
+        command::FallbackRunner,
         tui::{
             ControllerEffect, TuiEvent, handle_event,
-            model::{AgentsPane, TuiModel, View},
+            model::{AgentsPane, Focus, ProfileConfirmation, TuiModel, View},
             render,
             theme::Theme,
         },
@@ -159,7 +160,7 @@ fn schema_v1_upgrade_profile_lifecycle_restart_fallback_and_tui_are_accepted() {
         panic!("profile creation outcome");
     };
     assert_eq!(created.version.get(), 1);
-    assert_eq!(created.readiness, AgentReadiness::NotReady);
+    assert_eq!(created.readiness, AgentReadiness::Unbound);
 
     let listed = service
         .execute_user(ApplicationCommand::ListAgentProfiles)
@@ -169,11 +170,11 @@ fn schema_v1_upgrade_profile_lifecycle_restart_fallback_and_tui_are_accepted() {
     };
     assert_eq!(listed.profiles.len(), 1);
     assert_eq!(listed.profiles[0].display_name, "Research North");
-    assert_eq!(listed.profiles[0].readiness, AgentReadiness::NotReady);
+    assert_eq!(listed.profiles[0].readiness, AgentReadiness::Unbound);
 
     let shown = service
         .execute_user(ApplicationCommand::ShowAgentProfile {
-            profile_id: created.profile_id,
+            selector: AgentProfileSelector::from(created.profile_id),
         })
         .unwrap();
     let CommandView::AgentProfile(shown) = shown.view else {
@@ -183,7 +184,7 @@ fn schema_v1_upgrade_profile_lifecycle_restart_fallback_and_tui_are_accepted() {
         shown.profile.profile_version_id(),
         created.profile_version_id
     );
-    assert_eq!(shown.readiness, AgentReadiness::NotReady);
+    assert_eq!(shown.readiness, AgentReadiness::Unbound);
 
     let version_one_bytes = profile_payload(&paths, &created.profile_version_id.to_string());
     let durable_before_preview = (
@@ -199,10 +200,13 @@ fn schema_v1_upgrade_profile_lifecycle_restart_fallback_and_tui_are_accepted() {
     candidate.specialty_tags = vec!["catalysts".to_owned(), "quality".to_owned()];
     candidate.personality = "private-personality-marker".to_owned();
     candidate.instructions = "private-instructions-marker".to_owned();
-    candidate.bindings = AgentBindings {
-        model_provider: Some("provider-secret-marker".to_owned()),
-        model_name: Some("model-secret-marker".to_owned()),
-    };
+    candidate.bindings = AgentBindings::new(
+        Some(InferenceBindingRef::new(
+            BindingReferenceId::new("provider-secret-marker").unwrap(),
+            BindingReferenceId::new("model-secret-marker").unwrap(),
+        )),
+        None,
+    );
     let preview = service
         .preview_agent_profile_edit(
             created.profile_id,
@@ -238,22 +242,43 @@ fn schema_v1_upgrade_profile_lifecycle_restart_fallback_and_tui_are_accepted() {
         version_one_bytes
     );
 
-    let user_confirmed_activation = true;
-    assert!(user_confirmed_activation);
-    let activated = service
-        .execute_user(ApplicationCommand::ActivateAgentProfileVersion {
-            profile_id: created.profile_id,
-            expected_active_version_id: created.profile_version_id,
-            candidate: candidate.clone(),
-            review_token: preview.review_token,
-            review_digest: preview.review_digest,
-        })
-        .unwrap();
+    let activation_command = ApplicationCommand::ActivateAgentProfileVersion {
+        profile_id: created.profile_id,
+        expected_active_version_id: created.profile_version_id,
+        candidate: candidate.clone(),
+        review_token: preview.review_token,
+        review_digest: preview.review_digest.clone(),
+    };
+    let mut confirmation_model = TuiModel::new(
+        service
+            .presentation_snapshot(ai_stock_forum::app::AuditLimit::new(100).unwrap())
+            .unwrap(),
+        false,
+    );
+    confirmation_model.select_view(View::Agents);
+    confirmation_model.set_focus(Focus::Command);
+    confirmation_model.agents.pane = AgentsPane::Confirmation;
+    confirmation_model.agents.pending_confirmation = Some(ProfileConfirmation {
+        command: activation_command,
+    });
+    for character in format!("activate {}", preview.review_digest).chars() {
+        assert_eq!(
+            handle_event(&mut confirmation_model, key(character)),
+            ControllerEffect::Redraw
+        );
+    }
+    let ControllerEffect::ExecuteProfile(confirmed_activation) = handle_event(
+        &mut confirmation_model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    ) else {
+        panic!("exact activation phrase did not emit the reviewed command");
+    };
+    let activated = service.execute_user(confirmed_activation).unwrap();
     let CommandView::AgentProfileVersionActivated(activated) = activated.view else {
         panic!("profile activation outcome");
     };
     assert_eq!(activated.version.get(), 2);
-    assert_eq!(activated.readiness, AgentReadiness::Ready);
+    assert_eq!(activated.readiness, AgentReadiness::BindingUnavailable);
     assert_eq!(
         scalar_i64(&paths, "SELECT COUNT(*) FROM agent_profile_versions"),
         2
@@ -265,7 +290,7 @@ fn schema_v1_upgrade_profile_lifecycle_restart_fallback_and_tui_are_accepted() {
 
     let history = service
         .execute_user(ApplicationCommand::ShowAgentProfileHistory {
-            profile_id: created.profile_id,
+            selector: AgentProfileSelector::from(created.profile_id),
         })
         .unwrap();
     let CommandView::AgentProfileHistory(history) = history.view else {
@@ -359,7 +384,7 @@ fn schema_v1_upgrade_profile_lifecycle_restart_fallback_and_tui_are_accepted() {
     assert_eq!(active.profile.personality(), candidate.personality);
     assert_eq!(active.profile.instructions(), candidate.instructions);
     assert_eq!(active.profile.bindings(), &candidate.bindings);
-    assert_eq!(active.readiness, AgentReadiness::Ready);
+    assert_eq!(active.readiness, AgentReadiness::BindingUnavailable);
     let recovered_history = recovered_detail
         .selected_agent_profile_history
         .as_ref()
@@ -430,7 +455,10 @@ fn schema_v1_upgrade_profile_lifecycle_restart_fallback_and_tui_are_accepted() {
     let fallback_output = String::from_utf8(fallback_output).unwrap();
     assert!(fallback_output.contains("NAME | ROLE | SPECIALTY | READY | VERSION | ID"));
     assert!(fallback_output.contains("Research North"));
-    assert!(fallback_output.contains("Bindings readiness: ready"));
+    assert!(
+        fallback_output.contains("Bindings readiness: binding_unavailable"),
+        "{fallback_output}"
+    );
     assert!(
         fallback_output.contains("VERSION | VERSION ID | PREDECESSOR | CREATED | READY | DIGEST")
     );
@@ -534,7 +562,7 @@ impl CommandExecutor for RecordingServiceExecutor {
 }
 
 #[test]
-fn unrecoverable_fallback_receipt_failure_cancels_the_service_edit_review() {
+fn recoverable_fallback_receipt_failure_retains_the_review_for_retry() {
     let temporary_directory = tempfile::tempdir().unwrap();
     let paths = AppPaths::for_test(temporary_directory.path());
     let hook = Arc::new(FailSecondArmedReceipt::new());
@@ -557,6 +585,24 @@ fn unrecoverable_fallback_receipt_failure_cancels_the_service_edit_review() {
         panic!("profile creation outcome");
     };
 
+    let mut expected_candidate = template.copy_to_draft().unwrap();
+    expected_candidate.role = AgentRole::Custom;
+    expected_candidate.display_name = "Receipt Failure Edited".to_owned();
+    expected_candidate.description = "Edited description.".to_owned();
+    expected_candidate.primary_specialty = "quality research".to_owned();
+    expected_candidate.specialty_tags = vec!["quality".to_owned()];
+    expected_candidate.personality = "Calm and exact.".to_owned();
+    expected_candidate.instructions = "Cite primary evidence.".to_owned();
+    expected_candidate.bindings = AgentBindings::default();
+    let expected_review = service
+        .preview_agent_profile_edit(
+            created.profile_id,
+            created.profile_version_id,
+            expected_candidate,
+        )
+        .unwrap();
+    service.cancel_agent_profile_edit().unwrap();
+
     hook.arm();
     let activation = Arc::new(Mutex::new(None));
     let runtime = ApplicationRuntime::spawn(
@@ -568,23 +614,18 @@ fn unrecoverable_fallback_receipt_failure_cancels_the_service_edit_review() {
     )
     .unwrap();
     let script = format!(
-        "agent edit {}\n:role custom\n:next\nReceipt Failure Edited\n:next\nEdited description.\n:next\nquality research\n:tag remove growth\n:tag remove catalysts\n:tag add quality\n:next\nCalm and exact.\n:next\nCite primary evidence.\n:next\n:provider local\n:model analyst-v2\n:next\n:review\n:activate\nyes\n",
-        created.profile_id
+        "agent edit {}\n:role custom\n:next\nReceipt Failure Edited\n:next\nEdited description.\n:next\nquality research\n:tag remove growth\n:tag remove catalysts\n:tag add quality\n:next\nCalm and exact.\n:next\nCite primary evidence.\n:next\n:next\n:review\n:activate\nactivate {}\nactivate {}\n",
+        created.profile_id, expected_review.review_digest, expected_review.review_digest
     );
     let mut output = Vec::new();
-    let error = FallbackRunner::new(runtime.client(), false)
-        .run(Cursor::new(script), &mut output)
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        UiError::Runtime(RuntimeError::Application(AppError::Persistence(
-            PersistenceError::QueryFailed
-        )))
-    ));
-    assert!(
-        String::from_utf8(output)
-            .unwrap()
-            .contains("Confirm activation?")
+    let reason = FallbackRunner::new(runtime.client(), false).run(Cursor::new(script), &mut output);
+    assert_eq!(reason.unwrap(), ShutdownReason::InputClosed);
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("Type exactly: activate"));
+    assert!(output.contains("Editor message: database_write_failed"));
+    assert_eq!(
+        scalar_i64(&paths, "SELECT COUNT(*) FROM agent_profile_versions"),
+        2
     );
 
     let attempted_activation = activation
@@ -593,12 +634,7 @@ fn unrecoverable_fallback_receipt_failure_cancels_the_service_edit_review() {
         .clone()
         .expect("fallback submitted activation");
     hook.disarm();
-    assert_eq!(
-        runtime.client().submit(attempted_activation),
-        Err(RuntimeError::Application(
-            AppError::ProfileReviewUnavailable
-        ))
-    );
+    assert!(runtime.client().submit(attempted_activation).is_err());
     runtime
         .finish_and_join(ShutdownReason::ApplicationError)
         .unwrap();

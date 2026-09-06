@@ -493,17 +493,17 @@ impl CommandTransactionHook for SqliteNameConflictHook {
         transaction
             .execute_batch(
                 "CREATE TABLE injected_active_name_source AS
-                     SELECT profile_id, profile_version_id, version, readiness
+                     SELECT profile_id, profile_version_id, version, content_digest
                      FROM active_agent_profiles LIMIT 1;
                  CREATE TRIGGER inject_active_name_conflict
                  BEFORE INSERT ON active_agent_profiles
                  WHEN NEW.normalized_name = 'alpha sqlite candidate'
                  BEGIN
                      INSERT INTO active_agent_profiles (
-                         profile_id, profile_version_id, version, normalized_name, readiness
+                         profile_id, profile_version_id, version, normalized_name, content_digest
                      )
                      SELECT profile_id, profile_version_id, version,
-                            'alpha sqlite candidate', readiness
+                            'alpha sqlite candidate', content_digest
                      FROM injected_active_name_source;
                  END;",
             )

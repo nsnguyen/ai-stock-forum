@@ -50,6 +50,9 @@ fn empty_snapshot() -> PresentationSnapshot {
         recent_audit: Vec::new(),
         agent_profiles: AgentProfilesView {
             profiles: Vec::new(),
+            total_count: 0,
+            returned_count: 0,
+            truncated: false,
         },
         selected_agent_profile: None,
         selected_agent_profile_history: None,
@@ -469,6 +472,9 @@ impl CommandExecutor for OrderingExecutor {
             ApplicationCommand::ListAgentProfiles => {
                 CommandView::AgentProfiles(AgentProfilesView {
                     profiles: Vec::new(),
+                    total_count: 0,
+                    returned_count: 0,
+                    truncated: false,
                 })
             }
             _ => CommandView::Help(HelpView),
@@ -514,7 +520,7 @@ impl CommandExecutor for StaleCleanupExecutor {
         if self.fail_refresh {
             return Err(AppError::AgentProfileNotFound);
         }
-        let readiness = AgentReadiness::NotReady;
+        let readiness = AgentReadiness::Unbound;
         let view = match command {
             ApplicationCommand::ListAgentProfiles => {
                 CommandView::AgentProfiles(AgentProfilesView {
@@ -528,6 +534,9 @@ impl CommandExecutor for StaleCleanupExecutor {
                         readiness,
                         content_digest: self.profile.content_digest().clone(),
                     }],
+                    total_count: 1,
+                    returned_count: 1,
+                    truncated: false,
                 })
             }
             ApplicationCommand::ShowAgentProfile { .. } => {

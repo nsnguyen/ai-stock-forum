@@ -144,15 +144,23 @@ fn malformed_profile_payload_has_a_stable_redacted_repository_error() {
         .connection_mut()
         .execute(
             "INSERT INTO agent_profile_versions (
-                profile_id, profile_version_id, version, normalized_name, content_digest,
+                profile_id, profile_version_id, version, supersedes_version_id,
+                template_id, template_version, template_digest, role, display_name,
+                normalized_name, memory_namespace_id, policy_profile_ref, content_digest,
                 payload_json, source_event_sequence, created_at_ms
-             ) VALUES (?1, ?2, 1, ?3, ?4, ?5, 1, ?6)",
+             ) VALUES (
+                ?1, ?2, 1, NULL, NULL, NULL, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10
+             )",
             rusqlite::params![
                 profile.profile_id().to_string(),
                 profile.profile_version_id().to_string(),
+                profile.role().as_str(),
+                profile.display_name(),
                 profile.normalized_name().as_str(),
+                profile.memory_namespace_id().to_string(),
+                profile.default_policy_ref(),
                 profile.content_digest().as_str(),
-                b"secret profile payload".as_slice(),
+                br#"{"secret":"profile payload"}"#.as_slice(),
                 profile.created_at_ms(),
             ],
         )
@@ -201,7 +209,7 @@ fn active_pointer_replacement_tracks_the_latest_projection_version() {
     let active: (String, i64, String) = database
         .connection()
         .query_row(
-            "SELECT profile_version_id, version, readiness FROM active_agent_profiles",
+            "SELECT profile_version_id, version, content_digest FROM active_agent_profiles",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -211,7 +219,7 @@ fn active_pointer_replacement_tracks_the_latest_projection_version() {
         (
             second.profile_version_id().to_string(),
             2,
-            "not_ready".to_owned()
+            second.content_digest().to_string()
         )
     );
     assert_eq!(

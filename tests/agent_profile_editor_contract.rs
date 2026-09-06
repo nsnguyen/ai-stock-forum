@@ -76,8 +76,6 @@ fn advance_to_review(editor: &mut ProfileEditor) {
     editor.submit_line("Separate facts from estimates.");
     editor.submit_line(":next");
     assert_eq!(editor.step(), ProfileEditorStep::OptionalBindings);
-    editor.submit_line(":provider local");
-    editor.submit_line(":model analyst-v1");
     editor.submit_line(":next");
     assert_eq!(editor.step(), ProfileEditorStep::Review);
 }
@@ -109,18 +107,12 @@ fn create_editor_copies_template_and_walks_the_exact_ordered_steps() {
         editor.draft().instructions,
         "Use primary filings. Separate facts from estimates."
     );
-    assert_eq!(
-        editor.draft().bindings.model_provider.as_deref(),
-        Some("local")
-    );
-    assert_eq!(
-        editor.draft().bindings.model_name.as_deref(),
-        Some("analyst-v1")
-    );
+    assert_eq!(editor.draft().bindings, AgentBindings::default());
 
     assert_eq!(editor.submit_line(":review"), ProfileEditorEffect::None);
+    assert_eq!(editor.submit_line(":activate"), ProfileEditorEffect::None);
     assert!(matches!(
-        editor.submit_line(":activate"),
+        editor.submit_line(":create"),
         ProfileEditorEffect::Execute(_)
     ));
 }
@@ -168,7 +160,7 @@ fn specialty_tag_cap_and_binding_clear_are_local_draft_operations() {
     }
     assert_eq!(
         editor.draft().specialty_tags,
-        vec!["one", "two", "three", "four", "five"]
+        vec!["five", "four", "one", "three", "two"]
     );
     assert_eq!(
         editor.submit_line(":tag add six"),
@@ -179,7 +171,7 @@ fn specialty_tag_cap_and_binding_clear_are_local_draft_operations() {
     editor.submit_line(":tag remove three");
     assert_eq!(
         editor.draft().specialty_tags,
-        vec!["one", "two", "four", "five"]
+        vec!["five", "four", "one", "two"]
     );
 
     editor.submit_line(":next");
@@ -187,11 +179,8 @@ fn specialty_tag_cap_and_binding_clear_are_local_draft_operations() {
     editor.submit_line(":next");
     editor.submit_line("Instructions");
     editor.submit_line(":next");
-    editor.submit_line(":provider local");
-    editor.submit_line(":model analyst-v1");
     editor.submit_line(":clear");
-    assert_eq!(editor.draft().bindings.model_provider, None);
-    assert_eq!(editor.draft().bindings.model_name, None);
+    assert_eq!(editor.draft().bindings, AgentBindings::default());
 }
 
 #[test]
@@ -302,4 +291,71 @@ fn cancel_is_the_only_terminal_local_effect_and_never_exposes_prose_in_controls(
         editor.submit_line(":cancel"),
         ProfileEditorEffect::Cancelled
     );
+}
+
+#[test]
+fn custom_template_stays_editable_until_required_meaningful_fields_are_supplied() {
+    let custom = builtin_profile_templates()
+        .iter()
+        .find(|template| template.id.as_str() == "builtin.custom")
+        .unwrap();
+    let mut editor = ProfileEditor::for_create(custom).unwrap();
+    assert!(editor.draft().primary_specialty.is_empty());
+    assert!(editor.draft().personality.is_empty());
+    assert!(editor.draft().instructions.is_empty());
+
+    editor.submit_line(":next");
+    editor.submit_line("Special Situations Analyst");
+    editor.submit_line(":next");
+    editor.submit_line(":clear");
+    editor.submit_line(":next");
+    editor.submit_line("Event-driven research");
+    editor.submit_line(":next");
+    editor.submit_line("Skeptical and explicit");
+    editor.submit_line(":next");
+    editor.submit_line("List evidence and invalidators");
+    editor.submit_line(":next");
+    editor.submit_line(":next");
+
+    assert_eq!(editor.step(), ProfileEditorStep::Review);
+    assert!(matches!(
+        editor.submit_line(":create"),
+        ProfileEditorEffect::Execute(_)
+    ));
+}
+
+#[test]
+fn multiline_limits_are_cumulative_and_rejection_preserves_the_draft() {
+    let mut editor = create_editor();
+    editor.submit_line(":next");
+    editor.submit_line("Name");
+    editor.submit_line(":next");
+    editor.submit_line("");
+    editor.submit_line(":next");
+    editor.submit_line("Research");
+    editor.submit_line(":next");
+
+    let maximum = "p".repeat(1_024);
+    editor.submit_line(&maximum);
+    let before = editor.draft().personality.clone();
+    editor.submit_line("overflow");
+    assert_eq!(editor.draft().personality, before);
+    assert_eq!(
+        editor.local_message().unwrap().code(),
+        "profile_field_limit"
+    );
+}
+
+#[test]
+fn recoverable_application_errors_leave_editor_state_and_draft_intact() {
+    let mut editor = create_editor();
+    editor.submit_line(":next");
+    editor.submit_line("Private retained draft");
+    let before = editor.clone();
+
+    editor.report_error("capability_denied");
+
+    assert_eq!(editor.draft(), before.draft());
+    assert_eq!(editor.step(), before.step());
+    assert_eq!(editor.local_message().unwrap().code(), "capability_denied");
 }

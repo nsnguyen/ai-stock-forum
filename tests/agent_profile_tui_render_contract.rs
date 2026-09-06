@@ -5,9 +5,9 @@ use ai_stock_forum::{
         builtin_profile_templates,
     },
     app::{
-        AgentProfileHistoryEntry, AgentProfileHistoryView, AgentProfileSummary, AgentProfileView,
-        AgentProfilesView, ApplicationCommand, DatabaseReadiness, PresentationSnapshot,
-        ProcessGuardOwnership,
+        AgentProfileHistoryEntry, AgentProfileHistoryView, AgentProfileSummary,
+        AgentProfileVersionView, AgentProfileView, AgentProfilesView, ApplicationCommand,
+        DatabaseReadiness, PresentationSnapshot, ProcessGuardOwnership,
     },
     domain::{
         AgentProfileId, AgentProfileVersionId, InstallationId, MemoryNamespaceId,
@@ -37,11 +37,6 @@ fn profile() -> AgentProfileVersion {
     draft.specialty_tags = vec!["quality".to_owned(), "long-duration".to_owned()];
     draft.personality = "Patient, skeptical, and explicit about uncertainty.".to_owned();
     draft.instructions = "Separate facts from assumptions and cite primary evidence.".to_owned();
-    draft.skill_refs = vec![
-        serde_json::from_str("\"fundamental-research\"").expect("skill ref"),
-        serde_json::from_str("\"risk-review\"").expect("skill ref"),
-    ];
-    draft.mcp_refs = vec![serde_json::from_str("\"market-data\"").expect("mcp ref")];
     AgentProfileVersion::create(
         AgentProfileId::from_uuid(Uuid::from_u128(10)),
         AgentProfileVersionId::from_uuid(Uuid::from_u128(11)),
@@ -56,7 +51,7 @@ fn profile() -> AgentProfileVersion {
 fn snapshot(with_profile: bool) -> PresentationSnapshot {
     let (agent_profiles, selected_agent_profile, selected_agent_profile_history) = if with_profile {
         let profile = profile();
-        let readiness = AgentReadiness::NotReady;
+        let readiness = AgentReadiness::Unbound;
         (
             AgentProfilesView {
                 profiles: vec![AgentProfileSummary {
@@ -69,6 +64,9 @@ fn snapshot(with_profile: bool) -> PresentationSnapshot {
                     readiness,
                     content_digest: profile.content_digest().clone(),
                 }],
+                total_count: 1,
+                returned_count: 1,
+                truncated: false,
             },
             Some(AgentProfileView {
                 profile: profile.clone(),
@@ -85,12 +83,18 @@ fn snapshot(with_profile: bool) -> PresentationSnapshot {
                     readiness,
                     content_digest: profile.content_digest().clone(),
                 }],
+                total_count: 1,
+                returned_count: 1,
+                truncated: false,
             }),
         )
     } else {
         (
             AgentProfilesView {
                 profiles: Vec::new(),
+                total_count: 0,
+                returned_count: 0,
+                truncated: false,
             },
             None,
             None,
@@ -244,16 +248,13 @@ fn agents_empty_and_populated_states_render_counts_readiness_and_complete_metada
         "Long Horizon Analyst",
         "bull",
         "fundamental compounders",
-        "quality, long-duration",
+        "long-duration, quality",
         "Active version",
         "Template",
         "builtin.bull",
         "Bindings",
         "Skill refs",
-        "fundamental-research",
-        "risk-review",
         "MCP refs",
-        "market-data",
         "Created ms",
         "Memory",
         "Policy",
@@ -354,16 +355,28 @@ fn editor_renders_progress_guidance_ordered_review_diffs_and_explicit_confirmati
     confirmation.agents.pending_confirmation = Some(ProfileConfirmation { command });
     let confirmation = render_text(&confirmation, 100, 30);
     assert!(confirmation.contains("Confirm Activate"));
-    assert!(confirmation.contains("Enter"));
+    assert!(confirmation.contains("Type exactly: activate"));
+    assert!(confirmation.contains("Reviewed base"));
+    assert!(confirmation.contains("Review digest"));
     assert!(confirmation.contains("Esc"));
 
+    let mut create_editor =
+        ProfileEditor::for_create(&builtin_profile_templates()[0]).expect("valid create editor");
     let mut create = model(false, AgentsPane::Editor);
-    create.agents.editor = Some(
-        ProfileEditor::for_create(&builtin_profile_templates()[0]).expect("valid create editor"),
-    );
-    let create = render_text(&create, 79, 24);
-    assert!(create.contains("Step 1 of 7"));
-    assert!(create.contains("Choose a template role"));
+    create.agents.editor = Some(create_editor.clone());
+    let create_text = render_text(&create, 79, 24);
+    assert!(create_text.contains("Step 1 of 7"));
+    assert!(create_text.contains("Choose a template role"));
+
+    for _ in 0..7 {
+        assert_eq!(
+            create_editor.submit_line(":next"),
+            ProfileEditorEffect::None
+        );
+    }
+    create.agents.editor = Some(create_editor);
+    let create_review = render_text(&create, 100, 40);
+    assert!(create_review.contains("Use :create"));
 }
 
 #[test]
@@ -401,5 +414,84 @@ fn confirmation_distinguishes_create_from_activate() {
             template_provenance: Some(builtin_profile_templates()[0].provenance()),
         },
     });
-    assert!(render_text(&create, 100, 30).contains("Confirm Create"));
+    let text = render_text(&create, 100, 30);
+    assert!(text.contains("Confirm Create"));
+    assert!(text.contains("Type exactly: create"));
+    assert!(text.contains("builtin.bull"));
+    for chunk in builtin_profile_templates()[0]
+        .digest
+        .as_str()
+        .as_bytes()
+        .chunks(16)
+    {
+        let chunk = std::str::from_utf8(chunk).expect("digest chunks are UTF-8");
+        assert!(text.contains(chunk), "missing digest chunk {chunk}");
+    }
+}
+
+#[test]
+fn selected_historical_version_renders_full_content_metadata_and_predecessor_diff() {
+    let first = profile();
+    let mut candidate = first.to_draft();
+    candidate.description = "Second historical prose.".to_owned();
+    let second = AgentProfileVersion::next_version(
+        &first,
+        AgentProfileVersionId::from_uuid(Uuid::from_u128(13)),
+        1_800_000_000_001,
+        candidate,
+    )
+    .unwrap();
+    let mut model = model(true, AgentsPane::History);
+    model.agents.history = Some(AgentProfileHistoryView {
+        profile_id: first.profile_id(),
+        active_version_id: second.profile_version_id(),
+        versions: vec![
+            AgentProfileHistoryEntry {
+                profile_version_id: second.profile_version_id(),
+                version: second.version(),
+                supersedes: second.supersedes(),
+                created_at_ms: second.created_at_ms(),
+                readiness: AgentReadiness::Unbound,
+                content_digest: second.content_digest().clone(),
+            },
+            AgentProfileHistoryEntry {
+                profile_version_id: first.profile_version_id(),
+                version: first.version(),
+                supersedes: first.supersedes(),
+                created_at_ms: first.created_at_ms(),
+                readiness: AgentReadiness::Unbound,
+                content_digest: first.content_digest().clone(),
+            },
+        ],
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
+    });
+    model.agents.selected_history_version = 0;
+    model.agents.version_detail = Some(AgentProfileVersionView {
+        profile: second.clone(),
+        readiness: AgentReadiness::Unbound,
+        predecessor_diff: vec![ProfileFieldDiff {
+            field: ProfileDiffField::Description,
+            before: ProfileFieldValue::Text(first.description().to_owned()),
+            after: ProfileFieldValue::Text(second.description().to_owned()),
+        }],
+    });
+
+    let rendered = render_text(&model, 79, 70);
+    for expected in [
+        "HISTORICAL VERSION",
+        "Historical version",
+        "Second historical prose.",
+        "Template provenance",
+        "Memory",
+        "Policy",
+        second.content_digest().as_str(),
+        "PREDECESSOR DIFF",
+        "Description",
+        "Before",
+        "After",
+    ] {
+        assert!(rendered.contains(expected), "missing {expected:?}");
+    }
 }

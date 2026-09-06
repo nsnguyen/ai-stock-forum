@@ -659,7 +659,7 @@ impl TestApp {
         let connection = Connection::open(self.paths.database_path()).unwrap();
         let mut statement = connection
             .prepare(
-                "SELECT profile_id, profile_version_id, version, normalized_name, readiness
+                "SELECT profile_id, profile_version_id, version, normalized_name, content_digest
                  FROM active_agent_profiles ORDER BY profile_id",
             )
             .unwrap();

@@ -490,7 +490,8 @@ fn migration_records_and_complete_schema_are_exact() {
                 request_json TEXT NOT NULL CHECK (json_valid(request_json)),
                 capability TEXT NOT NULL CHECK (capability IN (
                     'help_read', 'status_read', 'setup_status_read', 'audit_read',
-                    'agent_profile_read', 'agent_profile_create', 'agent_profile_edit', 'shutdown',
+                    'agent_profile_read', 'agent_profile_create', 'agent_profile_preview',
+                    'agent_profile_activate', 'shutdown',
                     'discussion_run', 'mcp_use', 'engineering_job_run', 'git_merge', 'git_push',
                     'finance_recommendation'
                 )),
@@ -901,6 +902,10 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
             ("table".to_owned(), "setup_step_outcomes".to_owned()),
             (
                 "trigger".to_owned(),
+                "agent_profile_namespace_insert_guard".to_owned()
+            ),
+            (
+                "trigger".to_owned(),
                 "agent_profile_versions_no_delete".to_owned()
             ),
             (
@@ -950,7 +955,15 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
                 column("profile_id", "TEXT", true, 1),
                 column("profile_version_id", "TEXT", true, 0),
                 column("version", "INTEGER", true, 2),
+                column("supersedes_version_id", "TEXT", false, 0),
+                column("template_id", "TEXT", false, 0),
+                column("template_version", "INTEGER", false, 0),
+                column("template_digest", "TEXT", false, 0),
+                column("role", "TEXT", true, 0),
+                column("display_name", "TEXT", true, 0),
                 column("normalized_name", "TEXT", true, 0),
+                column("memory_namespace_id", "TEXT", true, 0),
+                column("policy_profile_ref", "TEXT", true, 0),
                 column("content_digest", "TEXT", true, 0),
                 column("payload_json", "BLOB", true, 0),
                 column("source_event_sequence", "INTEGER", true, 0),
@@ -964,7 +977,7 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
                 column("profile_version_id", "TEXT", true, 0),
                 column("version", "INTEGER", true, 0),
                 column("normalized_name", "TEXT", true, 0),
-                column("readiness", "TEXT", true, 0),
+                column("content_digest", "TEXT", true, 0),
             ],
         ),
         (
@@ -1183,6 +1196,12 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
     let mut expected_foreign_keys = vec![
         (
             "active_agent_profiles",
+            "content_digest",
+            "agent_profile_versions",
+            "content_digest",
+        ),
+        (
+            "active_agent_profiles",
             "profile_id",
             "agent_profile_versions",
             "profile_id",
@@ -1204,6 +1223,18 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
             "configuration_id",
             "installation_configuration_versions",
             "configuration_id",
+        ),
+        (
+            "agent_profile_versions",
+            "profile_id",
+            "agent_profile_versions",
+            "profile_id",
+        ),
+        (
+            "agent_profile_versions",
+            "supersedes_version_id",
+            "agent_profile_versions",
+            "profile_version_id",
         ),
         (
             "approval_records",
@@ -1311,6 +1342,13 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
                 true,
                 false,
                 &["profile_id", "profile_version_id"],
+            ),
+            semantic_index(
+                "agent_profile_versions",
+                "u",
+                true,
+                false,
+                &["profile_id", "profile_version_id", "content_digest"],
             ),
             semantic_index(
                 "agent_profile_versions",
@@ -1493,6 +1531,10 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
     }
 
     for (name, expected_sql) in [
+        (
+            "agent_profile_namespace_insert_guard",
+            "create trigger agent_profile_namespace_insert_guard before insert on agent_profile_versions when exists (select 1 from agent_profile_versions existing where existing.memory_namespace_id = new.memory_namespace_id and existing.profile_id <> new.profile_id) or exists (select 1 from agent_profile_versions existing where existing.profile_id = new.profile_id and existing.memory_namespace_id <> new.memory_namespace_id) begin select raise(abort, 'agent_profile_namespace_conflict'); end",
+        ),
         (
             "agent_profile_versions_no_update",
             "create trigger agent_profile_versions_no_update before update on agent_profile_versions begin select raise(abort, 'agent_profile_versions_immutable'); end",

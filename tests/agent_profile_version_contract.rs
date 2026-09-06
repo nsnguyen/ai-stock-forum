@@ -1,7 +1,7 @@
 use ai_stock_forum::{
     agents::{
-        AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentRole, ProfileDiffField,
-        ProfileFieldValue, diff_profile,
+        AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentRole, BindingReferenceId,
+        InferenceBindingRef, ProfileDiffField, ProfileFieldValue, diff_profile,
     },
     domain::{AgentProfileId, AgentProfileVersionId, MemoryNamespaceId, canonical_json_bytes},
 };
@@ -36,6 +36,16 @@ fn valid_draft() -> AgentProfileDraft {
     .unwrap()
 }
 
+fn bound_inference() -> AgentBindings {
+    AgentBindings::new(
+        Some(InferenceBindingRef::new(
+            BindingReferenceId::new("connection.openai").unwrap(),
+            BindingReferenceId::new("model.gpt-5").unwrap(),
+        )),
+        None,
+    )
+}
+
 fn create(draft: AgentProfileDraft) -> AgentProfileVersion {
     AgentProfileVersion::create(
         profile_id(1),
@@ -54,15 +64,9 @@ fn canonical_profile_digest_is_independent_of_json_map_order() {
     // references are ordered vectors. Equivalent bindings therefore cover the relevant
     // canonical profile payload ordering without inventing a map-only test fixture.
     let mut first_draft = valid_draft();
-    first_draft.bindings = AgentBindings {
-        model_provider: Some("openai".to_owned()),
-        model_name: Some("gpt-5".to_owned()),
-    };
+    first_draft.bindings = bound_inference();
     let mut second_draft = valid_draft();
-    second_draft.bindings = AgentBindings {
-        model_name: Some("gpt-5".to_owned()),
-        model_provider: Some("openai".to_owned()),
-    };
+    second_draft.bindings = bound_inference();
 
     let first = create(first_draft);
     let second = create(second_draft);
@@ -131,10 +135,7 @@ fn semantic_diff_lists_only_changed_fields_in_fixed_order() {
         vec!["growth".to_owned(), "quality".to_owned()],
         "Constructive and exacting.".to_owned(),
         "State assumptions and cite primary sources.".to_owned(),
-        AgentBindings {
-            model_provider: Some("openai".to_owned()),
-            model_name: Some("gpt-5".to_owned()),
-        },
+        bound_inference(),
         Vec::new(),
         Vec::new(),
     )
@@ -163,10 +164,7 @@ fn semantic_diff_lists_only_changed_fields_in_fixed_order() {
     );
     assert_eq!(
         diff[7].after,
-        ProfileFieldValue::Bindings(AgentBindings {
-            model_provider: Some("openai".to_owned()),
-            model_name: Some("gpt-5".to_owned()),
-        }),
+        ProfileFieldValue::Bindings(bound_inference()),
     );
 }
 

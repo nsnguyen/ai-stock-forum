@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use ai_stock_forum::{
     agents::{
-        AgentBindings, AgentProfileDraft, AgentReadiness, AgentRole, ProfileDiffField,
-        ProfileTemplateProvenance, builtin_profile_templates,
+        AgentBindings, AgentProfileDraft, AgentReadiness, AgentRole, BindingReferenceId,
+        InferenceBindingRef, ProfileDiffField, ProfileTemplateProvenance,
+        builtin_profile_templates,
     },
     app::{
-        AppError, ApplicationCommand, AuthorizationDecision, CommandEnvelope, CommandView,
-        ShutdownReason,
+        AgentProfileSelector, AppError, ApplicationCommand, AuthorizationDecision, CommandEnvelope,
+        CommandView, ShutdownReason,
     },
     domain::{Actor, AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, Digest},
     policy::{Capability, PolicyDecision},
@@ -41,6 +42,16 @@ fn custom_draft(name: &str) -> AgentProfileDraft {
     .unwrap()
 }
 
+fn bound_inference(provider: &str, model: &str) -> AgentBindings {
+    AgentBindings::new(
+        Some(InferenceBindingRef::new(
+            BindingReferenceId::new(provider).unwrap(),
+            BindingReferenceId::new(model).unwrap(),
+        )),
+        None,
+    )
+}
+
 fn edited_template_draft() -> (AgentProfileDraft, ProfileTemplateProvenance) {
     let template = &builtin_profile_templates()[0];
     let mut draft = template.copy_to_draft().unwrap();
@@ -51,10 +62,7 @@ fn edited_template_draft() -> (AgentProfileDraft, ProfileTemplateProvenance) {
     draft.specialty_tags = vec!["catalysts".to_owned(), "systems".to_owned()];
     draft.personality = "Methodical and constructively skeptical.".to_owned();
     draft.instructions = "Separate evidence, assumptions, and conclusions.".to_owned();
-    draft.bindings = AgentBindings {
-        model_provider: Some("provider-internal-name".to_owned()),
-        model_name: Some("model-internal-name".to_owned()),
-    };
+    draft.bindings = bound_inference("provider-internal-name", "model-internal-name");
     (draft, template.provenance())
 }
 
@@ -96,25 +104,25 @@ fn activate_command(
 }
 
 #[test]
-fn create_from_an_edited_template_activates_version_one_and_unbound_is_not_ready() {
+fn create_from_an_edited_template_activates_version_one_and_reports_catalog_readiness() {
     let mut app = support::app();
     let (draft, provenance) = edited_template_draft();
     let created = create(&mut app, 100, draft, Some(provenance.clone()));
 
     assert_eq!(created.version.get(), 1);
-    assert_eq!(created.readiness, AgentReadiness::Ready);
+    assert_eq!(created.readiness, AgentReadiness::BindingUnavailable);
     assert_eq!(app.count_rows("agent_profile_versions"), 1);
     assert_eq!(app.count_rows("active_agent_profiles"), 1);
 
     let unbound = create(&mut app, 101, custom_draft("Unbound Analyst"), None);
     assert_eq!(unbound.version.get(), 1);
-    assert_eq!(unbound.readiness, AgentReadiness::NotReady);
+    assert_eq!(unbound.readiness, AgentReadiness::Unbound);
 
     let detail = app
         .execute(envelope(
             102,
             ApplicationCommand::ShowAgentProfile {
-                profile_id: created.profile_id,
+                selector: AgentProfileSelector::from(created.profile_id),
             },
         ))
         .unwrap();
@@ -169,7 +177,7 @@ fn normalized_active_names_collide_and_views_are_structured_and_deterministic() 
         .execute(envelope(
             204,
             ApplicationCommand::ShowAgentProfileHistory {
-                profile_id: alpha.profile_id,
+                selector: AgentProfileSelector::from(alpha.profile_id),
             },
         ))
         .unwrap();
@@ -390,7 +398,7 @@ fn successful_activation_creates_version_two_preserves_one_and_token_is_one_use(
         .execute(envelope(
             503,
             ApplicationCommand::ShowAgentProfileHistory {
-                profile_id: created.profile_id,
+                selector: AgentProfileSelector::from(created.profile_id),
             },
         ))
         .unwrap();
@@ -427,7 +435,7 @@ fn profile_role_and_prose_never_grant_capabilities() {
         policy.capabilities(),
         vec![
             Capability::AgentProfileCreate,
-            Capability::AgentProfileEdit,
+            Capability::AgentProfilePreview,
             Capability::AgentProfileRead,
         ],
     );
@@ -464,7 +472,7 @@ fn denied_create_preview_activation_and_reads_use_the_existing_policy_boundary()
         )
         .unwrap_err(),
         AppError::CapabilityDenied {
-            capability: Capability::AgentProfileEdit,
+            capability: Capability::AgentProfilePreview,
             decision: PolicyDecision::Denied,
         },
     );
@@ -500,7 +508,7 @@ fn denied_create_preview_activation_and_reads_use_the_existing_policy_boundary()
         ))
         .unwrap_err(),
         AppError::CapabilityDenied {
-            capability: Capability::AgentProfileEdit,
+            capability: Capability::AgentProfileActivate,
             decision: PolicyDecision::Denied,
         },
     );
@@ -510,10 +518,7 @@ fn denied_create_preview_activation_and_reads_use_the_existing_policy_boundary()
 fn read_events_and_generic_audit_summaries_never_leak_profile_prose_or_bindings() {
     let mut app = support::app();
     let mut draft = custom_draft("Private Audit Analyst");
-    draft.bindings = AgentBindings {
-        model_provider: Some("provider-secret-internal".to_owned()),
-        model_name: Some("model-secret-internal".to_owned()),
-    };
+    draft.bindings = bound_inference("provider-secret-internal", "model-secret-internal");
     let created = create(&mut app, 800, draft.clone(), None);
     let mut candidate = draft.clone();
     candidate.display_name = "Senior Private Audit Analyst".to_owned();
@@ -540,14 +545,14 @@ fn read_events_and_generic_audit_summaries_never_leak_profile_prose_or_bindings(
     app.execute(envelope(
         802,
         ApplicationCommand::ShowAgentProfile {
-            profile_id: created.profile_id,
+            selector: AgentProfileSelector::from(created.profile_id),
         },
     ))
     .unwrap();
     app.execute(envelope(
         803,
         ApplicationCommand::ShowAgentProfileHistory {
-            profile_id: created.profile_id,
+            selector: AgentProfileSelector::from(created.profile_id),
         },
     ))
     .unwrap();

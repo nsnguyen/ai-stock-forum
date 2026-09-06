@@ -6,6 +6,7 @@ use ai_stock_forum::{
     persistence::{Database, LATEST_SCHEMA_VERSION},
 };
 use rusqlite::{Connection, Error as SqliteError, params};
+use uuid::Uuid;
 
 #[test]
 fn fresh_database_reaches_schema_version_two_with_strict_profile_storage() {
@@ -119,12 +120,75 @@ fn failed_v2_migration_rolls_back_every_new_schema_object() {
 }
 
 #[test]
+fn failed_v1_migration_rolls_back_every_earlier_schema_object() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::for_test(temp.path());
+    let connection = Connection::open(paths.database_path()).unwrap();
+    connection
+        .execute_batch("CREATE TABLE approval_records (marker TEXT) STRICT;")
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        Database::open(&paths),
+        Err(error) if error.code() == "database_unavailable"
+    ));
+
+    let connection = Connection::open(paths.database_path()).unwrap();
+    assert_eq!(pragma_i64(&connection, "user_version"), 0);
+    for object in [
+        "schema_migrations",
+        "event_stream",
+        "command_receipts",
+        "command_event_refs",
+        "installation_projection",
+        "process_session_projection",
+        "projection_metadata",
+        "setup_drafts",
+        "installation_configuration_versions",
+        "active_installation_configuration",
+        "setup_step_outcomes",
+        "capability_readiness",
+        "approval_records_status_idx",
+    ] {
+        assert!(
+            !connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1)",
+                    [object],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap(),
+            "unexpected rolled-back object {object}"
+        );
+    }
+    assert!(
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'approval_records')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap(),
+        "pre-existing conflict object was altered"
+    );
+}
+
+#[test]
 fn profile_version_mirror_is_immutable_and_active_pointer_replaces_transactionally() {
     let temp = tempfile::tempdir().unwrap();
     let mut database = Database::open(&AppPaths::for_test(temp.path())).unwrap();
     let connection = database.connection_mut();
-    insert_version(connection, "profile-1", "version-1", 1, "research", 1);
-    insert_version(connection, "profile-1", "version-2", 2, "research", 2);
+    insert_version(connection, "profile-1", "version-1", 1, None, "research", 1);
+    insert_version(
+        connection,
+        "profile-1",
+        "version-2",
+        2,
+        Some("version-1"),
+        "research",
+        2,
+    );
     insert_active(connection, "profile-1", "version-1", 1, "research");
 
     assert_immutable(
@@ -154,8 +218,10 @@ fn profile_version_mirror_is_immutable_and_active_pointer_replaces_transactional
     transaction
         .execute(
             "INSERT INTO active_agent_profiles
-                (profile_id, profile_version_id, version, normalized_name, readiness)
-             VALUES ('profile-1', 'version-2', 2, 'research', 'ready')",
+                (profile_id, profile_version_id, version, normalized_name, content_digest)
+             SELECT profile_id, profile_version_id, version, 'research', content_digest
+             FROM agent_profile_versions
+             WHERE profile_id = 'profile-1' AND profile_version_id = 'version-2'",
             [],
         )
         .unwrap();
@@ -183,16 +249,17 @@ fn foreign_keys_and_binary_folded_name_uniqueness_are_effective() {
         connection
             .execute(
                 "INSERT INTO active_agent_profiles
-                (profile_id, profile_version_id, version, normalized_name, readiness)
-             VALUES ('missing', 'missing-version', 1, 'missing', 'ready')",
+                (profile_id, profile_version_id, version, normalized_name, content_digest)
+             VALUES ('missing', 'missing-version', 1, 'missing',
+                     '0000000000000000000000000000000000000000000000000000000000000000')",
                 [],
             )
             .is_err()
     );
 
-    insert_version(connection, "profile-1", "version-1", 1, "Research", 1);
-    insert_version(connection, "profile-2", "version-2", 1, "research", 2);
-    insert_version(connection, "profile-3", "version-3", 1, "Research", 3);
+    insert_version(connection, "profile-1", "version-1", 1, None, "Research", 1);
+    insert_version(connection, "profile-2", "version-2", 1, None, "research", 2);
+    insert_version(connection, "profile-3", "version-3", 1, None, "Research", 3);
     insert_active(connection, "profile-1", "version-1", 1, "Research");
     insert_active(connection, "profile-2", "version-2", 1, "research");
 
@@ -200,12 +267,66 @@ fn foreign_keys_and_binary_folded_name_uniqueness_are_effective() {
         connection
             .execute(
                 "INSERT INTO active_agent_profiles
-                (profile_id, profile_version_id, version, normalized_name, readiness)
-             VALUES ('profile-3', 'version-3', 1, 'Research', 'ready')",
+                (profile_id, profile_version_id, version, normalized_name, content_digest)
+             SELECT profile_id, profile_version_id, version, 'Research', content_digest
+             FROM agent_profile_versions
+             WHERE profile_id = 'profile-3' AND profile_version_id = 'version-3'",
                 [],
             )
             .is_err()
     );
+}
+
+#[test]
+fn memory_namespace_is_global_to_one_profile_and_stable_across_versions() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut database = Database::open(&AppPaths::for_test(temp.path())).unwrap();
+    let connection = database.connection_mut();
+    let namespace = Uuid::from_u128(41).to_string();
+    insert_version_with_namespace(
+        connection,
+        "profile-1",
+        "version-1",
+        1,
+        None,
+        "research one",
+        &namespace,
+        1,
+    );
+
+    let cross_profile = insert_version_with_namespace_result(
+        connection,
+        "profile-2",
+        "version-2",
+        1,
+        None,
+        "research two",
+        &namespace,
+        2,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        cross_profile,
+        SqliteError::SqliteFailure(_, Some(message))
+            if message == "agent_profile_namespace_conflict"
+    ));
+
+    let drift = insert_version_with_namespace_result(
+        connection,
+        "profile-1",
+        "version-3",
+        2,
+        Some("version-1"),
+        "research one",
+        &Uuid::from_u128(42).to_string(),
+        3,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        drift,
+        SqliteError::SqliteFailure(_, Some(message))
+            if message == "agent_profile_namespace_conflict"
+    ));
 }
 
 #[test]
@@ -333,25 +454,83 @@ fn insert_version(
     profile_id: &str,
     profile_version_id: &str,
     version: i64,
+    supersedes_version_id: Option<&str>,
     normalized_name: &str,
     source_event_sequence: i64,
 ) {
-    connection
-        .execute(
-            "INSERT INTO agent_profile_versions (
-                profile_id, profile_version_id, version, normalized_name, content_digest,
-                payload_json, source_event_sequence, created_at_ms
-            ) VALUES (?1, ?2, ?3, ?4, 'content-digest', ?5, ?6, 1)",
-            params![
-                profile_id,
-                profile_version_id,
-                version,
-                normalized_name,
-                b"{}".as_slice(),
-                source_event_sequence,
-            ],
-        )
-        .unwrap();
+    let namespace_seed = profile_id.bytes().fold(0_u128, |seed, byte| {
+        seed.wrapping_mul(257) + u128::from(byte)
+    });
+    insert_version_with_namespace(
+        connection,
+        profile_id,
+        profile_version_id,
+        version,
+        supersedes_version_id,
+        normalized_name,
+        &Uuid::from_u128(namespace_seed).to_string(),
+        source_event_sequence,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_version_with_namespace(
+    connection: &Connection,
+    profile_id: &str,
+    profile_version_id: &str,
+    version: i64,
+    supersedes_version_id: Option<&str>,
+    normalized_name: &str,
+    memory_namespace_id: &str,
+    source_event_sequence: i64,
+) {
+    insert_version_with_namespace_result(
+        connection,
+        profile_id,
+        profile_version_id,
+        version,
+        supersedes_version_id,
+        normalized_name,
+        memory_namespace_id,
+        source_event_sequence,
+    )
+    .unwrap();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_version_with_namespace_result(
+    connection: &Connection,
+    profile_id: &str,
+    profile_version_id: &str,
+    version: i64,
+    supersedes_version_id: Option<&str>,
+    normalized_name: &str,
+    memory_namespace_id: &str,
+    source_event_sequence: i64,
+) -> rusqlite::Result<usize> {
+    let content_digest = format!("{source_event_sequence:064x}");
+    connection.execute(
+        "INSERT INTO agent_profile_versions (
+            profile_id, profile_version_id, version, supersedes_version_id,
+            template_id, template_version, template_digest, role, display_name,
+            normalized_name, memory_namespace_id, policy_profile_ref, content_digest,
+            payload_json, source_event_sequence, created_at_ms
+        ) VALUES (
+            ?1, ?2, ?3, ?4, NULL, NULL, NULL, 'custom', ?5, ?5, ?6,
+            'profile-default/v1', ?7, ?8, ?9, 1
+        )",
+        params![
+            profile_id,
+            profile_version_id,
+            version,
+            supersedes_version_id,
+            normalized_name,
+            memory_namespace_id,
+            content_digest,
+            b"{}".as_slice(),
+            source_event_sequence,
+        ],
+    )
 }
 
 fn insert_active(
@@ -364,8 +543,10 @@ fn insert_active(
     connection
         .execute(
             "INSERT INTO active_agent_profiles
-                (profile_id, profile_version_id, version, normalized_name, readiness)
-             VALUES (?1, ?2, ?3, ?4, 'ready')",
+                (profile_id, profile_version_id, version, normalized_name, content_digest)
+             SELECT profile_id, profile_version_id, version, ?4, content_digest
+             FROM agent_profile_versions
+             WHERE profile_id = ?1 AND profile_version_id = ?2 AND version = ?3",
             params![profile_id, profile_version_id, version, normalized_name],
         )
         .unwrap();

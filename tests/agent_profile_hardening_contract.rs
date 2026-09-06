@@ -211,7 +211,7 @@ impl ReceiptFixture {
         let active = {
             let mut statement = connection
                 .prepare(
-                    "SELECT profile_id, profile_version_id, version, normalized_name, readiness
+                    "SELECT profile_id, profile_version_id, version, normalized_name, content_digest
                      FROM active_agent_profiles ORDER BY profile_id",
                 )
                 .unwrap();
@@ -465,7 +465,27 @@ fn oversized_fallback_line_is_bounded_rejected_and_rendered_as_one_safe_line() {
     assert_terminal_safe(&rendered);
     assert!(!rendered.contains("credential"));
     assert!(!rendered.contains("oversized-secret"));
-    assert_eq!(ReceiptFixture::snapshot_path(&paths), before);
+    let after = ReceiptFixture::snapshot_path(&paths);
+    assert_eq!(after.versions, before.versions);
+    assert_eq!(after.active, before.active);
+    assert_eq!(after.events.len(), before.events.len() + 1);
+    assert_eq!(after.receipts.len(), before.receipts.len() + 1);
+    assert_eq!(after.refs.len(), before.refs.len() + 1);
+    let rejection_event = after.events.last().unwrap();
+    assert_eq!(rejection_event.2, "command_rejected");
+    assert!(rejection_event.3.contains("\"category\":\"oversized\""));
+    assert!(rejection_event.3.contains("\"byte_length\":32768"));
+    let rejection_receipt = after.receipts.last().unwrap();
+    assert_eq!(rejection_receipt.3, "help_read");
+    for durable_text in [
+        &rejection_event.3,
+        &rejection_receipt.2,
+        &rejection_receipt.5,
+    ] {
+        assert!(!durable_text.contains("credential"));
+        assert!(!durable_text.contains("oversized-secret"));
+        assert!(!durable_text.contains('\u{1b}'));
+    }
 
     runtime.finish_and_join(reason).unwrap();
     drop(temporary_directory);

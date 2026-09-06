@@ -1,10 +1,13 @@
 use ai_stock_forum::{
     agents::{AgentProfileVersion, AgentReadiness, builtin_profile_templates},
     app::{
-        AgentProfileSummary, AgentProfilesView, DatabaseReadiness, PresentationSnapshot,
-        ProcessGuardOwnership, ShutdownReason,
+        AgentProfileHistoryEntry, AgentProfileHistoryView, AgentProfileSummary, AgentProfilesView,
+        DatabaseReadiness, PresentationSnapshot, ProcessGuardOwnership, ShutdownReason,
     },
-    domain::{AgentProfileId, AgentProfileVersionId, InstallationId, MemoryNamespaceId, SessionId},
+    domain::{
+        AgentProfileId, AgentProfileVersionId, InstallationId, MemoryNamespaceId, ObjectVersion,
+        SessionId, sha256,
+    },
     setup::SetupStatus,
     ui::{
         profile_editor::{ProfileEditor, ProfileEditorMode},
@@ -30,6 +33,9 @@ fn model() -> TuiModel {
             recent_audit: Vec::new(),
             agent_profiles: ai_stock_forum::app::AgentProfilesView {
                 profiles: Vec::new(),
+                total_count: 0,
+                returned_count: 0,
+                truncated: false,
             },
             selected_agent_profile: None,
             selected_agent_profile_history: None,
@@ -74,7 +80,7 @@ fn profile_summary(id: u128) -> AgentProfileSummary {
         display_name: profile.display_name().to_owned(),
         role: profile.role(),
         primary_specialty: profile.primary_specialty().to_owned(),
-        readiness: AgentReadiness::NotReady,
+        readiness: AgentReadiness::Unbound,
         content_digest: profile.content_digest().clone(),
     }
 }
@@ -139,6 +145,9 @@ fn agents_local_navigation_tracks_panes_selection_and_effects() {
     handle_event(&mut model, key(KeyCode::Char('a')));
     model.agents.replace_profiles(AgentProfilesView {
         profiles: vec![profile_summary(10), profile_summary(11)],
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
     });
 
     assert_eq!(
@@ -192,6 +201,9 @@ fn list_navigation_clamps_empty_one_last_and_refresh_shrink_states() {
 
     empty.agents.replace_profiles(AgentProfilesView {
         profiles: vec![profile_summary(20)],
+        total_count: 1,
+        returned_count: 1,
+        truncated: false,
     });
     assert_eq!(
         handle_event(&mut empty, key(KeyCode::Down)),
@@ -208,6 +220,9 @@ fn list_navigation_clamps_empty_one_last_and_refresh_shrink_states() {
             profile_summary(21),
             profile_summary(22),
         ],
+        total_count: 3,
+        returned_count: 3,
+        truncated: false,
     });
     for _ in 0..5 {
         handle_event(&mut empty, key(KeyCode::Down));
@@ -219,6 +234,9 @@ fn list_navigation_clamps_empty_one_last_and_refresh_shrink_states() {
 
     empty.agents.replace_profiles(AgentProfilesView {
         profiles: vec![profile_summary(20)],
+        total_count: 1,
+        returned_count: 1,
+        truncated: false,
     });
     assert_eq!(
         (empty.agents.selected_profile, empty.agents.list_scroll),
@@ -231,6 +249,9 @@ fn profile_refresh_preserves_the_selected_identity_when_order_changes() {
     let mut model = model();
     model.agents.replace_profiles(AgentProfilesView {
         profiles: vec![profile_summary(30), profile_summary(31)],
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
     });
     model.agents.selected_profile = 1;
     model.agents.list_scroll = 1;
@@ -238,6 +259,9 @@ fn profile_refresh_preserves_the_selected_identity_when_order_changes() {
 
     model.agents.replace_profiles(AgentProfilesView {
         profiles: vec![profile_summary(31), profile_summary(30)],
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
     });
 
     assert_eq!(
@@ -333,16 +357,22 @@ fn escape_and_quit_respect_active_agents_layers() {
         model.runtime_status,
         ai_stock_forum::ui::tui::model::RuntimeStatus::Stopping
     );
+    handle_event(&mut model, key(KeyCode::Backspace));
+    assert_eq!(enter_line(&mut model, ":next"), ControllerEffect::Redraw);
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Esc)),
         ControllerEffect::Redraw
     );
-    assert_eq!(model.agents.pane, AgentsPane::List);
+    assert_eq!(model.agents.pane, AgentsPane::Editor);
+    assert_eq!(
+        model.agents.editor.as_ref().unwrap().step().as_str(),
+        "template"
+    );
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Esc)),
-        ControllerEffect::Redraw
+        ControllerEffect::CancelProfileReview
     );
-    assert_eq!(model.active_view, View::Overview);
+    assert_eq!(model.agents.pane, AgentsPane::Detail);
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Char('q'))),
         ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
@@ -382,7 +412,7 @@ fn resize_preserves_agents_selection_scroll_and_editor_draft() {
 }
 
 #[test]
-fn too_small_routes_text_and_escape_to_the_current_agents_or_command_owner() {
+fn too_small_q_is_unconditional_regardless_of_input_owner() {
     let mut editor_model = model();
     handle_event(&mut editor_model, key(KeyCode::Char('a')));
     handle_event(&mut editor_model, key(KeyCode::Char('c')));
@@ -393,27 +423,16 @@ fn too_small_routes_text_and_escape_to_the_current_agents_or_command_owner() {
     );
     handle_event(&mut editor_model, TuiEvent::Resize(10, 5));
     assert_eq!(
-        handle_event(&mut editor_model, key(KeyCode::Char('a'))),
-        ControllerEffect::Redraw
+        handle_event(&mut editor_model, key(KeyCode::Char('q'))),
+        ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
     );
-    assert_eq!(editor_model.command.text(), "a");
-    assert_eq!(
-        handle_event(&mut editor_model, key(KeyCode::Esc)),
-        ControllerEffect::Redraw
-    );
-    assert_eq!(editor_model.agents.pane, AgentsPane::List);
 
     let mut command_model = model();
     handle_event(&mut command_model, key(KeyCode::Char('/')));
     handle_event(&mut command_model, TuiEvent::Resize(10, 5));
     assert_eq!(
-        handle_event(&mut command_model, key(KeyCode::Char('a'))),
-        ControllerEffect::Redraw
-    );
-    assert_eq!(command_model.command.text(), "/a");
-    assert_eq!(
-        handle_event(&mut command_model, key(KeyCode::Esc)),
-        ControllerEffect::Redraw
+        handle_event(&mut command_model, key(KeyCode::Char('q'))),
+        ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
     );
 
     let mut confirmation_model = model();
@@ -425,20 +444,13 @@ fn too_small_routes_text_and_escape_to_the_current_agents_or_command_owner() {
     });
     handle_event(&mut confirmation_model, TuiEvent::Resize(10, 5));
     assert_eq!(
-        handle_event(&mut confirmation_model, key(KeyCode::Esc)),
-        ControllerEffect::Redraw
+        handle_event(&mut confirmation_model, key(KeyCode::Char('q'))),
+        ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
     );
-    assert_eq!(confirmation_model.agents.pane, AgentsPane::Editor);
-    assert!(confirmation_model.agents.pending_confirmation.is_none());
 
     let mut local_model = model();
     handle_event(&mut local_model, key(KeyCode::Char('a')));
     handle_event(&mut local_model, TuiEvent::Resize(10, 5));
-    assert_eq!(
-        handle_event(&mut local_model, key(KeyCode::Esc)),
-        ControllerEffect::Redraw
-    );
-    assert_eq!(local_model.active_view, View::Overview);
     assert_eq!(
         handle_event(&mut local_model, key(KeyCode::Char('q'))),
         ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
@@ -451,6 +463,9 @@ fn agents_edit_detail_and_history_navigation_keep_independent_scroll_state() {
     handle_event(&mut model, key(KeyCode::Char('a')));
     model.agents.replace_profiles(AgentProfilesView {
         profiles: vec![profile_summary(40), profile_summary(41)],
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
     });
     handle_event(&mut model, key(KeyCode::Down));
 
@@ -487,7 +502,7 @@ fn agents_edit_detail_and_history_navigation_keep_independent_scroll_state() {
         ControllerEffect::Redraw
     );
     assert_eq!(model.agents.detail_scroll, 1);
-    assert_eq!(model.agents.history_scroll, 1);
+    assert_eq!(model.agents.history_scroll, 0);
 }
 
 #[test]
@@ -532,10 +547,29 @@ fn editor_preview_cancellation_and_confirmation_are_typed_controller_effects() {
     confirmation_model.agents.editor = Some(create_editor());
     advance_create_editor_to_review(&mut confirmation_model);
     assert_eq!(
-        enter_line(&mut confirmation_model, ":activate"),
+        enter_line(&mut confirmation_model, ":create"),
         ControllerEffect::Redraw
     );
     assert_eq!(confirmation_model.agents.pane, AgentsPane::Confirmation);
+    assert_eq!(
+        handle_event(&mut confirmation_model, key(KeyCode::Enter)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(confirmation_model.agents.pane, AgentsPane::Confirmation);
+    for character in "yes".chars() {
+        handle_event(&mut confirmation_model, key(KeyCode::Char(character)));
+    }
+    assert_eq!(
+        handle_event(&mut confirmation_model, key(KeyCode::Enter)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(confirmation_model.agents.pane, AgentsPane::Confirmation);
+    for _ in 0..3 {
+        handle_event(&mut confirmation_model, key(KeyCode::Backspace));
+    }
+    for character in "create".chars() {
+        handle_event(&mut confirmation_model, key(KeyCode::Char(character)));
+    }
     assert!(matches!(
         handle_event(&mut confirmation_model, key(KeyCode::Enter)),
         ControllerEffect::ExecuteProfile(
@@ -561,6 +595,70 @@ fn editor_preview_cancellation_and_confirmation_are_typed_controller_effects() {
             .map(ProfileEditor::mode),
         Some(ProfileEditorMode::Edit { .. })
     ));
+}
+
+#[test]
+fn command_bar_dispatches_canonical_profile_workflows() {
+    let mut create = model();
+    assert!(matches!(
+        enter_line(&mut create, "/agent create bull"),
+        ControllerEffect::StartProfileCreateByTemplate { template_id }
+            if template_id.as_str() == "builtin.bull"
+    ));
+
+    let mut edit = model();
+    assert!(matches!(
+        enter_line(&mut edit, "/agent edit \"Bull Researcher\""),
+        ControllerEffect::StartProfileEditBySelector { selector }
+            if selector.display_name() == Some("Bull Researcher")
+    ));
+}
+
+#[test]
+fn history_navigation_selects_and_loads_exact_immutable_versions() {
+    let mut model = model();
+    let profile_id = AgentProfileId::from_uuid(Uuid::from_u128(700));
+    let active_version_id = AgentProfileVersionId::from_uuid(Uuid::from_u128(702));
+    model.active_view = View::Agents;
+    model.agents.pane = AgentsPane::History;
+    model.agents.replace_history(AgentProfileHistoryView {
+        profile_id,
+        active_version_id,
+        versions: vec![
+            AgentProfileHistoryEntry {
+                profile_version_id: active_version_id,
+                version: ObjectVersion::new(2).unwrap(),
+                supersedes: Some(AgentProfileVersionId::from_uuid(Uuid::from_u128(701))),
+                created_at_ms: 2,
+                readiness: AgentReadiness::Unbound,
+                content_digest: sha256(b"v2"),
+            },
+            AgentProfileHistoryEntry {
+                profile_version_id: AgentProfileVersionId::from_uuid(Uuid::from_u128(701)),
+                version: ObjectVersion::new(1).unwrap(),
+                supersedes: None,
+                created_at_ms: 1,
+                readiness: AgentReadiness::Unbound,
+                content_digest: sha256(b"v1"),
+            },
+        ],
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
+    });
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Down)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.agents.selected_history_version, 1);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::LoadAgentProfileVersion {
+            profile_id,
+            version: ObjectVersion::new(1).unwrap(),
+        }
+    );
 }
 
 #[test]
