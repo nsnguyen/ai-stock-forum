@@ -182,6 +182,7 @@ pub fn execute_skill_effect(
             if starter {
                 let seed = model.skills.detail.as_ref().map(|detail| detail.content.clone());
                 model.skills.start_create(seed);
+                synchronize_host_skill_input(model);
             }
         }
         ControllerEffect::LoadSkillHistory { selected_skill } => {
@@ -298,6 +299,17 @@ pub fn execute_skill_effect(
     Ok(())
 }
 
+fn synchronize_host_skill_input(model: &mut TuiModel) {
+    let value = model
+        .skills
+        .editor
+        .as_ref()
+        .map(|editor| editor.current_value().to_owned())
+        .unwrap_or_default();
+    model.command.clear();
+    model.command.ingest(&value);
+}
+
 fn execute_skill_preview(
     client: &RuntimeClient,
     model: &mut TuiModel,
@@ -363,10 +375,9 @@ fn install_assignment_preview(model: &mut TuiModel, preview: AgentSkillAssignmen
         },
     };
     model.skills.review_registered = true;
-    model.skills.active = true;
     model.skills.pending_confirmation = Some(super::model::SkillConfirmation {
         command,
-        return_pane: super::model::SkillsPane::AssignmentReview,
+        origin: model.skills.operation_origin,
     });
     model.skills.pane = super::model::SkillsPane::Confirmation;
 }
@@ -375,9 +386,8 @@ fn cancel_skill_review_once(
     client: &RuntimeClient,
     model: &mut TuiModel,
 ) -> Result<(), RuntimeError> {
-    if model.skills.review_registered {
+    if std::mem::take(&mut model.skills.review_registered) {
         client.cancel_skill_review()?;
-        model.skills.review_registered = false;
     }
     Ok(())
 }

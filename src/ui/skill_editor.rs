@@ -132,6 +132,7 @@ pub struct SkillEditor {
     field: SkillEditorField,
     raw: RawSkillDraft,
     pending_reference_name: Option<String>,
+    pending_reference_body: String,
     review: Option<SkillEditorReview>,
     local_error: Option<SkillEditorError>,
     preview_generation: u64,
@@ -164,6 +165,7 @@ impl SkillEditor {
             field: SkillEditorField::DisplayName,
             raw: draft.into(),
             pending_reference_name: None,
+            pending_reference_body: String::new(),
             review: None,
             local_error: None,
             preview_generation: 0,
@@ -189,6 +191,21 @@ impl SkillEditor {
 
     pub fn pending_reference_name(&self) -> Option<&str> {
         self.pending_reference_name.as_deref()
+    }
+
+    pub fn current_value(&self) -> &str {
+        match self.field {
+            SkillEditorField::DisplayName => &self.raw.display_name,
+            SkillEditorField::Purpose => &self.raw.description,
+            SkillEditorField::UseWhen => &self.raw.use_when,
+            SkillEditorField::Tags => &self.raw.tags,
+            SkillEditorField::Instructions => &self.raw.instructions,
+            SkillEditorField::ReferenceName => {
+                self.pending_reference_name.as_deref().unwrap_or("")
+            }
+            SkillEditorField::ReferenceBody => &self.pending_reference_body,
+            SkillEditorField::Review => "",
+        }
     }
 
     pub fn draft(&self) -> SkillDraft {
@@ -281,20 +298,25 @@ impl SkillEditor {
                 }
             }
             SkillEditorField::ReferenceName => {
+                if self.pending_reference_name.as_deref() != Some(input) {
+                    self.pending_reference_body.clear();
+                }
                 self.pending_reference_name = Some(input.to_owned());
                 self.field = SkillEditorField::ReferenceBody;
             }
             SkillEditorField::ReferenceBody => {
+                self.pending_reference_body = input.to_owned();
                 let name = self.pending_reference_name.take().unwrap_or_default();
                 self.raw.resources.push(SkillResource {
                     name: name.clone(),
-                    body: input.to_owned(),
+                    body: self.pending_reference_body.clone(),
                 });
                 if self.probe().is_err() {
                     self.raw.resources.pop();
                     self.pending_reference_name = Some(name);
                     return self.invalid(SkillEditorField::ReferenceBody, "skill_reference_invalid");
                 }
+                self.pending_reference_body.clear();
                 self.field = SkillEditorField::ReferenceName;
             }
             SkillEditorField::Review => return self.submit_review(),

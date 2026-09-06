@@ -74,6 +74,18 @@ pub enum AssignmentKind {
     Unassign { expected: SkillVersionRef },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillOperationOrigin {
+    Skills(SkillsPane),
+    AgentSkills,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillWorkspaceOrigin {
+    Cockpit(View),
+    AgentSkills,
+}
+
 impl AssignmentKind {
     pub fn classify(target: &SkillVersionRef, current: Option<&SkillVersionRef>) -> Self {
         match current {
@@ -89,12 +101,13 @@ impl AssignmentKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillConfirmation {
     pub command: ApplicationCommand,
-    pub return_pane: SkillsPane,
+    pub origin: SkillOperationOrigin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillsViewState {
     pub active: bool,
+    pub workspace_origin: Option<SkillWorkspaceOrigin>,
     pub pane: SkillsPane,
     pub selected_skill: usize,
     pub selected_action_index: usize,
@@ -110,12 +123,14 @@ pub struct SkillsViewState {
     pub editor: Option<SkillEditor>,
     pub pending_confirmation: Option<SkillConfirmation>,
     pub review_registered: bool,
+    pub operation_origin: SkillOperationOrigin,
 }
 
 impl Default for SkillsViewState {
     fn default() -> Self {
         Self {
             active: false,
+            workspace_origin: None,
             pane: SkillsPane::List,
             selected_skill: 0,
             selected_action_index: 0,
@@ -136,6 +151,7 @@ impl Default for SkillsViewState {
             editor: None,
             pending_confirmation: None,
             review_registered: false,
+            operation_origin: SkillOperationOrigin::Skills(SkillsPane::Detail),
         }
     }
 }
@@ -158,11 +174,16 @@ impl SkillsViewState {
     }
 
     pub fn replace_detail(&mut self, detail: SkillView) {
+        let skill_id = detail.skill_ref.skill_id();
         if let Some(index) = self.library.skills.iter().position(|summary| {
-            summary.skill_ref.skill_id() == detail.skill_ref.skill_id()
+            summary.skill_ref.skill_id() == skill_id
         }) {
             self.selected_skill = index;
         }
+        if self.history.as_ref().map(|history| history.skill_id) != Some(skill_id) {
+            self.history = None;
+        }
+        self.version_detail = None;
         self.detail = Some(detail);
         self.pane = SkillsPane::Detail;
     }
@@ -196,10 +217,9 @@ impl SkillsViewState {
                 .and_then(|history| history.versions.get(self.selected_history_version))
                 .map(|entry| &entry.skill_ref)
         } else {
-            self.version_detail
+            self.detail
                 .as_ref()
                 .map(|detail| &detail.skill_ref)
-                .or_else(|| self.detail.as_ref().map(|detail| &detail.skill_ref))
                 .or_else(|| self.selected_summary().map(|summary| &summary.skill_ref))
         }
     }

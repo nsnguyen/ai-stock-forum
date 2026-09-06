@@ -1,19 +1,20 @@
 use ai_stock_forum::{
     app::{
         AgentProfileSummary, AgentProfileView, AgentProfilesView, DatabaseReadiness,
-        PresentationSnapshot, ProcessGuardOwnership, SkillHistoryView, SkillSummary, SkillsView,
+        PresentationSnapshot, ProcessGuardOwnership, SkillHistoryView, SkillSummary, SkillView,
+        SkillsView,
     },
     domain::{
         AgentProfileId, AgentProfileVersionId, InstallationId, MemoryNamespaceId, ObjectVersion,
-        SessionId, SkillId, SkillVersionId,
+        SessionId, SkillId, SkillReviewToken, SkillVersionId, sha256,
     },
     setup::SetupStatus,
     skills::{SkillDraft, SkillProvenance, SkillVersion},
     ui::tui::{
         ControllerEffect, TuiEvent, handle_event,
         model::{
-            AgentSkillAction, AgentsPane, AssignmentKind, SkillDetailAction, SkillsPane, TuiModel,
-            View,
+            AgentSkillAction, AgentsPane, AssignmentKind, SkillConfirmation, SkillDetailAction,
+            SkillOperationOrigin, SkillsPane, TuiModel, View,
         },
     },
 };
@@ -40,6 +41,31 @@ fn model() -> TuiModel {
         },
         false,
     )
+}
+
+#[test]
+fn opening_skills_from_agent_panel_tracks_and_restores_workspace_origin() {
+    let mut model = model();
+    model.active_view = View::Agents;
+    model.agents.skill_panel_open = true;
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Char('s'))),
+        ControllerEffect::LoadSkills
+    );
+    assert_eq!(
+        model.skills.workspace_origin,
+        Some(ai_stock_forum::ui::tui::SkillWorkspaceOrigin::AgentSkills)
+    );
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Esc)),
+        ControllerEffect::Redraw
+    );
+    assert!(!model.skills.active);
+    assert_eq!(model.skills.workspace_origin, None);
+    assert_eq!(model.active_view, View::Agents);
+    assert!(model.agents.skill_panel_open);
 }
 
 fn key(code: KeyCode) -> TuiEvent {
@@ -73,6 +99,16 @@ fn summary(skill: &SkillVersion) -> SkillSummary {
     }
 }
 
+fn skill_view(skill: &SkillVersion) -> SkillView {
+    SkillView {
+        skill_ref: skill.reference(),
+        content: skill.content().clone(),
+        created_at_ms: skill.created_at_ms(),
+        provenance: skill.provenance().clone(),
+        predecessor_version_id: skill.predecessor(),
+    }
+}
+
 #[test]
 fn s_opens_skills_without_mutating_library_and_bare_q_is_inert() {
     let first = skill(10, "First");
@@ -98,6 +134,195 @@ fn s_opens_skills_without_mutating_library_and_bare_q_is_inert() {
         ControllerEffect::None
     );
     assert_eq!(model, before_q);
+}
+
+#[test]
+fn active_skills_workspace_owns_keys_even_when_the_rendered_view_is_agents() {
+    let assigned = skill(500, "Assigned");
+    let first = skill(510, "First");
+    let second = skill(520, "Second");
+    let template = &ai_stock_forum::agents::builtin_profile_templates()[0];
+    let mut draft = template.copy_to_draft().unwrap();
+    draft.skill_refs = vec![assigned.reference()];
+    let profile = ai_stock_forum::agents::AgentProfileVersion::create(
+        AgentProfileId::from_uuid(Uuid::from_u128(530)),
+        AgentProfileVersionId::from_uuid(Uuid::from_u128(531)),
+        MemoryNamespaceId::from_uuid(Uuid::from_u128(532)),
+        1,
+        draft,
+        Some(template.provenance()),
+    )
+    .unwrap();
+    let mut model = model();
+    model.active_view = View::Agents;
+    model.agents.pane = AgentsPane::Detail;
+    model.agents.skill_panel_open = true;
+    model.agents.detail = Some(AgentProfileView {
+        readiness: profile.readiness(),
+        profile,
+    });
+    model.skills.active = true;
+    model.skills.replace_skills(SkillsView {
+        skills: vec![summary(&first), summary(&second)],
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
+    });
+
+    assert_eq!(handle_event(&mut model, key(KeyCode::Down)), ControllerEffect::Redraw);
+    assert_eq!(model.skills.selected_skill, 1);
+    assert_eq!(model.agents.selected_assigned_skill, 0);
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Char('/'))),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.command.text(), "/");
+}
+
+#[test]
+fn loading_skill_b_after_skill_a_history_clears_the_historical_a_reference() {
+    let skill_a = skill(540, "Skill A");
+    let skill_b = skill(550, "Skill B");
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.replace_detail(skill_view(&skill_a));
+    model.skills.replace_history(SkillHistoryView {
+        skill_id: skill_a.skill_id(),
+        active_version_id: skill_a.skill_version_id(),
+        versions: vec![ai_stock_forum::app::SkillHistoryEntry {
+            skill_ref: skill_a.reference(),
+            created_at_ms: 1,
+            predecessor_version_id: None,
+        }],
+        total_count: 1,
+        returned_count: 1,
+        truncated: false,
+    });
+    model.skills.replace_version_detail(skill_view(&skill_a));
+
+    model.skills.replace_detail(skill_view(&skill_b));
+
+    assert_eq!(model.skills.selected_skill_ref(), Some(&skill_b.reference()));
+    assert!(model.skills.version_detail.is_none());
+    assert!(model.skills.history.is_none());
+}
+
+#[test]
+fn skill_editor_input_seeds_version_fields_and_enter_accepts_unchanged_values() {
+    let version = skill(560, "Seeded Skill");
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.replace_detail(skill_view(&version));
+    model.skills.selected_action_index = 1;
+
+    assert_eq!(handle_event(&mut model, key(KeyCode::Enter)), ControllerEffect::Redraw);
+    assert_eq!(model.command.text(), "Seeded Skill");
+
+    let expected = [
+        "Purpose for Seeded Skill",
+        "Use for deterministic tests.",
+        "",
+        "Follow the evidence.",
+        "",
+        "",
+    ];
+    for value in expected {
+        assert_eq!(handle_event(&mut model, key(KeyCode::Enter)), ControllerEffect::Redraw);
+        assert_eq!(model.command.text(), value);
+    }
+    assert_eq!(
+        model.skills.editor.as_ref().unwrap().step(),
+        ai_stock_forum::ui::skill_editor::SkillEditorStep::Review
+    );
+}
+
+#[test]
+fn skill_editor_input_keeps_invalid_text_in_the_visible_buffer() {
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.start_create(None);
+    let invalid = "x".repeat(65);
+    model.command.ingest(&invalid);
+
+    assert_eq!(handle_event(&mut model, key(KeyCode::Enter)), ControllerEffect::Redraw);
+    assert_eq!(model.command.text(), invalid);
+    assert_eq!(
+        model.skills.editor.as_ref().unwrap().field(),
+        ai_stock_forum::ui::skill_editor::SkillEditorField::DisplayName
+    );
+}
+
+#[test]
+fn skill_editor_input_escape_restores_the_previous_field_value() {
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.start_create(None);
+    model.command.ingest("Draft Skill");
+    handle_event(&mut model, key(KeyCode::Enter));
+    model.command.ingest("Draft purpose");
+    handle_event(&mut model, key(KeyCode::Enter));
+    assert_eq!(
+        model.skills.editor.as_ref().unwrap().field(),
+        ai_stock_forum::ui::skill_editor::SkillEditorField::UseWhen
+    );
+
+    assert_eq!(handle_event(&mut model, key(KeyCode::Esc)), ControllerEffect::Redraw);
+    assert_eq!(
+        model.skills.editor.as_ref().unwrap().field(),
+        ai_stock_forum::ui::skill_editor::SkillEditorField::Purpose
+    );
+    assert_eq!(model.command.text(), "Draft purpose");
+}
+
+#[test]
+fn editor_confirmation_escape_discards_the_cancelled_preview_before_retry() {
+    let version = skill(570, "Fresh Preview");
+    let mut editor = ai_stock_forum::ui::skill_editor::SkillEditor::for_version(
+        version.skill_id(),
+        version.skill_version_id(),
+        version.content().clone(),
+    );
+    editor.go_to_review().unwrap();
+    let ai_stock_forum::ui::skill_editor::SkillEditorEffect::Preview(request) =
+        editor.submit_keyboard_line("")
+    else {
+        panic!("preview request")
+    };
+    assert!(editor.apply_preview(
+        request.generation(),
+        ai_stock_forum::skills::SkillEditPreview {
+            skill_id: version.skill_id(),
+            expected_active_version_id: Some(version.skill_version_id()),
+            candidate_digest: sha256(b"candidate"),
+            review_token: SkillReviewToken::from_uuid(Uuid::from_u128(571)),
+            review_digest: sha256(b"review"),
+        },
+    ));
+    let ai_stock_forum::ui::skill_editor::SkillEditorEffect::Execute(command) =
+        editor.submit_keyboard_line("")
+    else {
+        panic!("protected command")
+    };
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.pane = SkillsPane::Confirmation;
+    model.skills.editor = Some(editor);
+    model.skills.pending_confirmation = Some(SkillConfirmation {
+        command,
+        origin: SkillOperationOrigin::Skills(SkillsPane::Editor),
+    });
+    model.skills.review_registered = true;
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Esc)),
+        ControllerEffect::CancelSkillReview
+    );
+    assert!(model.skills.editor.as_ref().unwrap().review().is_none());
+    assert!(matches!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::RequestSkillPreview(_)
+    ));
 }
 
 #[test]
