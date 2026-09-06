@@ -14,7 +14,9 @@ pub enum Capability {
     SkillRead,
     SkillCreate,
     SkillVersion,
+    #[serde(rename = "skill_assign")]
     AgentSkillAssign,
+    #[serde(rename = "skill_unassign")]
     AgentSkillUnassign,
     Shutdown,
     DiscussionRun,

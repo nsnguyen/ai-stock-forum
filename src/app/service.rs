@@ -694,6 +694,36 @@ impl IndependentApplicationService {
             AgentSkillAssignmentOperation::Assign { skill },
         )
     }
+
+    pub fn preview_agent_skill_upgrade(
+        &self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+        replacement: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        self.executor.preview_agent_skill_operation(
+            profile_id,
+            expected_active_profile_version_id,
+            AgentSkillAssignmentOperation::Upgrade {
+                expected,
+                replacement,
+            },
+        )
+    }
+
+    pub fn preview_agent_skill_unassignment(
+        &self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        self.executor.preview_agent_skill_operation(
+            profile_id,
+            expected_active_profile_version_id,
+            AgentSkillAssignmentOperation::Unassign { expected },
+        )
+    }
 }
 
 impl ApplicationWorker {

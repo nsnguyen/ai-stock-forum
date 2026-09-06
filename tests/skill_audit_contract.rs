@@ -17,6 +17,30 @@ fn envelope(id: u128, command: ApplicationCommand) -> CommandEnvelope {
     }
 }
 
+#[test]
+fn assignment_capability_serde_uses_schema_v3_wire_values() {
+    use ai_stock_forum::policy::Capability;
+
+    assert_eq!(
+        serde_json::to_string(&Capability::AgentSkillAssign).unwrap(),
+        "\"skill_assign\""
+    );
+    assert_eq!(
+        serde_json::from_str::<Capability>("\"skill_assign\"").unwrap(),
+        Capability::AgentSkillAssign
+    );
+    assert_eq!(
+        serde_json::to_string(&Capability::AgentSkillUnassign).unwrap(),
+        "\"skill_unassign\""
+    );
+    assert_eq!(
+        serde_json::from_str::<Capability>("\"skill_unassign\"").unwrap(),
+        Capability::AgentSkillUnassign
+    );
+    assert!(serde_json::from_str::<Capability>("\"agent_skill_assign\"").is_err());
+    assert!(serde_json::from_str::<Capability>("\"agent_skill_unassign\"").is_err());
+}
+
 fn draft() -> SkillDraft {
     SkillDraft::new(
         "Audit Skill".to_owned(),
@@ -82,8 +106,8 @@ fn capabilities_are_exactly_narrow_and_execution_like_values_are_rejected() {
     assert_eq!(serde_json::to_string(&Capability::SkillRead).unwrap(), "\"skill_read\"");
     assert_eq!(serde_json::to_string(&Capability::SkillCreate).unwrap(), "\"skill_create\"");
     assert_eq!(serde_json::to_string(&Capability::SkillVersion).unwrap(), "\"skill_version\"");
-    assert_eq!(serde_json::to_string(&Capability::AgentSkillAssign).unwrap(), "\"agent_skill_assign\"");
-    assert_eq!(serde_json::to_string(&Capability::AgentSkillUnassign).unwrap(), "\"agent_skill_unassign\"");
+    assert_eq!(serde_json::to_string(&Capability::AgentSkillAssign).unwrap(), "\"skill_assign\"");
+    assert_eq!(serde_json::to_string(&Capability::AgentSkillUnassign).unwrap(), "\"skill_unassign\"");
     assert!(serde_json::from_str::<Capability>("\"skill_execute\"").is_err());
     assert!(serde_json::from_str::<Capability>("\"execute_skill\"").is_err());
     assert!(serde_json::from_str::<Capability>("\"unknown_skill_capability\"").is_err());

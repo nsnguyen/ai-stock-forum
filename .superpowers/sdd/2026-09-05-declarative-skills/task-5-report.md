@@ -197,3 +197,137 @@ Task 8 consumes the public preview methods on `ApplicationService`, `Application
 single-use review token/digest. The controller currently treats resulting views as safe
 acknowledged outcomes; Task 8 may add dedicated editor/navigation state without changing the
 transaction or receipt contracts.
+
+## Fix round 1 of 5
+
+Status: complete and green.
+
+### Findings addressed
+
+- Capability serde now explicitly maps semantic `AgentSkillAssign` and
+  `AgentSkillUnassign` to authoritative schema-v3 wires `skill_assign` and
+  `skill_unassign`. The legacy `agent_skill_*` spellings are rejected and no execute
+  capability exists.
+- Independent application instances now expose upgrade and unassignment preview forwarding,
+  allowing separate valid review registries/connections to exercise real conflicting commits.
+- Receipt replay coverage now includes create, version activation, assignment, upgrade, and
+  unassignment with the same command identity.
+- Review coverage binds creation/version candidates and assignment operation, exact ref,
+  profile identity, and expected active profile version. It also covers consumed-token reuse,
+  same-command replay, and incorrect exact refs for upgrade/unassign.
+- Concurrency coverage retains the skill-version race and adds independent assignment,
+  upgrade, and unassignment races.
+
+### RED and pass-immediately evidence
+
+Capability serde RED:
+
+```text
+cargo test --test skill_audit_contract assignment_capability_serde_uses_schema_v3_wire_values
+```
+
+Observed: 0 passed, 1 failed. `AgentSkillAssign` serialized as
+`"agent_skill_assign"` instead of `"skill_assign"`. After explicit serde renames: 1 passed,
+0 failed.
+
+Receipt replay matrix:
+
+```text
+cargo test --test skill_receipt_contract fix_round_one_replay_matrix
+```
+
+After correcting a test-only selector import, the behavioral contract passed immediately:
+1 passed, 0 failed. This records evidence added for existing shared receipt behavior rather
+than claiming a production defect.
+
+Review/exact-ref matrix:
+
+```text
+cargo test --test skill_application_contract fix_round_one_review_and_exact_refs
+```
+
+After correcting test-only exact-ref acquisition and non-overlapping diagnostic command IDs,
+the behavioral contract passed immediately: 1 passed, 0 failed. Existing review reservation
+and rollback behavior already met these findings.
+
+Concurrency API RED:
+
+```text
+cargo test --test skill_concurrency_contract fix_round_one_agent_skill_races
+```
+
+Observed compile RED: independent services had assignment preview but no upgrade or
+unassignment preview methods. The minimum production change added those two forwarding
+methods. After test-only ownership and valid-draft fixture corrections, all three behavioral
+races passed: 3 passed, 0 failed.
+
+### Durable snapshot evidence
+
+For every create/version/assign/upgrade/unassign replay, the test captures the original typed
+outcome and a durable snapshot containing exact skill detail/history outcomes, exact agent
+detail/history outcomes where applicable, active profile pointer rows, mutation event JSON,
+receipt records, event IDs carried by the typed outcome/receipt relationship, and row totals
+for events, receipts, event references, and immutable profile versions. Same-identity replay
+returns an equal typed outcome and an equal post-replay snapshot.
+
+Every rejected review or exact-ref command compares before/after snapshots containing exact
+typed skill/profile pointers and histories, active profile rows, mutation payloads, and all
+relevant durable row totals. Rejections return exactly `SkillReviewMismatch`,
+`SkillReviewUnavailable`, `StaleAgentProfileVersion`, or `SkillNotAssigned` as appropriate,
+without durable change.
+
+Each agent mutation race snapshots durable totals before launch and proves one typed winner,
+one `StaleAgentProfileVersion` loser, exactly one new immutable profile version, one event,
+one receipt, and one event reference. It also verifies the sole active profile pointer equals
+the winner's exact profile-version ID and that the sole mutation payload embeds that ID.
+
+### Final verification
+
+Task 5 focused command:
+
+```text
+cargo test --test skill_application_contract \
+  --test skill_event_contract \
+  --test skill_concurrency_contract \
+  --test skill_receipt_contract \
+  --test skill_audit_contract
+```
+
+Result: 15 passed, 0 failed across 5 test binaries.
+
+Affected policy/audit/application/reducer/renderer/controller regression command:
+
+```text
+cargo test --test agent_profile_tui_host_contract \
+  --test agent_profile_application_contract \
+  --test fallback_fix_round_contract \
+  --test agent_profile_hardening_contract \
+  --test agent_profile_service_final_fix_contract \
+  --test fallback_contract \
+  --test application_contract \
+  --test tui_application_contract \
+  --test policy_contract \
+  --test final_fix_application_contract \
+  --test runtime_contract \
+  --test projection_contract \
+  --test agent_profile_recovery_contract \
+  --test agent_profile_tui_controller_contract \
+  --test tui_hardening_contract
+```
+
+Result: 174 passed, 0 failed across 15 test binaries.
+
+Combined fix-round verification: 189 passed, 0 failed across 20 test binaries.
+
+### Fix-round self-review
+
+- Final diff is limited to `src/policy/capability.rs`, `src/app/service.rs`, four existing
+  Task 5 focused test files, and this report.
+- `git diff --check` is clean.
+- Production delta is minimal: two serde attributes and two independent-service forwarding
+  methods; transaction, audit, event, renderer, controller, migration, and recovery behavior
+  are unchanged.
+- Tests use accepted repository/application reads for exact refs rather than constructing
+  domain refs or inspecting implementation-private state.
+- No execute capability, Task 6 recovery work, slash parsing, Task 7 workflow, Task 8 state,
+  unrelated formatting, push, PR, or merge was added.
