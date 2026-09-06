@@ -195,7 +195,20 @@ impl SkillsViewState {
     }
 
     pub fn replace_version_detail(&mut self, detail: SkillView) {
+        let skill_id = detail.skill_ref.skill_id();
+        if self.history.as_ref().map(|history| history.skill_id) != Some(skill_id) {
+            self.history = None;
+            self.selected_history_version = 0;
+        }
+        self.detail = Some(detail.clone());
         self.version_detail = Some(detail);
+    }
+
+    pub fn clear_skill_context(&mut self) {
+        self.detail = None;
+        self.history = None;
+        self.version_detail = None;
+        self.selected_history_version = 0;
     }
 
     pub fn selected_summary(&self) -> Option<&crate::app::SkillSummary> {
@@ -217,10 +230,17 @@ impl SkillsViewState {
                 .and_then(|history| history.versions.get(self.selected_history_version))
                 .map(|entry| &entry.skill_ref)
         } else {
-            self.detail
+            self.version_detail
+                .as_ref()
+                .filter(|version| {
+                    self.detail.as_ref().map(|detail| detail.skill_ref.skill_id())
+                        == Some(version.skill_ref.skill_id())
+                })
+                .map(|version| &version.skill_ref)
+                .or_else(|| self.detail
                 .as_ref()
                 .map(|detail| &detail.skill_ref)
-                .or_else(|| self.selected_summary().map(|summary| &summary.skill_ref))
+                .or_else(|| self.selected_summary().map(|summary| &summary.skill_ref)))
         }
     }
 

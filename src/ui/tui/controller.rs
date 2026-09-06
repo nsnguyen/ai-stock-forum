@@ -216,7 +216,7 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
         CommandView::SkillVersion(version) => {
             model.skills.replace_version_detail(version);
             model.skills.active = true;
-            model.skills.pane = SkillsPane::History;
+            model.skills.pane = SkillsPane::Detail;
             model.clear_message();
             ShutdownDisposition::Continue
         }
@@ -730,6 +730,14 @@ fn unwind_skills(model: &mut TuiModel) -> ControllerEffect {
                 None => {}
             }
         }
+        SkillsPane::Detail
+            if model.skills.workspace_origin == Some(SkillWorkspaceOrigin::AgentSkills) =>
+        {
+            model.skills.active = false;
+            model.skills.workspace_origin = None;
+            model.active_view = View::Agents;
+            model.agents.skill_panel_open = true;
+        }
         SkillsPane::CreateSource | SkillsPane::Detail => model.skills.pane = SkillsPane::List,
         SkillsPane::History | SkillsPane::AgentPicker | SkillsPane::Result => model.skills.pane = SkillsPane::Detail,
         SkillsPane::AssignmentReview => model.skills.pane = SkillsPane::AgentPicker,
@@ -1070,6 +1078,8 @@ fn handle_agent_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<Contro
                 .clone();
             match model.agents.selected_skill_action() {
                 AgentSkillAction::View => {
+                    model.skills.workspace_origin = Some(SkillWorkspaceOrigin::AgentSkills);
+                    model.skills.clear_skill_context();
                     model.skills.active = true;
                     ControllerEffect::LoadSkillVersion {
                         skill_id: selected.skill_id(),

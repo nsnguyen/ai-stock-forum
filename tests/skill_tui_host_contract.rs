@@ -1,10 +1,16 @@
-use std::{collections::VecDeque, sync::{Arc, Mutex}, time::Duration};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex, mpsc},
+    thread,
+    time::Duration,
+};
 
 use ai_stock_forum::{
     app::{
         AgentProfileView, AgentSkillAssignmentOperation, AgentSkillAssignmentPreview, AppError,
         ApplicationCommand, CommandOutcome, CommandView, PresentationSnapshot,
         ShutdownDisposition, ShutdownReason, ShutdownView, SkillsView,
+        SkillHistoryEntry, SkillHistoryView, SkillView,
     },
     domain::{
         AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, InstallationId,
@@ -13,13 +19,15 @@ use ai_stock_forum::{
     runtime::{ApplicationRuntime, CommandExecutor},
     policy::{Capability, PolicyDecision},
     setup::SetupStatus,
-    skills::{SkillDraft, SkillEditPreview},
+    skills::{SkillDraft, SkillEditPreview, SkillProvenance, SkillVersion},
     ui::{
         skill_editor::{SkillEditor, SkillEditorEffect, SkillPreviewRequest},
         tui::{
             ControllerEffect, EventSource, Screen, TuiError, TuiEvent,
             execute_skill_effect, handle_event, run_tui_with_screen,
-            model::{AgentsPane, SkillsPane, TuiModel, View},
+            model::{
+                AgentsPane, SkillConfirmation, SkillOperationOrigin, SkillsPane, TuiModel, View,
+            },
             theme::Theme,
         },
     },
@@ -42,6 +50,88 @@ enum Call {
 struct RouteRecorder {
     calls: Arc<Mutex<Vec<Call>>>,
     execute_error: Option<AppError>,
+}
+
+struct BlockingExecutor {
+    calls: Arc<Mutex<Vec<Call>>>,
+    entered: mpsc::SyncSender<()>,
+    release: mpsc::Receiver<()>,
+    block_next: bool,
+}
+
+impl CommandExecutor for BlockingExecutor {
+    fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError> {
+        if self.block_next {
+            self.block_next = false;
+            self.entered.send(()).unwrap();
+            self.release.recv().unwrap();
+        }
+        if matches!(
+            command,
+            ApplicationCommand::CreateSkill { .. }
+                | ApplicationCommand::ActivateSkillVersion { .. }
+                | ApplicationCommand::AssignAgentSkill { .. }
+                | ApplicationCommand::UpgradeAgentSkill { .. }
+                | ApplicationCommand::UnassignAgentSkill { .. }
+        ) {
+            self.calls.lock().unwrap().push(Call::Mutation);
+        }
+        Err(AppError::LifecycleFinished)
+    }
+
+    fn preview_skill_creation(
+        &mut self,
+        _candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, AppError> {
+        Err(AppError::SkillReviewUnavailable)
+    }
+
+    fn preview_skill_version(
+        &mut self,
+        _skill_id: SkillId,
+        _expected_active_version_id: SkillVersionId,
+        _candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, AppError> {
+        Err(AppError::SkillReviewUnavailable)
+    }
+
+    fn preview_agent_skill_assignment(
+        &mut self,
+        _profile_id: AgentProfileId,
+        _expected_active_profile_version_id: AgentProfileVersionId,
+        _skill: ai_stock_forum::skills::SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        Err(AppError::SkillReviewUnavailable)
+    }
+
+    fn preview_agent_skill_upgrade(
+        &mut self,
+        _profile_id: AgentProfileId,
+        _expected_active_profile_version_id: AgentProfileVersionId,
+        _expected: ai_stock_forum::skills::SkillVersionRef,
+        _replacement: ai_stock_forum::skills::SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        Err(AppError::SkillReviewUnavailable)
+    }
+
+    fn preview_agent_skill_unassignment(
+        &mut self,
+        _profile_id: AgentProfileId,
+        _expected_active_profile_version_id: AgentProfileVersionId,
+        _expected: ai_stock_forum::skills::SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        Err(AppError::SkillReviewUnavailable)
+    }
+
+    fn cancel_skill_review(&mut self) -> Result<(), AppError> {
+        self.calls.lock().unwrap().push(Call::Cancel);
+        Ok(())
+    }
+
+    fn finish(&mut self, _reason: ShutdownReason) -> Result<(), AppError> {
+        self.calls.lock().unwrap().push(Call::Finish);
+        Ok(())
+    }
 }
 
 struct ScriptedEvents {
@@ -97,6 +187,9 @@ impl CommandExecutor for RouteRecorder {
                 }),
                 shutdown: ShutdownDisposition::Requested,
             }),
+            ApplicationCommand::ShowSkillVersion { .. } => Ok(outcome(
+                CommandView::SkillVersion(host_skill_view(&assigned_skill())),
+            )),
             ApplicationCommand::CreateSkill { .. }
             | ApplicationCommand::ActivateSkillVersion { .. }
             | ApplicationCommand::AssignAgentSkill { .. }
@@ -145,23 +238,38 @@ impl CommandExecutor for RouteRecorder {
 
     fn preview_agent_skill_assignment(
         &mut self,
-        _profile_id: AgentProfileId,
-        _expected_active_profile_version_id: AgentProfileVersionId,
-        _skill: ai_stock_forum::skills::SkillVersionRef,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        skill: ai_stock_forum::skills::SkillVersionRef,
     ) -> Result<ai_stock_forum::app::AgentSkillAssignmentPreview, AppError> {
         self.calls.lock().unwrap().push(Call::Assign);
-        Err(AppError::SkillReviewUnavailable)
+        Ok(AgentSkillAssignmentPreview {
+            profile_id,
+            expected_active_profile_version_id,
+            operation: AgentSkillAssignmentOperation::Assign { skill },
+            review_token: SkillReviewToken::from_uuid(Uuid::from_u128(92)),
+            review_digest: sha256(b"assign-review"),
+        })
     }
 
     fn preview_agent_skill_upgrade(
         &mut self,
-        _profile_id: AgentProfileId,
-        _expected_active_profile_version_id: AgentProfileVersionId,
-        _expected: ai_stock_forum::skills::SkillVersionRef,
-        _replacement: ai_stock_forum::skills::SkillVersionRef,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        expected: ai_stock_forum::skills::SkillVersionRef,
+        replacement: ai_stock_forum::skills::SkillVersionRef,
     ) -> Result<ai_stock_forum::app::AgentSkillAssignmentPreview, AppError> {
         self.calls.lock().unwrap().push(Call::Upgrade);
-        Err(AppError::SkillReviewUnavailable)
+        Ok(AgentSkillAssignmentPreview {
+            profile_id,
+            expected_active_profile_version_id,
+            operation: AgentSkillAssignmentOperation::Upgrade {
+                expected,
+                replacement,
+            },
+            review_token: SkillReviewToken::from_uuid(Uuid::from_u128(93)),
+            review_digest: sha256(b"upgrade-review"),
+        })
     }
 
     fn preview_agent_skill_unassignment(
@@ -204,6 +312,46 @@ fn draft() -> SkillDraft {
         Vec::new(),
     )
     .unwrap()
+}
+
+fn assigned_skill() -> SkillVersion {
+    SkillVersion::create(
+        SkillId::from_uuid(Uuid::from_u128(100)),
+        SkillVersionId::from_uuid(Uuid::from_u128(101)),
+        1,
+        SkillProvenance::User,
+        draft(),
+    )
+    .unwrap()
+}
+
+fn host_skill(seed: u128, version: i64, name: &str) -> SkillVersion {
+    SkillVersion::create(
+        SkillId::from_uuid(Uuid::from_u128(seed)),
+        SkillVersionId::from_uuid(Uuid::from_u128(seed + version as u128)),
+        version,
+        SkillProvenance::User,
+        SkillDraft::new(
+            name.to_owned(),
+            format!("Purpose for {name}"),
+            "Use for host contracts.".to_owned(),
+            Vec::new(),
+            "Keep exact references.".to_owned(),
+            Vec::new(),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+fn host_skill_view(skill: &SkillVersion) -> SkillView {
+    SkillView {
+        skill_ref: skill.reference(),
+        content: skill.content().clone(),
+        created_at_ms: skill.created_at_ms(),
+        provenance: skill.provenance().clone(),
+        predecessor_version_id: skill.predecessor(),
+    }
 }
 
 fn outcome(view: CommandView) -> CommandOutcome {
@@ -294,14 +442,7 @@ fn run_review_host(
 }
 
 fn agent_panel_model() -> (TuiModel, ai_stock_forum::skills::SkillVersionRef) {
-    let skill = ai_stock_forum::skills::SkillVersion::create(
-        SkillId::from_uuid(Uuid::from_u128(100)),
-        SkillVersionId::from_uuid(Uuid::from_u128(101)),
-        1,
-        ai_stock_forum::skills::SkillProvenance::User,
-        draft(),
-    )
-    .unwrap();
+    let skill = assigned_skill();
     let assigned = skill.reference();
     let template = &ai_stock_forum::agents::builtin_profile_templates()[0];
     let mut profile_draft = template.copy_to_draft().unwrap();
@@ -512,6 +653,223 @@ fn agent_origin_terminal_review_failures_restore_the_agent_panel_without_orphans
         );
         runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
     }
+}
+
+#[test]
+fn agent_view_exact_version_route_replaces_stale_context_and_returns_to_agents() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let runtime = ApplicationRuntime::spawn(
+        RouteRecorder {
+            calls: Arc::clone(&calls),
+            execute_error: None,
+        },
+        4,
+    )
+    .unwrap();
+    let (mut model, target) = agent_panel_model();
+    model.agents.selected_skill_action_index = 0;
+    let stale = host_skill(900, 1, "Stale A");
+    model.skills.detail = Some(host_skill_view(&stale));
+    model.skills.version_detail = Some(host_skill_view(&stale));
+    model.skills.history = Some(SkillHistoryView {
+        skill_id: stale.skill_id(),
+        active_version_id: stale.skill_version_id(),
+        versions: vec![SkillHistoryEntry {
+            skill_ref: stale.reference(),
+            created_at_ms: stale.created_at_ms(),
+            predecessor_version_id: stale.predecessor(),
+        }],
+        total_count: 1,
+        returned_count: 1,
+        truncated: false,
+    });
+
+    let effect = handle_event(&mut model, key(KeyCode::Enter));
+    execute_skill_effect(&runtime.client(), &mut model, effect).unwrap();
+
+    assert_eq!(model.skills.pane, SkillsPane::Detail);
+    assert_eq!(model.skills.selected_skill_ref(), Some(&target));
+    assert_eq!(
+        model.skills.detail.as_ref().map(|detail| detail.skill_ref.clone()),
+        Some(target.clone())
+    );
+    assert!(model.skills.history.is_none());
+    handle_event(&mut model, key(KeyCode::Esc));
+    assert!(!model.skills.active);
+    assert_eq!(model.active_view, View::Agents);
+    assert!(model.agents.skill_panel_open);
+    runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
+}
+
+#[test]
+fn historical_assign_preview_builds_a_command_for_the_exact_opened_version() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let runtime = ApplicationRuntime::spawn(
+        RouteRecorder {
+            calls: Arc::clone(&calls),
+            execute_error: None,
+        },
+        4,
+    )
+    .unwrap();
+    let historical = host_skill(920, 1, "Historical");
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.replace_version_detail(host_skill_view(&historical));
+    model.skills.pane = SkillsPane::AssignmentReview;
+    model.skills.selected_agent_detail = Some(agent_panel_model().0.agents.detail.unwrap());
+    model.skills.assignment = Some(ai_stock_forum::ui::tui::AssignmentKind::Add);
+
+    let effect = handle_event(&mut model, key(KeyCode::Enter));
+    execute_skill_effect(&runtime.client(), &mut model, effect).unwrap();
+
+    let command = &model
+        .skills
+        .pending_confirmation
+        .as_ref()
+        .expect("assignment confirmation")
+        .command;
+    assert!(matches!(
+        command,
+        ApplicationCommand::AssignAgentSkill { skill, .. } if skill == &historical.reference()
+    ));
+    execute_skill_effect(
+        &runtime.client(),
+        &mut model,
+        ControllerEffect::CancelSkillReview,
+    )
+    .unwrap();
+    runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
+}
+
+#[test]
+fn agent_origin_upgrade_preview_builds_an_explicit_exact_upgrade_command() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let runtime = ApplicationRuntime::spawn(
+        RouteRecorder {
+            calls: Arc::clone(&calls),
+            execute_error: None,
+        },
+        4,
+    )
+    .unwrap();
+    let (mut model, expected) = agent_panel_model();
+    model.agents.selected_skill_action_index = 0;
+    handle_event(&mut model, key(KeyCode::Right));
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::LoadSkills
+    );
+    let replacement = SkillVersion::create(
+        expected.skill_id(),
+        SkillVersionId::from_uuid(Uuid::from_u128(941)),
+        2,
+        SkillProvenance::User,
+        draft(),
+    )
+    .unwrap();
+    model.skills.replace_detail(host_skill_view(&replacement));
+    let detail = model.agents.detail.clone().unwrap();
+    model.skills.selected_agent_detail = Some(detail);
+    model.skills.assignment = Some(ai_stock_forum::ui::tui::AssignmentKind::Upgrade {
+        expected: expected.clone(),
+    });
+    model.skills.pane = SkillsPane::AssignmentReview;
+
+    let effect = handle_event(&mut model, key(KeyCode::Enter));
+    execute_skill_effect(&runtime.client(), &mut model, effect).unwrap();
+
+    let command = &model
+        .skills
+        .pending_confirmation
+        .as_ref()
+        .expect("upgrade confirmation")
+        .command;
+    assert!(matches!(
+        command,
+        ApplicationCommand::UpgradeAgentSkill {
+            expected: command_expected,
+            replacement: command_replacement,
+            ..
+        } if command_expected == &expected && command_replacement == &replacement.reference()
+    ));
+    execute_skill_effect(
+        &runtime.client(),
+        &mut model,
+        ControllerEffect::CancelSkillReview,
+    )
+    .unwrap();
+    runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
+}
+
+#[test]
+fn typed_backpressure_keeps_protected_confirmation_retryable_without_token_loss() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let runtime = ApplicationRuntime::spawn(
+        BlockingExecutor {
+            calls: Arc::clone(&calls),
+            entered: entered_tx,
+            release: release_rx,
+            block_next: true,
+        },
+        1,
+    )
+    .unwrap();
+    let client = runtime.client();
+    let _running = client.try_submit(ApplicationCommand::ShowHelp).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let _queued = client.try_submit(ApplicationCommand::ShowStatus).unwrap();
+
+    let target = host_skill(960, 1, "Backpressure").reference();
+    let command = ApplicationCommand::AssignAgentSkill {
+        profile_id: AgentProfileId::from_uuid(Uuid::from_u128(970)),
+        expected_active_profile_version_id: AgentProfileVersionId::from_uuid(Uuid::from_u128(971)),
+        skill: target,
+        review_token: SkillReviewToken::from_uuid(Uuid::from_u128(972)),
+        review_digest: sha256(b"retryable-review"),
+    };
+    let confirmation = SkillConfirmation {
+        command: command.clone(),
+        origin: SkillOperationOrigin::Skills(SkillsPane::AssignmentReview),
+    };
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.pane = SkillsPane::Confirmation;
+    model.skills.pending_confirmation = Some(confirmation.clone());
+    model.skills.review_registered = true;
+
+    let worker_client = client.clone();
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let handle = thread::spawn(move || {
+        let result = execute_skill_effect(
+            &worker_client,
+            &mut model,
+            ControllerEffect::ExecuteSkill(command),
+        );
+        result_tx.send((result, model)).unwrap();
+    });
+
+    let received = result_rx.recv_timeout(Duration::from_millis(100));
+    if received.is_err() {
+        release_tx.send(()).unwrap();
+        let _ = result_rx.recv_timeout(Duration::from_secs(1));
+        handle.join().unwrap();
+        runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
+        panic!("protected skill submission blocked instead of returning typed backpressure");
+    }
+    let (result, model) = received.unwrap();
+    assert!(result.is_ok());
+    assert_eq!(model.skills.pane, SkillsPane::Confirmation);
+    assert_eq!(model.skills.pending_confirmation, Some(confirmation));
+    assert!(model.skills.review_registered);
+    assert!(!model.command_in_flight);
+    assert!(!calls.lock().unwrap().iter().any(|call| matches!(call, Call::Mutation | Call::Cancel)));
+
+    release_tx.send(()).unwrap();
+    handle.join().unwrap();
+    runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
 }
 
 #[test]

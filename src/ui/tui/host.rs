@@ -278,7 +278,7 @@ pub fn execute_skill_effect(
             }
         }
         ControllerEffect::ExecuteSkill(command) => {
-            match submit_agent_command(client, model, command) {
+            match submit_protected_skill_command(client, model, command) {
                 Ok(outcome) => {
                     let _ = apply_outcome(model, outcome);
                     model.skills.review_registered = false;
@@ -287,7 +287,14 @@ pub fn execute_skill_effect(
                     model.skills.pane = super::model::SkillsPane::Result;
                     model.set_message(super::model::Severity::Info, "Skill action completed.");
                 }
-                Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+                Err(RuntimeError::Backpressure) => {
+                    model.set_command_in_flight(false);
+                    model.set_message(
+                        super::model::Severity::Error,
+                        "Command queue is busy; review retained for retry.",
+                    );
+                }
+                Err(error @ RuntimeError::Application(_)) => {
                     recover_skill_error(client, model, &error)?;
                 }
                 Err(error) => return Err(error),
@@ -418,6 +425,19 @@ fn submit_agent_command(
 ) -> Result<CommandOutcome, RuntimeError> {
     model.set_command_in_flight(true);
     let result = client.submit(command);
+    if result.is_err() {
+        model.set_command_in_flight(false);
+    }
+    result
+}
+
+fn submit_protected_skill_command(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    command: ApplicationCommand,
+) -> Result<CommandOutcome, RuntimeError> {
+    model.set_command_in_flight(true);
+    let result = client.try_submit(command).and_then(|pending| pending.recv());
     if result.is_err() {
         model.set_command_in_flight(false);
     }

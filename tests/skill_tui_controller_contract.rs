@@ -1,20 +1,21 @@
 use ai_stock_forum::{
     app::{
-        AgentProfileSummary, AgentProfileView, AgentProfilesView, DatabaseReadiness,
-        PresentationSnapshot, ProcessGuardOwnership, SkillHistoryView, SkillSummary, SkillView,
-        SkillsView,
+        AgentProfileSummary, AgentProfileView, AgentProfilesView, CommandOutcome, CommandView,
+        DatabaseReadiness, PresentationSnapshot, ProcessGuardOwnership, ShutdownDisposition,
+        SkillHistoryEntry, SkillHistoryView, SkillSummary, SkillView, SkillsView,
     },
     domain::{
-        AgentProfileId, AgentProfileVersionId, InstallationId, MemoryNamespaceId, ObjectVersion,
-        SessionId, SkillId, SkillReviewToken, SkillVersionId, sha256,
+        AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, InstallationId,
+        MemoryNamespaceId, ObjectVersion, SessionId, SkillId, SkillReviewToken, SkillVersionId,
+        sha256,
     },
     setup::SetupStatus,
     skills::{SkillDraft, SkillProvenance, SkillVersion},
     ui::tui::{
-        ControllerEffect, TuiEvent, handle_event,
+        ControllerEffect, TuiEvent, apply_outcome, handle_event,
         model::{
             AgentSkillAction, AgentsPane, AssignmentKind, SkillConfirmation, SkillDetailAction,
-            SkillOperationOrigin, SkillsPane, TuiModel, View,
+            SkillOperationOrigin, SkillWorkspaceOrigin, SkillsPane, TuiModel, View,
         },
     },
 };
@@ -107,6 +108,186 @@ fn skill_view(skill: &SkillVersion) -> SkillView {
         provenance: skill.provenance().clone(),
         predecessor_version_id: skill.predecessor(),
     }
+}
+
+fn command_outcome(view: CommandView) -> CommandOutcome {
+    CommandOutcome {
+        command_id: CommandId::from_uuid(Uuid::from_u128(800)),
+        correlation_id: CorrelationId::from_uuid(Uuid::from_u128(801)),
+        committed_events: Vec::new(),
+        view,
+        shutdown: ShutdownDisposition::Continue,
+    }
+}
+
+fn profile_with_skills(
+    seed: u128,
+    skill_refs: Vec<ai_stock_forum::skills::SkillVersionRef>,
+) -> AgentProfileView {
+    let template = &ai_stock_forum::agents::builtin_profile_templates()[0];
+    let mut draft = template.copy_to_draft().unwrap();
+    draft.skill_refs = skill_refs;
+    let profile = ai_stock_forum::agents::AgentProfileVersion::create(
+        AgentProfileId::from_uuid(Uuid::from_u128(seed)),
+        AgentProfileVersionId::from_uuid(Uuid::from_u128(seed + 1)),
+        MemoryNamespaceId::from_uuid(Uuid::from_u128(seed + 2)),
+        1,
+        draft,
+        Some(template.provenance()),
+    )
+    .unwrap();
+    AgentProfileView {
+        readiness: profile.readiness(),
+        profile,
+    }
+}
+
+#[test]
+fn agent_view_replaces_stale_skill_context_and_escape_returns_to_agent_skills() {
+    let skill_a = skill(810, "Skill A");
+    let skill_b = skill(820, "Skill B");
+    let mut model = model();
+    model.active_view = View::Agents;
+    model.agents.pane = AgentsPane::Detail;
+    model.agents.detail = Some(profile_with_skills(830, vec![skill_b.reference()]));
+    model.agents.skill_panel_open = true;
+    model.skills.detail = Some(skill_view(&skill_a));
+    model.skills.version_detail = Some(skill_view(&skill_a));
+    model.skills.history = Some(SkillHistoryView {
+        skill_id: skill_a.skill_id(),
+        active_version_id: skill_a.skill_version_id(),
+        versions: vec![SkillHistoryEntry {
+            skill_ref: skill_a.reference(),
+            created_at_ms: skill_a.created_at_ms(),
+            predecessor_version_id: skill_a.predecessor(),
+        }],
+        total_count: 1,
+        returned_count: 1,
+        truncated: false,
+    });
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::LoadSkillVersion {
+            skill_id: skill_b.skill_id(),
+            version: skill_b.reference().version(),
+        }
+    );
+    assert_eq!(
+        model.skills.workspace_origin,
+        Some(SkillWorkspaceOrigin::AgentSkills)
+    );
+    assert!(model.skills.detail.is_none());
+    assert!(model.skills.history.is_none());
+    assert!(model.skills.version_detail.is_none());
+
+    assert_eq!(
+        apply_outcome(
+            &mut model,
+            command_outcome(CommandView::SkillVersion(skill_view(&skill_b))),
+        ),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.skills.pane, SkillsPane::Detail);
+    assert_eq!(model.skills.selected_skill_ref(), Some(&skill_b.reference()));
+    assert_eq!(
+        model.skills.detail.as_ref().map(|detail| detail.skill_ref.clone()),
+        Some(skill_b.reference())
+    );
+    assert_eq!(
+        model.skills.version_detail.as_ref().map(|detail| detail.skill_ref.clone()),
+        Some(skill_b.reference())
+    );
+    assert!(model.skills.history.is_none());
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Esc)),
+        ControllerEffect::Redraw
+    );
+    assert!(!model.skills.active);
+    assert_eq!(model.active_view, View::Agents);
+    assert!(model.agents.skill_panel_open);
+}
+
+#[test]
+fn opened_historical_version_assigns_its_exact_ref_and_classifies_downgrade_as_upgrade() {
+    let first = skill(840, "Historical");
+    let active = SkillVersion::create(
+        first.skill_id(),
+        SkillVersionId::from_uuid(Uuid::from_u128(842)),
+        2,
+        SkillProvenance::User,
+        first.content().clone(),
+    )
+    .unwrap();
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.replace_detail(skill_view(&active));
+    model.skills.replace_history(SkillHistoryView {
+        skill_id: first.skill_id(),
+        active_version_id: active.skill_version_id(),
+        versions: vec![
+            SkillHistoryEntry {
+                skill_ref: first.reference(),
+                created_at_ms: first.created_at_ms(),
+                predecessor_version_id: first.predecessor(),
+            },
+            SkillHistoryEntry {
+                skill_ref: active.reference(),
+                created_at_ms: active.created_at_ms(),
+                predecessor_version_id: active.predecessor(),
+            },
+        ],
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
+    });
+    model.skills.pane = SkillsPane::History;
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::LoadSkillVersion {
+            skill_id: first.skill_id(),
+            version: first.reference().version(),
+        }
+    );
+    apply_outcome(
+        &mut model,
+        command_outcome(CommandView::SkillVersion(skill_view(&first))),
+    );
+    assert_eq!(model.skills.pane, SkillsPane::Detail);
+    assert_eq!(model.skills.selected_skill_ref(), Some(&first.reference()));
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::LoadSkillAgents
+    );
+
+    let assigned = profile_with_skills(850, vec![active.reference()]);
+    model.skills.selected_agent_detail = Some(assigned.clone());
+    model.skills.assignment = Some(AssignmentKind::classify(
+        &first.reference(),
+        assigned.profile.skill_refs().first(),
+    ));
+    model.skills.pane = SkillsPane::AssignmentReview;
+    let ControllerEffect::RequestSkillAssignmentPreview {
+        target,
+        assignment,
+        ..
+    } = handle_event(&mut model, key(KeyCode::Enter))
+    else {
+        panic!("historical assignment preview")
+    };
+    assert_eq!(target, first.reference());
+    assert_eq!(
+        assignment,
+        AssignmentKind::Upgrade {
+            expected: active.reference(),
+        }
+    );
+
+    let skill_b = skill(860, "Skill B");
+    model.skills.replace_detail(skill_view(&skill_b));
+    assert_eq!(model.skills.selected_skill_ref(), Some(&skill_b.reference()));
 }
 
 #[test]

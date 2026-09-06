@@ -57,11 +57,11 @@ Fresh focused command:
 cargo test --test skill_editor_contract --test skill_tui_controller_contract --test skill_tui_host_contract
 ```
 
-Result: exit 0, 25 passed, 0 failed.
+Result: exit 0, 31 passed, 0 failed.
 
 - `skill_editor_contract`: 5 passed.
-- `skill_tui_controller_contract`: 12 passed.
-- `skill_tui_host_contract`: 8 passed.
+- `skill_tui_controller_contract`: 14 passed.
+- `skill_tui_host_contract`: 12 passed.
 
 No full suite was run, per Task 8 instructions.
 
@@ -89,8 +89,32 @@ No full suite was run, per Task 8 instructions.
 6. **Exact-once cancellation: fixed.** The host takes `review_registered` before dispatch. The worker-received-then-failed regression records one cancellation, returns an error, and proves a subsequent cleanup call does not dispatch again.
 7. **Focused regression coverage: added.** Contracts cover Skills-over-Agents ownership, explicit workspace return, historical A-to-B switching, seeded and unchanged edits, invalid input, Esc restoration, agent-origin cancellation and terminal failures, fresh preview after confirmation Esc, and cleanup on `/quit`, interruption, terminal input/EOF, terminal output failure, and cancellation failure. Host-exit tests assert no mutation command is dispatched.
 
+## Independent-review fix round 2
+
+### RED evidence
+
+- Agent-origin View initially had no `SkillWorkspaceOrigin`, retained stale A detail/history/version state while requesting assigned skill B, and routed the returned B `SkillVersion` back to `History` rather than a coherent exact-version detail.
+- Opening a historical version initially left the pane in `History`; the Detail Assign action therefore remained unreachable for the opened exact ref.
+- The host View route initially returned `LifecycleFinished` in the focused route contract because no exact-version response was exercised there. Assignment and Upgrade doubles initially returned `SkillReviewUnavailable`, so neither exact protected command was installed.
+- With a capacity-one runtime saturated by a blocked worker and one queued command, protected skill execution blocked instead of returning typed `RuntimeError::Backpressure`. The regression used a bounded timeout, released the worker safely, and failed with `protected skill submission blocked instead of returning typed backpressure`.
+
+### GREEN behavior and evidence
+
+1. **Agent-origin exact View:** View now records `SkillWorkspaceOrigin::AgentSkills` and clears prior detail/history/version state before requesting the assigned exact ref. A `SkillVersion` response installs same-identity detail/version state, clears mismatched history, and enters `SkillsPane::Detail`. Esc from agent-origin Detail closes Skills directly and restores the originating agent skill panel.
+2. **Historical exact-version Assign:** Opening a selected historical version now enters Detail. `selected_skill_ref` prefers `version_detail` only when its skill identity matches Detail; replacing detail for another skill still clears it. The existing Detail Assign route therefore previews the historical exact ref. Classification remains `Add` when the target agent has no version of that skill and becomes explicit `Upgrade { expected }` when replacing a different exact current ref, including historical reassignment/downgrade.
+3. **Typed host routes:** Focused host contracts verify the exact historical ref reaches `AssignAgentSkill`, and agent-origin Upgrade echoes exact expected/replacement refs into `UpgradeAgentSkill`. These commands continue to be constructed only from application preview responses and their returned review token/digest.
+4. **Retryable backpressure:** Protected execution now uses `RuntimeClient::try_submit`. Typed backpressure clears only the in-flight marker and retains the confirmation, registered review token, operation origin, and command for retry. The saturated-runtime contract verifies no mutation or cancellation dispatch occurs.
+
+Fresh focused fix-round-2 command:
+
+```text
+cargo test --test skill_editor_contract --test skill_tui_controller_contract --test skill_tui_host_contract
+```
+
+Result: exit 0, 31 passed, 0 failed: 5 editor, 14 controller, and 12 host contracts.
+
 ## Concerns
 
 - Rendering and visual discoverability are intentionally deferred to Task 9.
 - Only the three authorized focused test targets were executed; broader integration remains outside this task's verification scope.
-- No new dedicated backpressure-injection regression was added in this fix round; the report therefore makes no new claim beyond preserving the existing retryable-failure path.
+- Backpressure coverage is limited to protected skill command submission; preview transport remains on its existing synchronous typed runtime path.
