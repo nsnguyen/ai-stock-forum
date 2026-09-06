@@ -380,16 +380,18 @@ fn editor_lines(editor: &ProfileEditor, theme: &Theme) -> Vec<Line<'static>> {
             theme,
         ),
         label_value("Current step", step.as_str().replace('_', " "), theme),
+        label_value(
+            "Current field",
+            editor.current_field_label().to_owned(),
+            theme,
+        ),
     ];
     lines.extend(
-        step_guidance(step)
+        step_guidance(editor)
             .into_iter()
             .map(|guidance| Line::styled(guidance, theme.muted)),
     );
-    lines.push(Line::styled(
-        "Enter text or a :control in the command bar.",
-        theme.muted,
-    ));
+    lines.push(Line::styled(editor_key_guidance(editor), theme.focus));
     if let Some(message) = editor.local_message() {
         lines.push(Line::default());
         lines.push(Line::styled(editor_message(message.code()), theme.warning));
@@ -399,19 +401,11 @@ fn editor_lines(editor: &ProfileEditor, theme: &Theme) -> Vec<Line<'static>> {
         lines.push(Line::styled("REVIEW CHANGES", theme.accent));
         if let Some(review) = editor.review() {
             append_diffs(&mut lines, &review.preview().diffs, theme);
-            lines.push(Line::styled(
-                "Use :activate to continue to explicit confirmation.",
-                theme.muted,
-            ));
         } else if let Some(baseline) = editor.create_baseline() {
             append_create_diffs(&mut lines, baseline, editor.draft(), theme);
-            lines.push(Line::styled(
-                "Use :create to continue to explicit confirmation.",
-                theme.muted,
-            ));
         } else {
             lines.push(Line::styled(
-                "Use :review to request an authoritative diff.",
+                "An authoritative preview is required before activation.",
                 theme.warning,
             ));
         }
@@ -555,7 +549,7 @@ fn confirmation_lines(model: &TuiModel, theme: &Theme) -> (&'static str, Vec<Lin
                 Line::raw("This action creates and activates immutable profile version 1."),
                 label_value("Provenance", context, theme),
                 Line::default(),
-                Line::styled("Type exactly: create", theme.focus),
+                Line::styled("Enter: create", theme.focus),
             ]
         }
         ApplicationCommand::ActivateAgentProfileVersion {
@@ -573,10 +567,7 @@ fn confirmation_lines(model: &TuiModel, theme: &Theme) -> (&'static str, Vec<Lin
             ),
             label_value("Review digest", review_digest.to_string(), theme),
             Line::default(),
-            Line::styled(
-                format!("Type exactly: activate {review_digest}"),
-                theme.focus,
-            ),
+            Line::styled("Enter: activate", theme.focus),
         ],
         _ => vec![Line::styled(
             "Profile confirmation is unavailable. Press Esc to return.",
@@ -584,7 +575,7 @@ fn confirmation_lines(model: &TuiModel, theme: &Theme) -> (&'static str, Vec<Lin
         )],
     };
     lines.push(Line::styled(
-        "Enter submits the typed phrase; Esc returns to review.",
+        "Enter: confirm | Esc: return to review",
         theme.muted,
     ));
     let action = match confirmation.command {
@@ -774,30 +765,35 @@ fn step_number(step: ProfileEditorStep) -> u8 {
     }
 }
 
-fn step_guidance(step: ProfileEditorStep) -> Vec<String> {
-    match step {
-        ProfileEditorStep::Template => {
-            vec!["Choose a template role with :role <role>, then :next.".to_owned()]
-        }
+fn step_guidance(editor: &ProfileEditor) -> Vec<String> {
+    match editor.step() {
+        ProfileEditorStep::Template => match editor.mode() {
+            ProfileEditorMode::Create { .. } => vec![
+                "Choose the complete starting profile; the candidate updates immediately."
+                    .to_owned(),
+            ],
+            ProfileEditorMode::Edit { .. } => vec![
+                "The active profile remains the edit baseline.".to_owned(),
+                "Advanced: :role <role>".to_owned(),
+            ],
+        },
         ProfileEditorStep::Identity => vec![
             format!("Display name: {DISPLAY_NAME_MAX_BYTES} UTF-8 bytes."),
-            format!("Description: {DESCRIPTION_MAX_BYTES} UTF-8 bytes. Use :next between fields."),
+            format!("Description: {DESCRIPTION_MAX_BYTES} UTF-8 bytes."),
         ],
         ProfileEditorStep::Specialty => vec![
             format!("Primary specialty: {PRIMARY_SPECIALTY_MAX_BYTES} UTF-8 bytes."),
             format!(
                 "Add at most {MAX_SPECIALTY_TAGS} tags; {SPECIALTY_TAG_MAX_BYTES} UTF-8 bytes each."
             ),
-            "Use :tag add <tag> or :tag remove <tag>.".to_owned(),
+            "Advanced tags: :tag add <tag> or :tag remove <tag>.".to_owned(),
         ],
-        ProfileEditorStep::Personality => vec![
-            format!("Limit: {PERSONALITY_MAX_BYTES} UTF-8 bytes."),
-            "Describe the agent's working style, then use :next.".to_owned(),
-        ],
-        ProfileEditorStep::Instructions => vec![
-            format!("Limit: {INSTRUCTIONS_MAX_BYTES} UTF-8 bytes."),
-            "Enter operating instructions, then use :next.".to_owned(),
-        ],
+        ProfileEditorStep::Personality => {
+            vec![format!("Limit: {PERSONALITY_MAX_BYTES} UTF-8 bytes.")]
+        }
+        ProfileEditorStep::Instructions => {
+            vec![format!("Limit: {INSTRUCTIONS_MAX_BYTES} UTF-8 bytes.")]
+        }
         ProfileEditorStep::OptionalBindings => vec![
             "Use catalog binding-reference IDs.".to_owned(),
             "connection, model, and runtime IDs must reference catalog entries.".to_owned(),
@@ -806,6 +802,35 @@ fn step_guidance(step: ProfileEditorStep) -> Vec<String> {
         ProfileEditorStep::Review => {
             vec!["Review ordered accepted-field changes before confirmation.".to_owned()]
         }
+    }
+}
+
+fn editor_key_guidance(editor: &ProfileEditor) -> &'static str {
+    match editor.step() {
+        ProfileEditorStep::Template => match editor.mode() {
+            ProfileEditorMode::Create { .. } => {
+                "Up/Down: choose template | Enter: continue | Esc: cancel"
+            }
+            ProfileEditorMode::Edit { .. } => "Enter: continue | Esc: cancel",
+        },
+        ProfileEditorStep::Identity
+        | ProfileEditorStep::Specialty
+        | ProfileEditorStep::Personality
+        | ProfileEditorStep::Instructions => {
+            "Type a replacement, or leave blank to keep current | Enter: continue | Esc: back"
+        }
+        ProfileEditorStep::OptionalBindings => {
+            "Enter: keep current bindings and continue | Esc: back"
+        }
+        ProfileEditorStep::Review => match editor.mode() {
+            ProfileEditorMode::Create { .. } => {
+                "Enter: continue to Create confirmation | Esc: back"
+            }
+            ProfileEditorMode::Edit { .. } if editor.review().is_some() => {
+                "Enter: continue to activation confirmation | Esc: back"
+            }
+            ProfileEditorMode::Edit { .. } => "Enter: request authoritative review | Esc: back",
+        },
     }
 }
 
@@ -825,6 +850,9 @@ fn editor_message(code: &str) -> &'static str {
         "editor_last_step" => "This is the final editor step.",
         "preview_generation_exhausted" => "Validation: no further previews can be requested.",
         "preview_unavailable" => "Validation: preview is unavailable for this editor mode.",
+        "template_selection_create_only" => {
+            "Validation: complete templates can be selected only while creating a profile."
+        }
         "editor_field_unavailable" => "Validation: text entry is unavailable on this step.",
         "unknown_editor_control" => "Validation: unknown editor control.",
         _ => "Validation: review the current field and try again.",

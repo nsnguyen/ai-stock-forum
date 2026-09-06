@@ -308,6 +308,31 @@ foreach geometry {{24 70 {Bull Researcher Revised}} {30 100 Description} {40 140
 
 after 200
 drain_output
+send -- "c"
+must_exact {Profile editor} "keyboard create opens editor"
+after 200
+drain_output
+send -- "\033\[B"
+must_exact {downside} "Down selects complete Bear template"
+for {set i 0} {$i < 7} {incr i} {
+    after 150
+    drain_output
+    send -- "\r"
+}
+must_exact {REVIEW CHANGES} "Enter-only create reaches review"
+after 200
+drain_output
+send -- "\r"
+must_exact {Confirm Create} "review Enter opens create confirmation"
+after 200
+drain_output
+send -- "\r"
+must_exact {Agent detail} "confirmation Enter creates profile"
+must_exact {Bear Researcher} "keyboard-created Bear profile"
+puts {PTY_TUI_KEYBOARD_CREATE_OK template=keyboard fields=enter review=enter confirmation=enter}
+
+after 200
+drain_output
 resize_tty $tui_tty $tui_app_pid 10 40
 must_exact {Terminal} "Too Small heading"
 must_exact {too} "Too Small heading"

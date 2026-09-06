@@ -165,6 +165,21 @@ impl ProfileEditor {
         self.step
     }
 
+    pub const fn current_field_label(&self) -> &'static str {
+        match self.step {
+            ProfileEditorStep::Template => "Template",
+            ProfileEditorStep::Identity => match self.identity_field {
+                IdentityField::DisplayName => "Display name",
+                IdentityField::Description => "Description",
+            },
+            ProfileEditorStep::Specialty => "Primary specialty",
+            ProfileEditorStep::Personality => "Personality",
+            ProfileEditorStep::Instructions => "Instructions",
+            ProfileEditorStep::OptionalBindings => "Optional bindings",
+            ProfileEditorStep::Review => "Review",
+        }
+    }
+
     pub fn draft(&self) -> &AgentProfileDraft {
         &self.draft
     }
@@ -183,6 +198,33 @@ impl ProfileEditor {
 
     pub fn report_error(&mut self, code: &'static str) {
         self.message(code);
+    }
+
+    pub fn select_template(&mut self, template: &ProfileTemplate) -> bool {
+        if !matches!(self.mode, ProfileEditorMode::Create { .. }) {
+            self.message("template_selection_create_only");
+            return false;
+        }
+        if self.step != ProfileEditorStep::Template {
+            self.message("editor_field_unavailable");
+            return false;
+        }
+        let Ok(draft) = template.copy_to_draft() else {
+            self.message("invalid_profile_field");
+            return false;
+        };
+
+        self.draft = draft;
+        if let ProfileEditorMode::Create { provenance } = &mut self.mode {
+            *provenance = template.provenance();
+            self.create_baseline = Some(self.draft.clone());
+        }
+        self.identity_field = IdentityField::DisplayName;
+        self.personality_started = false;
+        self.instructions_started = false;
+        self.invalidate_review();
+        self.local_message = None;
+        true
     }
 
     /// Provides only control state suitable for a host's command history or
@@ -245,6 +287,47 @@ impl ProfileEditor {
         }
         self.submit_text(line);
         ProfileEditorEffect::None
+    }
+
+    /// Accepts one keyboard-editor submission. Empty input keeps the current
+    /// value, while valid replacement text is applied before advancing.
+    /// Colon controls retain their original explicit behavior.
+    pub fn submit_keyboard_line(&mut self, line: &str) -> ProfileEditorEffect {
+        if line.starts_with(':') {
+            return self.submit_line(line);
+        }
+        if line.is_empty() {
+            return match self.step {
+                ProfileEditorStep::Template
+                | ProfileEditorStep::Identity
+                | ProfileEditorStep::Specialty
+                | ProfileEditorStep::Personality
+                | ProfileEditorStep::Instructions
+                | ProfileEditorStep::OptionalBindings => self.next(),
+                ProfileEditorStep::Review => {
+                    self.message("editor_last_step");
+                    ProfileEditorEffect::None
+                }
+            };
+        }
+
+        match self.step {
+            ProfileEditorStep::Identity
+            | ProfileEditorStep::Specialty
+            | ProfileEditorStep::Personality
+            | ProfileEditorStep::Instructions => {
+                self.local_message = None;
+                self.submit_text(line);
+                if self.local_message.is_none() {
+                    self.next()
+                } else {
+                    ProfileEditorEffect::None
+                }
+            }
+            ProfileEditorStep::Template
+            | ProfileEditorStep::OptionalBindings
+            | ProfileEditorStep::Review => self.submit_line(line),
+        }
     }
 
     fn submit_control(&mut self, control: &str) -> ProfileEditorEffect {

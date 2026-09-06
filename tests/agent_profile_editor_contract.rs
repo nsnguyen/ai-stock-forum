@@ -118,6 +118,92 @@ fn create_editor_copies_template_and_walks_the_exact_ordered_steps() {
 }
 
 #[test]
+fn keyboard_submission_selects_a_complete_template_and_advances_each_prefilled_field() {
+    let bear = &builtin_profile_templates()[1];
+    let mut editor = create_editor();
+
+    assert!(editor.select_template(bear));
+    assert_eq!(editor.draft(), &bear.copy_to_draft().unwrap());
+    assert!(matches!(
+        editor.mode(),
+        ProfileEditorMode::Create { provenance }
+            if provenance.template_id.as_str() == "builtin.bear"
+    ));
+    assert_eq!(editor.current_field_label(), "Template");
+
+    assert_eq!(editor.submit_keyboard_line(""), ProfileEditorEffect::None);
+    assert_eq!(editor.current_field_label(), "Display name");
+
+    assert_eq!(
+        editor.submit_keyboard_line("Keyboard Bear"),
+        ProfileEditorEffect::None
+    );
+    assert_eq!(editor.draft().display_name, "Keyboard Bear");
+    assert_eq!(editor.current_field_label(), "Description");
+
+    let description = editor.draft().description.clone();
+    assert_eq!(editor.submit_keyboard_line(""), ProfileEditorEffect::None);
+    assert_eq!(editor.draft().description, description);
+    assert_eq!(editor.step(), ProfileEditorStep::Specialty);
+
+    let specialty = editor.draft().primary_specialty.clone();
+    editor.submit_keyboard_line("");
+    assert_eq!(editor.draft().primary_specialty, specialty);
+    assert_eq!(editor.step(), ProfileEditorStep::Personality);
+
+    editor.submit_keyboard_line("Direct and skeptical.");
+    assert_eq!(editor.draft().personality, "Direct and skeptical.");
+    assert_eq!(editor.step(), ProfileEditorStep::Instructions);
+
+    let instructions = editor.draft().instructions.clone();
+    editor.submit_keyboard_line("");
+    assert_eq!(editor.draft().instructions, instructions);
+    assert_eq!(editor.step(), ProfileEditorStep::OptionalBindings);
+
+    editor.submit_keyboard_line("");
+    assert_eq!(editor.step(), ProfileEditorStep::Review);
+}
+
+#[test]
+fn invalid_keyboard_replacement_stays_on_the_current_field() {
+    let mut editor = create_editor();
+    editor.submit_keyboard_line("");
+
+    assert_eq!(
+        editor.submit_keyboard_line("   "),
+        ProfileEditorEffect::None
+    );
+    assert_eq!(editor.step(), ProfileEditorStep::Identity);
+    assert_eq!(editor.current_field_label(), "Display name");
+    assert_eq!(
+        editor.local_message().map(|message| message.code()),
+        Some("invalid_profile_field")
+    );
+}
+
+#[test]
+fn edit_mode_rejects_complete_template_replacement_and_preserves_provenance() {
+    let profile_id = AgentProfileId::from_uuid(Uuid::from_u128(40));
+    let active_version_id = AgentProfileVersionId::from_uuid(Uuid::from_u128(41));
+    let original = builtin_profile_templates()[0].copy_to_draft().unwrap();
+    let mut editor = ProfileEditor::for_edit(profile_id, active_version_id, original.clone());
+
+    assert!(!editor.select_template(&builtin_profile_templates()[1]));
+    assert_eq!(editor.draft(), &original);
+    assert!(matches!(
+        editor.mode(),
+        ProfileEditorMode::Edit {
+            profile_id: actual_profile_id,
+            expected_active_version_id: actual_version_id,
+        } if *actual_profile_id == profile_id && *actual_version_id == active_version_id
+    ));
+    assert_eq!(
+        editor.local_message().map(|message| message.code()),
+        Some("template_selection_create_only")
+    );
+}
+
+#[test]
 fn editor_keeps_invalid_input_and_supports_back_navigation_without_terminal_state() {
     let mut editor = create_editor();
     editor.submit_line(":next");

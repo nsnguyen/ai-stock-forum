@@ -57,6 +57,7 @@ thresholds it is Narrow from `60x18`, Medium from `80x24`, and Wide from
 | `i`, `Esc` | Open/focus the inspector; then dismiss the inspector or message. |
 | `/` | Focus the command editor with `/` prefilled. |
 | Command editor: text, `Enter`, arrows, `Home`, `End`, `Backspace`, `Delete`, `Up`, `Down`, `Tab`, `Shift+Tab`, `Esc` | Edit, submit, recall in-memory history, move focus, or cancel command entry. |
+| Agent profile editor: `Up`, `Down`, `Enter`, `Esc` | Choose a template, accept the current field, advance, or go back without requiring colon controls. |
 | `/quit` | Request the auditable normal shutdown from command entry, including the TooSmall screen. |
 | `Ctrl+C` | Request emergency interrupted shutdown from any focus. |
 
@@ -94,6 +95,25 @@ or audit record. Activation requires a separate explicit confirmation and
 creates the next immutable version; earlier bytes and history remain unchanged.
 Preview tokens are process-local, one-use review bindings and do not survive a
 restart.
+
+### Keyboard-first profile editor
+
+In the Adaptive Cockpit, press `a` to open Agents and `c` to create a profile.
+Use `Up` and `Down` to choose a complete built-in template. Press `Enter` to
+accept it, then press `Enter` on each prefilled field to keep its current value
+and continue. Typing a replacement before `Enter` saves that replacement and
+continues. `Esc` returns to the previous field or cancels from the first step.
+
+On Create review, `Enter` opens a separate confirmation pane and a second
+`Enter` creates the profile. On Edit review, the first `Enter` requests the
+authoritative preview; after it appears, the next `Enter` opens activation
+confirmation and one more `Enter` activates the immutable revision. Specialty
+tag and optional binding controls remain available as advanced colon commands,
+and all existing editor colon controls remain backward-compatible aliases.
+
+Fallback line-command mode is unchanged: it retains explicit `:next`,
+`:review`, `:create`, and `:activate` controls plus its exact typed confirmation
+phrases.
 
 The verified event stream is authoritative at recovery. A missing immutable
 profile row may be backfilled from its verified event, but an altered row or an
@@ -155,8 +175,10 @@ bare `agent` alias for compatibility:
 | `/agent history <name-or-id> [version]` | Shows bounded newest-first metadata, or the exact immutable version with complete accepted content and predecessor diff. | Continues. |
 | `/quit` | Outputs exactly `Shutting down.`; commits `ShutdownRequested` and ends the session with `UserQuit`. | Ends normally. |
 
-Creation requires the exact phrase `create`. Revision activation requires
-`activate <review-digest>`. Recoverable submission errors retain the same draft,
+In fallback line-command mode, creation requires the exact phrase `create` and
+revision activation requires `activate <review-digest>`. The Adaptive Cockpit
+uses a separate visible confirmation pane where `Enter` confirms the pending
+Create or Activate action. Recoverable submission errors retain the same draft,
 review, and confirmation so the user can retry without reconstructing work.
 
 Rejected input is also audited as a typed event and the command host continues.

@@ -343,6 +343,7 @@ fn editor_renders_progress_guidance_ordered_review_diffs_and_explicit_confirmati
     assert!(review.contains("Display name"));
     assert!(review.contains("Before"));
     assert!(review.contains("After"));
+    assert!(review.contains("Enter: continue to activation confirmation"));
     assert!(
         review.find("Display name").expect("display diff")
             < review.find("Role").expect("role diff")
@@ -356,7 +357,7 @@ fn editor_renders_progress_guidance_ordered_review_diffs_and_explicit_confirmati
     confirmation.agents.pending_confirmation = Some(ProfileConfirmation { command });
     let confirmation = render_text(&confirmation, 100, 30);
     assert!(confirmation.contains("Confirm Activate"));
-    assert!(confirmation.contains("Type exactly: activate"));
+    assert!(confirmation.contains("Enter: activate"));
     assert!(confirmation.contains("Reviewed base"));
     assert!(confirmation.contains("Review digest"));
     assert!(confirmation.contains("Esc"));
@@ -367,7 +368,22 @@ fn editor_renders_progress_guidance_ordered_review_diffs_and_explicit_confirmati
     create.agents.editor = Some(create_editor.clone());
     let create_text = render_text(&create, 79, 24);
     assert!(create_text.contains("Step 1 of 7"));
-    assert!(create_text.contains("Choose a template role"));
+    assert!(create_text.contains("Up/Down: choose template"));
+    assert!(create_text.contains("Enter: continue"));
+    assert!(create_text.contains("Current field"));
+    assert!(create_text.contains("Template"));
+
+    let mut edit_template = model(true, AgentsPane::Editor);
+    edit_template.agents.editor = Some(ProfileEditor::for_edit(
+        profile.profile_id(),
+        profile.profile_version_id(),
+        draft,
+    ));
+    let edit_text = render_text(&edit_template, 100, 30);
+    assert!(!edit_text.contains("Up/Down: choose template"));
+    assert!(!edit_text.contains("Choose the complete starting profile"));
+    assert!(edit_text.contains("Enter: continue"));
+    assert!(edit_text.contains("Advanced: :role <role>"));
 
     for _ in 0..7 {
         assert_eq!(
@@ -377,7 +393,7 @@ fn editor_renders_progress_guidance_ordered_review_diffs_and_explicit_confirmati
     }
     create.agents.editor = Some(create_editor);
     let create_review = render_text(&create, 100, 40);
-    assert!(create_review.contains("Use :create"));
+    assert!(create_review.contains("Enter: continue to Create confirmation"));
 }
 
 #[test]
@@ -469,7 +485,8 @@ fn confirmation_distinguishes_create_from_activate() {
     });
     let text = render_text(&create, 100, 30);
     assert!(text.contains("Confirm Create"));
-    assert!(text.contains("Type exactly: create"));
+    assert!(text.contains("Enter: create"));
+    assert!(text.contains("Esc: return to review"));
     assert!(text.contains("builtin.bull"));
     for chunk in builtin_profile_templates()[0]
         .digest

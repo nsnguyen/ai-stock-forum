@@ -261,17 +261,11 @@ fn schema_v1_upgrade_profile_lifecycle_restart_fallback_and_tui_are_accepted() {
     confirmation_model.agents.pending_confirmation = Some(ProfileConfirmation {
         command: activation_command,
     });
-    for character in format!("activate {}", preview.review_digest).chars() {
-        assert_eq!(
-            handle_event(&mut confirmation_model, key(character)),
-            ControllerEffect::Redraw
-        );
-    }
     let ControllerEffect::ExecuteProfile(confirmed_activation) = handle_event(
         &mut confirmation_model,
         TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
     ) else {
-        panic!("exact activation phrase did not emit the reviewed command");
+        panic!("plain confirmation Enter did not emit the reviewed command");
     };
     let activated = service.execute_user(confirmed_activation).unwrap();
     let CommandView::AgentProfileVersionActivated(activated) = activated.view else {
