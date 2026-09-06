@@ -49,6 +49,7 @@ fn opening_skills_from_agent_panel_tracks_and_restores_workspace_origin() {
     let mut model = model();
     model.active_view = View::Agents;
     model.agents.skill_panel_open = true;
+    model.agents.detail = Some(profile_with_skills(10, Vec::new()));
 
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Char('s'))),
@@ -56,7 +57,9 @@ fn opening_skills_from_agent_panel_tracks_and_restores_workspace_origin() {
     );
     assert_eq!(
         model.skills.workspace_origin,
-        Some(ai_stock_forum::ui::tui::SkillWorkspaceOrigin::AgentSkills)
+        Some(ai_stock_forum::ui::tui::SkillWorkspaceOrigin::AgentSkills {
+            profile_id: AgentProfileId::from_uuid(Uuid::from_u128(10)),
+        })
     );
 
     assert_eq!(
@@ -175,7 +178,9 @@ fn agent_view_replaces_stale_skill_context_and_escape_returns_to_agent_skills() 
     );
     assert_eq!(
         model.skills.workspace_origin,
-        Some(SkillWorkspaceOrigin::AgentSkills)
+        Some(SkillWorkspaceOrigin::AgentSkills {
+            profile_id: AgentProfileId::from_uuid(Uuid::from_u128(830)),
+        })
     );
     assert!(model.skills.detail.is_none());
     assert!(model.skills.history.is_none());
@@ -313,20 +318,9 @@ fn agent_view_history_and_historical_assignment_never_reuse_selected_skill_a() {
     handle_event(&mut model, key(KeyCode::Left));
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Enter)),
-        ControllerEffect::LoadSkillAgents
-    );
-    apply_outcome(
-        &mut model,
-        command_outcome(CommandView::AgentProfiles(AgentProfilesView {
-            profiles: vec![agent(890, "Assigned Agent")],
-            total_count: 1,
-            returned_count: 1,
-            truncated: false,
-        })),
-    );
-    assert_eq!(
-        handle_event(&mut model, key(KeyCode::Enter)),
-        ControllerEffect::LoadSkillAgent { selected_agent: 0 }
+        ControllerEffect::LoadSkillAgent {
+            profile_id: AgentProfileId::from_uuid(Uuid::from_u128(890)),
+        }
     );
     apply_outcome(
         &mut model,
@@ -718,7 +712,9 @@ fn arrows_and_enter_drive_list_detail_actions_history_and_agent_picker() {
     assert_eq!(model.skills.selected_agent, 1);
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Enter)),
-        ControllerEffect::LoadSkillAgent { selected_agent: 1 }
+        ControllerEffect::LoadSkillAgent {
+            profile_id: model.agents.profiles.profiles[1].profile_id,
+        }
     );
 }
 
@@ -819,6 +815,12 @@ fn agent_detail_unassigns_the_selected_exact_current_reference_through_preview()
     );
     assert_eq!(target, assigned);
     assert_eq!(expected, assigned);
+    assert_eq!(
+        model.skills.operation_origin,
+        SkillOperationOrigin::AgentSkills {
+            profile_id: AgentProfileId::from_uuid(Uuid::from_u128(400)),
+        }
+    );
 }
 
 fn agent(seed: u128, name: &str) -> AgentProfileSummary {

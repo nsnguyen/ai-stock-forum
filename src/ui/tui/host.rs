@@ -211,16 +211,7 @@ pub fn execute_skill_effect(
             let _ = apply_outcome(model, outcome);
             model.skills.pane = super::model::SkillsPane::AgentPicker;
         }
-        ControllerEffect::LoadSkillAgent { selected_agent } => {
-            let Some(profile_id) = model
-                .agents
-                .profiles
-                .profiles
-                .get(selected_agent)
-                .map(|summary| summary.profile_id)
-            else {
-                return Ok(());
-            };
+        ControllerEffect::LoadSkillAgent { profile_id } => {
             let outcome = submit_agent_command(
                 client,
                 model,

@@ -77,13 +77,13 @@ pub enum AssignmentKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillOperationOrigin {
     Skills(SkillsPane),
-    AgentSkills,
+    AgentSkills { profile_id: crate::domain::AgentProfileId },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillWorkspaceOrigin {
     Cockpit(View),
-    AgentSkills,
+    AgentSkills { profile_id: crate::domain::AgentProfileId },
 }
 
 impl AssignmentKind {
@@ -223,6 +223,13 @@ impl SkillsViewState {
         self.selected_skill_ref().map(SkillVersionRef::skill_id)
     }
 
+    pub fn agent_origin_profile_id(&self) -> Option<crate::domain::AgentProfileId> {
+        match self.workspace_origin {
+            Some(SkillWorkspaceOrigin::AgentSkills { profile_id }) => Some(profile_id),
+            _ => None,
+        }
+    }
+
     pub fn selected_summary(&self) -> Option<&crate::app::SkillSummary> {
         self.library.skills.get(self.selected_skill)
     }
@@ -326,6 +333,18 @@ impl Default for AgentsViewState {
 }
 
 impl AgentsViewState {
+    pub fn select_profile_id(&mut self, profile_id: crate::domain::AgentProfileId) {
+        if let Some(index) = self
+            .profiles
+            .profiles
+            .iter()
+            .position(|summary| summary.profile_id == profile_id)
+        {
+            self.selected_profile = index;
+            self.list_scroll = index;
+        }
+    }
+
     pub fn selected_skill_action(&self) -> AgentSkillAction {
         match self.selected_skill_action_index.min(2) {
             0 => AgentSkillAction::View,

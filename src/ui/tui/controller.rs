@@ -66,7 +66,7 @@ pub enum ControllerEffect {
     },
     LoadSkillStarter { selected_skill: usize },
     LoadSkillAgents,
-    LoadSkillAgent { selected_agent: usize },
+    LoadSkillAgent { profile_id: crate::domain::AgentProfileId },
     RequestSkillPreview(SkillPreviewRequest),
     RequestSkillAssignmentPreview {
         profile_id: crate::domain::AgentProfileId,
@@ -437,13 +437,20 @@ fn open_agents(model: &mut TuiModel) -> ControllerEffect {
 }
 
 fn open_skills(model: &mut TuiModel) -> ControllerEffect {
-    model.skills.workspace_origin = Some(if model.active_view == View::Agents
-        && model.agents.skill_panel_open
-    {
-        SkillWorkspaceOrigin::AgentSkills
-    } else {
-        SkillWorkspaceOrigin::Cockpit(model.active_view)
-    });
+    model.skills.workspace_origin = Some(
+        if model.active_view == View::Agents && model.agents.skill_panel_open {
+            model
+                .agents
+                .detail
+                .as_ref()
+                .map(|detail| SkillWorkspaceOrigin::AgentSkills {
+                    profile_id: detail.profile.profile_id(),
+                })
+                .unwrap_or(SkillWorkspaceOrigin::Cockpit(model.active_view))
+        } else {
+            SkillWorkspaceOrigin::Cockpit(model.active_view)
+        },
+    );
     model.skills.active = true;
     model.skills.pane = SkillsPane::List;
     model.set_focus(Focus::Workspace);
@@ -622,7 +629,10 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             match model.skills.selected_action() {
                 SkillDetailAction::Assign => {
                     model.skills.pane = SkillsPane::AgentPicker;
-                    ControllerEffect::LoadSkillAgents
+                    match model.skills.agent_origin_profile_id() {
+                        Some(profile_id) => ControllerEffect::LoadSkillAgent { profile_id },
+                        None => ControllerEffect::LoadSkillAgents,
+                    }
                 }
                 SkillDetailAction::CreateVersion => {
                     model.skills.start_version();
@@ -661,7 +671,13 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             ControllerEffect::Redraw
         }
         (SkillsPane::AgentPicker, KeyCode::Enter) if no_modifiers(key.modifiers) => {
-            ControllerEffect::LoadSkillAgent { selected_agent: model.skills.selected_agent }
+            let profile_id = model
+                .agents
+                .profiles
+                .profiles
+                .get(model.skills.selected_agent)?
+                .profile_id;
+            ControllerEffect::LoadSkillAgent { profile_id }
         }
         (SkillsPane::AssignmentReview, KeyCode::Enter) if no_modifiers(key.modifiers) => {
             let detail = model.skills.selected_agent_detail.as_ref()?;
@@ -671,8 +687,11 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
                 model.set_message(Severity::Warning, "Agent already has this exact skill version.");
                 ControllerEffect::Redraw
             } else {
-                model.skills.operation_origin =
-                    SkillOperationOrigin::Skills(SkillsPane::AssignmentReview);
+                model.skills.operation_origin = model
+                    .skills
+                    .agent_origin_profile_id()
+                    .map(|profile_id| SkillOperationOrigin::AgentSkills { profile_id })
+                    .unwrap_or(SkillOperationOrigin::Skills(SkillsPane::AssignmentReview));
                 ControllerEffect::RequestSkillAssignmentPreview {
                     profile_id: detail.profile.profile_id(),
                     expected_active_profile_version_id: detail.profile.profile_version_id(),
@@ -708,9 +727,10 @@ fn restore_skill_origin(model: &mut TuiModel, origin: SkillOperationOrigin) {
             model.skills.active = true;
             model.skills.pane = pane;
         }
-        SkillOperationOrigin::AgentSkills => {
+        SkillOperationOrigin::AgentSkills { profile_id } => {
             model.skills.active = false;
             model.skills.pane = SkillsPane::Detail;
+            model.agents.select_profile_id(profile_id);
             model.agents.skill_panel_open = true;
             model.active_view = View::Agents;
         }
@@ -723,19 +743,27 @@ fn unwind_skills(model: &mut TuiModel) -> ControllerEffect {
             model.skills.active = false;
             match model.skills.workspace_origin.take() {
                 Some(SkillWorkspaceOrigin::Cockpit(view)) => model.active_view = view,
-                Some(SkillWorkspaceOrigin::AgentSkills) => {
+                Some(SkillWorkspaceOrigin::AgentSkills { profile_id }) => {
                     model.active_view = View::Agents;
+                    model.agents.select_profile_id(profile_id);
                     model.agents.skill_panel_open = true;
                 }
                 None => {}
             }
         }
         SkillsPane::Detail
-            if model.skills.workspace_origin == Some(SkillWorkspaceOrigin::AgentSkills) =>
+            if matches!(
+                model.skills.workspace_origin,
+                Some(SkillWorkspaceOrigin::AgentSkills { .. })
+            ) =>
         {
+            let profile_id = model.skills.agent_origin_profile_id();
             model.skills.active = false;
             model.skills.workspace_origin = None;
             model.active_view = View::Agents;
+            if let Some(profile_id) = profile_id {
+                model.agents.select_profile_id(profile_id);
+            }
             model.agents.skill_panel_open = true;
         }
         SkillsPane::CreateSource | SkillsPane::Detail => model.skills.pane = SkillsPane::List,
@@ -1078,7 +1106,9 @@ fn handle_agent_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<Contro
                 .clone();
             match model.agents.selected_skill_action() {
                 AgentSkillAction::View => {
-                    model.skills.workspace_origin = Some(SkillWorkspaceOrigin::AgentSkills);
+                    model.skills.workspace_origin = Some(SkillWorkspaceOrigin::AgentSkills {
+                        profile_id: detail.profile.profile_id(),
+                    });
                     model.skills.clear_skill_context();
                     model.skills.active = true;
                     ControllerEffect::LoadSkillVersion {
@@ -1087,13 +1117,17 @@ fn handle_agent_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<Contro
                     }
                 }
                 AgentSkillAction::Upgrade => {
-                    model.skills.workspace_origin = Some(SkillWorkspaceOrigin::AgentSkills);
+                    model.skills.workspace_origin = Some(SkillWorkspaceOrigin::AgentSkills {
+                        profile_id: detail.profile.profile_id(),
+                    });
                     model.skills.active = true;
                     model.skills.pane = SkillsPane::List;
                     ControllerEffect::LoadSkills
                 }
                 AgentSkillAction::Unassign => {
-                    model.skills.operation_origin = SkillOperationOrigin::AgentSkills;
+                    model.skills.operation_origin = SkillOperationOrigin::AgentSkills {
+                        profile_id: detail.profile.profile_id(),
+                    };
                     ControllerEffect::RequestSkillAssignmentPreview {
                         profile_id: detail.profile.profile_id(),
                         expected_active_profile_version_id: detail.profile.profile_version_id(),

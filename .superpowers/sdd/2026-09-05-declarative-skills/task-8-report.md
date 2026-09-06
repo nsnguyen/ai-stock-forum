@@ -75,7 +75,7 @@ No full suite was run, per Task 8 instructions.
 - Assignment classification is explicit Add, Upgrade, Already Assigned, or Unassign. Upgrade and unassign retain exact `SkillVersionRef` values; no auto-upgrade exists.
 - Agent detail exposes exact assigned refs through a keyboard-controlled selection panel without changing Task 9 rendering files.
 - The host owns review registration. Esc/cancel/host exit clears each registered Skill review at most once; successful commands mark consumed reviews without cancelling again.
-- Stale, policy, backpressure, and invalid-review errors clear pending confirmation/review state and retain an actionable editor or detail stage.
+- Terminal stale, policy, and invalid-review application failures clear pending confirmation/review state and return to an actionable origin. Protected-submit backpressure instead retains the registered review and confirmation for retry.
 - Bare `q` never requests shutdown. `/quit` remains the normal user shutdown path.
 - Runtime version preview uses a distinct typed request/reply variant and delegates directly to `ApplicationService::preview_skill_version`; it adds no token generation, commit path, or business logic.
 
@@ -133,6 +133,21 @@ cargo test --test skill_editor_contract --test skill_tui_controller_contract --t
 ```
 
 Result: exit 0, 32 passed, 0 failed: 5 editor, 15 controller, and 12 host contracts.
+
+## Independent-review fix round 4
+
+### RED evidence
+
+- The multi-profile Upgrade contract initially failed to compile because `ControllerEffect::LoadSkillAgent` exposed only `selected_agent: usize`; the effect could not carry the originating `AgentProfileId` and therefore could not prove identity-safe routing.
+- Inspection confirmed `SkillWorkspaceOrigin::AgentSkills` and `SkillOperationOrigin::AgentSkills` were marker-only variants. Agent-origin Upgrade entered the generic picker, whose independent `selected_agent` index could select a different profile.
+
+### GREEN behavior and evidence
+
+1. **Typed agent origin:** Both Skills workspace and protected-operation origins now carry `AgentProfileId`. View, Upgrade, and Unassign capture the profile ID from the open agent detail when their flow begins.
+2. **Identity-safe loading:** `LoadSkillAgent` now carries `profile_id` rather than a picker index. Generic Skills assignment converts its selected row to an ID before dispatch. Agent-origin assignment bypasses repicking and loads the stored origin ID directly before classification.
+3. **Multi-profile Upgrade contract:** The focused host regression places a wrong profile at index 0, the origin profile at index 1, and leaves the Skills picker at stale index 0. Real controller/host transitions load profile `110`, never profile `120`; classification uses active profile version `111`, the exact current ref, and exact replacement ref. The preview-owned token reaches `UpgradeAgentSkill`, cancellation occurs once without mutation, and return restores profile `110` and its skill panel.
+4. **View and Unassign compatibility:** Existing View and Unassign regressions now assert profile-bearing origins and same-profile return state. Generic picker behavior remains available for cockpit-origin Skills assignment, but its host route is ID-based.
+5. **Backpressure wording:** Protected-submit `RuntimeError::Backpressure` retains the registered review, confirmation, command, and origin for retry. Terminal `RuntimeError::Application` paths clear terminal review state and recover to an actionable origin.
 
 ## Concerns
 

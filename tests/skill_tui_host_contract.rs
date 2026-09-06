@@ -7,10 +7,10 @@ use std::{
 
 use ai_stock_forum::{
     app::{
-        AgentProfileSummary, AgentProfileView, AgentProfilesView, AgentSkillAssignmentOperation,
-        AgentSkillAssignmentPreview, AppError, ApplicationCommand, CommandOutcome, CommandView,
-        PresentationSnapshot, ShutdownDisposition, ShutdownReason, ShutdownView, SkillHistoryEntry,
-        SkillHistoryView, SkillSummary, SkillView, SkillsView,
+        AgentProfileSelector, AgentProfileSummary, AgentProfileView, AgentProfilesView,
+        AgentSkillAssignmentOperation, AgentSkillAssignmentPreview, AppError, ApplicationCommand,
+        CommandOutcome, CommandView, PresentationSnapshot, ShutdownDisposition, ShutdownReason,
+        ShutdownView, SkillHistoryEntry, SkillHistoryView, SkillSummary, SkillView, SkillsView,
     },
     domain::{
         AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, InstallationId,
@@ -44,6 +44,7 @@ enum Call {
     Unassign,
     Cancel,
     Mutation,
+    ShowAgent(AgentProfileId),
     Finish,
 }
 
@@ -205,9 +206,12 @@ impl CommandExecutor for RouteRecorder {
                     truncated: false,
                 },
             ))),
-            ApplicationCommand::ShowAgentProfile { .. } => Ok(outcome(
-                CommandView::AgentProfile(assigned_profile_view()),
-            )),
+            ApplicationCommand::ShowAgentProfile { selector } => {
+                if let AgentProfileSelector::Id(profile_id) = selector {
+                    self.calls.lock().unwrap().push(Call::ShowAgent(profile_id));
+                }
+                Ok(outcome(CommandView::AgentProfile(assigned_profile_view())))
+            }
             ApplicationCommand::RequestShutdown => Ok(CommandOutcome {
                 command_id: CommandId::from_uuid(Uuid::from_u128(701)),
                 correlation_id: CorrelationId::from_uuid(Uuid::from_u128(702)),
@@ -623,6 +627,10 @@ fn agent_origin_unassign_cancel_returns_to_the_agent_skill_panel() {
     assert!(model.agents.skill_panel_open);
     assert_eq!(model.active_view, View::Agents);
     assert_eq!(
+        model.agents.detail.as_ref().map(|detail| detail.profile.profile_id()),
+        Some(AgentProfileId::from_uuid(Uuid::from_u128(110)))
+    );
+    assert_eq!(
         calls.lock().unwrap().iter().filter(|call| **call == Call::Cancel).count(),
         1
     );
@@ -817,10 +825,44 @@ fn agent_origin_upgrade_preview_builds_an_explicit_exact_upgrade_command() {
     )
     .unwrap();
     let (mut model, expected) = agent_panel_model();
+    model.agents.profiles = AgentProfilesView {
+        profiles: vec![
+            AgentProfileSummary {
+                profile_id: AgentProfileId::from_uuid(Uuid::from_u128(120)),
+                profile_version_id: AgentProfileVersionId::from_uuid(Uuid::from_u128(121)),
+                version: ai_stock_forum::domain::ObjectVersion::new(1).unwrap(),
+                display_name: "Wrong Agent".to_owned(),
+                role: ai_stock_forum::agents::builtin_profile_templates()[0].role,
+                primary_specialty: "Research".to_owned(),
+                readiness: ai_stock_forum::agents::AgentReadiness::Unbound,
+                content_digest: sha256(b"wrong-agent"),
+            },
+            AgentProfileSummary {
+                profile_id: AgentProfileId::from_uuid(Uuid::from_u128(110)),
+                profile_version_id: AgentProfileVersionId::from_uuid(Uuid::from_u128(111)),
+                version: ai_stock_forum::domain::ObjectVersion::new(1).unwrap(),
+                display_name: "Origin Agent".to_owned(),
+                role: ai_stock_forum::agents::builtin_profile_templates()[0].role,
+                primary_specialty: "Research".to_owned(),
+                readiness: ai_stock_forum::agents::AgentReadiness::Unbound,
+                content_digest: sha256(b"origin-agent"),
+            },
+        ],
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
+    };
+    model.skills.selected_agent = 0;
     handle_event(&mut model, key(KeyCode::Left));
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Enter)),
         ControllerEffect::LoadSkills
+    );
+    assert_eq!(
+        model.skills.workspace_origin,
+        Some(ai_stock_forum::ui::tui::SkillWorkspaceOrigin::AgentSkills {
+            profile_id: AgentProfileId::from_uuid(Uuid::from_u128(110)),
+        })
     );
     execute_skill_effect(
         &runtime.client(),
@@ -843,12 +885,12 @@ fn agent_origin_upgrade_preview_builds_an_explicit_exact_upgrade_command() {
     assert_eq!(model.skills.selected_skill_ref(), Some(&replacement));
 
     let effect = handle_event(&mut model, key(KeyCode::Enter));
-    assert_eq!(effect, ControllerEffect::LoadSkillAgents);
-    execute_skill_effect(&runtime.client(), &mut model, effect).unwrap();
-    assert_eq!(model.skills.pane, SkillsPane::AgentPicker);
-
-    let effect = handle_event(&mut model, key(KeyCode::Enter));
-    assert_eq!(effect, ControllerEffect::LoadSkillAgent { selected_agent: 0 });
+    assert_eq!(
+        effect,
+        ControllerEffect::LoadSkillAgent {
+            profile_id: AgentProfileId::from_uuid(Uuid::from_u128(110)),
+        }
+    );
     execute_skill_effect(&runtime.client(), &mut model, effect).unwrap();
     assert_eq!(model.skills.pane, SkillsPane::AssignmentReview);
     assert_eq!(
@@ -884,18 +926,24 @@ fn agent_origin_upgrade_preview_builds_an_explicit_exact_upgrade_command() {
             && *review_token == SkillReviewToken::from_uuid(Uuid::from_u128(93))
     ));
     assert!(model.skills.review_registered);
+    assert!(calls.lock().unwrap().contains(&Call::ShowAgent(
+        AgentProfileId::from_uuid(Uuid::from_u128(110)),
+    )));
+    assert!(!calls.lock().unwrap().contains(&Call::ShowAgent(
+        AgentProfileId::from_uuid(Uuid::from_u128(120)),
+    )));
 
     let cancel = handle_event(&mut model, key(KeyCode::Esc));
     assert_eq!(cancel, ControllerEffect::CancelSkillReview);
     execute_skill_effect(&runtime.client(), &mut model, cancel).unwrap();
-    assert_eq!(model.skills.pane, SkillsPane::AssignmentReview);
     assert!(!model.skills.review_registered);
-    handle_event(&mut model, key(KeyCode::Esc));
-    handle_event(&mut model, key(KeyCode::Esc));
-    handle_event(&mut model, key(KeyCode::Esc));
     assert!(!model.skills.active);
     assert_eq!(model.active_view, View::Agents);
     assert!(model.agents.skill_panel_open);
+    assert_eq!(
+        model.agents.detail.as_ref().map(|detail| detail.profile.profile_id()),
+        Some(AgentProfileId::from_uuid(Uuid::from_u128(110)))
+    );
     assert_eq!(
         calls.lock().unwrap().iter().filter(|call| **call == Call::Upgrade).count(),
         1
