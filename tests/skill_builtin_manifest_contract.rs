@@ -1,6 +1,9 @@
 use ai_stock_forum::{
-    domain::{ObjectVersion, SkillId, SkillVersionId},
-    skills::{SkillProvenance, SkillsProjection, builtin_manifests, reconcile_builtin_manifests},
+    domain::{DomainError, ObjectVersion, SkillId, SkillVersionId},
+    skills::{
+        SkillProvenance, SkillVersion, SkillsProjection, builtin_manifests,
+        reconcile_builtin_manifests,
+    },
 };
 use uuid::Uuid;
 
@@ -103,4 +106,131 @@ fn reconciliation_is_independent_of_manifest_input_order() {
             reversed_projection.active_skill(skill.skill_id())
         );
     }
+}
+
+#[test]
+fn reconciliation_accepts_a_valid_later_active_version_and_remains_idempotent() {
+    let manifests = builtin_manifests().expect("valid static manifests");
+    let canonical_v1 = manifests[0].skill();
+    let mut edited = canonical_v1.content().clone();
+    edited.instructions.push_str("\nRecord the decision boundary.");
+    let v2 = SkillVersion::next_version(
+        canonical_v1,
+        skill_version_id(0x3001),
+        1,
+        edited,
+    )
+    .expect("valid built-in version two");
+    let mut projection = SkillsProjection::default();
+    projection.insert(canonical_v1).expect("insert version one");
+    projection
+        .activate(&v2, canonical_v1.skill_version_id())
+        .expect("activate version two");
+
+    let first = reconcile_builtin_manifests(&mut projection, &manifests)
+        .expect("later active version preserves canonical version one");
+    let second = reconcile_builtin_manifests(&mut projection, &manifests)
+        .expect("reconciliation remains idempotent");
+
+    assert_eq!(first, second);
+    assert_eq!(projection.active_skill(v2.skill_id()), Some(&v2));
+    assert_eq!(projection.history(v2.skill_id()), vec![canonical_v1.clone(), v2]);
+}
+
+#[test]
+fn reconciliation_rejects_tampered_immutable_version_one_metadata() {
+    let manifests = builtin_manifests().expect("valid static manifests");
+    let manifest = &manifests[0];
+    let canonical = manifest.skill();
+
+    let mut altered_content = canonical.content().clone();
+    altered_content.instructions.push_str("\nAltered guidance.");
+    let tampered = [
+        (
+            "version identity",
+            SkillVersion::create(
+                canonical.skill_id(),
+                skill_version_id(0x4001),
+                canonical.created_at_ms(),
+                canonical.provenance().clone(),
+                canonical.content().clone(),
+            )
+            .expect("valid alternate version identity"),
+        ),
+        (
+            "content and digest",
+            SkillVersion::create(
+                canonical.skill_id(),
+                canonical.skill_version_id(),
+                canonical.created_at_ms(),
+                canonical.provenance().clone(),
+                altered_content,
+            )
+            .expect("valid altered content"),
+        ),
+        (
+            "provenance",
+            SkillVersion::create(
+                canonical.skill_id(),
+                canonical.skill_version_id(),
+                canonical.created_at_ms(),
+                SkillProvenance::User,
+                canonical.content().clone(),
+            )
+            .expect("valid alternate provenance"),
+        ),
+        (
+            "creation time",
+            SkillVersion::create(
+                canonical.skill_id(),
+                canonical.skill_version_id(),
+                canonical.created_at_ms() + 1,
+                canonical.provenance().clone(),
+                canonical.content().clone(),
+            )
+            .expect("valid alternate creation time"),
+        ),
+    ];
+
+    for (field, stored_v1) in tampered {
+        let mut projection = SkillsProjection::default();
+        projection.insert(&stored_v1).expect("insert tampered record");
+
+        assert_eq!(
+            reconcile_builtin_manifests(&mut projection, std::slice::from_ref(manifest)),
+            Err(DomainError::InvalidSkillVersion),
+            "tampered {field} must fail closed"
+        );
+    }
+
+    let noncanonical_v1 = SkillVersion::create(
+        canonical.skill_id(),
+        skill_version_id(0x4002),
+        canonical.created_at_ms(),
+        canonical.provenance().clone(),
+        canonical.content().clone(),
+    )
+    .expect("valid noncanonical predecessor");
+    let mut successor_content = noncanonical_v1.content().clone();
+    successor_content.instructions.push_str("\nSuccessor guidance.");
+    let successor = SkillVersion::next_version(
+        &noncanonical_v1,
+        skill_version_id(0x4003),
+        noncanonical_v1.created_at_ms() + 1,
+        successor_content,
+    )
+    .expect("valid successor of noncanonical version one");
+    let mut projection = SkillsProjection::default();
+    projection
+        .insert(&noncanonical_v1)
+        .expect("insert noncanonical version one");
+    projection
+        .activate(&successor, noncanonical_v1.skill_version_id())
+        .expect("activate successor");
+
+    assert_eq!(
+        reconcile_builtin_manifests(&mut projection, std::slice::from_ref(manifest)),
+        Err(DomainError::InvalidSkillVersion),
+        "a successor rooted at a noncanonical predecessor must fail closed"
+    );
 }

@@ -190,7 +190,7 @@ fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
     let availability = model.agent_skill_upgrade_availability();
     let availability_text = match &availability {
         AgentSkillUpgradeAvailability::Unknown => {
-            "UNKNOWN - press s to load/reload active library data".to_owned()
+            "UNKNOWN - active skill version data could not be verified".to_owned()
         }
         AgentSkillUpgradeAvailability::Current => {
             "CURRENT - exact pin equals the loaded active reference".to_owned()

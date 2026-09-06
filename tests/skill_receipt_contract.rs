@@ -378,6 +378,140 @@ fn draft(instructions: &str) -> SkillDraft {
 }
 
 #[test]
+fn create_receipt_replays_after_a_later_version_becomes_active() {
+    let mut app = support::app();
+    let candidate = draft("Version one.");
+    let preview = app.preview_skill_creation(candidate.clone()).unwrap();
+    let create = envelope(
+        32_000,
+        ApplicationCommand::CreateSkill {
+            skill_id: preview.skill_id,
+            candidate,
+            review_token: preview.review_token,
+            review_digest: preview.review_digest,
+        },
+    );
+    let created = app.execute(create.clone()).unwrap();
+    let CommandView::SkillCreated(created_view) = &created.view else {
+        panic!("skill created")
+    };
+
+    let candidate = draft("Version two.");
+    let preview = app
+        .preview_skill_version(
+            created_view.skill_id,
+            created_view.skill_version_id,
+            candidate.clone(),
+        )
+        .unwrap();
+    app.execute(envelope(
+        32_001,
+        ApplicationCommand::ActivateSkillVersion {
+            skill_id: created_view.skill_id,
+            expected_active_version_id: created_view.skill_version_id,
+            candidate,
+            review_token: preview.review_token,
+            review_digest: preview.review_digest,
+        },
+    ))
+    .unwrap();
+
+    let durable_rows = (
+        app.count_rows("event_stream"),
+        app.count_rows("command_receipts"),
+        app.count_rows("command_event_refs"),
+    );
+    assert_eq!(app.execute(create).unwrap(), created);
+    assert_eq!(
+        (
+            app.count_rows("event_stream"),
+            app.count_rows("command_receipts"),
+            app.count_rows("command_event_refs"),
+        ),
+        durable_rows
+    );
+}
+
+#[test]
+fn version_receipt_replays_after_a_newer_version_becomes_active() {
+    let mut app = support::app();
+    let candidate = draft("Version one.");
+    let preview = app.preview_skill_creation(candidate.clone()).unwrap();
+    let created = app
+        .execute(envelope(
+            33_000,
+            ApplicationCommand::CreateSkill {
+                skill_id: preview.skill_id,
+                candidate,
+                review_token: preview.review_token,
+                review_digest: preview.review_digest,
+            },
+        ))
+        .unwrap();
+    let CommandView::SkillCreated(created_view) = &created.view else {
+        panic!("skill created")
+    };
+
+    let candidate = draft("Version two.");
+    let preview = app
+        .preview_skill_version(
+            created_view.skill_id,
+            created_view.skill_version_id,
+            candidate.clone(),
+        )
+        .unwrap();
+    let version = envelope(
+        33_001,
+        ApplicationCommand::ActivateSkillVersion {
+            skill_id: created_view.skill_id,
+            expected_active_version_id: created_view.skill_version_id,
+            candidate,
+            review_token: preview.review_token,
+            review_digest: preview.review_digest,
+        },
+    );
+    let versioned = app.execute(version.clone()).unwrap();
+    let CommandView::SkillVersionActivated(versioned_view) = &versioned.view else {
+        panic!("skill version activated")
+    };
+
+    let candidate = draft("Version three.");
+    let preview = app
+        .preview_skill_version(
+            versioned_view.skill_id,
+            versioned_view.skill_version_id,
+            candidate.clone(),
+        )
+        .unwrap();
+    app.execute(envelope(
+        33_002,
+        ApplicationCommand::ActivateSkillVersion {
+            skill_id: versioned_view.skill_id,
+            expected_active_version_id: versioned_view.skill_version_id,
+            candidate,
+            review_token: preview.review_token,
+            review_digest: preview.review_digest,
+        },
+    ))
+    .unwrap();
+
+    let durable_rows = (
+        app.count_rows("event_stream"),
+        app.count_rows("command_receipts"),
+        app.count_rows("command_event_refs"),
+    );
+    assert_eq!(app.execute(version).unwrap(), versioned);
+    assert_eq!(
+        (
+            app.count_rows("event_stream"),
+            app.count_rows("command_receipts"),
+            app.count_rows("command_event_refs"),
+        ),
+        durable_rows
+    );
+}
+
+#[test]
 fn skill_mutation_receipts_replay_the_original_typed_outcome_without_duplicate_writes() {
     let mut app = support::app();
     let preview = app.preview_skill_creation(draft("Version one.")).unwrap();

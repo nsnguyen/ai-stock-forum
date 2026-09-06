@@ -115,6 +115,7 @@ pub struct SkillConfirmation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillsViewState {
     pub active: bool,
+    pub library_loaded: bool,
     pub workspace_origin: Option<SkillWorkspaceOrigin>,
     pub pane: SkillsPane,
     pub selected_skill: usize,
@@ -129,6 +130,7 @@ pub struct SkillsViewState {
     pub selected_agent_detail: Option<AgentProfileView>,
     pub assignment: Option<AssignmentKind>,
     pub editor: Option<SkillEditor>,
+    pub editor_origin: SkillsPane,
     pub pending_confirmation: Option<SkillConfirmation>,
     pub review_registered: bool,
     pub operation_origin: SkillOperationOrigin,
@@ -139,6 +141,7 @@ impl Default for SkillsViewState {
     fn default() -> Self {
         Self {
             active: false,
+            library_loaded: false,
             workspace_origin: None,
             pane: SkillsPane::List,
             selected_skill: 0,
@@ -158,6 +161,7 @@ impl Default for SkillsViewState {
             selected_agent_detail: None,
             assignment: None,
             editor: None,
+            editor_origin: SkillsPane::CreateSource,
             pending_confirmation: None,
             review_registered: false,
             operation_origin: SkillOperationOrigin::Skills(SkillsPane::Detail),
@@ -170,6 +174,7 @@ impl SkillsViewState {
     pub fn replace_skills(&mut self, library: SkillsView) {
         let selected_id = self.selected_summary().map(|summary| summary.skill_ref.skill_id());
         self.library = library;
+        self.library_loaded = true;
         self.selected_skill = selected_id
             .and_then(|id| {
                 self.library
@@ -288,6 +293,7 @@ impl SkillsViewState {
 
     pub fn start_create(&mut self, seed: Option<SkillDraft>) {
         self.editor = Some(SkillEditor::for_create(seed));
+        self.editor_origin = SkillsPane::CreateSource;
         self.pane = SkillsPane::Editor;
         self.pending_confirmation = None;
     }
@@ -304,6 +310,7 @@ impl SkillsViewState {
             detail.skill_ref.skill_version_id(),
             detail.content.clone(),
         ));
+        self.editor_origin = SkillsPane::Detail;
         self.pane = SkillsPane::Editor;
         self.pending_confirmation = None;
         true

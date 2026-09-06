@@ -27,8 +27,8 @@ use ai_stock_forum::{
             ControllerEffect, EventSource, Screen, TuiError, TuiEvent,
             execute_agent_effect, execute_skill_effect, handle_event, run_tui_with_screen,
             model::{
-                AgentSkillAction, AgentsPane, AssignmentKind, SkillConfirmation,
-                SkillOperationOrigin, SkillsPane, TuiModel, View,
+                AgentSkillAction, AgentSkillUpgradeAvailability, AgentsPane, AssignmentKind,
+                SkillConfirmation, SkillOperationOrigin, SkillsPane, TuiModel, View,
             },
             theme::Theme,
         },
@@ -65,6 +65,7 @@ struct BlockingExecutor {
 struct SuccessfulSkillMutation {
     view: Option<CommandView>,
     active: SkillVersion,
+    updated_profile: Option<AgentProfileView>,
     calls: Arc<Mutex<Vec<&'static str>>>,
 }
 
@@ -72,7 +73,10 @@ impl CommandExecutor for SuccessfulSkillMutation {
     fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError> {
         match command {
             ApplicationCommand::CreateSkill { .. }
-            | ApplicationCommand::ActivateSkillVersion { .. } => {
+            | ApplicationCommand::ActivateSkillVersion { .. }
+            | ApplicationCommand::AssignAgentSkill { .. }
+            | ApplicationCommand::UpgradeAgentSkill { .. }
+            | ApplicationCommand::UnassignAgentSkill { .. } => {
                 self.calls.lock().unwrap().push("mutation");
                 Ok(outcome(self.view.take().expect("one successful mutation")))
             }
@@ -92,6 +96,32 @@ impl CommandExecutor for SuccessfulSkillMutation {
             ApplicationCommand::ShowSkill { .. } => {
                 self.calls.lock().unwrap().push("show");
                 Ok(outcome(CommandView::Skill(host_skill_view(&self.active))))
+            }
+            ApplicationCommand::ListAgentProfiles => {
+                self.calls.lock().unwrap().push("list_agents");
+                let detail = self.updated_profile.as_ref().expect("updated profile");
+                let profile = &detail.profile;
+                Ok(outcome(CommandView::AgentProfiles(AgentProfilesView {
+                    profiles: vec![AgentProfileSummary {
+                        profile_id: profile.profile_id(),
+                        profile_version_id: profile.profile_version_id(),
+                        version: profile.version(),
+                        display_name: profile.display_name().to_owned(),
+                        role: profile.role(),
+                        primary_specialty: profile.primary_specialty().to_owned(),
+                        readiness: detail.readiness,
+                        content_digest: profile.content_digest().clone(),
+                    }],
+                    total_count: 1,
+                    returned_count: 1,
+                    truncated: false,
+                })))
+            }
+            ApplicationCommand::ShowAgentProfile { .. } => {
+                self.calls.lock().unwrap().push("show_agent");
+                Ok(outcome(CommandView::AgentProfile(
+                    self.updated_profile.clone().expect("updated profile"),
+                )))
             }
             ApplicationCommand::RequestShutdown => Ok(CommandOutcome {
                 command_id: CommandId::from_uuid(Uuid::from_u128(954)),
@@ -486,10 +516,15 @@ fn replacement_skill() -> SkillVersion {
 }
 
 fn assigned_profile_view() -> AgentProfileView {
-    let assigned = assigned_skill().reference();
+    profile_view_with_skill(Some(assigned_skill().reference()))
+}
+
+fn profile_view_with_skill(
+    assigned: Option<ai_stock_forum::skills::SkillVersionRef>,
+) -> AgentProfileView {
     let template = &ai_stock_forum::agents::builtin_profile_templates()[0];
     let mut profile_draft = template.copy_to_draft().unwrap();
-    profile_draft.skill_refs = vec![assigned];
+    profile_draft.skill_refs = assigned.into_iter().collect();
     let profile = ai_stock_forum::agents::AgentProfileVersion::create(
         AgentProfileId::from_uuid(Uuid::from_u128(110)),
         AgentProfileVersionId::from_uuid(Uuid::from_u128(111)),
@@ -1064,6 +1099,7 @@ fn post_create_success_returns_through_an_authoritative_library_refresh() {
                 content_digest: created.content_digest().clone(),
             })),
             active: created.clone(),
+            updated_profile: None,
             calls: Arc::new(Mutex::new(Vec::new())),
         },
         4,
@@ -1117,6 +1153,7 @@ fn post_version_success_returns_through_an_authoritative_library_refresh() {
                 },
             )),
             active: active.clone(),
+            updated_profile: None,
             calls: Arc::new(Mutex::new(Vec::new())),
         },
         4,
@@ -1172,6 +1209,7 @@ fn async_post_create_refresh_completion_draws_populated_exact_detail() {
                 content_digest: created.content_digest().clone(),
             })),
             active: created,
+            updated_profile: None,
             calls: Arc::clone(&calls),
         },
         4,
@@ -1484,4 +1522,233 @@ fn review_regression_historical_detail_cannot_create_a_version_but_active_detail
         ControllerEffect::LoadSkillHistory { .. }
     ));
     assert!(model.skills.editor.is_none());
+}
+
+#[test]
+fn cancelling_a_new_skill_editor_returns_to_create_source() {
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.pane = SkillsPane::CreateSource;
+    model.skills.start_create(None);
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Esc)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.skills.pane, SkillsPane::CreateSource);
+    assert!(model.skills.editor.is_none());
+}
+
+#[test]
+fn cancelling_a_create_version_editor_returns_to_skill_detail() {
+    let active = replacement_skill();
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.replace_detail(host_skill_view(&active));
+    assert!(model.skills.start_version());
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Esc)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.skills.pane, SkillsPane::Detail);
+    assert!(model.skills.editor.is_none());
+}
+
+struct AgentTruthScreen {
+    availability: Arc<Mutex<Vec<AgentSkillUpgradeAvailability>>>,
+}
+
+impl Screen for AgentTruthScreen {
+    fn size(&self) -> Result<ratatui::layout::Rect, TuiError> {
+        Ok(ratatui::layout::Rect::new(0, 0, 100, 40))
+    }
+
+    fn draw(&mut self, model: &TuiModel, _theme: &Theme) -> Result<(), TuiError> {
+        if model.active_view == View::Agents
+            && model.agents.pane == AgentsPane::Detail
+            && model.agents.detail.is_some()
+        {
+            self.availability
+                .lock()
+                .unwrap()
+                .push(model.agent_skill_upgrade_availability());
+        }
+        Ok(())
+    }
+
+    fn restore(&mut self) -> Result<(), TuiError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn direct_agent_show_hydrates_upgrade_truth_without_visiting_skills() {
+    let runtime = ApplicationRuntime::spawn(
+        RouteRecorder {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            execute_error: None,
+        },
+        4,
+    )
+    .unwrap();
+    let mut scripted = VecDeque::new();
+    push_text(
+        &mut scripted,
+        &format!(
+            "/agent show {}",
+            AgentProfileId::from_uuid(Uuid::from_u128(110))
+        ),
+    );
+    scripted.extend((0..500).map(|_| Ok(None)));
+    push_text(&mut scripted, "/quit");
+    scripted.extend((0..4).map(|_| Ok(None)));
+    let mut events = ScriptedEvents { events: scripted };
+    let availability = Arc::new(Mutex::new(Vec::new()));
+    let mut screen = AgentTruthScreen {
+        availability: Arc::clone(&availability),
+    };
+
+    let result = run_tui_with_screen(
+        runtime,
+        snapshot(),
+        false,
+        &mut screen,
+        &mut events,
+        &Theme::from_no_color(true),
+    );
+
+    assert!(result.is_ok());
+    assert!(availability.lock().unwrap().iter().any(|state| matches!(
+        state,
+        AgentSkillUpgradeAvailability::Available(reference)
+            if reference == &replacement_skill().reference()
+    )));
+}
+
+#[test]
+fn successful_assignment_mutations_refresh_both_origin_views_before_result_dismissal() {
+    let assigned = assigned_skill();
+    let active = replacement_skill();
+    let profile_id = AgentProfileId::from_uuid(Uuid::from_u128(110));
+    let profile_version_id = AgentProfileVersionId::from_uuid(Uuid::from_u128(111));
+    let token = SkillReviewToken::from_uuid(Uuid::from_u128(990));
+    let digest = sha256(b"assignment-refresh");
+    let cases = vec![
+        (
+            ApplicationCommand::AssignAgentSkill {
+                profile_id,
+                expected_active_profile_version_id: profile_version_id,
+                skill: active.reference(),
+                review_token: token,
+                review_digest: digest.clone(),
+            },
+            profile_view_with_skill(None),
+            profile_view_with_skill(Some(active.reference())),
+        ),
+        (
+            ApplicationCommand::UpgradeAgentSkill {
+                profile_id,
+                expected_active_profile_version_id: profile_version_id,
+                expected: assigned.reference(),
+                replacement: active.reference(),
+                review_token: token,
+                review_digest: digest.clone(),
+            },
+            profile_view_with_skill(Some(assigned.reference())),
+            profile_view_with_skill(Some(active.reference())),
+        ),
+        (
+            ApplicationCommand::UnassignAgentSkill {
+                profile_id,
+                expected_active_profile_version_id: profile_version_id,
+                expected: assigned.reference(),
+                review_token: token,
+                review_digest: digest,
+            },
+            profile_view_with_skill(Some(assigned.reference())),
+            profile_view_with_skill(None),
+        ),
+    ];
+
+    for (command, initial, updated) in cases {
+        for origin in [
+            SkillOperationOrigin::Skills(SkillsPane::AssignmentReview),
+            SkillOperationOrigin::AgentSkills { profile_id },
+        ] {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let runtime = ApplicationRuntime::spawn(
+                SuccessfulSkillMutation {
+                    view: Some(CommandView::SkillCreated(SkillCreatedView {
+                        skill_id: active.skill_id(),
+                        skill_version_id: active.skill_version_id(),
+                        version: active.version(),
+                        content_digest: active.content_digest().clone(),
+                    })),
+                    active: active.clone(),
+                    updated_profile: Some(updated.clone()),
+                    calls: Arc::clone(&calls),
+                },
+                4,
+            )
+            .unwrap();
+            let mut model = model();
+            model.skills.active = matches!(origin, SkillOperationOrigin::Skills(_));
+            model.active_view = View::Agents;
+            model.agents.skill_panel_open = matches!(origin, SkillOperationOrigin::AgentSkills { .. });
+            model.agents.replace_detail(initial.clone());
+            model.skills.selected_agent_detail = Some(initial.clone());
+            model.skills.replace_skills(SkillsView {
+                skills: vec![SkillSummary {
+                    skill_ref: active.reference(),
+                    display_name: active.content().display_name.clone(),
+                    provenance: active.provenance().clone(),
+                }],
+                total_count: 1,
+                returned_count: 1,
+                truncated: false,
+            });
+            model.skills.replace_detail(host_skill_view(&active));
+            model.skills.operation_origin = origin;
+            model.skills.pane = SkillsPane::Confirmation;
+            model.skills.pending_confirmation = Some(SkillConfirmation {
+                command: command.clone(),
+                origin,
+            });
+            model.skills.review_registered = true;
+
+            execute_skill_effect(
+                &runtime.client(),
+                &mut model,
+                ControllerEffect::ExecuteSkill(command.clone()),
+            )
+            .unwrap();
+
+            let expected_refs = updated.profile.skill_refs();
+            assert_eq!(
+                model
+                    .agents
+                    .detail
+                    .as_ref()
+                    .map(|detail| detail.profile.skill_refs()),
+                Some(expected_refs)
+            );
+            assert_eq!(
+                model
+                    .skills
+                    .selected_agent_detail
+                    .as_ref()
+                    .map(|detail| detail.profile.skill_refs()),
+                Some(expected_refs)
+            );
+            assert_eq!(model.skills.pane, SkillsPane::Result);
+            assert!(model.skills.pending_confirmation.is_none());
+            assert!(!model.skills.review_registered);
+            assert_eq!(
+                calls.lock().unwrap().as_slice(),
+                ["mutation", "list_agents", "show_agent"]
+            );
+            runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
+        }
+    }
 }

@@ -25,6 +25,7 @@ pub struct SkillEditPreview {
 enum PendingSkillReview {
     Edit {
         token: SkillReviewToken,
+        actor: Actor,
         skill_id: SkillId,
         expected_active_version_id: Option<SkillVersionId>,
         candidate_digest: ContentDigest,
@@ -70,6 +71,7 @@ impl SkillReviewRegistry {
     ) -> Result<SkillEditPreview, DomainError> {
         self.operation().issue_edit(
             review_token,
+            Actor::Human,
             skill_id,
             expected_active_version_id,
             candidate,
@@ -88,6 +90,7 @@ impl SkillReviewRegistry {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let Some(ReviewState::Available(PendingSkillReview::Edit {
             token,
+            actor,
             skill_id: pending_skill_id,
             expected_active_version_id: pending_expected,
             candidate_digest: pending_candidate_digest,
@@ -97,6 +100,7 @@ impl SkillReviewRegistry {
             return Err(DomainError::InvalidSkillReviewToken);
         };
         if *token != review_token
+            || actor != &Actor::Human
             || *pending_skill_id != skill_id
             || *pending_expected != expected_active_version_id
             || *pending_candidate_digest != candidate_digest
@@ -130,15 +134,22 @@ impl SkillReviewOperation<'_> {
     pub(crate) fn issue_edit(
         &self,
         review_token: SkillReviewToken,
+        actor: Actor,
         skill_id: SkillId,
         expected_active_version_id: Option<SkillVersionId>,
         candidate: &SkillDraft,
     ) -> Result<SkillEditPreview, DomainError> {
         let candidate_digest = candidate_digest(candidate)?;
-        let review_digest = review_digest(skill_id, expected_active_version_id, &candidate_digest)?;
+        let review_digest = review_digest(
+            &actor,
+            skill_id,
+            expected_active_version_id,
+            &candidate_digest,
+        )?;
         *self.registry.state.lock().unwrap_or_else(|error| error.into_inner()) =
             Some(ReviewState::Available(PendingSkillReview::Edit {
                 token: review_token,
+                actor,
                 skill_id,
                 expected_active_version_id,
                 candidate_digest: candidate_digest.clone(),
@@ -189,6 +200,7 @@ impl SkillReviewOperation<'_> {
         &self,
         command_id: CommandId,
         review_token: SkillReviewToken,
+        actor: &Actor,
         skill_id: SkillId,
         expected_active_version_id: Option<SkillVersionId>,
         candidate: &SkillDraft,
@@ -201,11 +213,13 @@ impl SkillReviewOperation<'_> {
                 review,
                 PendingSkillReview::Edit {
                     token,
+                    actor: pending_actor,
                     skill_id: pending_skill_id,
                     expected_active_version_id: pending_expected,
                     candidate_digest: pending_candidate,
                     review_digest,
                 } if *token == review_token
+                    && pending_actor == actor
                     && *pending_skill_id == skill_id
                     && *pending_expected == expected_active_version_id
                     && *pending_candidate == candidate_digest
@@ -307,11 +321,13 @@ fn candidate_digest(candidate: &SkillDraft) -> Result<ContentDigest, DomainError
 }
 
 fn review_digest(
+    actor: &Actor,
     skill_id: SkillId,
     expected_active_version_id: Option<SkillVersionId>,
     candidate_digest: &ContentDigest,
 ) -> Result<ContentDigest, DomainError> {
     Ok(sha256(&canonical_json_bytes(&ReviewDigestMaterial {
+        actor,
         skill_id,
         expected_active_version_id,
         candidate_digest,
@@ -320,6 +336,7 @@ fn review_digest(
 
 #[derive(Serialize)]
 struct ReviewDigestMaterial<'a> {
+    actor: &'a Actor,
     skill_id: SkillId,
     expected_active_version_id: Option<SkillVersionId>,
     candidate_digest: &'a ContentDigest,

@@ -122,10 +122,15 @@ pub fn reconcile_builtin_manifests(
     });
 
     for manifest in &canonical_manifests {
-        match projection.active_skill(manifest.skill.skill_id()) {
-            Some(existing) if builtin_content_matches(existing, manifest) => {}
+        let history = projection.history(manifest.skill.skill_id());
+        let stored_v1 = history
+            .iter()
+            .find(|skill| skill.version() == manifest.skill.version());
+        match stored_v1 {
+            Some(existing) if builtin_manifest_matches(existing, manifest) => {}
             Some(_) => return Err(DomainError::InvalidSkillVersion),
-            None => projection.insert(&manifest.skill)?,
+            None if history.is_empty() => projection.insert(&manifest.skill)?,
+            None => return Err(DomainError::InvalidSkillVersion),
         }
     }
 
@@ -176,9 +181,19 @@ impl BuiltinSkillManifest {
     }
 }
 
-fn builtin_content_matches(existing: &SkillVersion, manifest: &BuiltinSkillManifest) -> bool {
-    existing.skill_version_id() == manifest.skill.skill_version_id()
-        && existing.version() == manifest.skill.version()
+fn builtin_manifest_matches(existing: &SkillVersion, manifest: &BuiltinSkillManifest) -> bool {
+    let provenance_matches = matches!(
+        existing.provenance(),
+        SkillProvenance::BuiltIn {
+            manifest_id,
+            manifest_version,
+            manifest_digest,
+        } if manifest_id == manifest.manifest_id()
+            && *manifest_version == manifest.manifest_version()
+            && manifest_digest == manifest.expected_digest()
+    );
+
+    existing == &manifest.skill
         && existing.content_digest() == manifest.expected_digest()
-        && existing.provenance() == manifest.skill.provenance()
+        && provenance_matches
 }

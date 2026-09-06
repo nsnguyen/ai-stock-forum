@@ -42,6 +42,7 @@ pub enum ControllerEffect {
         profile_id: crate::domain::AgentProfileId,
         version: crate::domain::ObjectVersion,
     },
+    LoadAgentSkillLibrary,
     StartProfileCreate {
         template_index: usize,
     },
@@ -158,6 +159,9 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
             ShutdownDisposition::Continue
         }
         CommandView::AgentProfile(profile) => {
+            let needs_skill_library = !model.skills.active
+                && !model.skills.library_loaded
+                && !profile.profile.skill_refs().is_empty();
             if model.skills.active {
                 let target = model.skills.selected_skill_ref().cloned();
                 let current = target.as_ref().and_then(|target| {
@@ -174,6 +178,9 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
                 model.agents.replace_detail(profile);
                 model.agents.pane = AgentsPane::Detail;
                 select_workspace_view(model, View::Agents);
+            }
+            if needs_skill_library {
+                follow_up = ControllerEffect::LoadAgentSkillLibrary;
             }
             model.clear_message();
             ShutdownDisposition::Continue
@@ -644,8 +651,9 @@ fn apply_skill_editor_effect(model: &mut TuiModel, effect: SkillEditorEffect) ->
         }
         SkillEditorEffect::CancelReview => ControllerEffect::CancelSkillReview,
         SkillEditorEffect::Cancelled => {
+            let origin = model.skills.editor_origin;
             model.skills.editor = None;
-            model.skills.pane = SkillsPane::CreateSource;
+            model.skills.pane = origin;
             ControllerEffect::Redraw
         }
     }

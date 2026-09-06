@@ -774,6 +774,7 @@ impl CommandExecutor {
         }
         self.skill_reviews.operation().issue_edit(
             SkillReviewToken::from_uuid(self.ids.next_uuid()),
+            Actor::Human,
             SkillId::from_uuid(self.ids.next_uuid()),
             None,
             &candidate,
@@ -799,6 +800,7 @@ impl CommandExecutor {
         ensure_skill_name_available(self.database.connection(), Some(skill_id), &candidate)?;
         self.skill_reviews.operation().issue_edit(
             SkillReviewToken::from_uuid(self.ids.next_uuid()),
+            Actor::Human,
             skill_id,
             Some(expected_active_version_id),
             &candidate,
@@ -1167,6 +1169,7 @@ impl CommandExecutor {
                             .reserve_edit(
                                 envelope.command_id,
                                 *review_token,
+                                &request.actor,
                                 *skill_id,
                                 None,
                                 candidate,
@@ -1207,6 +1210,7 @@ impl CommandExecutor {
                             .reserve_edit(
                                 envelope.command_id,
                                 *review_token,
+                                &request.actor,
                                 *skill_id,
                                 Some(*expected_active_version_id),
                                 candidate,
@@ -2366,8 +2370,7 @@ fn materialize_success(
                 || accepted.content().display_name != *display_name
                 || accepted.provenance() != provenance
                 || provenance != &SkillProvenance::User
-                || load_active_skill(transaction.transaction(), *skill_id)?.as_ref()
-                    != Some(&accepted)
+                || projection.skills.active_skill(*skill_id) != Some(skill)
             {
                 return Err(invalid_receipt());
             }
@@ -2412,8 +2415,7 @@ fn materialize_success(
                 || accepted != expected
                 || accepted.content().display_name != *display_name
                 || accepted.provenance() != provenance
-                || load_active_skill(transaction.transaction(), *skill_id)?.as_ref()
-                    != Some(&accepted)
+                || projection.skills.active_skill(*skill_id) != Some(skill)
             {
                 return Err(invalid_receipt());
             }

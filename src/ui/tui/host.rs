@@ -62,6 +62,9 @@ pub fn execute_agent_effect(
             )?;
             apply_agent_outcome(model, outcome);
         }
+        ControllerEffect::LoadAgentSkillLibrary => {
+            load_agent_skill_library(client, model)?;
+        }
         ControllerEffect::StartProfileCreate { template_index } => {
             model.set_command_in_flight(true);
             let templates = client.agent_profile_templates();
@@ -285,12 +288,17 @@ pub fn execute_skill_effect(
             }
         }
         ControllerEffect::ExecuteSkill(command) => {
+            let affected_profile_id = assignment_profile_id(&command);
             match submit_protected_skill_command(client, model, command) {
                 Ok(outcome) => {
                     let _ = apply_outcome(model, outcome);
                     model.skills.review_registered = false;
                     model.skills.pending_confirmation = None;
                     model.skills.editor = None;
+                    model.skills.assignment = None;
+                    if let Some(profile_id) = affected_profile_id {
+                        refresh_agent_skill_assignment_state(client, model, profile_id)?;
+                    }
                     model.skills.pane = super::model::SkillsPane::Result;
                     model.set_message(super::model::Severity::Info, "Skill action completed.");
                 }
@@ -543,6 +551,81 @@ fn apply_agent_outcome(model: &mut TuiModel, outcome: CommandOutcome) {
     }
 }
 
+fn assignment_profile_id(
+    command: &ApplicationCommand,
+) -> Option<crate::domain::AgentProfileId> {
+    match command {
+        ApplicationCommand::AssignAgentSkill { profile_id, .. }
+        | ApplicationCommand::UpgradeAgentSkill { profile_id, .. }
+        | ApplicationCommand::UnassignAgentSkill { profile_id, .. } => Some(*profile_id),
+        _ => None,
+    }
+}
+
+fn needs_agent_skill_library(model: &TuiModel) -> bool {
+    !model.skills.library_loaded
+        && model
+            .agents
+            .detail
+            .as_ref()
+            .is_some_and(|detail| !detail.profile.skill_refs().is_empty())
+}
+
+fn load_agent_skill_library(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+) -> Result<(), RuntimeError> {
+    let skills_active = model.skills.active;
+    let skills_pane = model.skills.pane;
+    let active_view = model.active_view;
+    let agents_pane = model.agents.pane;
+    let outcome = submit_agent_command(client, model, ApplicationCommand::ListSkills)?;
+    let _ = apply_outcome(model, outcome);
+    model.skills.active = skills_active;
+    model.skills.pane = skills_pane;
+    model.active_view = active_view;
+    model.agents.pane = agents_pane;
+    Ok(())
+}
+
+fn ensure_agent_skill_library(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+) -> Result<(), RuntimeError> {
+    if needs_agent_skill_library(model) {
+        load_agent_skill_library(client, model)?;
+    }
+    Ok(())
+}
+
+fn refresh_agent_skill_assignment_state(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    profile_id: crate::domain::AgentProfileId,
+) -> Result<(), RuntimeError> {
+    let profiles = submit_agent_command(client, model, ApplicationCommand::ListAgentProfiles)?;
+    apply_agent_outcome(model, profiles);
+    model.agents.select_profile_id(profile_id);
+
+    let outcome = submit_agent_command(
+        client,
+        model,
+        ApplicationCommand::ShowAgentProfile {
+            selector: profile_id.into(),
+        },
+    )?;
+    let refreshed = match &outcome.view {
+        CommandView::AgentProfile(detail) => Some(detail.clone()),
+        _ => None,
+    };
+    let _ = apply_outcome(model, outcome);
+    if let Some(detail) = refreshed {
+        model.agents.replace_detail(detail.clone());
+        model.skills.selected_agent_detail = Some(detail);
+    }
+    ensure_agent_skill_library(client, model)
+}
+
 fn selected_profile_id(
     model: &mut TuiModel,
     selected_profile: usize,
@@ -580,6 +663,7 @@ fn load_profile(
         },
     )?;
     apply_agent_outcome(model, outcome);
+    ensure_agent_skill_library(client, model)?;
     Ok(())
 }
 
@@ -709,6 +793,7 @@ fn refresh_profile_state(
         },
     )?;
     apply_agent_outcome(model, detail);
+    ensure_agent_skill_library(client, model)?;
     let history = submit_agent_command(
         client,
         model,
@@ -740,6 +825,9 @@ fn refresh_stale_profile(
     ) {
         Ok(outcome) => apply_agent_outcome(model, outcome),
         Err(_) => refresh_failed = true,
+    }
+    if ensure_agent_skill_library(client, model).is_err() {
+        refresh_failed = true;
     }
     model.agents.editor = None;
     model.agents.pending_confirmation = None;
@@ -973,6 +1061,7 @@ impl TuiRunner {
             | ControllerEffect::LoadAgentProfile { .. }
             | ControllerEffect::LoadAgentProfileHistory { .. }
             | ControllerEffect::LoadAgentProfileVersion { .. }
+            | ControllerEffect::LoadAgentSkillLibrary
             | ControllerEffect::StartProfileCreate { .. }
             | ControllerEffect::StartProfileEdit { .. }
             | ControllerEffect::StartProfileCreateByTemplate { .. }

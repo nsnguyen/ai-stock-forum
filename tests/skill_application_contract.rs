@@ -654,6 +654,104 @@ fn profile(name: &str) -> AgentProfileDraft {
 }
 
 #[test]
+fn create_review_token_rejects_system_actor_and_remains_available_to_human() {
+    let mut app = support::app();
+    let candidate = skill("Actor-bound Create", "Human-reviewed creation.");
+    let preview = app.preview_skill_creation(candidate.clone()).unwrap();
+    let human = envelope(
+        30_000,
+        ApplicationCommand::CreateSkill {
+            skill_id: preview.skill_id,
+            candidate,
+            review_token: preview.review_token,
+            review_digest: preview.review_digest,
+        },
+    );
+    let mut system = human.clone();
+    system.actor = Actor::System;
+    let durable_rows = (
+        app.count_rows("event_stream"),
+        app.count_rows("command_receipts"),
+        app.count_rows("command_event_refs"),
+    );
+
+    assert_eq!(app.execute(system), Err(AppError::SkillReviewMismatch));
+    assert_eq!(
+        (
+            app.count_rows("event_stream"),
+            app.count_rows("command_receipts"),
+            app.count_rows("command_event_refs"),
+        ),
+        durable_rows
+    );
+    assert!(matches!(
+        app.execute(human).unwrap().view,
+        CommandView::SkillCreated(_)
+    ));
+}
+
+#[test]
+fn version_review_token_rejects_system_actor_and_remains_available_to_human() {
+    let mut app = support::app();
+    let candidate = skill("Actor-bound Version", "Version one.");
+    let preview = app.preview_skill_creation(candidate.clone()).unwrap();
+    let created = app
+        .execute(envelope(
+            31_000,
+            ApplicationCommand::CreateSkill {
+                skill_id: preview.skill_id,
+                candidate,
+                review_token: preview.review_token,
+                review_digest: preview.review_digest,
+            },
+        ))
+        .unwrap();
+    let CommandView::SkillCreated(created) = created.view else {
+        panic!("skill created")
+    };
+
+    let candidate = skill("Actor-bound Version", "Version two.");
+    let preview = app
+        .preview_skill_version(
+            created.skill_id,
+            created.skill_version_id,
+            candidate.clone(),
+        )
+        .unwrap();
+    let human = envelope(
+        31_001,
+        ApplicationCommand::ActivateSkillVersion {
+            skill_id: created.skill_id,
+            expected_active_version_id: created.skill_version_id,
+            candidate,
+            review_token: preview.review_token,
+            review_digest: preview.review_digest,
+        },
+    );
+    let mut system = human.clone();
+    system.actor = Actor::System;
+    let durable_rows = (
+        app.count_rows("event_stream"),
+        app.count_rows("command_receipts"),
+        app.count_rows("command_event_refs"),
+    );
+
+    assert_eq!(app.execute(system), Err(AppError::SkillReviewMismatch));
+    assert_eq!(
+        (
+            app.count_rows("event_stream"),
+            app.count_rows("command_receipts"),
+            app.count_rows("command_event_refs"),
+        ),
+        durable_rows
+    );
+    assert!(matches!(
+        app.execute(human).unwrap().view,
+        CommandView::SkillVersionActivated(_)
+    ));
+}
+
+#[test]
 fn reviewed_create_version_reads_and_exact_assignment_lifecycle_are_typed() {
     let mut app = support::app();
     let create_candidate = skill(
