@@ -112,12 +112,15 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Them
 
 fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     let focused = workspace_focused(model) && model.agents.pane == AgentsPane::Detail;
-    let lines = model
-        .agents
-        .detail
-        .as_ref()
-        .map(|detail| detail_lines(detail, theme))
-        .unwrap_or_else(|| {
+    let lines = if model.agents.skill_panel_open {
+        assigned_skill_lines(model, theme)
+    } else {
+        model
+            .agents
+            .detail
+            .as_ref()
+            .map(|detail| detail_lines(detail, theme))
+            .unwrap_or_else(|| {
             if model.agents.profiles.profiles.is_empty() {
                 vec![
                     Line::styled("No agent profiles yet", theme.accent),
@@ -131,14 +134,96 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
                     Line::raw("Choose a profile and press Enter to load its detail."),
                 ]
             }
-        });
+            })
+    };
     frame.render_widget(
         Paragraph::new(lines)
-            .block(panel("Agent detail", focused, theme))
+            .block(panel(
+                if model.agents.skill_panel_open {
+                    "Assigned skills"
+                } else {
+                    "Agent detail"
+                },
+                focused,
+                theme,
+            ))
             .wrap(Wrap { trim: false })
             .scroll((scroll(model.agents.detail_scroll, area.height), 0)),
         area,
     );
+}
+
+fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
+    let Some(detail) = model.agents.detail.as_ref() else {
+        return vec![
+            Line::styled("Assigned skills unavailable", theme.warning),
+            Line::raw("Press Esc and reload the agent detail."),
+        ];
+    };
+    let Some(reference) = detail
+        .profile
+        .skill_refs()
+        .get(model.agents.selected_assigned_skill)
+    else {
+        return vec![
+            Line::styled("No assigned skills", theme.accent),
+            Line::raw("Assign a skill from the Skills workspace."),
+            Line::styled("Esc: agent detail", theme.focus),
+        ];
+    };
+    let selected_action = model.agents.selected_skill_action();
+    let mut action_spans = vec![Span::styled("Actions  ", theme.accent)];
+    for (index, (action, label)) in [
+        (crate::ui::tui::model::AgentSkillAction::View, "View"),
+        (crate::ui::tui::model::AgentSkillAction::Upgrade, "Upgrade"),
+        (crate::ui::tui::model::AgentSkillAction::Unassign, "Unassign"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index > 0 {
+            action_spans.push(Span::raw("  "));
+        }
+        action_spans.push(Span::styled(
+            format!("[{label}]"),
+            if action == selected_action { theme.focus } else { theme.muted },
+        ));
+    }
+    let active = model
+        .skills
+        .library
+        .skills
+        .iter()
+        .find(|summary| summary.skill_ref.skill_id() == reference.skill_id())
+        .map(|summary| &summary.skill_ref);
+    let upgrade = match active {
+        Some(active) if active.version() > reference.version() => format!(
+            "Upgrade available: active v{} (explicit action required)",
+            active.version().get()
+        ),
+        Some(active) if active == reference => "Pinned version is active; no upgrade available".to_owned(),
+        Some(active) => format!(
+            "Library active v{} differs; choose Upgrade to review",
+            active.version().get()
+        ),
+        None => "Open Upgrade to load and compare the active library version".to_owned(),
+    };
+    vec![
+        Line::from(action_spans),
+        Line::styled(
+            "Left/Right: choose | Enter: open review | Up/Down: skill | Esc: detail",
+            theme.focus,
+        ),
+        Line::default(),
+        Line::styled("PINNED EXACT VERSION", theme.accent),
+        label_value("Version", format!("v{}", reference.version().get()), theme),
+        label_value("Skill ID", reference.skill_id().to_string(), theme),
+        label_value("Version ID", reference.skill_version_id().to_string(), theme),
+        label_value("Digest", reference.content_digest().to_string(), theme),
+        Line::default(),
+        Line::styled(upgrade, theme.warning),
+        Line::styled("No automatic upgrades. Skill text grants no capability.", theme.muted),
+    ]
 }
 
 fn detail_lines(detail: &crate::app::AgentProfileView, theme: &Theme) -> Vec<Line<'static>> {

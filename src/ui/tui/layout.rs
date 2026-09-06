@@ -27,6 +27,8 @@ pub struct AgentWorkspaceLayout {
     pub active: Rect,
 }
 
+pub type SkillWorkspaceLayout = AgentWorkspaceLayout;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewGeometry {
     pub cockpit: CockpitLayout,
@@ -97,6 +99,28 @@ pub fn agent_workspace(area: Rect, mode: LayoutMode) -> AgentWorkspaceLayout {
     }
 }
 
+pub fn skill_layout_mode(area: Rect) -> LayoutMode {
+    agent_layout_mode(area)
+}
+
+pub fn skill_workspace(area: Rect, mode: LayoutMode) -> SkillWorkspaceLayout {
+    match mode {
+        LayoutMode::Narrow | LayoutMode::TooSmall => SkillWorkspaceLayout {
+            list: None,
+            active: area,
+        },
+        LayoutMode::Medium | LayoutMode::Wide => {
+            let columns =
+                Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)])
+                    .split(area);
+            SkillWorkspaceLayout {
+                list: Some(columns[0]),
+                active: columns[1],
+            }
+        }
+    }
+}
+
 pub fn calculate(area: Rect, inspector_open: bool) -> CockpitLayout {
     let mode = layout_mode(area);
     calculate_for_mode(area, inspector_open, mode, 3)
@@ -105,6 +129,11 @@ pub fn calculate(area: Rect, inspector_open: bool) -> CockpitLayout {
 pub fn calculate_agents(area: Rect, inspector_open: bool) -> CockpitLayout {
     let mode = agent_layout_mode(area);
     calculate_for_mode(area, inspector_open, mode, 4)
+}
+
+pub fn calculate_skills(area: Rect) -> CockpitLayout {
+    let mode = skill_layout_mode(area);
+    calculate_for_mode(area, false, mode, 4)
 }
 
 fn calculate_for_mode(
