@@ -66,12 +66,8 @@ impl SkillDraft {
             DESCRIPTION_MAX_BYTES,
             true,
         )?;
-        let use_when = canonicalize_multiline_text(
-            SkillField::UseWhen,
-            &use_when,
-            USE_WHEN_MAX_BYTES,
-            false,
-        )?;
+        let use_when =
+            canonicalize_multiline_text(SkillField::UseWhen, &use_when, USE_WHEN_MAX_BYTES, false)?;
         let instructions = canonicalize_multiline_text(
             SkillField::Instructions,
             &instructions,

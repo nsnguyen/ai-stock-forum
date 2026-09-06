@@ -19,7 +19,9 @@ impl SkillsProjection {
             || self.versions_by_id.contains_key(&skill.skill_version_id())
             || self.active_by_skill.contains_key(&skill.skill_id())
             || self.version_index_by_skill.contains_key(&skill.skill_id())
-            || self.active_name_index.contains_key(&skill.normalized_name()?)
+            || self
+                .active_name_index
+                .contains_key(&skill.normalized_name()?)
             || skill.recompute_content_digest()? != *skill.content_digest()
         {
             return Err(DomainError::InvalidSkillVersion);

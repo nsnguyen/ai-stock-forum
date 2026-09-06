@@ -1,8 +1,6 @@
 use ai_stock_forum::{
     domain::{ObjectVersion, SkillId, SkillVersionId, canonical_json_bytes, sha256},
-    skills::{
-        SkillDraft, SkillProvenance, SkillResource, SkillVersion, SkillsProjection,
-    },
+    skills::{SkillDraft, SkillProvenance, SkillResource, SkillVersion, SkillsProjection},
 };
 use uuid::Uuid;
 
@@ -45,8 +43,14 @@ fn skill_ids_are_distinct_typed_ids() {
 
 #[test]
 fn valid_draft_accepts_into_immutable_version_one() {
-    let accepted = SkillVersion::create(id(1), version_id(101), 1_800_000_000_000, user_provenance(), draft())
-        .expect("accepted version one");
+    let accepted = SkillVersion::create(
+        id(1),
+        version_id(101),
+        1_800_000_000_000,
+        user_provenance(),
+        draft(),
+    )
+    .expect("accepted version one");
 
     assert_eq!(accepted.skill_id(), id(1));
     assert_eq!(accepted.skill_version_id(), version_id(101));
@@ -57,8 +61,14 @@ fn valid_draft_accepts_into_immutable_version_one() {
 
 #[test]
 fn next_version_keeps_logical_identity_and_advances_once() {
-    let first = SkillVersion::create(id(1), version_id(101), 1_800_000_000_000, user_provenance(), draft())
-        .unwrap();
+    let first = SkillVersion::create(
+        id(1),
+        version_id(101),
+        1_800_000_000_000,
+        user_provenance(),
+        draft(),
+    )
+    .unwrap();
     let mut changed = first.content().clone();
     changed.instructions.push_str(" Cite the primary source.");
 
@@ -73,24 +83,33 @@ fn next_version_keeps_logical_identity_and_advances_once() {
 
 #[test]
 fn next_version_rejects_reusing_its_predecessor_version_id() {
-    let first = SkillVersion::create(id(1), version_id(101), 1_800_000_000_000, user_provenance(), draft())
-        .unwrap();
+    let first = SkillVersion::create(
+        id(1),
+        version_id(101),
+        1_800_000_000_000,
+        user_provenance(),
+        draft(),
+    )
+    .unwrap();
     let mut changed = first.content().clone();
     changed.instructions.push_str(" Cite the primary source.");
 
-    assert!(SkillVersion::next_version(
-        &first,
-        first.skill_version_id(),
-        1_800_000_000_001,
-        changed,
-    )
-    .is_err());
+    assert!(
+        SkillVersion::next_version(&first, first.skill_version_id(), 1_800_000_000_001, changed,)
+            .is_err()
+    );
 }
 
 #[test]
 fn unchanged_normalized_candidate_is_rejected() {
-    let first = SkillVersion::create(id(1), version_id(101), 1_800_000_000_000, user_provenance(), draft())
-        .unwrap();
+    let first = SkillVersion::create(
+        id(1),
+        version_id(101),
+        1_800_000_000_000,
+        user_provenance(),
+        draft(),
+    )
+    .unwrap();
     let unchanged = SkillDraft::new(
         " Evidence Review ".to_owned(),
         "Check sources before drawing conclusions.".to_owned(),
@@ -104,7 +123,9 @@ fn unchanged_normalized_candidate_is_rejected() {
     )
     .unwrap();
 
-    assert!(SkillVersion::next_version(&first, version_id(102), 1_800_000_000_001, unchanged).is_err());
+    assert!(
+        SkillVersion::next_version(&first, version_id(102), 1_800_000_000_001, unchanged).is_err()
+    );
 }
 
 #[test]
@@ -125,36 +146,134 @@ fn canonical_limits_and_forbidden_controls_hold_at_boundaries() {
     assert!(valid.is_ok());
 
     for invalid in [
-        SkillDraft::new("n".repeat(65), "d".repeat(256), "u".repeat(512), vec![], "i".repeat(4_096), vec![]),
-        SkillDraft::new("n".repeat(64), "d".repeat(257), "u".repeat(512), vec![], "i".repeat(4_096), vec![]),
-        SkillDraft::new("n".repeat(64), "d".repeat(256), "u".repeat(513), vec![], "i".repeat(4_096), vec![]),
-        SkillDraft::new("n".repeat(64), "d".repeat(256), "u".repeat(512), vec!["t".repeat(32); 9], "i".repeat(4_096), vec![]),
-        SkillDraft::new("n".repeat(64), "d".repeat(256), "u".repeat(512), vec!["t".repeat(33)], "i".repeat(4_096), vec![]),
-        SkillDraft::new("n".repeat(64), "d".repeat(256), "u".repeat(512), vec![], "i".repeat(4_097), vec![]),
-        SkillDraft::new("n".repeat(64), "d".repeat(256), "u".repeat(512), vec![], "i".repeat(4_096), vec![SkillResource { name: "r".to_owned(), body: "b".repeat(4_097) }]),
-        SkillDraft::new("n".repeat(64), "d".repeat(256), "u".repeat(512), vec![], "i".repeat(4_096), vec![SkillResource { name: "r".repeat(65), body: "b".to_owned() }]),
-        SkillDraft::new("n".repeat(64), "d".repeat(256), "u".repeat(512), vec![], "i".repeat(4_096), (0..9).map(|index| SkillResource { name: format!("r{index}"), body: String::new() }).collect()),
-        SkillDraft::new("n".repeat(64), "d".repeat(256), "u".repeat(512), vec![], "i".repeat(4_096), vec![
-            SkillResource { name: "r1".to_owned(), body: "b".repeat(4_096) },
-            SkillResource { name: "r2".to_owned(), body: "b".repeat(4_096) },
-            SkillResource { name: "r3".to_owned(), body: "b".repeat(4_096) },
-            SkillResource { name: "r4".to_owned(), body: "b".repeat(4_096) },
-            SkillResource { name: "r5".to_owned(), body: "b".to_owned() },
-        ]),
+        SkillDraft::new(
+            "n".repeat(65),
+            "d".repeat(256),
+            "u".repeat(512),
+            vec![],
+            "i".repeat(4_096),
+            vec![],
+        ),
+        SkillDraft::new(
+            "n".repeat(64),
+            "d".repeat(257),
+            "u".repeat(512),
+            vec![],
+            "i".repeat(4_096),
+            vec![],
+        ),
+        SkillDraft::new(
+            "n".repeat(64),
+            "d".repeat(256),
+            "u".repeat(513),
+            vec![],
+            "i".repeat(4_096),
+            vec![],
+        ),
+        SkillDraft::new(
+            "n".repeat(64),
+            "d".repeat(256),
+            "u".repeat(512),
+            vec!["t".repeat(32); 9],
+            "i".repeat(4_096),
+            vec![],
+        ),
+        SkillDraft::new(
+            "n".repeat(64),
+            "d".repeat(256),
+            "u".repeat(512),
+            vec!["t".repeat(33)],
+            "i".repeat(4_096),
+            vec![],
+        ),
+        SkillDraft::new(
+            "n".repeat(64),
+            "d".repeat(256),
+            "u".repeat(512),
+            vec![],
+            "i".repeat(4_097),
+            vec![],
+        ),
+        SkillDraft::new(
+            "n".repeat(64),
+            "d".repeat(256),
+            "u".repeat(512),
+            vec![],
+            "i".repeat(4_096),
+            vec![SkillResource {
+                name: "r".to_owned(),
+                body: "b".repeat(4_097),
+            }],
+        ),
+        SkillDraft::new(
+            "n".repeat(64),
+            "d".repeat(256),
+            "u".repeat(512),
+            vec![],
+            "i".repeat(4_096),
+            vec![SkillResource {
+                name: "r".repeat(65),
+                body: "b".to_owned(),
+            }],
+        ),
+        SkillDraft::new(
+            "n".repeat(64),
+            "d".repeat(256),
+            "u".repeat(512),
+            vec![],
+            "i".repeat(4_096),
+            (0..9)
+                .map(|index| SkillResource {
+                    name: format!("r{index}"),
+                    body: String::new(),
+                })
+                .collect(),
+        ),
+        SkillDraft::new(
+            "n".repeat(64),
+            "d".repeat(256),
+            "u".repeat(512),
+            vec![],
+            "i".repeat(4_096),
+            vec![
+                SkillResource {
+                    name: "r1".to_owned(),
+                    body: "b".repeat(4_096),
+                },
+                SkillResource {
+                    name: "r2".to_owned(),
+                    body: "b".repeat(4_096),
+                },
+                SkillResource {
+                    name: "r3".to_owned(),
+                    body: "b".repeat(4_096),
+                },
+                SkillResource {
+                    name: "r4".to_owned(),
+                    body: "b".repeat(4_096),
+                },
+                SkillResource {
+                    name: "r5".to_owned(),
+                    body: "b".to_owned(),
+                },
+            ],
+        ),
     ] {
         assert!(invalid.is_err());
     }
 
     for control in ["\0", "\u{001b}", "\u{0085}", "\u{202e}"] {
-        assert!(SkillDraft::new(
-            format!("unsafe{control}"),
-            "description".to_owned(),
-            "usage".to_owned(),
-            vec![],
-            "instructions".to_owned(),
-            vec![],
-        )
-        .is_err());
+        assert!(
+            SkillDraft::new(
+                format!("unsafe{control}"),
+                "description".to_owned(),
+                "usage".to_owned(),
+                vec![],
+                "instructions".to_owned(),
+                vec![],
+            )
+            .is_err()
+        );
     }
 }
 
@@ -183,7 +302,12 @@ fn single_resource_body_at_4096_utf8_bytes_is_accepted() {
 #[test]
 fn complete_canonical_payload_limit_accepts_32768_bytes_and_rejects_32769() {
     let escaped_bytes = (0..=16_384)
-        .find(|escaped_bytes| canonical_json_bytes(&maximum_payload_draft(*escaped_bytes)).unwrap().len() == 32_768)
+        .find(|escaped_bytes| {
+            canonical_json_bytes(&maximum_payload_draft(*escaped_bytes))
+                .unwrap()
+                .len()
+                == 32_768
+        })
         .expect("a payload exactly at the canonical limit");
     let at_limit = maximum_payload_draft(escaped_bytes);
     let over_limit = maximum_payload_draft(escaped_bytes + 1);
@@ -203,8 +327,14 @@ fn canonicalization_normalizes_line_endings_orders_content_and_rejects_duplicate
         vec!["Zulu".to_owned(), "alpha".to_owned()],
         "First\r\nSecond\rThird".to_owned(),
         vec![
-            SkillResource { name: "Zulu".to_owned(), body: "Z".to_owned() },
-            SkillResource { name: "alpha".to_owned(), body: "A".to_owned() },
+            SkillResource {
+                name: "Zulu".to_owned(),
+                body: "Z".to_owned(),
+            },
+            SkillResource {
+                name: "alpha".to_owned(),
+                body: "A".to_owned(),
+            },
         ],
     )
     .unwrap();
@@ -212,23 +342,57 @@ fn canonicalization_normalizes_line_endings_orders_content_and_rejects_duplicate
     assert_eq!(canonical.instructions, "First\nSecond\nThird");
     assert_eq!(canonical.tags, ["alpha", "Zulu"]);
     assert_eq!(canonical.resources[0].name, "alpha");
-    assert!(SkillDraft::new(
-        "Evidence Review".to_owned(), "description".to_owned(), "usage".to_owned(),
-        vec!["evidence".to_owned(), "EVIDENCE".to_owned()], "instructions".to_owned(), vec![],
-    ).is_err());
-    assert!(SkillDraft::new(
-        "Evidence Review".to_owned(), "description".to_owned(), "usage".to_owned(), vec![],
-        "instructions".to_owned(), vec![
-            SkillResource { name: "checklist".to_owned(), body: "one".to_owned() },
-            SkillResource { name: "CHECKLIST".to_owned(), body: "two".to_owned() },
-        ],
-    ).is_err());
+    assert!(
+        SkillDraft::new(
+            "Evidence Review".to_owned(),
+            "description".to_owned(),
+            "usage".to_owned(),
+            vec!["evidence".to_owned(), "EVIDENCE".to_owned()],
+            "instructions".to_owned(),
+            vec![],
+        )
+        .is_err()
+    );
+    assert!(
+        SkillDraft::new(
+            "Evidence Review".to_owned(),
+            "description".to_owned(),
+            "usage".to_owned(),
+            vec![],
+            "instructions".to_owned(),
+            vec![
+                SkillResource {
+                    name: "checklist".to_owned(),
+                    body: "one".to_owned()
+                },
+                SkillResource {
+                    name: "CHECKLIST".to_owned(),
+                    body: "two".to_owned()
+                },
+            ],
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn equal_accepted_content_has_stable_digest_and_exact_reference() {
-    let first = SkillVersion::create(id(1), version_id(101), 1_800_000_000_000, user_provenance(), draft()).unwrap();
-    let second = SkillVersion::create(id(1), version_id(101), 1_800_000_000_000, user_provenance(), draft()).unwrap();
+    let first = SkillVersion::create(
+        id(1),
+        version_id(101),
+        1_800_000_000_000,
+        user_provenance(),
+        draft(),
+    )
+    .unwrap();
+    let second = SkillVersion::create(
+        id(1),
+        version_id(101),
+        1_800_000_000_000,
+        user_provenance(),
+        draft(),
+    )
+    .unwrap();
     let reference = first.reference();
 
     assert_eq!(first.content_digest(), second.content_digest());
@@ -264,8 +428,14 @@ fn content_digest_ignores_record_metadata_and_normalizes_line_endings() {
         }],
     )
     .unwrap();
-    let user_record = SkillVersion::create(id(1), version_id(101), 1_800_000_000_000, user_provenance(), lf)
-        .unwrap();
+    let user_record = SkillVersion::create(
+        id(1),
+        version_id(101),
+        1_800_000_000_000,
+        user_provenance(),
+        lf,
+    )
+    .unwrap();
     let builtin_record = SkillVersion::create(
         id(2),
         version_id(202),
@@ -279,21 +449,37 @@ fn content_digest_ignores_record_metadata_and_normalizes_line_endings() {
     )
     .unwrap();
 
-    assert_eq!(user_record.content_digest(), builtin_record.content_digest());
+    assert_eq!(
+        user_record.content_digest(),
+        builtin_record.content_digest()
+    );
 }
 
 #[test]
 fn projection_deterministically_inserts_and_moves_active_version() {
-    let first = SkillVersion::create(id(1), version_id(101), 1_800_000_000_000, user_provenance(), draft()).unwrap();
+    let first = SkillVersion::create(
+        id(1),
+        version_id(101),
+        1_800_000_000_000,
+        user_provenance(),
+        draft(),
+    )
+    .unwrap();
     let mut changed = first.content().clone();
     changed.description.push_str(" Updated.");
-    let second = SkillVersion::next_version(&first, version_id(102), 1_800_000_000_001, changed).unwrap();
+    let second =
+        SkillVersion::next_version(&first, version_id(102), 1_800_000_000_001, changed).unwrap();
     let mut projection = SkillsProjection::default();
 
     projection.insert(&first).unwrap();
-    projection.activate(&second, first.skill_version_id()).unwrap();
+    projection
+        .activate(&second, first.skill_version_id())
+        .unwrap();
 
-    assert_eq!(projection.active_skill(id(1)).unwrap().skill_version_id(), version_id(102));
+    assert_eq!(
+        projection.active_skill(id(1)).unwrap().skill_version_id(),
+        version_id(102)
+    );
     assert_eq!(projection.history(id(1)), vec![first, second]);
 }
 

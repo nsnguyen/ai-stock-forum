@@ -40,11 +40,7 @@ impl SkillReviewRegistry {
         candidate: &SkillDraft,
     ) -> Result<SkillEditPreview, DomainError> {
         let candidate_digest = candidate_digest(candidate)?;
-        let review_digest = review_digest(
-            skill_id,
-            expected_active_version_id,
-            &candidate_digest,
-        )?;
+        let review_digest = review_digest(skill_id, expected_active_version_id, &candidate_digest)?;
         *self.state.lock().unwrap_or_else(|error| error.into_inner()) = Some(PendingSkillReview {
             token: review_token,
             skill_id,

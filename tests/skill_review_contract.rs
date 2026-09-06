@@ -23,7 +23,10 @@ fn candidate(instructions: &str) -> SkillDraft {
         "Use when evidence quality matters.".to_owned(),
         vec!["research".to_owned()],
         instructions.to_owned(),
-        vec![SkillResource { name: "Checklist".to_owned(), body: "Verify sources.".to_owned() }],
+        vec![SkillResource {
+            name: "Checklist".to_owned(),
+            body: "Verify sources.".to_owned(),
+        }],
     )
     .unwrap()
 }
@@ -32,9 +35,26 @@ fn candidate(instructions: &str) -> SkillDraft {
 fn review_token_rejects_changed_candidate_and_stale_expected_version() {
     let registry = SkillReviewRegistry::default();
     let original = candidate("Compare claims to evidence.");
-    registry.issue(token(1), id(2), Some(version_id(3)), &original).unwrap();
+    registry
+        .issue(token(1), id(2), Some(version_id(3)), &original)
+        .unwrap();
 
-    assert!(registry.consume(token(1), id(2), Some(version_id(3)), &candidate("Changed candidate.")).is_err());
-    registry.issue(token(4), id(2), Some(version_id(3)), &original).unwrap();
-    assert!(registry.consume(token(4), id(2), Some(version_id(5)), &original).is_err());
+    assert!(
+        registry
+            .consume(
+                token(1),
+                id(2),
+                Some(version_id(3)),
+                &candidate("Changed candidate.")
+            )
+            .is_err()
+    );
+    registry
+        .issue(token(4), id(2), Some(version_id(3)), &original)
+        .unwrap();
+    assert!(
+        registry
+            .consume(token(4), id(2), Some(version_id(5)), &original)
+            .is_err()
+    );
 }
