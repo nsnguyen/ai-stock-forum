@@ -465,6 +465,97 @@ fn orphan_and_noncanonical_root_activations_are_rejected() {
     );
 }
 
+#[test]
+fn cross_skill_canonical_predecessor_is_rejected() {
+    let manifests = builtin_manifests().unwrap();
+    let builtin = manifests[0].skill().clone();
+    let other_builtin = manifests[1].skill().clone();
+    let successor = SkillVersion::next_version(
+        &builtin,
+        SkillVersionId::from_uuid(Uuid::from_u128(92_102)),
+        1_726_000_000_102,
+        SkillDraft::new(
+            builtin.content().display_name.clone(),
+            builtin.content().description.clone(),
+            builtin.content().use_when.clone(),
+            builtin.content().tags.clone(),
+            "Reject a predecessor from another canonical skill.".to_owned(),
+            builtin.content().resources.clone(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut fixture = Fixture::new();
+    let envelope = fixture.append_with_object(
+        ApplicationEvent::SkillVersionActivated {
+            skill: successor.reference(),
+            previous_version_id: other_builtin.skill_version_id(),
+            display_name: successor.content().display_name.clone(),
+            provenance: successor.provenance().clone(),
+        },
+        Some(skill_object(&successor)),
+    );
+    let mut state = ProjectionState::default();
+
+    assert_eq!(
+        reduce(&mut state, &envelope).unwrap_err(),
+        ai_stock_forum::persistence::RecoveryError::InvalidEventRecord,
+    );
+    assert_eq!(state, ProjectionState::default());
+}
+
+#[test]
+fn wrong_version_for_canonical_predecessor_is_rejected() {
+    let builtin = builtin_manifests().unwrap()[0].skill().clone();
+    let version_two = SkillVersion::next_version(
+        &builtin,
+        SkillVersionId::from_uuid(Uuid::from_u128(92_202)),
+        1_726_000_000_202,
+        SkillDraft::new(
+            builtin.content().display_name.clone(),
+            builtin.content().description.clone(),
+            builtin.content().use_when.clone(),
+            builtin.content().tags.clone(),
+            "Canonical immediate successor.".to_owned(),
+            builtin.content().resources.clone(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let version_three = SkillVersion::next_version(
+        &version_two,
+        SkillVersionId::from_uuid(Uuid::from_u128(92_203)),
+        1_726_000_000_203,
+        SkillDraft::new(
+            builtin.content().display_name.clone(),
+            builtin.content().description.clone(),
+            builtin.content().use_when.clone(),
+            builtin.content().tags.clone(),
+            "Reject a non-immediate successor.".to_owned(),
+            builtin.content().resources.clone(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut fixture = Fixture::new();
+    let envelope = fixture.append_with_object(
+        ApplicationEvent::SkillVersionActivated {
+            skill: version_three.reference(),
+            previous_version_id: builtin.skill_version_id(),
+            display_name: version_three.content().display_name.clone(),
+            provenance: version_three.provenance().clone(),
+        },
+        Some(skill_object(&version_three)),
+    );
+    let mut state = ProjectionState::default();
+
+    assert_eq!(
+        reduce(&mut state, &envelope).unwrap_err(),
+        ai_stock_forum::persistence::RecoveryError::InvalidEventRecord,
+    );
+    assert_eq!(state, ProjectionState::default());
+}
+
 fn assignment_upgrade_fixture() -> (Fixture, AgentProfileVersion, SkillVersion) {
     let mut fixture = Fixture::new();
     let builtin = builtin_manifests().unwrap()[0].skill().clone();

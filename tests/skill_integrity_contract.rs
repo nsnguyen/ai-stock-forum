@@ -340,6 +340,34 @@ fn missing_custom_immutable_row_fails_closed_without_builtin_reconstruction() {
 }
 
 #[test]
+fn forged_skill_created_cannot_claim_a_canonical_builtin_identity() {
+    let mut fixture = Fixture::new();
+    let builtin = builtin_manifests().unwrap()[0].skill().clone();
+    fixture.append(
+        ApplicationEvent::SkillCreated {
+            skill: builtin.reference(),
+            display_name: builtin.content().display_name.clone(),
+            provenance: builtin.provenance().clone(),
+        },
+        Some(
+            ObjectRef::new(
+                "skill_version",
+                builtin.skill_version_id().to_string(),
+                builtin.version(),
+                sha256(b"forged-built-in-full-record-digest"),
+            )
+            .unwrap(),
+        ),
+    );
+    let before = recovery_counts(&fixture.database);
+
+    let error = fixture.bootstrap().unwrap_err();
+
+    assert_eq!(error.code(), "invalid_event_record");
+    assert_eq!(recovery_counts(&fixture.database), before);
+}
+
+#[test]
 fn missing_skill_event_object_fails_before_any_recovery_mutation() {
     let mut fixture = Fixture::new();
     let skill = unexpected_skill();

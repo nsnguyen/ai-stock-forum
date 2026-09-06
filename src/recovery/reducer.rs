@@ -166,7 +166,8 @@ impl SkillsProjection {
         provenance: &SkillProvenance,
         record_digest: Sha256Digest,
     ) -> Result<(), RecoveryError> {
-        if skill.version().get() != 1
+        if collides_with_canonical_builtin_identity(skill)?
+            || skill.version().get() != 1
             || self.versions_by_id.contains_key(&skill.skill_version_id())
             || self.active_by_skill.contains_key(&skill.skill_id())
         {
@@ -575,5 +576,17 @@ fn is_canonical_builtin_successor(
             && previous.skill_version_id() == previous_version_id
             && previous.version().get().checked_add(1) == Some(skill.version().get())
             && previous.provenance() == provenance
+    }))
+}
+
+fn collides_with_canonical_builtin_identity(
+    skill: &SkillVersionRef,
+) -> Result<bool, RecoveryError> {
+    let manifests =
+        crate::skills::builtin_manifests().map_err(|_| RecoveryError::InvalidEventRecord)?;
+    Ok(manifests.iter().any(|manifest| {
+        let builtin = manifest.skill();
+        builtin.skill_id() == skill.skill_id()
+            || builtin.skill_version_id() == skill.skill_version_id()
     }))
 }
