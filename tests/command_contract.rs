@@ -130,6 +130,15 @@ fn classifies_unknown_command_names_without_retaining_input() {
 }
 
 #[test]
+fn bare_q_is_inert_and_only_slash_quit_requests_shutdown() {
+    let ApplicationCommand::RejectInput(rejection) = command(b"q") else {
+        panic!("bare q must remain inert")
+    };
+    assert_eq!(rejection.category, InputRejectionCategory::Unknown);
+    assert_eq!(command(b"/quit"), ApplicationCommand::RequestShutdown);
+}
+
+#[test]
 fn classifies_invalid_forms_of_recognized_commands_as_malformed() {
     for input in [
         b"/help extra".as_slice(),

@@ -1,6 +1,6 @@
 use crate::app::{
     AgentProfileSelector, ApplicationCommand, DEFAULT_AUDIT_LIMIT, InputRejection,
-    InputRejectionCategory, MAX_INPUT_BYTES, SafeToken,
+    InputRejectionCategory, MAX_INPUT_BYTES, SafeToken, SkillSelector,
 };
 use crate::{
     agents::{ProfileTemplateId, builtin_profile_templates},
@@ -14,6 +14,20 @@ pub enum AgentWorkflowCommand {
     Edit { selector: AgentProfileSelector },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillWorkflowCommand {
+    Add,
+    Assign {
+        skill: SkillSelector,
+        agent: AgentProfileSelector,
+        version: Option<ObjectVersion>,
+    },
+    Unassign {
+        skill: SkillSelector,
+        agent: AgentProfileSelector,
+    },
+}
+
 #[expect(
     clippy::large_enum_variant,
     reason = "fallback parsing returns owned typed commands without a second allocation contract"
@@ -22,6 +36,7 @@ pub enum AgentWorkflowCommand {
 pub enum FallbackParsedLine {
     Command(ApplicationCommand),
     AgentWorkflow(AgentWorkflowCommand),
+    SkillWorkflow(SkillWorkflowCommand),
     Ignored,
 }
 
@@ -40,6 +55,11 @@ pub fn parse_line(input: &[u8]) -> ParsedLine {
     match parse_fallback_line(input) {
         FallbackParsedLine::Command(command) => ParsedLine::Command(command),
         FallbackParsedLine::AgentWorkflow(command) => ParsedLine::AgentWorkflow(command),
+        FallbackParsedLine::SkillWorkflow(_) => ParsedLine::Command(reject(
+            InputRejectionCategory::Malformed,
+            safe_token(std::str::from_utf8(input).unwrap_or_default()),
+            input,
+        )),
         FallbackParsedLine::Ignored => ParsedLine::Ignored,
     }
 }
@@ -141,6 +161,81 @@ pub fn parse_fallback_line(input: &[u8]) -> FallbackParsedLine {
                 )),
             };
         }
+        ["/skill", "list"] | ["/skills"] => ApplicationCommand::ListSkills,
+        ["/skill", "show", selector] => match SkillSelector::from_input(selector) {
+            Ok(selector) => ApplicationCommand::ShowSkill { selector },
+            Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
+        },
+        ["/skill", "show", selector, version] => {
+            let parsed = SkillSelector::from_input(selector).and_then(|selector| {
+                positive_version(version).map(|version| ApplicationCommand::ShowSkillVersion {
+                    selector,
+                    version,
+                })
+            });
+            parsed.unwrap_or_else(|_| {
+                reject(InputRejectionCategory::Malformed, safe_token(line), input)
+            })
+        }
+        ["/skill", "add"] => {
+            return FallbackParsedLine::SkillWorkflow(SkillWorkflowCommand::Add);
+        }
+        ["/skill", "assign", skill, agent] => {
+            let parsed = SkillSelector::from_input(skill).and_then(|skill| {
+                AgentProfileSelector::from_input(agent).map(|agent| SkillWorkflowCommand::Assign {
+                    skill,
+                    agent,
+                    version: None,
+                })
+            });
+            return parsed.map_or_else(
+                |_| {
+                    FallbackParsedLine::Command(reject(
+                        InputRejectionCategory::Malformed,
+                        safe_token(line),
+                        input,
+                    ))
+                },
+                FallbackParsedLine::SkillWorkflow,
+            );
+        }
+        ["/skill", "assign", skill, agent, version] => {
+            let parsed = SkillSelector::from_input(skill).and_then(|skill| {
+                AgentProfileSelector::from_input(agent).and_then(|agent| {
+                    positive_version(version).map(|version| SkillWorkflowCommand::Assign {
+                        skill,
+                        agent,
+                        version: Some(version),
+                    })
+                })
+            });
+            return parsed.map_or_else(
+                |_| {
+                    FallbackParsedLine::Command(reject(
+                        InputRejectionCategory::Malformed,
+                        safe_token(line),
+                        input,
+                    ))
+                },
+                FallbackParsedLine::SkillWorkflow,
+            );
+        }
+        ["/skill", "unassign", skill, agent] => {
+            let parsed = SkillSelector::from_input(skill).and_then(|skill| {
+                AgentProfileSelector::from_input(agent)
+                    .map(|agent| SkillWorkflowCommand::Unassign { skill, agent })
+            });
+            return parsed.map_or_else(
+                |_| {
+                    FallbackParsedLine::Command(reject(
+                        InputRejectionCategory::Malformed,
+                        safe_token(line),
+                        input,
+                    ))
+                },
+                FallbackParsedLine::SkillWorkflow,
+            );
+        }
         ["/help"] => ApplicationCommand::ShowHelp,
         ["/status"] => ApplicationCommand::ShowStatus,
         ["/setup", "status"] => ApplicationCommand::ShowSetupStatus,
@@ -154,13 +249,21 @@ pub fn parse_fallback_line(input: &[u8]) -> FallbackParsedLine {
         },
         ["/quit"] => ApplicationCommand::RequestShutdown,
         [
-            "agent" | "/agent" | "/help" | "/status" | "/setup" | "/audit" | "/quit",
+            "agent" | "/agent" | "/skill" | "/skills" | "/help" | "/status" | "/setup" | "/audit" | "/quit",
             ..,
         ] => reject(InputRejectionCategory::Malformed, safe_token(line), input),
         _ => reject(InputRejectionCategory::Unknown, safe_token(line), input),
     };
 
     FallbackParsedLine::Command(command)
+}
+
+fn positive_version(value: &str) -> Result<ObjectVersion, crate::domain::DomainError> {
+    value
+        .parse::<u64>()
+        .ok()
+        .ok_or(crate::domain::DomainError::InvalidObjectVersion)
+        .and_then(ObjectVersion::new)
 }
 
 fn tokenize(line: &str) -> Option<Vec<String>> {

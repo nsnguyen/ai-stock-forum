@@ -6,14 +6,15 @@ use crate::{
         ProfileFieldValue, ProfileTemplate,
     },
     app::{
-        AppError, ApplicationCommand, CommandOutcome, CommandView, InputRejectionCategory,
-        ShutdownDisposition, ShutdownReason,
+        AgentSkillAssignmentOperation, AgentSkillAssignmentPreview, AppError, ApplicationCommand,
+        CommandOutcome, CommandView, InputRejectionCategory, SafeToken, ShutdownDisposition,
+        ShutdownReason,
     },
     cli::CliError,
     config::StartupError,
     domain::Actor,
     runtime::RuntimeError,
-    skills::SkillVersionRef,
+    skills::{SkillDraft, SkillEditPreview, SkillVersionRef},
     setup::SetupStatus,
     ui::{
         profile_editor::{ProfileEditor, ProfileEditorMode, ProfileEditorStep},
@@ -34,7 +35,7 @@ impl TextRenderer {
     pub fn render_view<W: Write>(view: &CommandView, writer: &mut W) -> io::Result<()> {
         match view {
             CommandView::Help(_) => writer.write_all(
-                b"Available commands:\n  /help\n  /status\n  /setup status\n  /audit tail [limit: 1-100]\n  /quit\n",
+                b"Available commands:\n  /help\n  /status\n  /setup status\n  /audit tail [limit: 1-100]\n  /skill list\n  /skills\n  /skill add\n  /skill show <name-or-id> [version]\n  /skill assign <skill> <agent> [version]\n  /skill unassign <skill> <agent>\n  /quit\n",
             ),
             CommandView::Status(_) => {
                 writer.write_all(b"Installation: ready\nSession: active\n")
@@ -79,7 +80,15 @@ impl TextRenderer {
                     writer.write_all(b"Input rejected: input exceeds 4096 bytes.\n")
                 }
                 InputRejectionCategory::Malformed => {
-                    writer.write_all(b"Input rejected: malformed command.\n")
+                    writer.write_all(b"Input rejected: malformed command.\n")?;
+                    if matches!(
+                        view.rejection.safe_token.as_ref().map(SafeToken::as_str),
+                        Some("/skill" | "/skills")
+                    ) {
+                        writer.write_all(b"Usage: /skill list | /skill add | /skill show <name-or-id> [version] | /skill assign <skill> <agent> [version] | /skill unassign <skill> <agent>\n")
+                    } else {
+                        Ok(())
+                    }
                 }
                 InputRejectionCategory::Unknown => {
                     if let Some(token) = &view.rejection.safe_token {
@@ -393,6 +402,97 @@ impl TextRenderer {
             )?;
         }
         writer.write_all(b"Enter a template ID, or :cancel.\n")
+    }
+
+    pub fn render_skill_editor<W: Write>(
+        draft: &SkillDraft,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writer.write_all(b"Create skill editor\n")?;
+        writeln!(writer, "  Display name: {}", escaped_bounded(&draft.display_name, 64))?;
+        writeln!(writer, "  Description: {}", escaped_bounded(&draft.description, 256))?;
+        writeln!(writer, "  Use when: {}", escaped_bounded(&draft.use_when, 512))?;
+        writeln!(writer, "  Tags: {}", escaped_list(&draft.tags, 32))?;
+        writeln!(writer, "  Instructions: {}", escaped_bounded(&draft.instructions, 4_096))?;
+        writer.write_all(b"Controls: :name <text> :description <text> :use-when <text> :tag add <tag> :tag remove <tag> :instructions <text> :review :cancel\n")
+    }
+
+    pub fn render_skill_editor_message<W: Write>(message: &str, writer: &mut W) -> io::Result<()> {
+        writeln!(writer, "Skill editor: {}", escaped_bounded(message, 128))
+    }
+
+    pub fn render_skill_creation_review<W: Write>(
+        candidate: &SkillDraft,
+        preview: &SkillEditPreview,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writeln!(
+            writer,
+            "Skill creation review: {} version 1 digest {}",
+            escaped_bounded(&candidate.display_name, 64),
+            preview.candidate_digest,
+        )?;
+        writer.write_all(b"Type exactly: create\n")
+    }
+
+    pub fn render_skill_assignment_review<W: Write>(
+        preview: &AgentSkillAssignmentPreview,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        let (action, reference) = match &preview.operation {
+            AgentSkillAssignmentOperation::Assign { skill } => ("assign", skill),
+            AgentSkillAssignmentOperation::Upgrade { replacement, .. } => ("upgrade", replacement),
+            AgentSkillAssignmentOperation::Unassign { expected } => ("unassign", expected),
+        };
+        writeln!(writer, "Skill assignment review: {action}")?;
+        writeln!(
+            writer,
+            "  Agent: {} base {}",
+            preview.profile_id,
+            preview.expected_active_profile_version_id,
+        )?;
+        writeln!(
+            writer,
+            "  Skill: {} exact version {} ({})",
+            reference.skill_id(),
+            reference.version().get(),
+            reference.content_digest(),
+        )?;
+        writeln!(writer, "Type exactly: {action}")
+    }
+
+    pub fn render_skill_confirmation<W: Write>(
+        action: &str,
+        command: &ApplicationCommand,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        let reference = match command {
+            ApplicationCommand::AssignAgentSkill { skill, .. } => Some(skill),
+            ApplicationCommand::UpgradeAgentSkill { replacement, .. } => Some(replacement),
+            ApplicationCommand::UnassignAgentSkill { expected, .. } => Some(expected),
+            ApplicationCommand::CreateSkill { .. } => None,
+            _ => return writer.write_all(b"Skill confirmation is unavailable.\n"),
+        };
+        if let Some(reference) = reference {
+            writeln!(
+                writer,
+                "Skill assignment review: {action}\n  Skill: {} exact version {} ({})",
+                reference.skill_id(),
+                reference.version().get(),
+                reference.content_digest(),
+            )?;
+        } else {
+            writer.write_all(b"Skill creation review\n")?;
+        }
+        writeln!(writer, "Type exactly: {action}")
+    }
+
+    pub fn render_skill_confirmation_mismatch<W: Write>(writer: &mut W) -> io::Result<()> {
+        writer.write_all(b"Confirmation did not match; skill review retained.\n")
+    }
+
+    pub fn render_skill_cancelled<W: Write>(writer: &mut W) -> io::Result<()> {
+        writer.write_all(b"Skill review cancelled.\n")
     }
 
     pub fn render_profile_editor<W: Write>(

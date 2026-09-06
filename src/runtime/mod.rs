@@ -15,11 +15,12 @@ use thiserror::Error;
 
 use crate::agents::{AgentProfileDraft, ProfileEditPreview, ProfileTemplate};
 use crate::app::{
-    AppError, ApplicationCommand, ApplicationService, ApplicationWorker, CommandOutcome,
-    ShutdownReason,
+    AgentSkillAssignmentPreview, AppError, ApplicationCommand, ApplicationService,
+    ApplicationWorker, CommandOutcome, ShutdownReason,
 };
 use crate::domain::{AgentProfileId, AgentProfileVersionId};
 use crate::panic_boundary::catch_sensitive_unwind;
+use crate::skills::{SkillDraft, SkillEditPreview, SkillVersionRef};
 
 pub const MODULE_NAME: &str = "runtime";
 pub const DEFAULT_QUEUE_CAPACITY: usize = 32;
@@ -44,6 +45,45 @@ pub trait CommandExecutor: Send + 'static {
         Ok(())
     }
 
+    fn preview_skill_creation(
+        &mut self,
+        _candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, AppError> {
+        Err(AppError::SkillReviewUnavailable)
+    }
+
+    fn preview_agent_skill_assignment(
+        &mut self,
+        _profile_id: AgentProfileId,
+        _expected_active_profile_version_id: AgentProfileVersionId,
+        _skill: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        Err(AppError::SkillReviewUnavailable)
+    }
+
+    fn preview_agent_skill_upgrade(
+        &mut self,
+        _profile_id: AgentProfileId,
+        _expected_active_profile_version_id: AgentProfileVersionId,
+        _expected: SkillVersionRef,
+        _replacement: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        Err(AppError::SkillReviewUnavailable)
+    }
+
+    fn preview_agent_skill_unassignment(
+        &mut self,
+        _profile_id: AgentProfileId,
+        _expected_active_profile_version_id: AgentProfileVersionId,
+        _expected: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        Err(AppError::SkillReviewUnavailable)
+    }
+
+    fn cancel_skill_review(&mut self) -> Result<(), AppError> {
+        Ok(())
+    }
+
     fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError>;
 }
 
@@ -58,6 +98,61 @@ impl CommandExecutor for ApplicationService {
 
     fn cancel_agent_profile_edit(&mut self) -> Result<(), AppError> {
         Self::cancel_agent_profile_edit(self)
+    }
+
+    fn preview_skill_creation(
+        &mut self,
+        candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, AppError> {
+        Self::preview_skill_creation(self, candidate)
+    }
+
+    fn preview_agent_skill_assignment(
+        &mut self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        skill: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        Self::preview_agent_skill_assignment(
+            self,
+            profile_id,
+            expected_active_profile_version_id,
+            skill,
+        )
+    }
+
+    fn preview_agent_skill_upgrade(
+        &mut self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+        replacement: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        Self::preview_agent_skill_upgrade(
+            self,
+            profile_id,
+            expected_active_profile_version_id,
+            expected,
+            replacement,
+        )
+    }
+
+    fn preview_agent_skill_unassignment(
+        &mut self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        Self::preview_agent_skill_unassignment(
+            self,
+            profile_id,
+            expected_active_profile_version_id,
+            expected,
+        )
+    }
+
+    fn cancel_skill_review(&mut self) -> Result<(), AppError> {
+        Self::cancel_skill_review(self)
     }
 
     fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
@@ -117,6 +212,32 @@ enum Request {
         response: Sender<Result<ProfileEditPreview, RuntimeError>>,
     },
     CancelAgentProfileEdit {
+        response: Sender<Result<(), RuntimeError>>,
+    },
+    PreviewSkillCreation {
+        candidate: SkillDraft,
+        response: Sender<Result<SkillEditPreview, RuntimeError>>,
+    },
+    PreviewAgentSkillAssignment {
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        skill: SkillVersionRef,
+        response: Sender<Result<AgentSkillAssignmentPreview, RuntimeError>>,
+    },
+    PreviewAgentSkillUpgrade {
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+        replacement: SkillVersionRef,
+        response: Sender<Result<AgentSkillAssignmentPreview, RuntimeError>>,
+    },
+    PreviewAgentSkillUnassignment {
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+        response: Sender<Result<AgentSkillAssignmentPreview, RuntimeError>>,
+    },
+    CancelSkillReview {
         response: Sender<Result<(), RuntimeError>>,
     },
 }
@@ -441,6 +562,75 @@ impl RuntimeClient {
             .unwrap_or_else(|_| Err(self.disconnection_error()))
     }
 
+    pub fn preview_skill_creation(
+        &self,
+        candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, RuntimeError> {
+        self.request_reply(|response| Request::PreviewSkillCreation { candidate, response })
+    }
+
+    pub fn preview_agent_skill_assignment(
+        &self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        skill: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, RuntimeError> {
+        self.request_reply(|response| Request::PreviewAgentSkillAssignment {
+            profile_id,
+            expected_active_profile_version_id,
+            skill,
+            response,
+        })
+    }
+
+    pub fn preview_agent_skill_upgrade(
+        &self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+        replacement: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, RuntimeError> {
+        self.request_reply(|response| Request::PreviewAgentSkillUpgrade {
+            profile_id,
+            expected_active_profile_version_id,
+            expected,
+            replacement,
+            response,
+        })
+    }
+
+    pub fn preview_agent_skill_unassignment(
+        &self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, RuntimeError> {
+        self.request_reply(|response| Request::PreviewAgentSkillUnassignment {
+            profile_id,
+            expected_active_profile_version_id,
+            expected,
+            response,
+        })
+    }
+
+    pub fn cancel_skill_review(&self) -> Result<(), RuntimeError> {
+        self.request_reply(|response| Request::CancelSkillReview { response })
+    }
+
+    fn request_reply<T>(
+        &self,
+        request: impl FnOnce(Sender<Result<T, RuntimeError>>) -> Request,
+    ) -> Result<T, RuntimeError> {
+        let sender = self.shared.reserve()?;
+        let (response_sender, response) = bounded(1);
+        let accepted = sender.send(request(response_sender)).is_ok();
+        drop(sender);
+        self.shared.resolve_reservation(accepted)?;
+        response
+            .recv()
+            .unwrap_or_else(|_| Err(self.disconnection_error()))
+    }
+
     fn disconnection_error(&self) -> RuntimeError {
         self.shared
             .state
@@ -729,6 +919,58 @@ impl CommandExecutor for ServiceWorker {
         self.service.cancel_agent_profile_edit()
     }
 
+    fn preview_skill_creation(
+        &mut self,
+        candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, AppError> {
+        self.service.preview_skill_creation(candidate)
+    }
+
+    fn preview_agent_skill_assignment(
+        &mut self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        skill: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        self.service.preview_agent_skill_assignment(
+            profile_id,
+            expected_active_profile_version_id,
+            skill,
+        )
+    }
+
+    fn preview_agent_skill_upgrade(
+        &mut self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+        replacement: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        self.service.preview_agent_skill_upgrade(
+            profile_id,
+            expected_active_profile_version_id,
+            expected,
+            replacement,
+        )
+    }
+
+    fn preview_agent_skill_unassignment(
+        &mut self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        self.service.preview_agent_skill_unassignment(
+            profile_id,
+            expected_active_profile_version_id,
+            expected,
+        )
+    }
+
+    fn cancel_skill_review(&mut self) -> Result<(), AppError> {
+        self.service.cancel_skill_review()
+    }
+
     fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
         let result = self.service.finish(reason);
         if result.is_ok() {
@@ -867,6 +1109,78 @@ fn execute_request(executor: &mut dyn CommandExecutor, request: Request, shared:
                     resume_unwind(payload);
                 }
             }
+        }
+        Request::PreviewSkillCreation { candidate, response } => {
+            send_runtime_reply(executor, shared, response, |executor| {
+                executor.preview_skill_creation(candidate)
+            });
+        }
+        Request::PreviewAgentSkillAssignment {
+            profile_id,
+            expected_active_profile_version_id,
+            skill,
+            response,
+        } => {
+            send_runtime_reply(executor, shared, response, |executor| {
+                executor.preview_agent_skill_assignment(
+                    profile_id,
+                    expected_active_profile_version_id,
+                    skill,
+                )
+            });
+        }
+        Request::PreviewAgentSkillUpgrade {
+            profile_id,
+            expected_active_profile_version_id,
+            expected,
+            replacement,
+            response,
+        } => {
+            send_runtime_reply(executor, shared, response, |executor| {
+                executor.preview_agent_skill_upgrade(
+                    profile_id,
+                    expected_active_profile_version_id,
+                    expected,
+                    replacement,
+                )
+            });
+        }
+        Request::PreviewAgentSkillUnassignment {
+            profile_id,
+            expected_active_profile_version_id,
+            expected,
+            response,
+        } => {
+            send_runtime_reply(executor, shared, response, |executor| {
+                executor.preview_agent_skill_unassignment(
+                    profile_id,
+                    expected_active_profile_version_id,
+                    expected,
+                )
+            });
+        }
+        Request::CancelSkillReview { response } => {
+            send_runtime_reply(executor, shared, response, |executor| {
+                executor.cancel_skill_review()
+            });
+        }
+    }
+}
+
+fn send_runtime_reply<T>(
+    executor: &mut dyn CommandExecutor,
+    shared: &SharedRuntime,
+    response: Sender<Result<T, RuntimeError>>,
+    operation: impl FnOnce(&mut dyn CommandExecutor) -> Result<T, AppError>,
+) {
+    match catch_sensitive_unwind(AssertUnwindSafe(|| operation(executor))) {
+        Ok(result) => {
+            let _ = response.send(result.map_err(RuntimeError::Application));
+        }
+        Err(payload) => {
+            fail_panicked_request(executor, shared);
+            let _ = response.send(Err(RuntimeError::WorkerPanicked));
+            resume_unwind(payload);
         }
     }
 }
