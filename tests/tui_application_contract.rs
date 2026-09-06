@@ -3,6 +3,7 @@ mod support;
 use std::sync::Arc;
 
 use ai_stock_forum::{
+    agents::builtin_profile_templates,
     app::{
         ApplicationCommand, ApplicationEvent, ApplicationService, AuditLimit, DatabaseReadiness,
         EVENT_SCHEMA_VERSION, EventEnvelope, PendingEvent, ProcessGuardOwnership, ShutdownReason,
@@ -90,6 +91,9 @@ fn presentation_snapshot_is_typed_bounded_and_does_not_append_events() {
     assert_eq!(snapshot.session_id, harness.service.session_id());
     assert_eq!(snapshot.setup_status, SetupStatus::NotStarted);
     assert_eq!(snapshot.database_readiness, DatabaseReadiness::Ready);
+    assert!(snapshot.agent_profiles.profiles.is_empty());
+    assert!(snapshot.selected_agent_profile.is_none());
+    assert!(snapshot.selected_agent_profile_history.is_none());
     assert_eq!(
         snapshot.process_guard_ownership,
         ProcessGuardOwnership::Held
@@ -108,4 +112,16 @@ fn presentation_snapshot_is_typed_bounded_and_does_not_append_events() {
     );
     assert_eq!(before.last().unwrap().sequence, 9);
     assert_eq!(after, before);
+}
+
+#[test]
+fn pinned_agent_profile_templates_are_read_through_the_application_service() {
+    let harness = SnapshotHarness::new();
+
+    let templates = harness
+        .service
+        .agent_profile_templates()
+        .expect("typed pinned templates");
+
+    assert_eq!(templates, builtin_profile_templates());
 }

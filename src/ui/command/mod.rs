@@ -5,7 +5,9 @@ mod runner;
 #[cfg(any(windows, test))]
 mod windows;
 
-pub use parser::{ParsedLine, parse_line};
+pub use parser::{
+    AgentWorkflowCommand, FallbackParsedLine, ParsedLine, parse_fallback_line, parse_line,
+};
 pub use reader::{BoundedLineReader, RawLine};
 pub use renderer::TextRenderer;
 #[cfg(unix)]

@@ -77,6 +77,8 @@ impl RecoveryCoordinator {
         EventRepository::verify(database.connection()).map_err(startup_from_recovery)?;
         let events =
             EventRepository::load_all(database.connection()).map_err(startup_from_recovery)?;
+        ProjectionRepository::reconcile_agent_profiles(database.connection_mut(), &events)
+            .map_err(startup_from_recovery)?;
         let mut state = match ProjectionRepository::load(database.connection()) {
             Ok(state) => state,
             Err(RecoveryError::InvalidEventRecord) => {
@@ -261,6 +263,15 @@ fn startup_from_persistence(error: PersistenceError) -> StartupError {
     match error {
         PersistenceError::ProjectionStateConflict => {
             StartupError::EventStreamRecovery(RecoveryError::InvalidEventRecord)
+        }
+        PersistenceError::AgentProfileHistoryMismatch => {
+            StartupError::EventStreamRecovery(RecoveryError::AgentProfileHistoryMismatch)
+        }
+        PersistenceError::InvalidAgentProfilePayload => {
+            StartupError::EventStreamRecovery(RecoveryError::InvalidAgentProfilePayload)
+        }
+        PersistenceError::ActiveAgentProfileRebuildFailed => {
+            StartupError::EventStreamRecovery(RecoveryError::ActiveAgentProfileRebuildFailed)
         }
         other => StartupError::Persistence(other),
     }

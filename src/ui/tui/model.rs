@@ -1,10 +1,16 @@
 use std::collections::VecDeque;
 
 use crate::{
-    app::{DatabaseReadiness, MAX_INPUT_BYTES, PresentationSnapshot, ProcessGuardOwnership},
+    agents::ProfileTemplate,
+    app::{
+        AgentProfileHistoryView, AgentProfileVersionView, AgentProfileView, AgentProfilesView,
+        ApplicationCommand, DatabaseReadiness, MAX_INPUT_BYTES, PresentationSnapshot,
+        ProcessGuardOwnership,
+    },
     audit::AuditEntry,
     domain::{InstallationId, SessionId},
     setup::SetupStatus,
+    ui::profile_editor::ProfileEditor,
 };
 
 pub const COMMAND_HISTORY_CAPACITY: usize = 100;
@@ -15,6 +21,173 @@ pub enum View {
     Setup,
     Audit,
     Help,
+    Agents,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentsPane {
+    List,
+    Detail,
+    History,
+    Editor,
+    Confirmation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileConfirmation {
+    pub command: ApplicationCommand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentsViewState {
+    pub selected_profile: usize,
+    pub selected_template: usize,
+    pub pane: AgentsPane,
+    pub list_scroll: usize,
+    pub detail_scroll: usize,
+    pub history_scroll: usize,
+    pub selected_history_version: usize,
+    pub editor: Option<ProfileEditor>,
+    pub pending_confirmation: Option<ProfileConfirmation>,
+    pub profiles: AgentProfilesView,
+    pub detail: Option<AgentProfileView>,
+    pub history: Option<AgentProfileHistoryView>,
+    pub version_detail: Option<AgentProfileVersionView>,
+}
+
+impl Default for AgentsViewState {
+    fn default() -> Self {
+        Self {
+            selected_profile: 0,
+            selected_template: 0,
+            pane: AgentsPane::List,
+            list_scroll: 0,
+            detail_scroll: 0,
+            history_scroll: 0,
+            selected_history_version: 0,
+            editor: None,
+            pending_confirmation: None,
+            profiles: AgentProfilesView {
+                profiles: Vec::new(),
+                total_count: 0,
+                returned_count: 0,
+                truncated: false,
+            },
+            detail: None,
+            history: None,
+            version_detail: None,
+        }
+    }
+}
+
+impl AgentsViewState {
+    pub fn selected_summary(&self) -> Option<&crate::app::AgentProfileSummary> {
+        self.profiles.profiles.get(self.selected_profile)
+    }
+
+    pub fn replace_profiles(&mut self, profiles: AgentProfilesView) {
+        let selected_id = self.selected_summary().map(|summary| summary.profile_id);
+        self.profiles = profiles;
+        if self.profiles.profiles.is_empty() {
+            self.selected_profile = 0;
+            self.list_scroll = 0;
+            self.detail = None;
+            self.history = None;
+            self.version_detail = None;
+            return;
+        }
+        self.selected_profile = selected_id
+            .and_then(|profile_id| {
+                self.profiles
+                    .profiles
+                    .iter()
+                    .position(|summary| summary.profile_id == profile_id)
+            })
+            .unwrap_or_else(|| {
+                self.selected_profile
+                    .min(self.profiles.profiles.len().saturating_sub(1))
+            });
+        self.list_scroll = self.selected_profile;
+        let selected_id = self.selected_summary().map(|summary| summary.profile_id);
+        if self
+            .detail
+            .as_ref()
+            .map(|detail| detail.profile.profile_id())
+            != selected_id
+        {
+            self.detail = None;
+            self.history = None;
+            self.version_detail = None;
+        }
+    }
+
+    pub fn replace_detail(&mut self, detail: AgentProfileView) {
+        let profile_id = detail.profile.profile_id();
+        if let Some(index) = self
+            .profiles
+            .profiles
+            .iter()
+            .position(|summary| summary.profile_id == profile_id)
+        {
+            self.selected_profile = index;
+        }
+        if self.history.as_ref().map(|history| history.profile_id) != Some(profile_id) {
+            self.history = None;
+            self.version_detail = None;
+        }
+        self.detail = Some(detail);
+    }
+
+    pub fn replace_history(&mut self, history: AgentProfileHistoryView) {
+        if let Some(index) = self
+            .profiles
+            .profiles
+            .iter()
+            .position(|summary| summary.profile_id == history.profile_id)
+        {
+            self.selected_profile = index;
+            self.list_scroll = index;
+        }
+        self.selected_history_version = 0;
+        self.history_scroll = 0;
+        self.version_detail = None;
+        self.history = Some(history);
+    }
+
+    pub fn replace_version_detail(&mut self, version: AgentProfileVersionView) {
+        let profile_id = version.profile.profile_id();
+        if self.history.as_ref().map(|history| history.profile_id) != Some(profile_id) {
+            self.history = None;
+            self.selected_history_version = 0;
+            self.history_scroll = 0;
+        }
+        if let Some(index) = self
+            .profiles
+            .profiles
+            .iter()
+            .position(|summary| summary.profile_id == profile_id)
+        {
+            self.selected_profile = index;
+            self.list_scroll = index;
+        }
+        self.version_detail = Some(version);
+    }
+
+    pub fn start_profile_create(
+        &mut self,
+        template_index: usize,
+        templates: &[ProfileTemplate],
+    ) -> bool {
+        let Some(editor) = templates
+            .get(template_index)
+            .and_then(|template| ProfileEditor::for_create(template).ok())
+        else {
+            return false;
+        };
+        self.editor = Some(editor);
+        self.pane = AgentsPane::Editor;
+        true
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,6 +392,7 @@ fn bounded_safe_prefix(input: &str, byte_limit: usize) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiModel {
     pub active_view: View,
+    pub agents: AgentsViewState,
     pub focus: Focus,
     pub layout_mode: LayoutMode,
     pub inspector_open: bool,
@@ -233,6 +407,8 @@ pub struct TuiModel {
     pub workspace_scroll: u16,
     pub workspace_body_width: u16,
     pub workspace_body_height: u16,
+    pub terminal_width: u16,
+    pub terminal_height: u16,
     pub message: Option<UiMessage>,
     pub command_in_flight: bool,
     pub runtime_status: RuntimeStatus,
@@ -248,9 +424,19 @@ impl TuiModel {
             process_guard_ownership,
             setup_status,
             recent_audit,
+            agent_profiles,
+            selected_agent_profile,
+            selected_agent_profile_history,
         } = snapshot;
+        let agents = AgentsViewState {
+            profiles: agent_profiles,
+            detail: selected_agent_profile,
+            history: selected_agent_profile_history,
+            ..AgentsViewState::default()
+        };
         let mut model = Self {
             active_view: View::Overview,
+            agents,
             focus: Focus::Workspace,
             layout_mode: LayoutMode::Wide,
             inspector_open: false,
@@ -265,17 +451,21 @@ impl TuiModel {
             workspace_scroll: 0,
             workspace_body_width: 0,
             workspace_body_height: 0,
+            terminal_width: super::layout::WIDE_WIDTH,
+            terminal_height: super::layout::WIDE_HEIGHT,
             message: None,
             command_in_flight: false,
             runtime_status: RuntimeStatus::Ready,
             previous_session_interrupted,
         };
         model.replace_audit(recent_audit);
+        model.synchronize_geometry();
         model
     }
 
     pub fn select_view(&mut self, view: View) {
         self.active_view = view;
+        self.synchronize_geometry();
     }
 
     pub fn set_focus(&mut self, focus: Focus) {
@@ -288,6 +478,7 @@ impl TuiModel {
 
     pub fn toggle_inspector(&mut self) {
         self.inspector_open = !self.inspector_open;
+        self.synchronize_geometry();
     }
 
     pub fn scroll_up(&mut self, amount: u16) {
@@ -305,6 +496,23 @@ impl TuiModel {
     pub fn set_workspace_body_size(&mut self, width: u16, height: u16) {
         self.workspace_body_width = width;
         self.workspace_body_height = height;
+    }
+
+    pub fn set_terminal_size(&mut self, width: u16, height: u16) {
+        self.terminal_width = width;
+        self.terminal_height = height;
+        self.synchronize_geometry();
+    }
+
+    pub fn synchronize_geometry(&mut self) {
+        let geometry = super::layout::view_geometry(
+            ratatui::layout::Rect::new(0, 0, self.terminal_width, self.terminal_height),
+            self.active_view,
+            self.inspector_open,
+        );
+        self.layout_mode = geometry.cockpit.mode;
+        self.workspace_body_width = geometry.workspace_body_width;
+        self.workspace_body_height = geometry.workspace_body_height;
     }
 
     pub fn replace_audit(&mut self, mut entries: Vec<AuditEntry>) {
@@ -392,6 +600,14 @@ mod tests {
             process_guard_ownership: crate::app::ProcessGuardOwnership::Held,
             setup_status: SetupStatus::NotStarted,
             recent_audit: vec![audit_entry(1)],
+            agent_profiles: crate::app::AgentProfilesView {
+                profiles: Vec::new(),
+                total_count: 0,
+                returned_count: 0,
+                truncated: false,
+            },
+            selected_agent_profile: None,
+            selected_agent_profile_history: None,
         }
     }
 
@@ -580,7 +796,7 @@ mod tests {
         let mut model = TuiModel::new(snapshot(), false);
         model.select_view(View::Audit);
         model.set_focus(Focus::Command);
-        model.set_layout_mode(LayoutMode::Narrow);
+        model.set_terminal_size(70, 20);
         model.toggle_inspector();
         model.scroll_down(u16::MAX);
         model.scroll_down(1);

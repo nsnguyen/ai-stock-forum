@@ -15,7 +15,8 @@ use ai_stock_forum::{
     app::{
         AppError, ApplicationCommand, ApplicationEvent, ApplicationService, AuditTailView,
         AuthorizationDecision, CommandOutcome, CommandPolicy, CommandView, EventEnvelope, HelpView,
-        InputRejection, InputRejectionCategory, ShutdownDisposition, ShutdownReason,
+        InputRejectedView, InputRejection, InputRejectionCategory, ShutdownDisposition,
+        ShutdownReason,
     },
     audit::AuditEntry,
     config::AppPaths,
@@ -87,12 +88,18 @@ struct RecordingExecutor {
 
 impl CommandExecutor for RecordingExecutor {
     fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError> {
-        self.command.send(command).unwrap();
+        self.command.send(command.clone()).unwrap();
+        let view = match command {
+            ApplicationCommand::RejectInput(rejection) => {
+                CommandView::InputRejected(InputRejectedView { rejection })
+            }
+            _ => CommandView::Help(HelpView),
+        };
         Ok(CommandOutcome {
             command_id: ai_stock_forum::domain::CommandId::from_uuid(Uuid::from_u128(1)),
             correlation_id: CorrelationId::from_uuid(Uuid::from_u128(2)),
             committed_events: Vec::new(),
-            view: CommandView::Help(HelpView),
+            view,
             shutdown: ShutdownDisposition::Continue,
         })
     }
@@ -103,7 +110,7 @@ impl CommandExecutor for RecordingExecutor {
 }
 
 #[test]
-fn runner_constructs_oversized_rejection_from_authoritative_metadata() {
+fn runner_dispatches_and_renders_authoritative_oversized_rejection() {
     let (command_sender, command_receiver) = bounded(1);
     let runtime = ApplicationRuntime::spawn(
         RecordingExecutor {
@@ -115,11 +122,13 @@ fn runner_constructs_oversized_rejection_from_authoritative_metadata() {
     let mut physical = vec![0xff; 32 * 1024];
     physical.push(b'\n');
 
+    let mut output = Vec::new();
     let reason = FallbackRunner::new(runtime.client(), false)
-        .run(Cursor::new(physical), Vec::new())
+        .run(Cursor::new(physical), &mut output)
         .unwrap();
-    let ApplicationCommand::RejectInput(rejection) = receive(&command_receiver) else {
-        panic!("oversized input must bypass parsing and become a typed rejection");
+    assert_eq!(output, b"Input rejected: input exceeds 4096 bytes.\n");
+    let ApplicationCommand::RejectInput(rejection) = command_receiver.try_recv().unwrap() else {
+        panic!("oversized input was not dispatched as an authoritative rejection");
     };
     assert_eq!(rejection.category, InputRejectionCategory::Oversized);
     assert_eq!(rejection.byte_length, 32 * 1024);
@@ -127,7 +136,6 @@ fn runner_constructs_oversized_rejection_from_authoritative_metadata() {
         rejection.input_digest.as_str(),
         "2d864c0b789a43214eee8524d3182075125e5ca2cd527f3582ec87ffd94076bc"
     );
-    assert!(rejection.safe_token.is_none());
     runtime.finish_and_join(reason).unwrap();
 }
 

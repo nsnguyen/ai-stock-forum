@@ -46,6 +46,10 @@ uuid_id!(CausationId);
 uuid_id!(ApprovalId);
 uuid_id!(SetupDraftId);
 uuid_id!(ConfigurationVersionId);
+uuid_id!(AgentProfileId);
+uuid_id!(AgentProfileVersionId);
+uuid_id!(MemoryNamespaceId);
+uuid_id!(ProfileReviewToken);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Actor {

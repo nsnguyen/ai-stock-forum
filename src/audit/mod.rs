@@ -66,6 +66,55 @@ fn summary(event: &ApplicationEvent) -> String {
         ApplicationEvent::ProjectionRebuilt { through_sequence } => {
             format!("projection rebuilt through sequence {through_sequence}")
         }
+        ApplicationEvent::AgentProfileCreated { profile } => {
+            format!(
+                "agent profile created: profile={}, version={}",
+                profile.profile_id(),
+                profile.version().get(),
+            )
+        }
+        ApplicationEvent::AgentProfileVersionActivated {
+            profile,
+            previous_version_id,
+        } => format!(
+            "agent profile version activated: profile={}, version={}, previous_version={previous_version_id}",
+            profile.profile_id(),
+            profile.version().get(),
+        ),
+        ApplicationEvent::AgentProfilesListed {
+            total_count,
+            returned_count,
+            truncated,
+        } => format!(
+            "agent profiles listed: total_count={total_count}, returned_count={returned_count}, truncated={truncated}"
+        ),
+        ApplicationEvent::AgentProfileViewed {
+            profile_id,
+            active_version_id,
+        } => format!(
+            "agent profile viewed: profile={profile_id}, active_version={active_version_id}"
+        ),
+        ApplicationEvent::AgentProfileHistoryViewed {
+            profile_id,
+            total_count,
+            returned_count,
+            truncated,
+            active_version_id,
+        } => format!(
+            "agent profile history viewed: profile={profile_id}, active_version={active_version_id}, total_count={total_count}, returned_count={returned_count}, truncated={truncated}"
+        ),
+        ApplicationEvent::AgentProfileVersionViewed {
+            profile_id,
+            profile_version_id,
+            version,
+            predecessor_version_id,
+        } => format!(
+            "agent profile version viewed: profile={profile_id}, profile_version={profile_version_id}, version={}, predecessor={}",
+            version.get(),
+            predecessor_version_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".to_owned())
+        ),
     }
 }
 

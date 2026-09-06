@@ -6,14 +6,14 @@ use ratatui::{
 };
 
 use super::{
-    layout::{MIN_HEIGHT, MIN_WIDTH, calculate},
+    layout::{MIN_HEIGHT, MIN_WIDTH, view_geometry},
     model::{Focus, LayoutMode, Severity, TuiModel, View},
     theme::Theme,
     views,
 };
 
 pub fn render(frame: &mut Frame<'_>, model: &TuiModel, theme: &Theme) {
-    let cockpit = calculate(frame.area(), model.inspector_open);
+    let cockpit = view_geometry(frame.area(), model.active_view, model.inspector_open).cockpit;
     frame.render_widget(Clear, cockpit.viewport);
     if cockpit.mode == LayoutMode::TooSmall {
         render_too_small(frame, cockpit.viewport);
@@ -46,6 +46,24 @@ fn render_header(
         Span::styled(view_name(model.active_view), theme.focus),
         Span::raw(format!("  /  {}", mode_name(mode))),
     ]);
+    let mut lines = vec![identity];
+    if model.active_view == View::Agents {
+        let active = model.agents.profiles.profiles.len();
+        let ready = model
+            .agents
+            .profiles
+            .profiles
+            .iter()
+            .filter(|profile| profile.readiness == crate::agents::AgentReadiness::Ready)
+            .count();
+        let not_ready = active.saturating_sub(ready);
+        lines.push(Line::from(vec![
+            Span::raw(format!("Active {active}  ")),
+            Span::styled(format!("Ready {ready}"), theme.success),
+            Span::raw("  "),
+            Span::styled(format!("Not Ready {not_ready}"), theme.warning),
+        ]));
+    }
     let second = if mode == LayoutMode::Narrow {
         numbered_tabs(model, theme)
     } else if model.previous_session_interrupted {
@@ -61,7 +79,8 @@ fn render_header(
     } else {
         Line::styled("-".repeat(usize::from(area.width)), theme.muted)
     };
-    frame.render_widget(Paragraph::new(vec![identity, second, third]), area);
+    lines.extend([second, third]);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn numbered_tabs(model: &TuiModel, theme: &Theme) -> Line<'static> {
@@ -83,6 +102,15 @@ fn numbered_tabs(model: &TuiModel, theme: &Theme) -> Line<'static> {
             style,
         ));
     }
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        "a Agents",
+        if model.active_view == View::Agents {
+            theme.focus
+        } else {
+            theme.muted
+        },
+    ));
     Line::from(spans)
 }
 
@@ -109,6 +137,22 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
         ));
     }
     lines.extend([
+        Line::default(),
+        Line::styled(
+            format!(
+                "{} a Agents",
+                if model.active_view == View::Agents {
+                    ">"
+                } else {
+                    " "
+                }
+            ),
+            if model.active_view == View::Agents {
+                theme.focus
+            } else {
+                theme.muted
+            },
+        ),
         Line::default(),
         Line::styled("/ command", theme.muted),
         Line::styled("? help", theme.muted),
@@ -148,12 +192,17 @@ fn render_message(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
 
 fn render_command(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     let focused = model.focus == Focus::Command;
+    let title = if model.active_view == View::Agents
+        && model.agents.pane == crate::ui::tui::model::AgentsPane::Editor
+    {
+        " Profile input "
+    } else if model.command_in_flight {
+        " Command - working "
+    } else {
+        " Command "
+    };
     let block = Block::default()
-        .title(if model.command_in_flight {
-            " Command - working "
-        } else {
-            " Command "
-        })
+        .title(title)
         .borders(Borders::ALL)
         .border_style(if focused { theme.focus } else { theme.muted });
     let line = if focused {
@@ -214,6 +263,7 @@ fn view_name(view: View) -> &'static str {
         View::Setup => "Setup",
         View::Audit => "Audit",
         View::Help => "Help",
+        View::Agents => "Agents",
     }
 }
 
@@ -335,6 +385,14 @@ mod tests {
                     correlation_id: CorrelationId::from_uuid(Uuid::from_u128(3)),
                     summary: "status viewed".to_owned(),
                 }],
+                agent_profiles: crate::app::AgentProfilesView {
+                    profiles: Vec::new(),
+                    total_count: 0,
+                    returned_count: 0,
+                    truncated: false,
+                },
+                selected_agent_profile: None,
+                selected_agent_profile_history: None,
             },
             false,
         );

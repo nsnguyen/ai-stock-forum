@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
+    agents::AgentProfilesProjection,
     app::{ApplicationEvent, EVENT_SCHEMA_VERSION, EventEnvelope, ShutdownReason},
     domain::{EventId, InstallationId, SessionId, Sha256Digest, canonical_json_bytes, sha256},
     persistence::RecoveryError,
@@ -13,6 +14,8 @@ use crate::{
 pub struct ProjectionState {
     pub installation: Option<InstallationProjection>,
     pub sessions: BTreeMap<SessionId, SessionProjection>,
+    #[serde(skip_serializing_if = "AgentProfilesProjection::is_empty")]
+    pub agent_profiles: AgentProfilesProjection,
     pub setup_status: SetupStatus,
     pub last_sequence: u64,
     pub last_event_digest: Option<Sha256Digest>,
@@ -23,6 +26,7 @@ impl Default for ProjectionState {
         Self {
             installation: None,
             sessions: BTreeMap::new(),
+            agent_profiles: AgentProfilesProjection::default(),
             setup_status: SetupStatus::NotStarted,
             last_sequence: 0,
             last_event_digest: None,
@@ -35,6 +39,8 @@ impl Default for ProjectionState {
 struct ProjectionStateWire {
     installation: Option<InstallationProjection>,
     sessions: BTreeMap<SessionId, SessionProjection>,
+    #[serde(default)]
+    agent_profiles: AgentProfilesProjection,
     setup_status: SetupStatus,
     last_sequence: u64,
     last_event_digest: Option<Sha256Digest>,
@@ -49,6 +55,7 @@ impl<'de> Deserialize<'de> for ProjectionState {
         let state = Self {
             installation: wire.installation,
             sessions: wire.sessions,
+            agent_profiles: wire.agent_profiles,
             setup_status: wire.setup_status,
             last_sequence: wire.last_sequence,
             last_event_digest: wire.last_event_digest,
@@ -94,6 +101,7 @@ impl ProjectionState {
         canonical_json_bytes(&PersistentProjectionState {
             installation: &self.installation,
             sessions: &self.sessions,
+            agent_profiles: &self.agent_profiles,
             setup_status: &self.setup_status,
             last_sequence: self.last_sequence,
             last_event_digest: &self.last_event_digest,
@@ -158,9 +166,15 @@ impl ProjectionState {
 struct PersistentProjectionState<'a> {
     installation: &'a Option<InstallationProjection>,
     sessions: &'a BTreeMap<SessionId, SessionProjection>,
+    #[serde(skip_serializing_if = "agent_profiles_are_empty")]
+    agent_profiles: &'a AgentProfilesProjection,
     setup_status: &'a SetupStatus,
     last_sequence: u64,
     last_event_digest: &'a Option<Sha256Digest>,
+}
+
+fn agent_profiles_are_empty(profiles: &&AgentProfilesProjection) -> bool {
+    profiles.is_empty()
 }
 
 pub fn reduce(
@@ -233,8 +247,15 @@ pub fn reduce(
         | ApplicationEvent::SetupStatusViewed
         | ApplicationEvent::AuditTailViewed { .. }
         | ApplicationEvent::CommandRejected { .. }
-        | ApplicationEvent::ShutdownRequested => {}
+        | ApplicationEvent::ShutdownRequested
+        | ApplicationEvent::AgentProfileCreated { .. }
+        | ApplicationEvent::AgentProfileVersionActivated { .. }
+        | ApplicationEvent::AgentProfilesListed { .. }
+        | ApplicationEvent::AgentProfileViewed { .. }
+        | ApplicationEvent::AgentProfileHistoryViewed { .. }
+        | ApplicationEvent::AgentProfileVersionViewed { .. } => {}
     }
+    next.agent_profiles.reduce(&event.event)?;
     next.last_sequence = event.sequence;
     next.last_event_digest = Some(event.event_digest.clone());
     next.validate()?;

@@ -57,18 +57,7 @@ impl StartupError {
             Self::DatabaseTerminalPathRejected => "database_terminal_path_rejected",
             Self::AlreadyRunning => "already_running",
             Self::EventStreamRecovery(error) => error.code(),
-            Self::Persistence(error) => match error {
-                PersistenceError::QueryFailed => "database_write_failed",
-                PersistenceError::InvalidMigrationRecord => "invalid_migration_record",
-                PersistenceError::InvalidEventRecord => "invalid_event_record",
-                PersistenceError::UnsupportedEventSchema => "unsupported_event_schema",
-                PersistenceError::IdempotencyConflict => "event_id_conflict",
-                PersistenceError::Contention => "database_write_contended",
-                PersistenceError::ImmutableEventStream => "event_stream_immutable",
-                PersistenceError::PreviousEventDigestMismatch => "previous_event_digest_mismatch",
-                PersistenceError::EventDigestMismatch => "event_digest_mismatch",
-                PersistenceError::ProjectionStateConflict => "projection_state_conflict",
-            },
+            Self::Persistence(error) => error.code(),
         }
     }
 }

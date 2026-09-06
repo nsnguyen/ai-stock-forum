@@ -4,18 +4,439 @@ use super::{
     TuiError,
     controller::{ControllerEffect, apply_outcome, handle_event},
     event::{CrosstermEventSource, EventSource, TuiEvent},
-    layout::{layout_mode, workspace_body_size},
     model::{RuntimeStatus, TuiModel},
     terminal::{CrosstermScreen, Screen},
     theme::Theme,
 };
 use crate::{
-    app::{ApplicationCommand, PresentationSnapshot, ShutdownReason},
+    agents::AgentProfileDraft,
+    app::{
+        AppError, ApplicationCommand, CommandOutcome, CommandView, PresentationSnapshot,
+        ShutdownReason,
+    },
     panic_boundary::catch_sensitive_unwind,
     runtime::{ApplicationRuntime, PendingOutcome, RuntimeClient, RuntimeError},
+    ui::profile_editor::{PreviewEditRequest, ProfileEditor},
 };
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const STALE_PROFILE_MESSAGE: &str =
+    "Profile changed elsewhere. Detail refreshed; reopen Edit to continue.";
+
+#[doc(hidden)]
+pub fn execute_agent_effect(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    effect: ControllerEffect,
+) -> Result<(), RuntimeError> {
+    match effect {
+        ControllerEffect::LoadAgentProfiles => {
+            let outcome =
+                submit_agent_command(client, model, ApplicationCommand::ListAgentProfiles)?;
+            apply_agent_outcome(model, outcome);
+        }
+        ControllerEffect::LoadAgentProfile { selected_profile } => {
+            load_profile(client, model, selected_profile)?;
+        }
+        ControllerEffect::LoadAgentProfileHistory { selected_profile } => {
+            load_history(client, model, selected_profile)?;
+        }
+        ControllerEffect::LoadAgentProfileVersion {
+            profile_id,
+            version,
+        } => {
+            let outcome = submit_agent_command(
+                client,
+                model,
+                ApplicationCommand::ShowAgentProfileVersion {
+                    selector: profile_id.into(),
+                    version,
+                },
+            )?;
+            apply_agent_outcome(model, outcome);
+        }
+        ControllerEffect::StartProfileCreate { template_index } => {
+            model.set_command_in_flight(true);
+            let templates = client.agent_profile_templates();
+            model.set_command_in_flight(false);
+            let templates = templates?;
+            if model
+                .agents
+                .start_profile_create(template_index, &templates)
+            {
+                model.command.clear();
+                model.clear_message();
+            } else {
+                model.agents.pane = super::model::AgentsPane::List;
+                model.set_message(
+                    super::model::Severity::Warning,
+                    "Profile template is unavailable.",
+                );
+            }
+        }
+        ControllerEffect::StartProfileEdit { selected_profile } => {
+            load_profile(client, model, selected_profile)?;
+            start_profile_editor_from_detail(model)?;
+        }
+        ControllerEffect::StartProfileCreateByTemplate { template_id } => {
+            model.set_command_in_flight(true);
+            let templates = client.agent_profile_templates();
+            model.set_command_in_flight(false);
+            let templates = templates?;
+            let template_index = templates
+                .iter()
+                .position(|template| template.id == template_id);
+            if template_index
+                .is_some_and(|index| model.agents.start_profile_create(index, &templates))
+            {
+                model.command.clear();
+                model.clear_message();
+            } else {
+                model.agents.pane = super::model::AgentsPane::List;
+                model.set_message(
+                    super::model::Severity::Warning,
+                    "Profile template is unavailable.",
+                );
+            }
+        }
+        ControllerEffect::StartProfileEditBySelector { selector } => {
+            match submit_agent_command(
+                client,
+                model,
+                ApplicationCommand::ShowAgentProfile { selector },
+            ) {
+                Ok(outcome) => {
+                    apply_agent_outcome(model, outcome);
+                    start_profile_editor_from_detail(model)?;
+                }
+                Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+                    retain_profile_error(model, &error, super::model::AgentsPane::List);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        ControllerEffect::RequestProfilePreview(request) => {
+            execute_preview(client, model, request)?;
+        }
+        ControllerEffect::ExecuteProfile(command) => {
+            execute_profile_command(client, model, command)?;
+        }
+        ControllerEffect::CancelProfileReview => {
+            client.cancel_agent_profile_edit()?;
+            model.clear_message();
+        }
+        ControllerEffect::None
+        | ControllerEffect::Redraw
+        | ControllerEffect::Submit(_)
+        | ControllerEffect::RequestShutdown(_) => {}
+    }
+    Ok(())
+}
+
+fn submit_agent_command(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    command: ApplicationCommand,
+) -> Result<CommandOutcome, RuntimeError> {
+    model.set_command_in_flight(true);
+    let result = client.submit(command);
+    if result.is_err() {
+        model.set_command_in_flight(false);
+    }
+    result
+}
+
+fn apply_agent_outcome(model: &mut TuiModel, outcome: CommandOutcome) {
+    let view = outcome.view.clone();
+    let _ = apply_outcome(model, outcome);
+    match view {
+        CommandView::AgentProfiles(profiles) => model.agents.replace_profiles(profiles),
+        CommandView::AgentProfile(detail) => model.agents.replace_detail(detail),
+        CommandView::AgentProfileHistory(history) => model.agents.replace_history(history),
+        CommandView::AgentProfileVersion(version) => model.agents.replace_version_detail(version),
+        _ => {}
+    }
+}
+
+fn selected_profile_id(
+    model: &mut TuiModel,
+    selected_profile: usize,
+) -> Option<crate::domain::AgentProfileId> {
+    let profile_id = model
+        .agents
+        .profiles
+        .profiles
+        .get(selected_profile)
+        .map(|summary| summary.profile_id);
+    if profile_id.is_none() {
+        model.agents.selected_profile = model.agents.profiles.profiles.len().saturating_sub(1);
+        model.agents.pane = super::model::AgentsPane::List;
+        model.set_message(
+            super::model::Severity::Warning,
+            "No agent profile is selected.",
+        );
+    }
+    profile_id
+}
+
+fn load_profile(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    selected_profile: usize,
+) -> Result<(), RuntimeError> {
+    let Some(profile_id) = selected_profile_id(model, selected_profile) else {
+        return Ok(());
+    };
+    let outcome = submit_agent_command(
+        client,
+        model,
+        ApplicationCommand::ShowAgentProfile {
+            selector: profile_id.into(),
+        },
+    )?;
+    apply_agent_outcome(model, outcome);
+    Ok(())
+}
+
+fn load_history(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    selected_profile: usize,
+) -> Result<(), RuntimeError> {
+    let Some(profile_id) = selected_profile_id(model, selected_profile) else {
+        return Ok(());
+    };
+    let outcome = submit_agent_command(
+        client,
+        model,
+        ApplicationCommand::ShowAgentProfileHistory {
+            selector: profile_id.into(),
+        },
+    )?;
+    apply_agent_outcome(model, outcome);
+    Ok(())
+}
+
+fn execute_preview(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    request: PreviewEditRequest,
+) -> Result<(), RuntimeError> {
+    let PreviewEditRequest {
+        generation,
+        profile_id,
+        expected_active_version_id,
+        candidate,
+    } = request;
+    model.set_command_in_flight(true);
+    let result =
+        client.preview_agent_profile_edit(profile_id, expected_active_version_id, candidate);
+    model.set_command_in_flight(false);
+    match result {
+        Ok(preview) => {
+            if let Some(editor) = model.agents.editor.as_mut() {
+                editor.apply_preview(generation, preview);
+            }
+            model.clear_message();
+            Ok(())
+        }
+        Err(error) if is_stale(&error) => refresh_stale_profile(client, model, profile_id),
+        Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+            if let Some(editor) = model.agents.editor.as_mut() {
+                editor.report_error(runtime_error_code(&error));
+            }
+            retain_profile_error(model, &error, super::model::AgentsPane::Editor);
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn execute_profile_command(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    command: ApplicationCommand,
+) -> Result<(), RuntimeError> {
+    let stale_profile_id = match &command {
+        ApplicationCommand::ActivateAgentProfileVersion { profile_id, .. } => Some(*profile_id),
+        _ => None,
+    };
+    let outcome = match submit_agent_command(client, model, command) {
+        Ok(outcome) => outcome,
+        Err(error) if is_stale(&error) => {
+            return refresh_stale_profile(
+                client,
+                model,
+                stale_profile_id.expect("stale profile activation carries an ID"),
+            );
+        }
+        Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+            if let Some(editor) = model.agents.editor.as_mut() {
+                editor.report_error(runtime_error_code(&error));
+            }
+            retain_profile_error(model, &error, super::model::AgentsPane::Confirmation);
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let (profile_id, message) = match &outcome.view {
+        CommandView::AgentProfileCreated(created) => {
+            (Some(created.profile_id), "Agent profile created.")
+        }
+        CommandView::AgentProfileVersionActivated(activated) => (
+            Some(activated.profile_id),
+            "Agent profile version activated.",
+        ),
+        _ => (None, "Agent profile action completed."),
+    };
+    apply_agent_outcome(model, outcome);
+    if let Some(profile_id) = profile_id {
+        refresh_profile_state(client, model, profile_id)?;
+    }
+    model.agents.editor = None;
+    model.agents.pending_confirmation = None;
+    model.agents.pane = super::model::AgentsPane::Detail;
+    model.set_message(super::model::Severity::Info, message);
+    Ok(())
+}
+
+fn refresh_profile_state(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    profile_id: crate::domain::AgentProfileId,
+) -> Result<(), RuntimeError> {
+    let profiles = submit_agent_command(client, model, ApplicationCommand::ListAgentProfiles)?;
+    apply_agent_outcome(model, profiles);
+    if let Some(index) = model
+        .agents
+        .profiles
+        .profiles
+        .iter()
+        .position(|summary| summary.profile_id == profile_id)
+    {
+        model.agents.selected_profile = index;
+    }
+    let detail = submit_agent_command(
+        client,
+        model,
+        ApplicationCommand::ShowAgentProfile {
+            selector: profile_id.into(),
+        },
+    )?;
+    apply_agent_outcome(model, detail);
+    let history = submit_agent_command(
+        client,
+        model,
+        ApplicationCommand::ShowAgentProfileHistory {
+            selector: profile_id.into(),
+        },
+    )?;
+    apply_agent_outcome(model, history);
+    Ok(())
+}
+
+fn refresh_stale_profile(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    profile_id: crate::domain::AgentProfileId,
+) -> Result<(), RuntimeError> {
+    let cancel_failed = client.cancel_agent_profile_edit().is_err();
+    let mut refresh_failed = false;
+    match submit_agent_command(client, model, ApplicationCommand::ListAgentProfiles) {
+        Ok(outcome) => apply_agent_outcome(model, outcome),
+        Err(_) => refresh_failed = true,
+    }
+    match submit_agent_command(
+        client,
+        model,
+        ApplicationCommand::ShowAgentProfile {
+            selector: profile_id.into(),
+        },
+    ) {
+        Ok(outcome) => apply_agent_outcome(model, outcome),
+        Err(_) => refresh_failed = true,
+    }
+    model.agents.editor = None;
+    model.agents.pending_confirmation = None;
+    model.agents.pane = super::model::AgentsPane::Detail;
+    let message = match (cancel_failed, refresh_failed) {
+        (false, false) => STALE_PROFILE_MESSAGE,
+        (true, false) => {
+            "Profile changed elsewhere. Detail refreshed, but review cleanup could not be confirmed."
+        }
+        (false, true) => {
+            "Profile changed elsewhere. Review was cancelled, but profile refresh failed."
+        }
+        (true, true) => {
+            "Profile changed elsewhere. Review cleanup and profile refresh both failed."
+        }
+    };
+    model.set_message(super::model::Severity::Warning, message);
+    Ok(())
+}
+
+fn is_stale(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Application(AppError::StaleAgentProfileVersion)
+    )
+}
+
+fn start_profile_editor_from_detail(model: &mut TuiModel) -> Result<(), RuntimeError> {
+    if let Some(detail) = model.agents.detail.as_ref() {
+        let draft = draft_from_profile(&detail.profile)
+            .map_err(|error| RuntimeError::Application(error.into()))?;
+        model.agents.editor = Some(ProfileEditor::for_edit(
+            detail.profile.profile_id(),
+            detail.profile.profile_version_id(),
+            draft,
+        ));
+        model.agents.pane = super::model::AgentsPane::Editor;
+        model.command.clear();
+        model.clear_message();
+    }
+    Ok(())
+}
+
+fn retain_profile_error(
+    model: &mut TuiModel,
+    error: &RuntimeError,
+    pane: super::model::AgentsPane,
+) {
+    model.set_command_in_flight(false);
+    model.agents.pane = pane;
+    let message = match error {
+        RuntimeError::Backpressure => "Command queue is busy; draft retained.",
+        RuntimeError::Application(_) => "Profile action failed; draft retained.",
+        _ => "Profile action is unavailable.",
+    };
+    model.set_message(super::model::Severity::Error, message);
+}
+
+fn runtime_error_code(error: &RuntimeError) -> &'static str {
+    match error {
+        RuntimeError::Application(error) => error.code(),
+        RuntimeError::Backpressure => "command_backpressure",
+        _ => "runtime_unavailable",
+    }
+}
+
+fn draft_from_profile(
+    profile: &crate::agents::AgentProfileVersion,
+) -> Result<AgentProfileDraft, crate::domain::DomainError> {
+    AgentProfileDraft::new(
+        profile.display_name().to_owned(),
+        profile.description().to_owned(),
+        profile.role(),
+        profile.primary_specialty().to_owned(),
+        profile.specialty_tags().to_vec(),
+        profile.personality().to_owned(),
+        profile.instructions().to_owned(),
+        profile.bindings().clone(),
+        profile.skill_refs().to_vec(),
+        profile.mcp_refs().to_vec(),
+    )
+}
 
 pub fn run_tui(
     runtime: ApplicationRuntime,
@@ -36,6 +457,23 @@ pub fn run_tui(
     let result = run_with_screen(runner, &mut screen, &mut events, &theme);
     drop(screen);
     result
+}
+
+#[doc(hidden)]
+pub fn run_tui_with_screen(
+    runtime: ApplicationRuntime,
+    snapshot: PresentationSnapshot,
+    previous_session_interrupted: bool,
+    screen: &mut dyn Screen,
+    events: &mut dyn EventSource,
+    theme: &Theme,
+) -> Result<(), TuiError> {
+    run_with_screen(
+        TuiRunner::new(runtime, snapshot, previous_session_interrupted),
+        screen,
+        events,
+        theme,
+    )
 }
 
 struct TuiRunner {
@@ -118,15 +556,7 @@ impl TuiRunner {
 
     fn update_layout(&mut self, screen: &dyn Screen) -> Result<bool, TuiError> {
         let area = screen.size()?;
-        let mode = layout_mode(area);
-        let body_size = workspace_body_size(area, self.model.inspector_open);
-        if mode == self.model.layout_mode
-            && body_size
-                == (
-                    self.model.workspace_body_width,
-                    self.model.workspace_body_height,
-                )
-        {
+        if (area.width, area.height) == (self.model.terminal_width, self.model.terminal_height) {
             return Ok(false);
         }
         let effect = handle_event(&mut self.model, TuiEvent::Resize(area.width, area.height));
@@ -153,6 +583,20 @@ impl TuiRunner {
             ControllerEffect::RequestShutdown(reason) => {
                 self.begin_stopping();
                 Ok(LoopControl::Finish(reason))
+            }
+            effect @ (ControllerEffect::LoadAgentProfiles
+            | ControllerEffect::LoadAgentProfile { .. }
+            | ControllerEffect::LoadAgentProfileHistory { .. }
+            | ControllerEffect::LoadAgentProfileVersion { .. }
+            | ControllerEffect::StartProfileCreate { .. }
+            | ControllerEffect::StartProfileEdit { .. }
+            | ControllerEffect::StartProfileCreateByTemplate { .. }
+            | ControllerEffect::StartProfileEditBySelector { .. }
+            | ControllerEffect::RequestProfilePreview(_)
+            | ControllerEffect::ExecuteProfile(_)
+            | ControllerEffect::CancelProfileReview) => {
+                execute_agent_effect(&self.client, &mut self.model, effect)?;
+                Ok(LoopControl::Continue { redraw: true })
             }
         }
     }
@@ -207,6 +651,14 @@ impl TuiRunner {
         };
         runtime.finish_and_join(reason)
     }
+
+    fn cancel_active_profile_review(&self) -> Result<(), RuntimeError> {
+        if self.model.agents.editor.is_some() || self.model.agents.pending_confirmation.is_some() {
+            self.client.cancel_agent_profile_edit()
+        } else {
+            Ok(())
+        }
+    }
 }
 
 enum LoopControl {
@@ -241,11 +693,14 @@ fn run_with_screen(
         Err(_) => ShutdownReason::ApplicationError,
     };
     runner.begin_stopping();
+    let cancellation = runner
+        .cancel_active_profile_review()
+        .map_err(TuiError::Runtime);
     let restoration = screen.restore();
     let finish = runner.finish(finish_reason).map_err(TuiError::Runtime);
     match primary {
         Err(error) => Err(error),
-        Ok(_) => restoration.and(finish),
+        Ok(_) => cancellation.and(restoration).and(finish),
     }
 }
 
@@ -566,6 +1021,14 @@ mod tests {
             process_guard_ownership: crate::app::ProcessGuardOwnership::Held,
             setup_status: SetupStatus::NotStarted,
             recent_audit: Vec::new(),
+            agent_profiles: crate::app::AgentProfilesView {
+                profiles: Vec::new(),
+                total_count: 0,
+                returned_count: 0,
+                truncated: false,
+            },
+            selected_agent_profile: None,
+            selected_agent_profile_history: None,
         }
     }
 

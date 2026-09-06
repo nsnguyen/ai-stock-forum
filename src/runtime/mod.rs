@@ -13,10 +13,12 @@ use crossbeam_channel::{
 };
 use thiserror::Error;
 
+use crate::agents::{AgentProfileDraft, ProfileEditPreview, ProfileTemplate};
 use crate::app::{
     AppError, ApplicationCommand, ApplicationService, ApplicationWorker, CommandOutcome,
     ShutdownReason,
 };
+use crate::domain::{AgentProfileId, AgentProfileVersionId};
 use crate::panic_boundary::catch_sensitive_unwind;
 
 pub const MODULE_NAME: &str = "runtime";
@@ -24,12 +26,38 @@ pub const DEFAULT_QUEUE_CAPACITY: usize = 32;
 
 pub trait CommandExecutor: Send + 'static {
     fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError>;
+
+    fn agent_profile_templates(&mut self) -> Result<Vec<ProfileTemplate>, AppError> {
+        Err(AppError::ProfileReviewUnavailable)
+    }
+
+    fn preview_agent_profile_edit(
+        &mut self,
+        _profile_id: AgentProfileId,
+        _expected_active_version_id: AgentProfileVersionId,
+        _candidate: AgentProfileDraft,
+    ) -> Result<ProfileEditPreview, AppError> {
+        Err(AppError::ProfileReviewUnavailable)
+    }
+
+    fn cancel_agent_profile_edit(&mut self) -> Result<(), AppError> {
+        Ok(())
+    }
+
     fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError>;
 }
 
 impl CommandExecutor for ApplicationService {
     fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError> {
         Self::execute_user(self, command)
+    }
+
+    fn agent_profile_templates(&mut self) -> Result<Vec<ProfileTemplate>, AppError> {
+        Self::agent_profile_templates(self)
+    }
+
+    fn cancel_agent_profile_edit(&mut self) -> Result<(), AppError> {
+        Self::cancel_agent_profile_edit(self)
     }
 
     fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
@@ -78,6 +106,18 @@ enum Request {
     Command {
         command: ApplicationCommand,
         response: Sender<CommandResult>,
+    },
+    AgentProfileTemplates {
+        response: Sender<Result<Vec<ProfileTemplate>, RuntimeError>>,
+    },
+    PreviewAgentProfileEdit {
+        profile_id: AgentProfileId,
+        expected_active_version_id: AgentProfileVersionId,
+        candidate: AgentProfileDraft,
+        response: Sender<Result<ProfileEditPreview, RuntimeError>>,
+    },
+    CancelAgentProfileEdit {
+        response: Sender<Result<(), RuntimeError>>,
     },
 }
 
@@ -307,6 +347,21 @@ impl RuntimeClient {
         .recv()
     }
 
+    pub fn agent_profile_templates(&self) -> Result<Vec<ProfileTemplate>, RuntimeError> {
+        let sender = self.shared.reserve()?;
+        let (response_sender, response) = bounded(1);
+        let accepted = sender
+            .send(Request::AgentProfileTemplates {
+                response: response_sender,
+            })
+            .is_ok();
+        drop(sender);
+        self.shared.resolve_reservation(accepted)?;
+        response
+            .recv()
+            .unwrap_or_else(|_| Err(self.disconnection_error()))
+    }
+
     pub fn try_submit(&self, command: ApplicationCommand) -> Result<PendingOutcome, RuntimeError> {
         let (response_sender, response) = bounded(1);
         let result = {
@@ -346,6 +401,52 @@ impl RuntimeClient {
             }
             Err(error) => Err(error),
         }
+    }
+
+    pub fn preview_agent_profile_edit(
+        &self,
+        profile_id: AgentProfileId,
+        expected_active_version_id: AgentProfileVersionId,
+        candidate: AgentProfileDraft,
+    ) -> Result<ProfileEditPreview, RuntimeError> {
+        let sender = self.shared.reserve()?;
+        let (response_sender, response) = bounded(1);
+        let accepted = sender
+            .send(Request::PreviewAgentProfileEdit {
+                profile_id,
+                expected_active_version_id,
+                candidate,
+                response: response_sender,
+            })
+            .is_ok();
+        drop(sender);
+        self.shared.resolve_reservation(accepted)?;
+        response
+            .recv()
+            .unwrap_or_else(|_| Err(self.disconnection_error()))
+    }
+
+    pub fn cancel_agent_profile_edit(&self) -> Result<(), RuntimeError> {
+        let sender = self.shared.reserve()?;
+        let (response_sender, response) = bounded(1);
+        let accepted = sender
+            .send(Request::CancelAgentProfileEdit {
+                response: response_sender,
+            })
+            .is_ok();
+        drop(sender);
+        self.shared.resolve_reservation(accepted)?;
+        response
+            .recv()
+            .unwrap_or_else(|_| Err(self.disconnection_error()))
+    }
+
+    fn disconnection_error(&self) -> RuntimeError {
+        self.shared
+            .state
+            .lock()
+            .map(|state| SharedRuntime::terminal_error(&state))
+            .unwrap_or(RuntimeError::WorkerPanicked)
     }
 
     pub fn wait_for_termination(&self, timeout: Duration) -> FinishResult {
@@ -609,6 +710,25 @@ impl CommandExecutor for ServiceWorker {
     fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError> {
         self.worker.execute_user(command)
     }
+
+    fn agent_profile_templates(&mut self) -> Result<Vec<ProfileTemplate>, AppError> {
+        self.service.agent_profile_templates()
+    }
+
+    fn preview_agent_profile_edit(
+        &mut self,
+        profile_id: AgentProfileId,
+        expected_active_version_id: AgentProfileVersionId,
+        candidate: AgentProfileDraft,
+    ) -> Result<ProfileEditPreview, AppError> {
+        self.service
+            .preview_agent_profile_edit(profile_id, expected_active_version_id, candidate)
+    }
+
+    fn cancel_agent_profile_edit(&mut self) -> Result<(), AppError> {
+        self.service.cancel_agent_profile_edit()
+    }
+
     fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
         let result = self.service.finish(reason);
         if result.is_ok() {
@@ -687,20 +807,75 @@ fn worker_loop(
 }
 
 fn execute_request(executor: &mut dyn CommandExecutor, request: Request, shared: &SharedRuntime) {
-    let Request::Command { command, response } = request;
-    match catch_sensitive_unwind(AssertUnwindSafe(|| executor.execute_user(command))) {
-        Ok(result) => {
-            let _ = response.send(result.map_err(RuntimeError::Application));
+    match request {
+        Request::Command { command, response } => {
+            match catch_sensitive_unwind(AssertUnwindSafe(|| executor.execute_user(command))) {
+                Ok(result) => {
+                    let _ = response.send(result.map_err(RuntimeError::Application));
+                }
+                Err(payload) => {
+                    fail_panicked_request(executor, shared);
+                    let _ = response.send(Err(RuntimeError::WorkerPanicked));
+                    resume_unwind(payload);
+                }
+            }
         }
-        Err(payload) => {
-            let _ = catch_sensitive_unwind(AssertUnwindSafe(|| {
-                executor.finish(ShutdownReason::ApplicationError)
-            }));
-            shared.publish_exited(Err(RuntimeError::WorkerPanicked));
-            let _ = response.send(Err(RuntimeError::WorkerPanicked));
-            resume_unwind(payload);
+        Request::AgentProfileTemplates { response } => {
+            match catch_sensitive_unwind(AssertUnwindSafe(|| executor.agent_profile_templates())) {
+                Ok(result) => {
+                    let _ = response.send(result.map_err(RuntimeError::Application));
+                }
+                Err(payload) => {
+                    fail_panicked_request(executor, shared);
+                    let _ = response.send(Err(RuntimeError::WorkerPanicked));
+                    resume_unwind(payload);
+                }
+            }
+        }
+        Request::PreviewAgentProfileEdit {
+            profile_id,
+            expected_active_version_id,
+            candidate,
+            response,
+        } => {
+            match catch_sensitive_unwind(AssertUnwindSafe(|| {
+                executor.preview_agent_profile_edit(
+                    profile_id,
+                    expected_active_version_id,
+                    candidate,
+                )
+            })) {
+                Ok(result) => {
+                    let _ = response.send(result.map_err(RuntimeError::Application));
+                }
+                Err(payload) => {
+                    fail_panicked_request(executor, shared);
+                    let _ = response.send(Err(RuntimeError::WorkerPanicked));
+                    resume_unwind(payload);
+                }
+            }
+        }
+        Request::CancelAgentProfileEdit { response } => {
+            match catch_sensitive_unwind(AssertUnwindSafe(|| executor.cancel_agent_profile_edit()))
+            {
+                Ok(result) => {
+                    let _ = response.send(result.map_err(RuntimeError::Application));
+                }
+                Err(payload) => {
+                    fail_panicked_request(executor, shared);
+                    let _ = response.send(Err(RuntimeError::WorkerPanicked));
+                    resume_unwind(payload);
+                }
+            }
         }
     }
+}
+
+fn fail_panicked_request(executor: &mut dyn CommandExecutor, shared: &SharedRuntime) {
+    let _ = catch_sensitive_unwind(AssertUnwindSafe(|| {
+        executor.finish(ShutdownReason::ApplicationError)
+    }));
+    shared.publish_exited(Err(RuntimeError::WorkerPanicked));
 }
 
 #[cfg(test)]

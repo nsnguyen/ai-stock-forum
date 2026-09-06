@@ -1,17 +1,27 @@
 use std::io::{self, Write};
 
 use crate::{
+    agents::{
+        AgentProfileDraft, AgentReadiness, McpRef, ProfileDiffField, ProfileFieldDiff,
+        ProfileFieldValue, ProfileTemplate, SkillRef,
+    },
     app::{
-        AppError, CommandOutcome, CommandView, InputRejectionCategory, ShutdownDisposition,
-        ShutdownReason,
+        AppError, ApplicationCommand, CommandOutcome, CommandView, InputRejectionCategory,
+        ShutdownDisposition, ShutdownReason,
     },
     cli::CliError,
     config::StartupError,
     domain::Actor,
     runtime::RuntimeError,
     setup::SetupStatus,
-    ui::tui::TuiError,
+    ui::{
+        profile_editor::{ProfileEditor, ProfileEditorMode, ProfileEditorStep},
+        tui::TuiError,
+    },
 };
+
+const MAX_PROFILE_LIST_ROWS: usize = 100;
+const MAX_PROFILE_HISTORY_ROWS: usize = 100;
 
 pub struct TextRenderer;
 
@@ -88,6 +98,325 @@ impl TextRenderer {
                 }
                 ShutdownDisposition::Requested => writer.write_all(b"Shutting down.\n"),
             },
+            CommandView::AgentProfileCreated(view) => writeln!(
+                writer,
+                "Agent profile created: {} version {} ({})",
+                view.profile_id,
+                view.version.get(),
+                readiness(view.readiness)
+            ),
+            CommandView::AgentProfileVersionActivated(view) => writeln!(
+                writer,
+                "Agent profile version activated: {} version {} ({})",
+                view.profile_id,
+                view.version.get(),
+                readiness(view.readiness)
+            ),
+            CommandView::AgentProfiles(view) => {
+                writer.write_all(b"NAME | ROLE | SPECIALTY | READY | VERSION | ID\n")?;
+                for profile in view.profiles.iter().take(MAX_PROFILE_LIST_ROWS) {
+                    writeln!(
+                        writer,
+                        "{} | {} | {} | {} | {} | {}",
+                        escaped_bounded(&profile.display_name, 64),
+                        profile.role.as_str(),
+                        escaped_bounded(&profile.primary_specialty, 64),
+                        readiness(profile.readiness),
+                        profile.version.get(),
+                        profile.profile_id,
+                    )?;
+                }
+                let omitted = view.profiles.len().saturating_sub(MAX_PROFILE_LIST_ROWS);
+                if omitted > 0 {
+                    writeln!(writer, "... {omitted} profiles omitted.")?;
+                }
+                Ok(())
+            }
+            CommandView::AgentProfile(view) => {
+                let profile = &view.profile;
+                writeln!(writer, "Agent profile: {}", profile.profile_id())?;
+                writeln!(writer, "Display name: {}", escaped_bounded(profile.display_name(), 64))?;
+                writeln!(writer, "Description: {}", escaped_bounded(profile.description(), 256))?;
+                writeln!(writer, "Role: {}", profile.role().as_str())?;
+                writeln!(
+                    writer,
+                    "Primary specialty: {}",
+                    escaped_bounded(profile.primary_specialty(), 64)
+                )?;
+                writeln!(
+                    writer,
+                    "Specialty tags: {}",
+                    escaped_list(profile.specialty_tags(), 48)
+                )?;
+                writeln!(writer, "Personality: {}", escaped_bounded(profile.personality(), 1_024))?;
+                writeln!(writer, "Instructions: {}", escaped_bounded(profile.instructions(), 4_096))?;
+                writeln!(
+                    writer,
+                    "Bindings: {}",
+                    bindings_summary(profile.bindings())
+                )?;
+                writeln!(writer, "Skill refs: {}", escaped_skill_refs(profile.skill_refs()))?;
+                writeln!(writer, "MCP refs: {}", escaped_mcp_refs(profile.mcp_refs()))?;
+                match profile.template_provenance() {
+                    Some(provenance) => writeln!(
+                        writer,
+                        "Template provenance: {}@{} {}",
+                        escaped_bounded(provenance.template_id.as_str(), 64),
+                        provenance.template_version.get(),
+                        provenance.template_digest,
+                    )?,
+                    None => writer.write_all(b"Template provenance: none\n")?,
+                }
+                writeln!(writer, "Bindings readiness: {}", readiness(view.readiness))?;
+                writeln!(writer, "Memory namespace ID: {}", profile.memory_namespace_id())?;
+                writeln!(writer, "Policy reference: {}", escaped_bounded(profile.default_policy_ref(), 128))?;
+                writeln!(writer, "Created time: {}", profile.created_at_ms())?;
+                writeln!(writer, "Version: {}", profile.version().get())?;
+                writeln!(writer, "Version ID: {}", profile.profile_version_id())?;
+                writeln!(writer, "Digest: {}", profile.content_digest())
+            }
+            CommandView::AgentProfileHistory(view) => {
+                writeln!(writer, "Agent profile history: {}", view.profile_id)?;
+                writeln!(writer, "Active version ID: {}", view.active_version_id)?;
+                writer.write_all(b"VERSION | VERSION ID | PREDECESSOR | CREATED | READY | DIGEST\n")?;
+                for version in view.versions.iter().take(MAX_PROFILE_HISTORY_ROWS) {
+                    writeln!(
+                        writer,
+                        "{} | {} | {} | {} | {} | {}",
+                        version.version.get(),
+                        version.profile_version_id,
+                        version
+                            .supersedes
+                            .map(|id| id.to_string())
+                            .unwrap_or_else(|| "none".to_owned()),
+                        version.created_at_ms,
+                        readiness(version.readiness),
+                        version.content_digest,
+                    )?;
+                }
+                let omitted = view.total_count.saturating_sub(view.returned_count);
+                if omitted > 0 {
+                    writeln!(writer, "... {omitted} versions omitted.")?;
+                }
+                Ok(())
+            }
+            CommandView::AgentProfileVersion(view) => {
+                let profile = &view.profile;
+                writeln!(
+                    writer,
+                    "Agent profile historical version: {} version {}",
+                    profile.profile_id(),
+                    profile.version().get()
+                )?;
+                writeln!(
+                    writer,
+                    "Display name: {}",
+                    escaped_bounded(profile.display_name(), 64)
+                )?;
+                writeln!(
+                    writer,
+                    "Description: {}",
+                    escaped_bounded(profile.description(), 256)
+                )?;
+                writeln!(writer, "Role: {}", profile.role().as_str())?;
+                writeln!(
+                    writer,
+                    "Primary specialty: {}",
+                    escaped_bounded(profile.primary_specialty(), 64)
+                )?;
+                writeln!(
+                    writer,
+                    "Specialty tags: {}",
+                    escaped_list(profile.specialty_tags(), 48)
+                )?;
+                writeln!(
+                    writer,
+                    "Personality: {}",
+                    escaped_bounded(profile.personality(), 1_024)
+                )?;
+                writeln!(
+                    writer,
+                    "Instructions: {}",
+                    escaped_bounded(profile.instructions(), 4_096)
+                )?;
+                writeln!(
+                    writer,
+                    "Bindings: {}",
+                    bindings_summary(profile.bindings())
+                )?;
+                writeln!(
+                    writer,
+                    "Skill refs: {}",
+                    escaped_skill_refs(profile.skill_refs())
+                )?;
+                writeln!(
+                    writer,
+                    "MCP refs: {}",
+                    escaped_mcp_refs(profile.mcp_refs())
+                )?;
+                match profile.template_provenance() {
+                    Some(provenance) => writeln!(
+                        writer,
+                        "Template provenance: {}@{} {}",
+                        escaped_bounded(provenance.template_id.as_str(), 64),
+                        provenance.template_version.get(),
+                        provenance.template_digest,
+                    )?,
+                    None => writer.write_all(b"Template provenance: none\n")?,
+                }
+                writeln!(writer, "Readiness: {}", readiness(view.readiness))?;
+                writeln!(
+                    writer,
+                    "Memory namespace ID: {}",
+                    profile.memory_namespace_id()
+                )?;
+                writeln!(
+                    writer,
+                    "Policy reference: {}",
+                    escaped_bounded(profile.default_policy_ref(), 128)
+                )?;
+                writeln!(writer, "Created time: {}", profile.created_at_ms())?;
+                writeln!(
+                    writer,
+                    "Predecessor version ID: {}",
+                    profile
+                        .supersedes()
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "none".to_owned())
+                )?;
+                writeln!(writer, "Version: {}", profile.version().get())?;
+                writeln!(writer, "Version ID: {}", profile.profile_version_id())?;
+                writeln!(writer, "Digest: {}", profile.content_digest())?;
+                writer.write_all(b"Predecessor diff:\n")?;
+                render_profile_diffs(&view.predecessor_diff, writer)
+            }
+        }
+    }
+
+    pub fn render_profile_templates<W: Write>(
+        templates: &[ProfileTemplate],
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writer.write_all(b"Profile templates:\n")?;
+        for template in templates {
+            writeln!(
+                writer,
+                "  {} | {} | {} | version {}",
+                escaped_bounded(template.id.as_str(), 64),
+                template.role.as_str(),
+                escaped_bounded(template.suggested_name, 64),
+                template.version.get(),
+            )?;
+        }
+        writer.write_all(b"Enter a template ID, or :cancel.\n")
+    }
+
+    pub fn render_profile_editor<W: Write>(
+        editor: &ProfileEditor,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        let mode = match editor.mode() {
+            ProfileEditorMode::Create { .. } => "Create",
+            ProfileEditorMode::Edit { .. } => "Edit",
+        };
+        writeln!(writer, "{mode} profile editor [{}]", editor.step().as_str())?;
+        render_draft(editor.draft(), writer)?;
+        if editor.step() == ProfileEditorStep::Review {
+            writeln!(writer, "{mode} profile review")?;
+            match editor.mode() {
+                ProfileEditorMode::Create { .. } => {
+                    if let Some(baseline) = editor.create_baseline() {
+                        render_profile_diffs(&draft_diffs(baseline, editor.draft()), writer)?;
+                        writer.write_all(b"  Unchanged fields omitted.\n")?;
+                    }
+                    if let ProfileEditorMode::Create { provenance } = editor.mode() {
+                        writeln!(
+                            writer,
+                            "  Template provenance: {}@{} {}",
+                            escaped_bounded(provenance.template_id.as_str(), 128),
+                            provenance.template_version.get(),
+                            provenance.template_digest
+                        )?;
+                    }
+                    writer.write_all(b"  Create action: :create\n")?;
+                }
+                ProfileEditorMode::Edit {
+                    expected_active_version_id,
+                    ..
+                } => {
+                    writeln!(writer, "  Base version ID: {expected_active_version_id}")?;
+                    if let Some(review) = editor.review() {
+                        render_profile_diffs(&review.preview().diffs, writer)?;
+                        writeln!(
+                            writer,
+                            "  Review digest: {}",
+                            review.preview().review_digest
+                        )?;
+                        writer.write_all(b"  Activate action: :activate\n")?;
+                    } else {
+                        writer.write_all(b"  Run :review to request a passive preview.\n")?;
+                    }
+                }
+            }
+        }
+        if let Some(message) = editor.local_message() {
+            writeln!(writer, "Editor message: {}", message.code())?;
+        }
+        writer.write_all(b"Limits: display name 1-64 bytes; description 0-256 bytes; primary specialty 1-64 bytes; tags 0-5 at 1-48 bytes each; personality 1-1024 cumulative bytes; instructions 1-4096 cumulative bytes.\n")?;
+        match editor.mode() {
+            ProfileEditorMode::Create { .. } => writer.write_all(
+                b"Controls: :role <bull|bear|chief|engineering|custom> :tag add <tag> :tag remove <tag> :next :back :show :clear :review :create :cancel\n",
+            ),
+            ProfileEditorMode::Edit { .. } => writer.write_all(
+                b"Controls: :role <bull|bear|chief|engineering|custom> :tag add <tag> :tag remove <tag> :next :back :show :clear :review :activate :cancel\n",
+            ),
+        }
+    }
+
+    pub fn render_profile_confirmation<W: Write>(
+        editor: &ProfileEditor,
+        command: &ApplicationCommand,
+        expected_confirmation: &str,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        match (editor.mode(), command) {
+            (
+                ProfileEditorMode::Create { provenance },
+                ApplicationCommand::CreateAgentProfile { .. },
+            ) => writeln!(
+                writer,
+                "Create and activate from {}@{} {}. Type exactly: {expected_confirmation}",
+                escaped_bounded(provenance.template_id.as_str(), 128),
+                provenance.template_version.get(),
+                provenance.template_digest,
+            ),
+            (
+                ProfileEditorMode::Edit {
+                    expected_active_version_id,
+                    ..
+                },
+                ApplicationCommand::ActivateAgentProfileVersion { review_digest, .. },
+            ) => writeln!(
+                writer,
+                "Activate from base {expected_active_version_id} with review digest {review_digest}. Type exactly: {expected_confirmation}",
+            ),
+            _ => writer.write_all(b"Profile confirmation is unavailable.\n"),
+        }
+    }
+
+    pub fn render_activation_declined<W: Write>(writer: &mut W) -> io::Result<()> {
+        writer.write_all(b"Confirmation cancelled; returned to review.\n")
+    }
+
+    pub fn render_confirmation_mismatch<W: Write>(writer: &mut W) -> io::Result<()> {
+        writer.write_all(b"Confirmation did not match; draft retained.\n")
+    }
+
+    pub fn render_profile_cancelled<W: Write>(create: bool, writer: &mut W) -> io::Result<()> {
+        if create {
+            writer.write_all(b"Profile creation cancelled.\n")
+        } else {
+            writer.write_all(b"Profile edit cancelled.\n")
         }
     }
 
@@ -171,6 +500,203 @@ impl TextRenderer {
     }
 }
 
+fn render_draft<W: Write>(draft: &AgentProfileDraft, writer: &mut W) -> io::Result<()> {
+    writeln!(
+        writer,
+        "  Display name: {}",
+        escaped_bounded(&draft.display_name, 64)
+    )?;
+    writeln!(
+        writer,
+        "  Description: {}",
+        escaped_bounded(&draft.description, 256)
+    )?;
+    writeln!(writer, "  Role: {}", draft.role.as_str())?;
+    writeln!(
+        writer,
+        "  Primary specialty: {}",
+        escaped_bounded(&draft.primary_specialty, 64)
+    )?;
+    writeln!(
+        writer,
+        "  Specialty tags: {}",
+        escaped_list(&draft.specialty_tags, 48)
+    )?;
+    writeln!(
+        writer,
+        "  Personality: {}",
+        escaped_bounded(&draft.personality, 1_024)
+    )?;
+    writeln!(
+        writer,
+        "  Instructions: {}",
+        escaped_bounded(&draft.instructions, 4_096)
+    )?;
+    writeln!(writer, "  Bindings: {}", bindings_summary(&draft.bindings),)
+}
+
+fn render_profile_diffs<W: Write>(diffs: &[ProfileFieldDiff], writer: &mut W) -> io::Result<()> {
+    for diff in diffs {
+        writeln!(
+            writer,
+            "  {}: {} -> {}",
+            diff_field(diff.field),
+            field_value(&diff.before),
+            field_value(&diff.after),
+        )?;
+    }
+    Ok(())
+}
+
+fn draft_diffs(before: &AgentProfileDraft, after: &AgentProfileDraft) -> Vec<ProfileFieldDiff> {
+    let mut diffs = Vec::new();
+    push_text_diff(
+        &mut diffs,
+        ProfileDiffField::DisplayName,
+        &before.display_name,
+        &after.display_name,
+    );
+    push_text_diff(
+        &mut diffs,
+        ProfileDiffField::Description,
+        &before.description,
+        &after.description,
+    );
+    if before.role != after.role {
+        diffs.push(ProfileFieldDiff {
+            field: ProfileDiffField::Role,
+            before: ProfileFieldValue::Role(before.role),
+            after: ProfileFieldValue::Role(after.role),
+        });
+    }
+    push_text_diff(
+        &mut diffs,
+        ProfileDiffField::PrimarySpecialty,
+        &before.primary_specialty,
+        &after.primary_specialty,
+    );
+    if before.specialty_tags != after.specialty_tags {
+        diffs.push(ProfileFieldDiff {
+            field: ProfileDiffField::SpecialtyTags,
+            before: ProfileFieldValue::SpecialtyTags(before.specialty_tags.clone()),
+            after: ProfileFieldValue::SpecialtyTags(after.specialty_tags.clone()),
+        });
+    }
+    push_text_diff(
+        &mut diffs,
+        ProfileDiffField::Personality,
+        &before.personality,
+        &after.personality,
+    );
+    push_text_diff(
+        &mut diffs,
+        ProfileDiffField::Instructions,
+        &before.instructions,
+        &after.instructions,
+    );
+    if before.bindings != after.bindings {
+        diffs.push(ProfileFieldDiff {
+            field: ProfileDiffField::Bindings,
+            before: ProfileFieldValue::Bindings(before.bindings.clone()),
+            after: ProfileFieldValue::Bindings(after.bindings.clone()),
+        });
+    }
+    diffs
+}
+
+fn push_text_diff(
+    diffs: &mut Vec<ProfileFieldDiff>,
+    field: ProfileDiffField,
+    before: &str,
+    after: &str,
+) {
+    if before != after {
+        diffs.push(ProfileFieldDiff {
+            field,
+            before: ProfileFieldValue::Text(before.to_owned()),
+            after: ProfileFieldValue::Text(after.to_owned()),
+        });
+    }
+}
+
+fn diff_field(field: ProfileDiffField) -> &'static str {
+    match field {
+        ProfileDiffField::DisplayName => "display_name",
+        ProfileDiffField::Description => "description",
+        ProfileDiffField::Role => "role",
+        ProfileDiffField::PrimarySpecialty => "primary_specialty",
+        ProfileDiffField::SpecialtyTags => "specialty_tags",
+        ProfileDiffField::Personality => "personality",
+        ProfileDiffField::Instructions => "instructions",
+        ProfileDiffField::Bindings => "bindings",
+    }
+}
+
+fn field_value(value: &ProfileFieldValue) -> String {
+    match value {
+        ProfileFieldValue::Text(value) => escaped_bounded(value, 4_096),
+        ProfileFieldValue::Role(value) => value.as_str().to_owned(),
+        ProfileFieldValue::SpecialtyTags(values) => escaped_list(values, 48),
+        ProfileFieldValue::Bindings(bindings) => bindings_summary(bindings),
+    }
+}
+
+fn escaped_list(values: &[String], maximum_scalars: usize) -> String {
+    if values.is_empty() {
+        return "none".to_owned();
+    }
+    values
+        .iter()
+        .map(|value| escaped_bounded(value, maximum_scalars))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn escaped_skill_refs(values: &[SkillRef]) -> String {
+    escaped_refs(values.iter().map(SkillRef::as_str))
+}
+
+fn escaped_mcp_refs(values: &[McpRef]) -> String {
+    escaped_refs(values.iter().map(McpRef::as_str))
+}
+
+fn escaped_refs<'a>(values: impl Iterator<Item = &'a str>) -> String {
+    let values = values
+        .map(|value| escaped_bounded(value, 256))
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        "none".to_owned()
+    } else {
+        values.join(", ")
+    }
+}
+
+fn readiness(readiness: AgentReadiness) -> &'static str {
+    match readiness {
+        AgentReadiness::Unbound => "unbound",
+        AgentReadiness::BindingUnavailable => "binding_unavailable",
+        AgentReadiness::Ready => "ready",
+    }
+}
+
+fn bindings_summary(bindings: &AgentBindings) -> String {
+    let inference = bindings.inference.as_ref().map_or_else(
+        || "none".to_owned(),
+        |binding| {
+            format!(
+                "{}/{}",
+                escaped_bounded(binding.connection_id().as_str(), 128),
+                escaped_bounded(binding.model_id().as_str(), 128)
+            )
+        },
+    );
+    let engineering = bindings.engineering.as_ref().map_or_else(
+        || "none".to_owned(),
+        |binding| escaped_bounded(binding.runtime_id().as_str(), 128),
+    );
+    format!("inference={inference} engineering={engineering}")
+}
+
 fn app_error_message(error: &AppError) -> &'static str {
     match error {
         AppError::Persistence(_) | AppError::Recovery(_) => "Application command failed.",
@@ -178,6 +704,15 @@ fn app_error_message(error: &AppError) -> &'static str {
             "Command is unavailable."
         }
         AppError::CommandConflict => "Command could not be completed.",
+        AppError::Domain(_)
+        | AppError::AgentProfileNotFound
+        | AppError::DuplicateProfileName
+        | AppError::AgentProfileHistoryMismatch
+        | AppError::BindingReferenceUnavailable
+        | AppError::StaleAgentProfileVersion
+        | AppError::ProfileReviewUnavailable
+        | AppError::ProfileReviewMismatch
+        | AppError::ReviewDigestMismatch => "Agent profile operation could not be completed.",
         AppError::LifecycleFinished => "Application is shutting down.",
     }
 }
@@ -197,3 +732,4 @@ fn escaped_bounded(value: &str, maximum_scalars: usize) -> String {
     }
     escaped
 }
+use crate::agents::AgentBindings;

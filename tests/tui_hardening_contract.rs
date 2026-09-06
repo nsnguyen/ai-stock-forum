@@ -184,6 +184,14 @@ fn snapshot() -> PresentationSnapshot {
         process_guard_ownership: ai_stock_forum::app::ProcessGuardOwnership::Held,
         setup_status: SetupStatus::NotStarted,
         recent_audit: Vec::new(),
+        agent_profiles: ai_stock_forum::app::AgentProfilesView {
+            profiles: Vec::new(),
+            total_count: 0,
+            returned_count: 0,
+            truncated: false,
+        },
+        selected_agent_profile: None,
+        selected_agent_profile_history: None,
     }
 }
 

@@ -644,6 +644,8 @@ impl TestApp {
                 | "approval_records"
                 | "command_receipts"
                 | "command_event_refs"
+                | "agent_profile_versions"
+                | "active_agent_profiles"
         ));
         Connection::open(self.paths.database_path())
             .unwrap()
@@ -651,6 +653,56 @@ impl TestApp {
                 row.get(0)
             })
             .unwrap()
+    }
+
+    pub fn active_profile_rows(&self) -> Vec<(String, String, i64, String, String)> {
+        let connection = Connection::open(self.paths.database_path()).unwrap();
+        let mut statement = connection
+            .prepare(
+                "SELECT profile_id, profile_version_id, version, normalized_name, content_digest
+                 FROM active_agent_profiles ORDER BY profile_id",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    pub fn projection_metadata_row(&self) -> (i64, Option<String>, String) {
+        Connection::open(self.paths.database_path())
+            .unwrap()
+            .query_row(
+                "SELECT last_event_sequence, last_event_digest, projection_digest
+                 FROM projection_metadata WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    }
+
+    pub fn event_payloads(&self, kind: &str) -> Vec<String> {
+        let connection = Connection::open(self.paths.database_path()).unwrap();
+        let mut statement = connection
+            .prepare(
+                "SELECT payload_json FROM event_stream
+                 WHERE event_type = ?1 ORDER BY sequence",
+            )
+            .unwrap();
+        statement
+            .query_map([kind], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
     }
 
     pub fn event_count(&self, kind: &str) -> i64 {

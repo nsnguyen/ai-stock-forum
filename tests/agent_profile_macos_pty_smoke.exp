@@ -1,0 +1,361 @@
+#!/usr/bin/expect -f
+
+if {$argc != 2} {
+    puts stderr "usage: agent_profile_macos_pty_smoke.exp <binary> <isolated-root>"
+    exit 2
+}
+
+set binary [file normalize [lindex $argv 0]]
+set root [file normalize [lindex $argv 1]]
+set evidence_dir [file join $root evidence]
+file mkdir [file join $root home]
+file mkdir [file join $root data]
+file mkdir $evidence_dir
+
+set env(HOME) [file join $root home]
+set env(XDG_DATA_HOME) [file join $root data]
+set env(TERM) xterm-256color
+set timeout 20
+set send_slow {1 .01}
+log_user 0
+
+proc fail {message} {
+    catch {log_file}
+    puts stderr "PTY_FAIL: $message"
+    exit 1
+}
+
+proc must_exact {pattern label} {
+    expect {
+        -exact $pattern {}
+        timeout { fail "$label timed out" }
+        eof { fail "$label reached EOF" }
+    }
+}
+
+proc must_regex {pattern label} {
+    expect {
+        -re $pattern {}
+        timeout { fail "$label timed out" }
+        eof { fail "$label reached EOF" }
+    }
+    if {[info exists expect_out(1,string)]} {
+        return $expect_out(1,string)
+    }
+    return ""
+}
+
+proc wait_prompt {} {
+    expect {
+        -re {\r\n> $} {}
+        timeout { fail "command prompt timed out" }
+        eof { fail "command prompt reached EOF" }
+    }
+}
+
+proc line_to_prompt {line} {
+    send -- "$line\r"
+    wait_prompt
+}
+
+proc tui_slash {line} {
+    send -- "/"
+    must_exact {/} "TUI command-bar slash focus"
+    send -s -- "[string range $line 1 end]\r"
+}
+
+proc drain_output {} {
+    global timeout
+    set prior_timeout $timeout
+    set timeout 0
+    expect {
+        -re {(.|\r|\n)+} {}
+        timeout {}
+        eof {}
+    }
+    set timeout $prior_timeout
+}
+
+proc resize_tty {tty app_pid rows cols} {
+    exec /bin/stty rows $rows cols $cols < $tty
+    set observed [string trim [exec /bin/stty size < $tty]]
+    if {$observed ne "$rows $cols"} {
+        fail "PTY size mismatch: requested=$rows $cols observed=$observed"
+    }
+    exec /bin/kill -WINCH $app_pid
+}
+
+proc create_to_confirmation {template} {
+    send -- "/agent create $template\r"
+    must_exact {Create profile editor [template]} "create $template template editor"
+    wait_prompt
+    for {set i 0} {$i < 6} {incr i} {
+        line_to_prompt {:next}
+    }
+    send -- ":next\r"
+    must_exact {Create profile review} "create review"
+    wait_prompt
+    send -- ":create\r"
+    must_exact {Type exactly: create} "create confirmation"
+    wait_prompt
+}
+
+set fallback_log [file join $evidence_dir fallback.raw]
+log_file -a -noappend $fallback_log
+spawn -noecho $binary --command-mode
+must_exact {> } "fallback startup prompt"
+
+create_to_confirmation bull
+send -- "create\r"
+set profile_id [must_regex \
+    {Agent profile created: ([0-9a-f-]{36}) version 1 \(unbound\)} \
+    "create result"]
+wait_prompt
+
+send -- "/agent show \"Bull Researcher\"\r"
+must_exact "Agent profile: $profile_id" "name selector"
+must_exact {Display name: Bull Researcher} "name-selected detail"
+wait_prompt
+
+send -- "/agent show $profile_id\r"
+must_exact {Display name: Bull Researcher} "ID-selected detail"
+wait_prompt
+
+create_to_confirmation bull
+send -- "create\r"
+must_exact {Agent profile operation could not be completed.} "duplicate create error"
+wait_prompt
+send -- ":back\r"
+must_exact {Confirmation cancelled; returned to review.} \
+    "duplicate create confirmation retention"
+must_exact {Create profile review} "retained create review"
+wait_prompt
+line_to_prompt {:cancel}
+
+foreach template {bear chief engineering custom} {
+    send -- "/agent create $template\r"
+    must_exact {Create profile editor [template]} "short template $template"
+    must_exact "Role: $template" "short template role $template"
+    wait_prompt
+    send -- ":cancel\r"
+    must_exact {Profile creation cancelled.} "short template cancellation"
+    wait_prompt
+}
+
+send -- "/agent edit \"Bull Researcher\"\r"
+must_exact {Edit profile editor [template]} "name-selected edit"
+wait_prompt
+line_to_prompt {:next}
+send -- "Bull Researcher Revised\r"
+must_exact {Display name: Bull Researcher Revised} "edit field update"
+wait_prompt
+for {set i 0} {$i < 5} {incr i} {
+    line_to_prompt {:next}
+}
+send -- ":next\r"
+must_exact {Edit profile review} "edit review step"
+wait_prompt
+
+send -- ":review\r"
+set review_digest [must_regex {Review digest: ([0-9a-f]{64})} \
+    "authoritative review digest"]
+wait_prompt
+send -- ":activate\r"
+must_exact "Type exactly: activate $review_digest" "activation confirmation"
+wait_prompt
+send -- "not-the-exact-phrase\r"
+must_exact {Confirmation did not match; draft retained.} \
+    "recoverable confirmation error"
+must_exact "Type exactly: activate $review_digest" \
+    "retained activation confirmation"
+wait_prompt
+send -- "activate $review_digest\r"
+set activated_profile_id [must_regex \
+    {Agent profile version activated: ([0-9a-f-]{36}) version 2 \(unbound\)} \
+    "activation result"]
+if {$activated_profile_id ne $profile_id} {
+    fail "activation changed the stable profile ID"
+}
+wait_prompt
+
+send -- "/agent history \"Bull Researcher Revised\"\r"
+must_exact "Agent profile history: $profile_id" "name-selected history"
+must_regex {\r\n2 \| [^\r\n]+\r\n1 \|} "newest-first history"
+wait_prompt
+
+send -- "/agent history $profile_id 2\r"
+must_exact "Agent profile historical version: $profile_id version 2" \
+    "exact ID-selected history"
+foreach expected {
+    {Description: Develops evidence-led upside research.}
+    {Role: bull}
+    {Primary specialty: upside research}
+    {Specialty tags: catalysts, growth}
+    {Personality: Constructive, precise, and evidence-led.}
+    {Instructions: Develop the strongest evidence-backed bull case.}
+    {Bindings: inference=none engineering=none}
+    {Skill refs: none}
+    {MCP refs: none}
+    {Template provenance: builtin.bull@1}
+    {Memory namespace ID:}
+    {Policy reference: profile-default/v1}
+    {Predecessor version ID:}
+    {Digest:}
+    {Predecessor diff:}
+    {display_name: Bull Researcher -> Bull Researcher Revised}
+} {
+    must_exact $expected "historical field $expected"
+}
+wait_prompt
+
+send -- "/quit\r"
+must_exact {Shutting down.} "fallback shutdown"
+expect eof
+set fallback_wait [wait]
+if {[lindex $fallback_wait 3] != 0} {
+    fail "fallback process exited nonzero"
+}
+log_file
+puts "PTY_FALLBACK_OK profile_id=$profile_id"
+
+set tui_log [file join $evidence_dir tui.raw]
+log_file -a -noappend $tui_log
+set env(PS1) {PTY_SHELL> }
+spawn -noecho /bin/zsh -dfi
+set tui_shell $spawn_id
+set tui_shell_pid [exp_pid -i $tui_shell]
+must_exact {PTY_SHELL> } "PTY shell startup"
+set tui_tty $spawn_out(slave,name)
+exec /bin/stty rows 30 cols 120 < $tui_tty
+set terminal_before [exec /bin/stty -g < $tui_tty]
+
+send -- "$binary\r"
+must_exact {AI STOCK FORUM} "TUI startup"
+after 300
+set tui_app_pid [string trim [exec /usr/bin/pgrep -P $tui_shell_pid]]
+if {![regexp {^[0-9]+$} $tui_app_pid]} {
+    fail "could not identify the TUI child process"
+}
+
+set spawn_id $tui_shell
+spawn -noecho $binary --command-mode
+set second_instance $spawn_id
+expect {
+    -nocase -re {already.running} {}
+    timeout { fail "second-instance rejection timed out" }
+    eof { fail "second instance exited without the rejection category" }
+}
+expect eof
+set second_wait [wait]
+if {[lindex $second_wait 3] == 0} {
+    fail "second instance exited successfully"
+}
+puts "PTY_SECOND_INSTANCE_OK exit=[lindex $second_wait 3]"
+
+set spawn_id $tui_shell
+after 300
+drain_output
+tui_slash {/agent list}
+must_exact {Agent list} "TUI slash list workspace"
+must_exact {Bull Researcher Revised} "TUI slash list profile"
+after 300
+drain_output
+
+tui_slash {/agent show "Bull Researcher Revised"}
+must_exact {Agent detail} "TUI slash show name workspace"
+after 300
+drain_output
+
+tui_slash {/agent history "Bull Researcher Revised" 1}
+must_exact {Historical version} "TUI slash exact name workspace"
+must_exact {Description} "TUI slash exact name detail"
+after 300
+drain_output
+
+tui_slash "/agent show $profile_id"
+must_exact {Revised} "TUI slash show ID detail"
+after 300
+drain_output
+
+tui_slash {/agent history "Bull Researcher Revised"}
+must_exact {Returned} "TUI slash history name detail"
+after 300
+drain_output
+
+tui_slash "/agent history $profile_id 2"
+must_exact {Historical version} "TUI slash exact ID workspace"
+must_exact {Description} "TUI slash exact ID detail"
+after 300
+drain_output
+
+tui_slash "/agent history $profile_id"
+must_exact {ACTIVE} "TUI slash history ID typed list"
+puts {PTY_TUI_SLASH_READ_OK list show=name,id history=name,id exact=name,id}
+
+foreach geometry {{24 70 {Bull Researcher Revised}} {30 100 Description} {40 140 Description}} {
+    lassign $geometry rows cols marker
+    after 200
+    drain_output
+    resize_tty $tui_tty $tui_app_pid $rows $cols
+    after 300
+    drain_output
+    send -- "1"
+    after 300
+    drain_output
+    send -- "a"
+    must_exact $marker "resize ${cols}x${rows}"
+}
+
+after 200
+drain_output
+resize_tty $tui_tty $tui_app_pid 10 40
+must_exact {Terminal} "Too Small heading"
+must_exact {too} "Too Small heading"
+must_exact {small} "Too Small heading"
+send -- "\033"
+set prior_timeout $timeout
+set timeout 1
+expect {
+    -exact {PTY_SHELL> } { fail "Esc quit from Too Small" }
+    timeout {}
+}
+set timeout $prior_timeout
+send -- "q"
+must_exact {PTY_SHELL> } "unconditional Too Small q quit"
+
+set terminal_after [exec /bin/stty -g < $tui_tty]
+if {$terminal_before ne $terminal_after} {
+    fail "terminal mode mismatch: before=$terminal_before after=$terminal_after"
+}
+puts "PTY_RESTORE_OK stty=$terminal_after"
+
+send -- "exit\r"
+expect eof
+set shell_wait [wait]
+if {[lindex $shell_wait 3] != 0} {
+    fail "PTY shell exited nonzero"
+}
+log_file
+
+set handle [open $tui_log rb]
+fconfigure $handle -translation binary
+set tui_bytes [read $handle]
+close $handle
+foreach pair {
+    {\033\[?1049h alternate-screen-enter}
+    {\033\[?1049l alternate-screen-leave}
+    {\033\[?25l cursor-hide}
+    {\033\[?25h cursor-show}
+    {\033\[?2004h bracketed-paste-enable}
+    {\033\[?2004l bracketed-paste-disable}
+} {
+    lassign $pair sequence label
+    set sequence [subst -nocommands $sequence]
+    if {[string first $sequence $tui_bytes] < 0} {
+        fail "missing terminal sequence $label"
+    }
+}
+puts {PTY_ESCAPE_PAIRS_OK alternate-screen cursor bracketed-paste}
+puts {PTY_TUI_OK resize=70x24,100x30,140x40,40x10 too-small-esc=retained too-small-q=quit}
+puts "PTY_EVIDENCE_DIR=$evidence_dir"
+exit 0

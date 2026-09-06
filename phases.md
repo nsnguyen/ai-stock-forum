@@ -3,7 +3,7 @@
 **Status:** Approved version 1 roadmap, including the full-screen TUI,
 first-run configuration, and live-participation design
 
-**Updated:** 2026-08-30
+**Updated:** 2026-09-05
 
 **Canonical design:** [architecture.md](architecture.md)
 
@@ -11,10 +11,9 @@ This roadmap replaces the previous Python backend, React frontend, and
 Hermes-first phase plans. Older plans are historical context only and must not
 be executed without being rewritten against the current architecture.
 
-**Repository warning:** the current README and older files under
-`docs/superpowers/` still contain executable-looking legacy instructions. Until
-Phase 0 adds superseded banners or moves them to history, do not use them as a
-plan or source of truth.
+**Repository warning:** older files under `docs/superpowers/` are historical
+unless the canonical documents explicitly identify them as the approved design
+or plan for the current milestone.
 
 ## 1. How this roadmap is organized
 
@@ -308,6 +307,22 @@ rooms, engineering jobs, Git promotion, and finance-specific screens.
 
 ## Phase 2 — Agent profiles, skills, and hybrid memory
 
+### Milestone status
+
+- [x] **Milestone 1: Agent Profile Foundation.** Local schema-v1 upgrade,
+  immutable profile versions, active pointers, pinned templates, typed binding
+  references with computed tri-state readiness, passive edit preview, explicit
+  activation, restart recovery, fallback workflows, and narrow/medium/wide
+  Adaptive Cockpit coverage are complete.
+- [ ] **Milestone 2: Declarative skills.** Versioned skill manifests, assignment,
+  retrieval, and presentation remain deferred.
+- [ ] **Milestone 3: Hybrid memory.** Private KV memory, episodic summaries,
+  proposals, approvals, and retrieval budgets remain deferred.
+
+Phase 2 as a whole remains in progress. Completing Milestone 1 does not mark
+skills, memory, model execution, rooms, debates, market data, or any later
+vertical slice complete.
+
 ### Objective
 
 Let the user define the durable identity and context of an agent without calling
@@ -315,16 +330,19 @@ a real model.
 
 ### User-visible result
 
-The user can create a Bull, Bear, Chief, or Engineering profile in guided TUI
-workspaces; give each a personality and specialty; assign skills; edit private
-memory; inspect version history and field-level diffs; and activate a reviewed
-profile revision.
+Milestone 1 lets the user create Bull, Bear, Chief, Engineering, and Custom
+profiles in guided TUI or fallback workflows; give each a personality and
+specialty; inspect immutable version history and authoritative field-level
+diffs; and explicitly activate a reviewed profile revision. Skill assignment
+and private-memory editing remain future Phase 2 milestones.
 
 ### Scope
 
 - Implement immutable `AgentProfileVersion` records and current-version
   projections.
-- Add `/agent create|list|show|edit|history` with guided editing, validation,
+- Add canonical `/agent create|list|show|edit|history` commands, with the bare
+  `agent` prefix retained as a fallback alias, guided editing, name-or-ID
+  selectors, exact-version history inspection, validation,
   field-level diffs, and activation confirmation.
 - Add TUI list/detail/editor/history views for profiles, skills, memory, and
   proposals; every action maps to the same typed commands as fallback mode.
@@ -347,6 +365,10 @@ profile revision.
 
 ### Exit gate
 
+The following is the full Phase 2 exit gate and remains open until the deferred
+skills and hybrid-memory milestones are implemented. Milestone 1 independently
+passes its profile-foundation acceptance and release gates.
+
 - Editing always creates a new version; existing versions and pinned references
   remain immutable.
 - Two profiles bound to the same placeholder provider retain different
@@ -363,8 +385,10 @@ profile revision.
 
 ### Explicitly deferred
 
-Real direct-provider model calls, MCP connections, rooms, engineering children,
-and finance-specific skills.
+After Agent Profiles Milestone 1: declarative skills, hybrid memory, memory
+proposals and approvals, retrieval budgets, real direct-provider model calls,
+model execution, MCP connections, rooms, debates, market data, engineering
+children, and finance-specific skills.
 
 ## Phase 3 — Connections, normalized inference, and single-agent chat
 

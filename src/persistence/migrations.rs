@@ -1,8 +1,9 @@
 use crate::domain::{Sha256Digest, sha256};
 
-pub const LATEST_SCHEMA_VERSION: u32 = 1;
+pub const LATEST_SCHEMA_VERSION: u32 = 2;
 
 pub(crate) const APPLICATION_ID: i64 = 0x4149_4653;
+pub(crate) const MIGRATION_BOUNDARY_PREFIX: &str = "-- migration-boundary:";
 pub(crate) const SCHEMA_MIGRATIONS_SQL: &str = "
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY CHECK (version > 0),
@@ -37,12 +38,29 @@ impl Migration {
     }
 }
 
-pub(crate) fn ordered() -> [Migration; 1] {
-    [Migration {
-        version: 1,
-        sql: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/migrations/0001_phase0.sql"
-        )),
-    }]
+pub(crate) fn ordered() -> [Migration; 2] {
+    [
+        Migration {
+            version: 1,
+            sql: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/0001_phase0.sql"
+            )),
+        },
+        Migration {
+            version: 2,
+            sql: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/0002_agent_profiles.sql"
+            )),
+        },
+    ]
+}
+
+pub(crate) fn migration_boundary_names(sql: &'static str) -> Vec<&'static str> {
+    sql.lines()
+        .filter_map(|line| line.trim().strip_prefix(MIGRATION_BOUNDARY_PREFIX))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect()
 }

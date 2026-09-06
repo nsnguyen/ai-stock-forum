@@ -1,10 +1,41 @@
 use crate::{
+    agents::{AgentProfileVersion, AgentReadiness, AgentRole, ProfileFieldDiff},
     app::{AuditLimit, EventEnvelope, InputRejection},
     audit::AuditEntry,
-    domain::{CommandId, CorrelationId, InstallationId, SessionId},
+    domain::{
+        AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, Digest, InstallationId,
+        ObjectVersion, SessionId,
+    },
     setup::SetupStatus,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+impl Serialize for AgentReadiness {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::Unbound => "unbound",
+            Self::BindingUnavailable => "binding_unavailable",
+            Self::Ready => "ready",
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentReadiness {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "unbound" => Ok(Self::Unbound),
+            "binding_unavailable" => Ok(Self::BindingUnavailable),
+            "ready" => Ok(Self::Ready),
+            _ => Err(serde::de::Error::custom("invalid agent readiness")),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,6 +88,84 @@ pub struct ShutdownView {
     pub disposition: ShutdownDisposition,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentProfileCreatedView {
+    pub profile_id: AgentProfileId,
+    pub profile_version_id: AgentProfileVersionId,
+    pub version: ObjectVersion,
+    pub readiness: AgentReadiness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentProfileVersionActivatedView {
+    pub profile_id: AgentProfileId,
+    pub profile_version_id: AgentProfileVersionId,
+    pub previous_version_id: AgentProfileVersionId,
+    pub version: ObjectVersion,
+    pub readiness: AgentReadiness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentProfileSummary {
+    pub profile_id: AgentProfileId,
+    pub profile_version_id: AgentProfileVersionId,
+    pub version: ObjectVersion,
+    pub display_name: String,
+    pub role: AgentRole,
+    pub primary_specialty: String,
+    pub readiness: AgentReadiness,
+    pub content_digest: Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentProfilesView {
+    pub profiles: Vec<AgentProfileSummary>,
+    pub total_count: u32,
+    pub returned_count: u32,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentProfileView {
+    pub profile: AgentProfileVersion,
+    pub readiness: AgentReadiness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentProfileHistoryEntry {
+    pub profile_version_id: AgentProfileVersionId,
+    pub version: ObjectVersion,
+    pub supersedes: Option<AgentProfileVersionId>,
+    pub created_at_ms: i64,
+    pub readiness: AgentReadiness,
+    pub content_digest: Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentProfileHistoryView {
+    pub profile_id: AgentProfileId,
+    pub active_version_id: AgentProfileVersionId,
+    pub versions: Vec<AgentProfileHistoryEntry>,
+    pub total_count: u32,
+    pub returned_count: u32,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentProfileVersionView {
+    pub profile: AgentProfileVersion,
+    pub readiness: AgentReadiness,
+    pub predecessor_diff: Vec<ProfileFieldDiff>,
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShutdownDisposition {
@@ -76,6 +185,12 @@ pub enum CommandView {
     Status(StatusView),
     SetupStatus(SetupStatusView),
     AuditTail(AuditTailView),
+    AgentProfileCreated(AgentProfileCreatedView),
+    AgentProfileVersionActivated(AgentProfileVersionActivatedView),
+    AgentProfiles(AgentProfilesView),
+    AgentProfile(AgentProfileView),
+    AgentProfileHistory(AgentProfileHistoryView),
+    AgentProfileVersion(AgentProfileVersionView),
     InputRejected(InputRejectedView),
     Shutdown(ShutdownView),
 }

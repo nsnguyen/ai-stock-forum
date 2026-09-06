@@ -1,6 +1,6 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 
-use super::model::LayoutMode;
+use super::model::{LayoutMode, View};
 
 pub const MIN_WIDTH: u16 = 60;
 pub const MIN_HEIGHT: u16 = 18;
@@ -21,6 +21,40 @@ pub struct CockpitLayout {
     pub command: Rect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentWorkspaceLayout {
+    pub list: Option<Rect>,
+    pub active: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewGeometry {
+    pub cockpit: CockpitLayout,
+    pub workspace_body_width: u16,
+    pub workspace_body_height: u16,
+}
+
+pub fn view_geometry(area: Rect, view: View, inspector_open: bool) -> ViewGeometry {
+    let cockpit = if view == View::Agents {
+        calculate_agents(area, inspector_open)
+    } else {
+        calculate(area, inspector_open)
+    };
+    let (workspace_body_width, workspace_body_height) = if cockpit.mode == LayoutMode::TooSmall {
+        (0, 0)
+    } else {
+        (
+            cockpit.workspace.width.saturating_sub(2),
+            cockpit.workspace.height.saturating_sub(2),
+        )
+    };
+    ViewGeometry {
+        cockpit,
+        workspace_body_width,
+        workspace_body_height,
+    }
+}
+
 pub fn layout_mode(area: Rect) -> LayoutMode {
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         LayoutMode::TooSmall
@@ -33,8 +67,52 @@ pub fn layout_mode(area: Rect) -> LayoutMode {
     }
 }
 
+pub fn agent_layout_mode(area: Rect) -> LayoutMode {
+    if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
+        LayoutMode::TooSmall
+    } else if area.width >= WIDE_WIDTH {
+        LayoutMode::Wide
+    } else if area.width >= MEDIUM_WIDTH {
+        LayoutMode::Medium
+    } else {
+        LayoutMode::Narrow
+    }
+}
+
+pub fn agent_workspace(area: Rect, mode: LayoutMode) -> AgentWorkspaceLayout {
+    match mode {
+        LayoutMode::Narrow | LayoutMode::TooSmall => AgentWorkspaceLayout {
+            list: None,
+            active: area,
+        },
+        LayoutMode::Medium | LayoutMode::Wide => {
+            let columns =
+                Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)])
+                    .split(area);
+            AgentWorkspaceLayout {
+                list: Some(columns[0]),
+                active: columns[1],
+            }
+        }
+    }
+}
+
 pub fn calculate(area: Rect, inspector_open: bool) -> CockpitLayout {
     let mode = layout_mode(area);
+    calculate_for_mode(area, inspector_open, mode, 3)
+}
+
+pub fn calculate_agents(area: Rect, inspector_open: bool) -> CockpitLayout {
+    let mode = agent_layout_mode(area);
+    calculate_for_mode(area, inspector_open, mode, 4)
+}
+
+fn calculate_for_mode(
+    area: Rect,
+    inspector_open: bool,
+    mode: LayoutMode,
+    header_height: u16,
+) -> CockpitLayout {
     if mode == LayoutMode::TooSmall {
         return CockpitLayout {
             mode,
@@ -49,7 +127,7 @@ pub fn calculate(area: Rect, inspector_open: bool) -> CockpitLayout {
     }
 
     let bands = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(header_height),
         Constraint::Min(0),
         Constraint::Length(1),
         Constraint::Length(3),
@@ -101,15 +179,19 @@ pub fn calculate(area: Rect, inspector_open: bool) -> CockpitLayout {
 }
 
 pub fn workspace_body_size(area: Rect, inspector_open: bool) -> (u16, u16) {
-    let cockpit = calculate(area, inspector_open);
-    if cockpit.mode == LayoutMode::TooSmall {
-        (0, 0)
-    } else {
-        (
-            cockpit.workspace.width.saturating_sub(2),
-            cockpit.workspace.height.saturating_sub(2),
-        )
-    }
+    let geometry = view_geometry(area, View::Overview, inspector_open);
+    (
+        geometry.workspace_body_width,
+        geometry.workspace_body_height,
+    )
+}
+
+pub fn agent_workspace_body_size(area: Rect, inspector_open: bool) -> (u16, u16) {
+    let geometry = view_geometry(area, View::Agents, inspector_open);
+    (
+        geometry.workspace_body_width,
+        geometry.workspace_body_height,
+    )
 }
 
 fn centered_overlay(area: Rect) -> Rect {
