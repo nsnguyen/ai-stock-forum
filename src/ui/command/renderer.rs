@@ -291,6 +291,89 @@ impl TextRenderer {
                 writer.write_all(b"Predecessor diff:\n")?;
                 render_profile_diffs(&view.predecessor_diff, writer)
             }
+            CommandView::SkillCreated(view) => writeln!(
+                writer,
+                "Skill created: {} version {} digest {}",
+                view.skill_id,
+                view.version.get(),
+                view.content_digest,
+            ),
+            CommandView::SkillVersionActivated(view) => writeln!(
+                writer,
+                "Skill version activated: {} version {} digest {}",
+                view.skill_id,
+                view.version.get(),
+                view.content_digest,
+            ),
+            CommandView::Skills(view) => {
+                writer.write_all(b"NAME | VERSION | ID | DIGEST\n")?;
+                for skill in view.skills.iter().take(100) {
+                    writeln!(
+                        writer,
+                        "{} | {} | {} | {}",
+                        escaped_bounded(&skill.display_name, 64),
+                        skill.skill_ref.version().get(),
+                        skill.skill_ref.skill_id(),
+                        skill.skill_ref.content_digest(),
+                    )?;
+                }
+                let omitted = view.total_count.saturating_sub(view.returned_count);
+                if omitted > 0 {
+                    writeln!(writer, "... {omitted} skills omitted.")?;
+                }
+                Ok(())
+            }
+            CommandView::Skill(view) | CommandView::SkillVersion(view) => {
+                writeln!(writer, "Skill: {}", view.skill_ref.skill_id())?;
+                writeln!(
+                    writer,
+                    "Display name: {}",
+                    escaped_bounded(&view.content.display_name, 64)
+                )?;
+                writeln!(writer, "Version: {}", view.skill_ref.version().get())?;
+                writeln!(writer, "Version ID: {}", view.skill_ref.skill_version_id())?;
+                writeln!(writer, "Digest: {}", view.skill_ref.content_digest())?;
+                writeln!(writer, "Provenance: {:?}", view.provenance)?;
+                writeln!(writer, "Resource count: {}", view.content.resources.len())
+            }
+            CommandView::SkillHistory(view) => {
+                writeln!(writer, "Skill history: {}", view.skill_id)?;
+                writeln!(writer, "Active version ID: {}", view.active_version_id)?;
+                writer.write_all(b"VERSION | VERSION ID | PREDECESSOR | CREATED | DIGEST\n")?;
+                for version in view.versions.iter().take(100) {
+                    writeln!(
+                        writer,
+                        "{} | {} | {} | {} | {}",
+                        version.skill_ref.version().get(),
+                        version.skill_ref.skill_version_id(),
+                        version
+                            .predecessor_version_id
+                            .map(|id| id.to_string())
+                            .unwrap_or_else(|| "none".to_owned()),
+                        version.created_at_ms,
+                        version.skill_ref.content_digest(),
+                    )?;
+                }
+                Ok(())
+            }
+            CommandView::AgentSkillAssigned(view) => writeln!(
+                writer,
+                "Agent skill assigned: profile {} version {}",
+                view.profile_id,
+                view.version.get(),
+            ),
+            CommandView::AgentSkillUpgraded(view) => writeln!(
+                writer,
+                "Agent skill upgraded: profile {} version {}",
+                view.profile_id,
+                view.version.get(),
+            ),
+            CommandView::AgentSkillUnassigned(view) => writeln!(
+                writer,
+                "Agent skill unassigned: profile {} version {}",
+                view.profile_id,
+                view.version.get(),
+            ),
         }
     }
 
@@ -727,6 +810,14 @@ fn app_error_message(error: &AppError) -> &'static str {
         | AppError::ProfileReviewUnavailable
         | AppError::ProfileReviewMismatch
         | AppError::ReviewDigestMismatch => "Agent profile operation could not be completed.",
+        AppError::SkillNotFound
+        | AppError::DuplicateSkillName
+        | AppError::StaleSkillVersion
+        | AppError::SkillReviewUnavailable
+        | AppError::SkillReviewMismatch
+        | AppError::SkillAlreadyAssigned
+        | AppError::SkillNotAssigned
+        | AppError::AgentSkillLimitExceeded => "Skill operation could not be completed.",
         AppError::LifecycleFinished => "Application is shutting down.",
     }
 }

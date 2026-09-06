@@ -7,6 +7,7 @@ use crate::{
         ObjectVersion, SessionId,
     },
     setup::SetupStatus,
+    skills::{ContentDigest, SkillDraft, SkillProvenance, SkillVersionRef},
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -166,6 +167,90 @@ pub struct AgentProfileVersionView {
     pub predecessor_diff: Vec<ProfileFieldDiff>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillCreatedView {
+    pub skill_id: crate::domain::SkillId,
+    pub skill_version_id: crate::domain::SkillVersionId,
+    pub version: ObjectVersion,
+    pub content_digest: Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillVersionActivatedView {
+    pub skill_id: crate::domain::SkillId,
+    pub skill_version_id: crate::domain::SkillVersionId,
+    pub previous_version_id: crate::domain::SkillVersionId,
+    pub version: ObjectVersion,
+    pub content_digest: Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillSummary {
+    pub skill_ref: SkillVersionRef,
+    pub display_name: String,
+    pub provenance: SkillProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillsView {
+    pub skills: Vec<SkillSummary>,
+    pub total_count: u32,
+    pub returned_count: u32,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillView {
+    pub skill_ref: SkillVersionRef,
+    pub content: SkillDraft,
+    pub created_at_ms: i64,
+    pub provenance: SkillProvenance,
+    pub predecessor_version_id: Option<crate::domain::SkillVersionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillHistoryEntry {
+    pub skill_ref: SkillVersionRef,
+    pub created_at_ms: i64,
+    pub predecessor_version_id: Option<crate::domain::SkillVersionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillHistoryView {
+    pub skill_id: crate::domain::SkillId,
+    pub active_version_id: crate::domain::SkillVersionId,
+    pub versions: Vec<SkillHistoryEntry>,
+    pub total_count: u32,
+    pub returned_count: u32,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSkillMutationView {
+    pub profile_id: AgentProfileId,
+    pub profile_version_id: AgentProfileVersionId,
+    pub previous_profile_version_id: AgentProfileVersionId,
+    pub version: ObjectVersion,
+    pub profile_content_digest: Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSkillAssignmentPreview {
+    pub profile_id: AgentProfileId,
+    pub expected_active_profile_version_id: AgentProfileVersionId,
+    pub operation: crate::app::AgentSkillAssignmentOperation,
+    pub review_token: crate::domain::SkillReviewToken,
+    pub review_digest: ContentDigest,
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShutdownDisposition {
@@ -191,6 +276,15 @@ pub enum CommandView {
     AgentProfile(AgentProfileView),
     AgentProfileHistory(AgentProfileHistoryView),
     AgentProfileVersion(AgentProfileVersionView),
+    SkillCreated(SkillCreatedView),
+    SkillVersionActivated(SkillVersionActivatedView),
+    Skills(SkillsView),
+    Skill(SkillView),
+    SkillHistory(SkillHistoryView),
+    SkillVersion(SkillView),
+    AgentSkillAssigned(AgentSkillMutationView),
+    AgentSkillUpgraded(AgentSkillMutationView),
+    AgentSkillUnassigned(AgentSkillMutationView),
     InputRejected(InputRejectedView),
     Shutdown(ShutdownView),
 }

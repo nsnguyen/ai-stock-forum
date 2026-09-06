@@ -155,6 +155,18 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
         CommandView::AgentProfileCreated(_) | CommandView::AgentProfileVersionActivated(_) => {
             ShutdownDisposition::Continue
         }
+        CommandView::SkillCreated(_)
+        | CommandView::SkillVersionActivated(_)
+        | CommandView::Skills(_)
+        | CommandView::Skill(_)
+        | CommandView::SkillHistory(_)
+        | CommandView::SkillVersion(_)
+        | CommandView::AgentSkillAssigned(_)
+        | CommandView::AgentSkillUpgraded(_)
+        | CommandView::AgentSkillUnassigned(_) => {
+            model.clear_message();
+            ShutdownDisposition::Continue
+        }
     };
 
     merge_committed_audit(model, committed_audit);

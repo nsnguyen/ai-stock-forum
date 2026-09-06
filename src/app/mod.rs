@@ -14,21 +14,24 @@ use crate::{
 pub const MODULE_NAME: &str = "app";
 
 pub use command::{
-    AgentProfileSelector, ApplicationCommand, AuditLimit, AuditLimitError, CommandEnvelope,
+    AgentProfileSelector, AgentSkillAssignmentOperation, ApplicationCommand, AuditLimit,
+    AuditLimitError, CommandEnvelope,
     DEFAULT_AUDIT_LIMIT, InputRejection, InputRejectionCategory, MAX_AGENT_PROFILE_HISTORY_RESULTS,
     MAX_AGENT_PROFILE_LIST_RESULTS, MAX_AUDIT_LIMIT, MAX_INPUT_BYTES, MAX_SAFE_TOKEN_CHARS,
-    SafeToken, SafeTokenError,
+    MAX_SKILL_HISTORY_RESULTS, MAX_SKILL_LIST_RESULTS, SafeToken, SafeTokenError, SkillSelector,
 };
 pub(crate) use event::envelope_from_pending;
 pub use event::{
     ApplicationEvent, EVENT_SCHEMA_VERSION, EventEnvelope, EventEnvelopeWire, PendingEvent,
-    ShutdownReason,
+    ShutdownReason, SkillEventSummary, SkillHistoryEventEntry,
 };
 pub use outcome::{
     AgentProfileCreatedView, AgentProfileHistoryEntry, AgentProfileHistoryView,
     AgentProfileSummary, AgentProfileVersionActivatedView, AgentProfileVersionView,
     AgentProfileView, AgentProfilesView, AuditTailView, CommandOutcome, CommandView, HelpView,
     InputRejectedView, SetupStatusView, ShutdownDisposition, ShutdownView, StatusView,
+    AgentSkillMutationView, SkillCreatedView, SkillHistoryEntry, SkillHistoryView, SkillSummary,
+    SkillVersionActivatedView, SkillView, SkillsView, AgentSkillAssignmentPreview,
 };
 pub use service::{
     ApplicationService, ApplicationWorker, AuthorizationDecision, CommandPolicy,
@@ -59,6 +62,22 @@ pub enum AppError {
     DuplicateProfileName,
     #[error("the active agent profile version is stale")]
     StaleAgentProfileVersion,
+    #[error("skill was not found")]
+    SkillNotFound,
+    #[error("an active skill already uses that normalized name")]
+    DuplicateSkillName,
+    #[error("the active skill version is stale")]
+    StaleSkillVersion,
+    #[error("the skill review is unavailable")]
+    SkillReviewUnavailable,
+    #[error("the skill review does not match the mutation")]
+    SkillReviewMismatch,
+    #[error("the requested skill is already assigned")]
+    SkillAlreadyAssigned,
+    #[error("the requested skill is not assigned")]
+    SkillNotAssigned,
+    #[error("the agent already has the maximum number of skills")]
+    AgentSkillLimitExceeded,
     #[error("the profile edit review is unavailable")]
     ProfileReviewUnavailable,
     #[error("the profile edit review does not match the activation")]
@@ -85,6 +104,14 @@ impl AppError {
             Self::AgentProfileNotFound => "unknown_profile",
             Self::DuplicateProfileName => "active_name_conflict",
             Self::StaleAgentProfileVersion => "stale_profile_version",
+            Self::SkillNotFound => "skill_not_found",
+            Self::DuplicateSkillName => "active_skill_name_conflict",
+            Self::StaleSkillVersion => "stale_skill_version",
+            Self::SkillReviewUnavailable => "skill_review_unavailable",
+            Self::SkillReviewMismatch => "skill_review_mismatch",
+            Self::SkillAlreadyAssigned => "skill_already_assigned",
+            Self::SkillNotAssigned => "skill_not_assigned",
+            Self::AgentSkillLimitExceeded => "agent_skill_limit_exceeded",
             Self::ProfileReviewUnavailable => "profile_review_unavailable",
             Self::ProfileReviewMismatch => "profile_review_mismatch",
             Self::ReviewDigestMismatch => "review_digest_mismatch",

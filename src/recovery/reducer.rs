@@ -253,7 +253,34 @@ pub fn reduce(
         | ApplicationEvent::AgentProfilesListed { .. }
         | ApplicationEvent::AgentProfileViewed { .. }
         | ApplicationEvent::AgentProfileHistoryViewed { .. }
-        | ApplicationEvent::AgentProfileVersionViewed { .. } => {}
+        | ApplicationEvent::AgentProfileVersionViewed { .. }
+        | ApplicationEvent::SkillCreated { .. }
+        | ApplicationEvent::SkillVersionActivated { .. }
+        | ApplicationEvent::SkillsListed { .. }
+        | ApplicationEvent::SkillViewed { .. }
+        | ApplicationEvent::SkillHistoryViewed { .. }
+        | ApplicationEvent::SkillVersionViewed { .. } => {}
+        ApplicationEvent::AgentSkillAssigned {
+            profile,
+            previous_profile_version_id,
+            ..
+        }
+        | ApplicationEvent::AgentSkillUpgraded {
+            profile,
+            previous_profile_version_id,
+            ..
+        }
+        | ApplicationEvent::AgentSkillUnassigned {
+            profile,
+            previous_profile_version_id,
+            ..
+        } => {
+            next.agent_profiles
+                .reduce(&ApplicationEvent::AgentProfileVersionActivated {
+                    profile: profile.clone(),
+                    previous_version_id: *previous_profile_version_id,
+                })?;
+        }
     }
     next.agent_profiles.reduce(&event.event)?;
     next.last_sequence = event.sequence;

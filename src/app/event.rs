@@ -9,7 +9,24 @@ use crate::{
         InstallationId, ObjectRef, SessionId, Sha256Digest, canonical_json_bytes, sha256,
     },
     persistence::RecoveryError,
+    skills::{SkillProvenance, SkillVersionRef},
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillEventSummary {
+    pub skill: SkillVersionRef,
+    pub display_name: String,
+    pub provenance: SkillProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillHistoryEventEntry {
+    pub skill: SkillVersionRef,
+    pub created_at_ms: i64,
+    pub predecessor_version_id: Option<crate::domain::SkillVersionId>,
+}
 
 pub const EVENT_SCHEMA_VERSION: u16 = 1;
 const DIGEST_FORMAT_VERSION: u16 = 1;
@@ -86,6 +103,58 @@ pub enum ApplicationEvent {
         version: crate::domain::ObjectVersion,
         predecessor_version_id: Option<AgentProfileVersionId>,
     },
+    SkillCreated {
+        skill: SkillVersionRef,
+        display_name: String,
+        provenance: SkillProvenance,
+    },
+    SkillVersionActivated {
+        skill: SkillVersionRef,
+        previous_version_id: crate::domain::SkillVersionId,
+        display_name: String,
+        provenance: SkillProvenance,
+    },
+    SkillsListed {
+        skills: Vec<SkillEventSummary>,
+        total_count: u32,
+        returned_count: u32,
+        truncated: bool,
+    },
+    SkillViewed {
+        skill: SkillVersionRef,
+        display_name: String,
+        provenance: SkillProvenance,
+    },
+    SkillHistoryViewed {
+        skill_id: crate::domain::SkillId,
+        active: SkillVersionRef,
+        versions: Vec<SkillHistoryEventEntry>,
+        total_count: u32,
+        returned_count: u32,
+        truncated: bool,
+    },
+    SkillVersionViewed {
+        skill: SkillVersionRef,
+        display_name: String,
+        provenance: SkillProvenance,
+        predecessor_version_id: Option<crate::domain::SkillVersionId>,
+    },
+    AgentSkillAssigned {
+        profile: AgentProfileVersion,
+        previous_profile_version_id: AgentProfileVersionId,
+        skill: SkillVersionRef,
+    },
+    AgentSkillUpgraded {
+        profile: AgentProfileVersion,
+        previous_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+        replacement: SkillVersionRef,
+    },
+    AgentSkillUnassigned {
+        profile: AgentProfileVersion,
+        previous_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+    },
 }
 
 impl ApplicationEvent {
@@ -108,6 +177,15 @@ impl ApplicationEvent {
             Self::AgentProfileViewed { .. } => "agent_profile_viewed",
             Self::AgentProfileHistoryViewed { .. } => "agent_profile_history_viewed",
             Self::AgentProfileVersionViewed { .. } => "agent_profile_version_viewed",
+            Self::SkillCreated { .. } => "skill_created",
+            Self::SkillVersionActivated { .. } => "skill_version_activated",
+            Self::SkillsListed { .. } => "skills_listed",
+            Self::SkillViewed { .. } => "skill_viewed",
+            Self::SkillHistoryViewed { .. } => "skill_history_viewed",
+            Self::SkillVersionViewed { .. } => "skill_version_viewed",
+            Self::AgentSkillAssigned { .. } => "agent_skill_assigned",
+            Self::AgentSkillUpgraded { .. } => "agent_skill_upgraded",
+            Self::AgentSkillUnassigned { .. } => "agent_skill_unassigned",
         }
     }
 }
