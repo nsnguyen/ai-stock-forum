@@ -118,8 +118,51 @@ fn validate_skill_slash_commands(section: &str) -> Result<(), String> {
 
 fn logical_markdown_units(document: &str) -> Vec<String> {
     fn flush(units: &mut Vec<String>, current: &mut String) {
-        if !current.is_empty() {
-            units.push(std::mem::take(current));
+        if current.is_empty() {
+            return;
+        }
+
+        let logical_unit = std::mem::take(current);
+        let mut sentence_start = 0;
+        let mut characters = logical_unit.char_indices().peekable();
+        while let Some((punctuation_start, character)) = characters.next() {
+            if !matches!(character, '.' | '!' | '?') {
+                continue;
+            }
+
+            let mut punctuation_end = punctuation_start + character.len_utf8();
+            let mut punctuation_count = 1;
+            let mut only_periods = character == '.';
+            while let Some(&(index, next)) = characters.peek() {
+                if !matches!(next, '.' | '!' | '?') {
+                    break;
+                }
+                characters.next();
+                punctuation_end = index + next.len_utf8();
+                punctuation_count += 1;
+                only_periods &= next == '.';
+            }
+
+            let next_character = logical_unit[punctuation_end..]
+                .chars()
+                .find(|candidate| !candidate.is_whitespace());
+            let continuing_ellipsis = only_periods
+                && punctuation_count > 1
+                && next_character.is_some_and(char::is_lowercase);
+            if continuing_ellipsis {
+                continue;
+            }
+
+            let sentence = logical_unit[sentence_start..punctuation_start].trim();
+            if !sentence.is_empty() {
+                units.push(sentence.to_owned());
+            }
+            sentence_start = punctuation_end;
+        }
+
+        let sentence = logical_unit[sentence_start..].trim();
+        if !sentence.is_empty() {
+            units.push(sentence.to_owned());
         }
     }
 
@@ -207,6 +250,55 @@ fn token_window_is_negated(tokens: &[String], left: usize, right: usize) -> bool
     }) || window.windows(2).any(|pair| pair[0] == "no" && pair[1] == "longer")
 }
 
+fn token_slice_contains_phrase(tokens: &[String], start: usize, end: usize, phrase: &[&str]) -> bool {
+    !phrase.is_empty()
+        && start < end
+        && end <= tokens.len()
+        && tokens[start..end]
+            .windows(phrase.len())
+            .any(|window| window.iter().map(String::as_str).eq(phrase.iter().copied()))
+}
+
+fn q_exit_relation_is_negated(tokens: &[String], q_index: usize, verb_index: usize) -> bool {
+    const EXPLICIT_NEGATIONS: [&str; 9] = [
+        "not", "never", "neither", "no", "cannot", "cant", "wont", "doesnt", "isnt",
+    ];
+
+    let left = q_index.min(verb_index);
+    let right = q_index.max(verb_index);
+    let before = &tokens[left.saturating_sub(3)..left];
+    let local_end = (right + 7).min(tokens.len());
+    let relation_and_effect = &tokens[left..local_end];
+
+    before
+        .iter()
+        .any(|token| EXPLICIT_NEGATIONS.contains(&token.as_str()))
+        || relation_and_effect.iter().any(|token| {
+            EXPLICIT_NEGATIONS.contains(&token.as_str())
+                || matches!(token.as_str(), "inert" | "ignored" | "unsupported")
+        })
+        || token_slice_contains_phrase(tokens, left, local_end, &["does", "nothing"])
+        || token_slice_contains_phrase(tokens, left, local_end, &["has", "no", "effect"])
+        || token_slice_contains_phrase(tokens, left, local_end, &["have", "no", "effect"])
+}
+
+fn control_relation_is_negated(tokens: &[String], start: usize, end: usize) -> bool {
+    const EXPLICIT_NEGATIONS: [&str; 9] = [
+        "not", "never", "neither", "no", "cannot", "cant", "wont", "doesnt", "isnt",
+    ];
+
+    let local_start = start.saturating_sub(2);
+    let local_end = (end + 7).min(tokens.len());
+    let local = &tokens[local_start..local_end];
+
+    local.iter().any(|token| {
+        EXPLICIT_NEGATIONS.contains(&token.as_str())
+            || matches!(token.as_str(), "optional" | "unsupported")
+    }) || token_slice_contains_phrase(tokens, local_start, local_end, &["does", "nothing"])
+        || token_slice_contains_phrase(tokens, local_start, local_end, &["has", "no", "effect"])
+        || token_slice_contains_phrase(tokens, local_start, local_end, &["have", "no", "effect"])
+}
+
 fn unit_maps_bare_q_to_exit(tokens: &[String]) -> bool {
     const EXIT_WORDS: [&str; 6] = ["quit", "quits", "exit", "exits", "close", "closes"];
     for (q_index, _) in tokens.iter().enumerate().filter(|(_, token)| token.as_str() == "q") {
@@ -226,7 +318,9 @@ fn unit_maps_bare_q_to_exit(tokens: &[String]) -> bool {
                 .and_then(|index| tokens.get(index))
                 .is_some_and(|token| token == "/quit")
                 || tokens[left..=right].iter().any(|token| token == "/quit");
-            if !verb_belongs_to_slash_quit && !token_window_is_negated(tokens, left, right) {
+            if !verb_belongs_to_slash_quit
+                && !q_exit_relation_is_negated(tokens, q_index, verb_index)
+            {
                 return true;
             }
         }
@@ -257,11 +351,18 @@ fn unit_requires_colon_skill_control(tokens: &[String]) -> bool {
             let start = left.saturating_sub(4);
             let end = right.saturating_add(4).min(tokens.len().saturating_sub(1));
             let window = &tokens[start..=end];
-            let requires = window
-                .iter()
-                .any(|token| REQUIREMENTS.contains(&token.as_str()))
-                || window.windows(2).any(|pair| pair[0] == "have" && pair[1] == "to");
-            if requires && !token_window_is_negated(tokens, left, right) {
+            let requirement_index = (start..=end)
+                .filter(|index| REQUIREMENTS.contains(&tokens[*index].as_str()))
+                .min_by_key(|index| index.abs_diff(control_index));
+            let have_to_index = window
+                .windows(2)
+                .position(|pair| pair[0] == "have" && pair[1] == "to")
+                .map(|offset| start + offset);
+            let relation_requirement = requirement_index.or(have_to_index);
+            if relation_requirement.is_some_and(|requirement_index| {
+                let relation_start = requirement_index.min(left);
+                !control_relation_is_negated(tokens, relation_start, right)
+            }) {
                 return true;
             }
         }
@@ -658,6 +759,10 @@ fn slash_and_control_validators_reject_unsupported_or_contradictory_guidance() {
     assert!(validate_skill_slash_commands(unsupported).is_err());
 
     for contradictory in [
+        "Bare q is inert. Press q to exit.",
+        "You never need :next. Press :next to continue.",
+        "Bare **`q`** is INERT?!\nPress   `Q`... to EXIT!!!",
+        "You NEVER need `:next`.\nPress **`:NEXT`** to continue!",
         "Press `q` to exit.",
         "Q exits the app!",
         "| `q` | Close the application. |",
@@ -675,6 +780,12 @@ fn slash_and_control_validators_reject_unsupported_or_contradictory_guidance() {
     }
 
     for legitimate in [
+        "Press q to exit does nothing.",
+        "Press `q`; it does nothing.",
+        "You never need `:next` to continue.",
+        "Use `/quit` to exit; bare `q` remains inert.",
+        "Press q to close has no effect.",
+        "The q key is ignored and has no effect.",
         "Bare `q` is inert; `/quit` exits.",
         "`q` does not exit or close the app.",
         "`/quit` exits through normal shutdown.",
