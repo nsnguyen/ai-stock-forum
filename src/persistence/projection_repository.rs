@@ -1,18 +1,23 @@
-use std::{collections::BTreeMap, str::FromStr};
+use std::{collections::{BTreeMap, BTreeSet}, str::FromStr};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
     agents::AgentProfilesProjection,
     app::{EventEnvelope, ShutdownReason},
-    domain::Sha256Digest,
-    recovery::{InstallationProjection, ProjectionState, SessionEndProjection, SessionProjection},
+    domain::{Sha256Digest, SkillId, SkillVersionId},
+    recovery::{
+        InstallationProjection, ProjectionState, SessionEndProjection, SessionProjection,
+        SkillsProjection,
+    },
+    skills::{SkillVersion, builtin_manifests},
 };
 
 use super::{
     EventRepository, ImmediateTransaction, PersistenceError, RecoveryError,
     agent_profile_repository::{active_profiles_match, reconcile_expected_versions},
-    replace_active_profiles,
+    load_all_skill_versions, load_all_versions, reconcile_skill_versions,
+    replace_active_profiles, replace_active_skills,
 };
 
 pub struct ProjectionRepository;
@@ -107,13 +112,30 @@ impl ProjectionRepository {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| RecoveryError::QueryFailed)?;
         let state = prepare_rebuild(&transaction, events)?;
+        reconcile_skill_projection(&transaction, &state.skills)
+            .map_err(recovery_from_persistence)?;
         reconcile_expected_versions(&transaction, events)?;
+        load_all_versions(&transaction).map_err(recovery_from_persistence)?;
         clear_rebuildable_projection_rows(&transaction)?;
         store_transaction(&transaction, &state).map_err(recovery_from_persistence)?;
         transaction
             .commit()
             .map_err(|_| RecoveryError::QueryFailed)?;
         Ok(state)
+    }
+
+    pub(crate) fn reconcile_skills(
+        connection: &mut Connection,
+        events: &[EventEnvelope],
+    ) -> Result<(), PersistenceError> {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| PersistenceError::QueryFailed)?;
+        let state = prepare_rebuild(&transaction, events).map_err(persistence_from_recovery)?;
+        reconcile_skill_projection(&transaction, &state.skills)?;
+        transaction
+            .commit()
+            .map_err(|_| PersistenceError::ActiveSkillRebuildFailed)
     }
 
     pub(crate) fn reconcile_agent_profiles(
@@ -125,6 +147,7 @@ impl ProjectionRepository {
             .map_err(|_| RecoveryError::QueryFailed)?;
         let state = prepare_rebuild(&transaction, events)?;
         reconcile_expected_versions(&transaction, events)?;
+        load_all_versions(&transaction).map_err(recovery_from_persistence)?;
         replace_active_profiles(&transaction, &state.agent_profiles)
             .map_err(recovery_from_persistence)?;
         transaction
@@ -140,7 +163,10 @@ impl ProjectionRepository {
         events: &[EventEnvelope],
     ) -> Result<ProjectionState, RecoveryError> {
         let state = prepare_rebuild(transaction.transaction(), events)?;
+        reconcile_skill_projection(transaction.transaction(), &state.skills)
+            .map_err(recovery_from_persistence)?;
         reconcile_expected_versions(transaction.transaction(), events)?;
+        load_all_versions(transaction.transaction()).map_err(recovery_from_persistence)?;
         clear_rebuildable_projection_rows(transaction.transaction())?;
         Ok(state)
     }
@@ -159,6 +185,9 @@ fn prepare_rebuild(
 }
 
 fn clear_rebuildable_projection_rows(transaction: &Transaction<'_>) -> Result<(), RecoveryError> {
+    transaction
+        .execute("DELETE FROM active_skills", [])
+        .map_err(|_| RecoveryError::QueryFailed)?;
     transaction
         .execute("DELETE FROM active_agent_profiles", [])
         .map_err(|_| RecoveryError::ActiveAgentProfileRebuildFailed)?;
@@ -448,6 +477,7 @@ where
             )
             .map_err(|_| PersistenceError::QueryFailed)?;
     }
+    reconcile_skill_projection(transaction, &state.skills)?;
     replace_active_profiles(transaction, &state.agent_profiles)?;
     after_active_profiles(transaction)?;
     let digest = state
@@ -465,6 +495,76 @@ where
         )
         .map_err(|_| PersistenceError::QueryFailed)?;
     Ok(())
+}
+
+fn reconcile_skill_projection(
+    transaction: &Transaction<'_>,
+    projection: &SkillsProjection,
+) -> Result<(), PersistenceError> {
+    let builtins = builtin_manifests()
+        .map_err(|_| PersistenceError::SkillVersionIntegrityMismatch)?
+        .into_iter()
+        .map(|manifest| manifest.skill().clone())
+        .collect::<Vec<_>>();
+    reconcile_skill_versions(transaction, &builtins)?;
+    let active = validated_active_skills(transaction, projection, &builtins)?;
+    replace_active_skills(transaction, &active)
+}
+
+fn validated_active_skills(
+    connection: &Connection,
+    projection: &SkillsProjection,
+    builtins: &[SkillVersion],
+) -> Result<Vec<SkillVersion>, PersistenceError> {
+    let stored = load_all_skill_versions(connection)?;
+    let mut expected_ids = BTreeSet::<SkillVersionId>::new();
+    let mut builtin_by_id = BTreeMap::<SkillVersionId, &SkillVersion>::new();
+    for builtin in builtins {
+        expected_ids.insert(builtin.skill_version_id());
+        builtin_by_id.insert(builtin.skill_version_id(), builtin);
+    }
+    let projected = projection.version_metadata().collect::<Vec<_>>();
+    for (reference, _, _, _) in &projected {
+        if !expected_ids.insert(reference.skill_version_id())
+            && !builtin_by_id.contains_key(&reference.skill_version_id())
+        {
+            return Err(PersistenceError::SkillVersionIntegrityMismatch);
+        }
+    }
+    if stored.len() != expected_ids.len() {
+        return Err(PersistenceError::SkillVersionIntegrityMismatch);
+    }
+    for skill in &stored {
+        if let Some(builtin) = builtin_by_id.get(&skill.skill_version_id()) {
+            if skill != *builtin {
+                return Err(PersistenceError::SkillVersionIntegrityMismatch);
+            }
+            continue;
+        }
+        let matches = projected.iter().any(|(reference, display_name, provenance, predecessor)| {
+            skill.reference() == **reference
+                && skill.content().display_name == **display_name
+                && skill.provenance() == *provenance
+                && skill.predecessor() == *predecessor
+        });
+        if !matches {
+            return Err(PersistenceError::SkillVersionIntegrityMismatch);
+        }
+    }
+
+    let mut active = builtins
+        .iter()
+        .cloned()
+        .map(|skill| (skill.skill_id(), skill))
+        .collect::<BTreeMap<SkillId, SkillVersion>>();
+    for reference in projection.active_refs() {
+        let skill = stored
+            .iter()
+            .find(|skill| skill.reference() == *reference)
+            .ok_or(PersistenceError::SkillVersionIntegrityMismatch)?;
+        active.insert(skill.skill_id(), skill.clone());
+    }
+    Ok(active.into_values().collect())
 }
 
 fn parse_id<T: FromStr>(value: String) -> Result<T, RecoveryError> {

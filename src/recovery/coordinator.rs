@@ -73,10 +73,21 @@ impl RecoveryCoordinator {
         ids: &dyn IdGenerator,
         hooks: &[Box<dyn RecoveryHook>],
     ) -> Result<BootstrapState, StartupError> {
+        Self::bootstrap_after_database_ready(database, clock, ids, hooks)
+    }
+
+    pub(crate) fn bootstrap_after_database_ready(
+        database: &mut Database,
+        clock: &dyn Clock,
+        ids: &dyn IdGenerator,
+        hooks: &[Box<dyn RecoveryHook>],
+    ) -> Result<BootstrapState, StartupError> {
         let process_guard = database.acquire_process_guard()?;
         EventRepository::verify(database.connection()).map_err(startup_from_recovery)?;
         let events =
             EventRepository::load_all(database.connection()).map_err(startup_from_recovery)?;
+        ProjectionRepository::reconcile_skills(database.connection_mut(), &events)
+            .map_err(startup_from_persistence)?;
         ProjectionRepository::reconcile_agent_profiles(database.connection_mut(), &events)
             .map_err(startup_from_recovery)?;
         let mut state = match ProjectionRepository::load(database.connection()) {

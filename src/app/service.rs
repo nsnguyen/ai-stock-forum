@@ -424,8 +424,12 @@ impl ApplicationService {
         binding_catalog: AgentBindingCatalogSnapshot,
     ) -> Result<Self, StartupError> {
         let mut database = Database::open(paths)?;
-        let state =
-            RecoveryCoordinator::bootstrap(&mut database, clock.as_ref(), ids.as_ref(), &[])?;
+        let state = RecoveryCoordinator::bootstrap_after_database_ready(
+            &mut database,
+            clock.as_ref(),
+            ids.as_ref(),
+            &[],
+        )?;
         let lifecycle = Arc::new(SharedLifecycle {
             session_id: state.session_id(),
             phase: RwLock::new(LifecyclePhase::Open),
