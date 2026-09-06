@@ -7,20 +7,21 @@ use super::{
 };
 use crate::{
     agents::ProfileTemplateId,
+    agents::builtin_profile_templates,
     app::{
         AgentProfileSelector, ApplicationCommand, CommandOutcome, CommandView, ShutdownDisposition,
         ShutdownReason,
     },
     audit::AuditEntry,
     ui::command::{AgentWorkflowCommand, ParsedLine, parse_line},
-    ui::profile_editor::{PreviewEditRequest, ProfileEditorEffect, ProfileEditorStep},
+    ui::profile_editor::{
+        PreviewEditRequest, ProfileEditorEffect, ProfileEditorMode, ProfileEditorStep,
+    },
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 const COMMAND_IN_FLIGHT_MESSAGE: &str = "A command is already running.";
 const COMMAND_REJECTED_MESSAGE: &str = "Command rejected. Check the command and try again.";
-const CONFIRMATION_MISMATCH_MESSAGE: &str = "Confirmation did not match; draft retained.";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControllerEffect {
     None,
@@ -355,8 +356,7 @@ fn active_profile_editor(model: &TuiModel) -> bool {
 
 fn handle_confirmation_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
     match key.code {
-        KeyCode::Enter if no_modifiers(key.modifiers) => {
-            let input = model.command.take_text();
+        KeyCode::Enter if key.kind == KeyEventKind::Press => {
             let Some(command) = model
                 .agents
                 .pending_confirmation
@@ -365,13 +365,9 @@ fn handle_confirmation_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEff
             else {
                 return ControllerEffect::None;
             };
-            if exact_profile_confirmation(&command).as_deref() == Some(input.as_str()) {
-                model.clear_message();
-                ControllerEffect::ExecuteProfile(command)
-            } else {
-                model.set_message(Severity::Error, CONFIRMATION_MISMATCH_MESSAGE);
-                ControllerEffect::Redraw
-            }
+            model.command.clear();
+            model.clear_message();
+            ControllerEffect::ExecuteProfile(command)
         }
         KeyCode::Esc if no_modifiers(key.modifiers) => {
             model.command.clear();
@@ -428,16 +424,9 @@ fn handle_profile_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerE
                 apply_profile_editor_effect(model, effect)
             }
         }
-        KeyCode::Enter => {
-            let input = model.command.take_text();
-            let effect = model
-                .agents
-                .editor
-                .as_mut()
-                .map(|editor| editor.submit_line(&input))
-                .unwrap_or(ProfileEditorEffect::None);
-            apply_profile_editor_effect(model, effect)
-        }
+        KeyCode::Up if no_modifiers(key.modifiers) => cycle_profile_template(model, false),
+        KeyCode::Down if no_modifiers(key.modifiers) => cycle_profile_template(model, true),
+        KeyCode::Enter => submit_profile_editor_enter(model, key),
         KeyCode::Char(character) if text_modifiers(key.modifiers) => {
             model.command.insert(character);
             ControllerEffect::Redraw
@@ -464,6 +453,63 @@ fn handle_profile_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerE
     }
 }
 
+fn cycle_profile_template(model: &mut TuiModel, forward: bool) -> ControllerEffect {
+    let Some(editor) = model.agents.editor.as_mut() else {
+        return ControllerEffect::None;
+    };
+    if editor.step() != ProfileEditorStep::Template {
+        return ControllerEffect::None;
+    }
+    let templates = builtin_profile_templates();
+    if templates.is_empty() {
+        return ControllerEffect::None;
+    }
+    let current = templates
+        .iter()
+        .position(|template| template.role == editor.draft().role)
+        .unwrap_or(0);
+    let selected = if forward {
+        (current + 1) % templates.len()
+    } else {
+        (current + templates.len() - 1) % templates.len()
+    };
+    if editor.select_template(&templates[selected]) {
+        model.agents.selected_template = selected;
+    }
+    ControllerEffect::Redraw
+}
+
+fn submit_profile_editor_enter(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
+    let on_review = model
+        .agents
+        .editor
+        .as_ref()
+        .is_some_and(|editor| editor.step() == ProfileEditorStep::Review);
+    if on_review && key.kind != KeyEventKind::Press {
+        return ControllerEffect::None;
+    }
+
+    let input = model.command.take_text();
+    let effect = model
+        .agents
+        .editor
+        .as_mut()
+        .map(|editor| {
+            if editor.step() == ProfileEditorStep::Review && input.is_empty() {
+                let control = match editor.mode() {
+                    ProfileEditorMode::Create { .. } => ":create",
+                    ProfileEditorMode::Edit { .. } if editor.review().is_some() => ":activate",
+                    ProfileEditorMode::Edit { .. } => ":review",
+                };
+                editor.submit_line(control)
+            } else {
+                editor.submit_keyboard_line(&input)
+            }
+        })
+        .unwrap_or(ProfileEditorEffect::None);
+    apply_profile_editor_effect(model, effect)
+}
+
 fn apply_profile_editor_effect(
     model: &mut TuiModel,
     effect: ProfileEditorEffect,
@@ -484,16 +530,6 @@ fn apply_profile_editor_effect(
             model.agents.pane = AgentsPane::Detail;
             ControllerEffect::CancelProfileReview
         }
-    }
-}
-
-fn exact_profile_confirmation(command: &ApplicationCommand) -> Option<String> {
-    match command {
-        ApplicationCommand::CreateAgentProfile { .. } => Some("create".to_owned()),
-        ApplicationCommand::ActivateAgentProfileVersion { review_digest, .. } => {
-            Some(format!("activate {review_digest}"))
-        }
-        _ => None,
     }
 }
 
