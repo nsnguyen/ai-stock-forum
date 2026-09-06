@@ -31,10 +31,26 @@ profile version; it does not remove any skill history.
 
 ## Keyboard-first workflow
 
-Launch the Adaptive Cockpit and Press `s` to open Skills. Use `Up` and `Down`
-to select rows and actions, `Enter` to open or accept the visible action, and
-`Esc` to return or cancel. The footer shows the controls available in the
+Launch the Adaptive Cockpit and Press `s` to open Skills. Controls are
+pane-specific: `Up` and `Down` select vertical rows or items, while `Left` and
+`Right` select horizontal actions. `Enter` opens or accepts the visible action,
+and `Esc` returns or cancels. The footer shows the controls available in the
 current state. You never need `:next` or `:create` for this workflow.
+
+### Pane controls
+
+| Pane | Selection | `Enter` | `Esc` |
+| --- | --- | --- | --- |
+| Library | `Up/Down` selects skill rows. | Opens the selected exact active version. | Returns to the originating workspace. |
+| Create source | `Up/Down` selects a starting point: blank or a built-in. | Opens the editor with that starting point. | Returns to Library. |
+| Editor | Typing edits the field; `Left/Right` moves the text cursor. | Accepts the field or requests Review validation at the final step. | Returns to the prior field or cancels from the first step. |
+| Detail actions | `Left/Right` selects the Assign, Create Version, or History action. | Opens the selected action. | Returns to Library. |
+| History | `Up/Down` selects immutable version rows. | Opens the exact read-only version. | Returns to Detail. |
+| Agent picker | `Up/Down` selects agent rows. | Opens Review for that agent and exact skill version. | Returns to Detail. |
+| Agent assigned skills | `Up/Down` selects pinned skill rows; `Left/Right` selects available View, Upgrade, or Unassign actions. | Opens the selected action or its Review. | Closes the assigned-skills panel. |
+| Review | No selection changes. | `Enter` validates the displayed operation and opens Confirmation. | Returns to the originating picker, detail, or editor. |
+| Confirmation | No selection changes. | `Enter` commits only the displayed reviewed operation. | Cancels confirmation and returns without mutation. |
+| Result | No selection changes. | Returns to Detail. | Returns to Detail. |
 
 ### Create a custom skill
 
@@ -48,8 +64,8 @@ current state. You never need `:next` or `:create` for this workflow.
 
 ### Create and inspect versions
 
-1. Select a skill with `Up` and `Down`, then open it with `Enter`.
-2. Select Create Version with the action arrows and press `Enter`.
+1. Select a skill row with `Up` and `Down`, then open it with `Enter`.
+2. Select Create Version with `Left` and `Right`, then press `Enter`.
 3. Edit the copied active content, review it, and confirm with `Enter`. Unchanged
    content is rejected rather than creating a duplicate immutable version.
 4. Select History, choose a historical version with `Up` and `Down`, and press
@@ -57,16 +73,18 @@ current state. You never need `:next` or `:create` for this workflow.
 
 ### Assign, deliberately use history, upgrade, and unassign
 
-1. On skill detail or a historical version, select Assign and press `Enter`.
+1. On skill detail or a historical version, select Assign with `Left` and
+   `Right`, then press `Enter`.
 2. Choose an agent with `Up` and `Down`; `Enter` opens a review naming the
    agent, operation, and exact version. A second `Enter` opens confirmation and
    confirmation `Enter` commits the new immutable agent profile version.
-3. To upgrade, open Agents with `a`, select the assigned exact skill, choose
-   Upgrade, and review and confirm the exact replacement version. A newer
-   active skill alone never changes the pin.
-4. To unassign, choose Unassign from the same assigned-skill actions, then
-   review and confirm. `Esc` backs out at every review or confirmation step
-   without applying the mutation.
+3. To upgrade, open Agents with `a`. In assigned skills, use `Up` and `Down` to
+   select the pinned skill row and `Left` and `Right` to choose Upgrade, then
+   review and confirm the exact replacement version. A newer active skill alone
+   never changes the pin.
+4. To unassign, use `Left` and `Right` to choose Unassign from the same
+   assigned-skill row, then review and confirm. `Esc` backs out at every review
+   or confirmation step without applying the mutation.
 
 Assigning a historical version is intentionally the same reviewed operation as
 assigning the active version. The review must identify that exact version so
