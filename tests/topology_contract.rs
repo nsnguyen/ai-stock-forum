@@ -4,7 +4,7 @@ use ai_stock_forum::{
 };
 
 #[test]
-fn phase_two_agent_profiles_preserve_the_approved_module_boundaries() {
+fn phase_two_profiles_and_declarative_skills_preserve_the_approved_module_boundaries() {
     let names = [
         agents::MODULE_NAME,
         app::MODULE_NAME,
@@ -33,8 +33,17 @@ fn phase_two_agent_profiles_preserve_the_approved_module_boundaries() {
             persistence::MODULE_NAME,
             recovery::MODULE_NAME,
             runtime::MODULE_NAME,
+            skills::MODULE_NAME,
             ui::MODULE_NAME,
         ],
-        ["agents", "app", "persistence", "recovery", "runtime", "ui"]
+        [
+            "agents",
+            "app",
+            "persistence",
+            "recovery",
+            "runtime",
+            "skills",
+            "ui",
+        ]
     );
 }

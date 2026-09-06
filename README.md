@@ -5,7 +5,9 @@ terminal application. Phase 0 establishes the typed event core, SQLite
 persistence, startup/recovery lifecycle, audit inspection, and the fallback
 command adapter. Phase 0B adds an interactive full-screen cockpit while
 preserving that fallback. Phase 2 Agent Profiles Milestone 1 adds local,
-versioned profile management without running models, agents, or market work.
+versioned profile management. Phase 2 Declarative Skills Milestone 2 adds an
+inert, versioned skill library and exact agent assignments without running
+models, agents, or market work.
 
 ## Sources of truth
 
@@ -13,6 +15,8 @@ versioned profile management without running models, agents, or market work.
 - [Delivery phases](phases.md)
 - [Phase 2 Agent Profile Foundation design](docs/superpowers/specs/2026-09-05-phase-2-agent-profile-foundation-design.md)
 - [Phase 2 Agent Profile testing guide](docs/testing/phase-2-agent-profile-foundation.md)
+- [Phase 2 Declarative Skills design](docs/superpowers/specs/2026-09-05-declarative-skills-design.md)
+- [Declarative Skills testing and workflow guide](docs/testing/declarative-skills.md)
 - [Approved design specification](docs/superpowers/specs/2026-08-31-phase-0-rust-foundation-design.md)
 - [Phase 0 implementation plan](docs/superpowers/plans/2026-08-31-phase-0-rust-foundation.md)
 
@@ -52,6 +56,7 @@ thresholds it is Narrow from `60x18`, Medium from `80x24`, and Wide from
 | --- | --- |
 | `1`, `2`, `3`, `4`, `?` | Select Overview, Setup, Audit, or Help. |
 | `a` outside command entry | Open the Agents workspace. Inside command entry, `a` remains text. |
+| `s` outside command entry | Open the Skills workspace. Inside command entry, `s` remains text. |
 | `Tab`, `Shift+Tab` | Move focus forward or backward among visible regions. |
 | Arrow keys, `PageUp`, `PageDown`, `Home`, `End` | Navigate the focused view or Audit selection. |
 | `i`, `Esc` | Open/focus the inspector; then dismiss the inspector or message. |
@@ -126,11 +131,29 @@ amended to its final shape. Databases at the released schema-v1 boundary upgrade
 in place. Databases created by an intermediate Phase 2 development build must be
 recreated rather than treated as a supported upgrade source.
 
-Milestone 1 does not execute a model or agent. Declarative skills, hybrid
-memory, provider connections, model execution, MCP use, rooms, debates, market
-data, engineering jobs, and trading behavior remain deferred. See the
+Milestone 1 does not execute a model or agent. Skill execution, hybrid memory,
+provider connections, model execution, MCP use, rooms, debates, market data,
+engineering jobs, and trading behavior remain deferred. See the
 [Phase 2 testing guide](docs/testing/phase-2-agent-profile-foundation.md) for
 exact isolated TUI and fallback procedures.
+
+## Phase 2 Declarative Skills Milestone 2
+
+Declarative Skills Milestone 2 is complete. It provides four deterministic
+built-ins, guided custom creation, immutable version history, exact pinned
+agent assignments, deliberate historical assignment, explicit upgrade and
+unassign reviews, schema version 3 persistence, recovery, and compact-to-wide
+Adaptive Cockpit views. Skills are inert accepted context: they cannot execute
+or grant shell, filesystem, Git, MCP, provider, browser, or network access.
+
+Normal use is keyboard-first: press `s`, navigate with arrows, and use `Enter`
+and `Esc` through visible review and confirmation steps. Optional `/skill`
+commands open the same typed workflows; mutation shortcuts stage review rather
+than writing directly. Bare `q` remains inert and `/quit` remains normal
+shutdown. Inference and chat remain deferred to Phase 3. See the
+[Declarative Skills testing and workflow guide](docs/testing/declarative-skills.md)
+for the exact workflow, isolated local commands, persistence checks, and manual
+acceptance checklist.
 
 ## Build, run, and test
 
@@ -173,6 +196,11 @@ bare `agent` alias for compatibility:
 | `/agent show <name-or-id>` | Shows the accepted active profile fields and immutable metadata. | Continues. |
 | `/agent edit <name-or-id>` | Loads the active version into a local editor, previews an authoritative diff, and requires explicit activation confirmation. | Continues until confirmation or cancel. |
 | `/agent history <name-or-id> [version]` | Shows bounded newest-first metadata, or the exact immutable version with complete accepted content and predecessor diff. | Continues. |
+| `/skill list` or `/skills` | Lists the bounded local skill library with active exact versions and provenance. | Continues. |
+| `/skill add` | Opens the local guided creator and stages review before version 1 can be confirmed. | Continues until confirmation or cancel. |
+| `/skill show <name-or-id> [version]` | Shows the active or requested exact historical skill version. | Continues. |
+| `/skill assign <skill> <agent> [version]` | Stages an assign or upgrade review for the displayed exact version; it does not mutate directly. | Continues until confirmation or cancel. |
+| `/skill unassign <skill> <agent>` | Stages an unassign review for the agent's exact pin; it does not mutate directly. | Continues until confirmation or cancel. |
 | `/quit` | Outputs exactly `Shutting down.`; commits `ShutdownRequested` and ends the session with `UserQuit`. | Ends normally. |
 
 In fallback line-command mode, creation requires the exact phrase `create` and
@@ -210,11 +238,11 @@ Privacy warning: users must not enter secrets; Phase 0 has no supported secret, 
 
 On rejection, a bounded escaped first token, category, exact byte count, and SHA-256 digest may be persisted. Audit rendering may show the category, bounded safe token, and byte count; the digest and rejected full line are not rendered.
 
-For Agent Profiles Milestone 1, personality, instructions, and binding labels
-are stored locally as accepted profile content and appear only in explicit
-profile detail/editor views. Do not enter API keys or credentials; Milestone 1
-has no secret-storage or provider-connection workflow. Generic audit entries
-and errors omit profile prose, provider material, and rejected hostile text.
+For Phase 2 Milestones 1 and 2, profile and skill instructions are stored
+locally as accepted content and appear only in their explicit detail/editor
+views. Do not enter API keys or credentials; Phase 2 has no secret-storage or
+provider-connection workflow. Generic audit entries and errors omit profile or
+skill prose, provider material, and rejected hostile text.
 
 ## Startup and sessions
 
@@ -240,12 +268,12 @@ Windows runtime verification has not been performed for this milestone.
 
 ## Explicit non-goals
 
-Agent Profiles Milestone 1 does not add agent orchestration, declarative skills,
+Phase 2 Milestones 1 and 2 do not add agent orchestration, skill execution,
 hybrid memory, model execution, model providers, live or market data, rooms,
-debates, network access, credential entry, OAuth, MCP, external runtimes, broker
-connectivity, order placement, trading recommendations, financial calculations,
-guided setup application, web or mobile clients, multi-user access, remote
-access, or an autonomous/background service.
+debates, network access, credential entry, OAuth, MCP, external runtimes,
+broker connectivity, order placement, trading recommendations, financial
+calculations, guided setup application, web or mobile clients, multi-user
+access, remote access, or an autonomous/background service.
 
 ## Quality gates
 
