@@ -220,6 +220,7 @@ struct CandidateDigestMaterial<'a> {
 }
 
 pub(crate) fn candidate_digest(candidate: &AgentProfileDraft) -> Result<Digest, DomainError> {
+    let candidate = candidate.canonicalized()?;
     let material = CandidateDigestMaterial {
         display_name: &candidate.display_name,
         description: &candidate.description,

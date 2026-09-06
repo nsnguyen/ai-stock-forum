@@ -38,6 +38,7 @@ impl ProfileTemplateVersion {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProfileTemplateProvenance {
     pub template_id: ProfileTemplateId,
     pub template_version: ProfileTemplateVersion,
@@ -68,22 +69,55 @@ impl ProfileTemplate {
     }
 
     pub fn copy_to_draft(&self) -> Result<AgentProfileDraft, DomainError> {
-        AgentProfileDraft::new_with_provenance(
+        let primary_specialty = if self.primary_specialty.is_empty() {
+            "customize before activation"
+        } else {
+            self.primary_specialty
+        };
+        let personality = if self.personality.is_empty() {
+            "customize before activation"
+        } else {
+            self.personality
+        };
+        let instructions = if self.instructions.is_empty() {
+            "customize before activation"
+        } else {
+            self.instructions
+        };
+        let mut draft = AgentProfileDraft::new_with_provenance(
             self.suggested_name.to_owned(),
             self.description.to_owned(),
             self.role,
-            self.primary_specialty.to_owned(),
+            primary_specialty.to_owned(),
             self.specialty_tags
                 .iter()
                 .map(|tag| (*tag).to_owned())
                 .collect(),
-            self.personality.to_owned(),
-            self.instructions.to_owned(),
+            personality.to_owned(),
+            instructions.to_owned(),
             AgentBindings::default(),
             Vec::<SkillRef>::new(),
             Vec::<McpRef>::new(),
             Some(self.provenance()),
-        )
+        )?;
+        draft.primary_specialty = self.primary_specialty.to_owned();
+        draft.personality = self.personality.to_owned();
+        draft.instructions = self.instructions.to_owned();
+        Ok(draft)
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, DomainError> {
+        canonical_json_bytes(&CanonicalTemplatePayload {
+            id: &self.id,
+            version: self.version,
+            role: self.role,
+            suggested_name: self.suggested_name,
+            description: self.description,
+            primary_specialty: self.primary_specialty,
+            specialty_tags: self.specialty_tags,
+            personality: self.personality,
+            instructions: self.instructions,
+        })
     }
 }
 
@@ -136,10 +170,10 @@ pub fn builtin_profile_templates() -> &'static [ProfileTemplate] {
                 AgentRole::Custom,
                 "Custom Analyst",
                 "Provides a starting point for a custom analyst.",
-                "general research",
-                &["custom"],
-                "Adaptable, clear, and evidence-led.",
-                "Perform general research according to the configured remit.",
+                "",
+                &[],
+                "",
+                "",
             ),
         ]
     })

@@ -38,6 +38,7 @@ pub fn diff_profile(
     current: &AgentProfileVersion,
     candidate: &AgentProfileDraft,
 ) -> Result<Vec<ProfileFieldDiff>, DomainError> {
+    let candidate = candidate.canonicalized()?;
     let mut changes = Vec::new();
 
     push_text_change(

@@ -1,9 +1,12 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
-    agents::{normalize_profile_name_key, normalize_tag_key, validate_visible_text},
+    agents::{
+        AgentBindingCatalogSnapshot, EngineeringBindingRef, InferenceBindingRef,
+        canonicalize_visible_text, normalize_profile_name_key, normalize_tag_key,
+    },
     domain::{
         AgentProfileId, AgentProfileVersionId, Digest, DomainError, MemoryNamespaceId,
         ObjectVersion, canonical_json_bytes, sha256,
@@ -12,13 +15,13 @@ use crate::{
 
 use super::{ProfileTemplateProvenance, normalization::ProfileField as ValidationProfileField};
 
-const DISPLAY_NAME_MAX_BYTES: usize = 64;
-const DESCRIPTION_MAX_BYTES: usize = 256;
-const PRIMARY_SPECIALTY_MAX_BYTES: usize = 64;
-const SPECIALTY_TAG_MAX_BYTES: usize = 48;
-const MAX_SPECIALTY_TAGS: usize = 5;
-const PERSONALITY_MAX_BYTES: usize = 1_024;
-const INSTRUCTIONS_MAX_BYTES: usize = 4_096;
+pub const DISPLAY_NAME_MAX_BYTES: usize = 64;
+pub const DESCRIPTION_MAX_BYTES: usize = 256;
+pub const PRIMARY_SPECIALTY_MAX_BYTES: usize = 64;
+pub const SPECIALTY_TAG_MAX_BYTES: usize = 48;
+pub const MAX_SPECIALTY_TAGS: usize = 5;
+pub const PERSONALITY_MAX_BYTES: usize = 1_024;
+pub const INSTRUCTIONS_MAX_BYTES: usize = 4_096;
 const DEFAULT_POLICY_REF: &str = "profile-default/v1";
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,9 +47,24 @@ impl AgentRole {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct AgentBindings {
-    pub model_provider: Option<String>,
-    pub model_name: Option<String>,
+    #[serde(default)]
+    pub inference: Option<InferenceBindingRef>,
+    #[serde(default)]
+    pub engineering: Option<EngineeringBindingRef>,
+}
+
+impl AgentBindings {
+    pub fn new(
+        inference: Option<InferenceBindingRef>,
+        engineering: Option<EngineeringBindingRef>,
+    ) -> Self {
+        Self {
+            inference,
+            engineering,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,11 +87,13 @@ impl McpRef {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum AgentReadiness {
+    Unbound,
+    BindingUnavailable,
     Ready,
-    NotReady,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentProfileDraft {
     pub display_name: String,
     pub description: String,
@@ -131,49 +151,60 @@ impl AgentProfileDraft {
         mcp_refs: Vec<McpRef>,
         template_provenance: Option<ProfileTemplateProvenance>,
     ) -> Result<Self, DomainError> {
-        validate_visible_text(
+        let display_name = canonicalize_visible_text(
             ValidationProfileField::DisplayName,
             &display_name,
             DISPLAY_NAME_MAX_BYTES,
+            false,
         )?;
         normalize_profile_name_key(&display_name)?;
-        validate_visible_text(
+        let description = canonicalize_visible_text(
             ValidationProfileField::Description,
             &description,
             DESCRIPTION_MAX_BYTES,
+            true,
         )?;
-        validate_visible_text(
+        let primary_specialty = canonicalize_visible_text(
             ValidationProfileField::PrimarySpecialty,
             &primary_specialty,
             PRIMARY_SPECIALTY_MAX_BYTES,
+            false,
         )?;
-        validate_visible_text(
+        let personality = canonicalize_visible_text(
             ValidationProfileField::Personality,
             &personality,
             PERSONALITY_MAX_BYTES,
+            false,
         )?;
-        validate_visible_text(
+        let instructions = canonicalize_visible_text(
             ValidationProfileField::Instructions,
             &instructions,
             INSTRUCTIONS_MAX_BYTES,
+            false,
         )?;
-        validate_bindings(&bindings)?;
 
         if specialty_tags.len() > MAX_SPECIALTY_TAGS {
             return Err(DomainError::TooManyProfileTags);
         }
 
-        let mut tag_keys = HashSet::with_capacity(specialty_tags.len());
-        for tag in &specialty_tags {
-            validate_visible_text(
+        let primary_key = normalize_profile_name_key(&primary_specialty)?;
+        let mut tag_keys = BTreeSet::new();
+        let mut canonical_tags = Vec::with_capacity(specialty_tags.len());
+        for tag in specialty_tags {
+            let tag = canonicalize_visible_text(
                 ValidationProfileField::SpecialtyTag,
-                tag,
+                &tag,
                 SPECIALTY_TAG_MAX_BYTES,
+                false,
             )?;
-            if !tag_keys.insert(normalize_tag_key(tag)?) {
+            let key = normalize_tag_key(&tag)?;
+            if key == primary_key.as_str() || !tag_keys.insert(key.clone()) {
                 return Err(DomainError::DuplicateProfileTag);
             }
+            canonical_tags.push((key, tag));
         }
+        canonical_tags.sort_by(|left, right| left.0.cmp(&right.0));
+        let specialty_tags = canonical_tags.into_iter().map(|(_, tag)| tag).collect();
 
         if !skill_refs.is_empty() {
             return Err(DomainError::InvalidProfileField {
@@ -202,25 +233,48 @@ impl AgentProfileDraft {
     }
 
     pub fn readiness(&self) -> AgentReadiness {
-        match (&self.bindings.model_provider, &self.bindings.model_name) {
-            (Some(_), Some(_)) => AgentReadiness::Ready,
-            _ => AgentReadiness::NotReady,
-        }
+        AgentBindingCatalogSnapshot::default().readiness(self.role, &self.bindings)
+    }
+
+    pub fn readiness_with_catalog(&self, catalog: &AgentBindingCatalogSnapshot) -> AgentReadiness {
+        catalog.readiness(self.role, &self.bindings)
+    }
+
+    pub fn canonicalized(&self) -> Result<Self, DomainError> {
+        Self::new_with_provenance(
+            self.display_name.clone(),
+            self.description.clone(),
+            self.role,
+            self.primary_specialty.clone(),
+            self.specialty_tags.clone(),
+            self.personality.clone(),
+            self.instructions.clone(),
+            self.bindings.clone(),
+            self.skill_refs.clone(),
+            self.mcp_refs.clone(),
+            self.template_provenance.clone(),
+        )
     }
 
     pub fn template_provenance(&self) -> Option<&ProfileTemplateProvenance> {
         self.template_provenance.as_ref()
     }
-}
 
-fn validate_bindings(bindings: &AgentBindings) -> Result<(), DomainError> {
-    if let Some(provider) = &bindings.model_provider {
-        validate_visible_text(ValidationProfileField::ModelProvider, provider, 256)?;
+    pub fn to_draft(&self) -> AgentProfileDraft {
+        AgentProfileDraft {
+            display_name: self.display_name.clone(),
+            description: self.description.clone(),
+            role: self.role,
+            primary_specialty: self.primary_specialty.clone(),
+            specialty_tags: self.specialty_tags.clone(),
+            personality: self.personality.clone(),
+            instructions: self.instructions.clone(),
+            bindings: self.bindings.clone(),
+            skill_refs: self.skill_refs.clone(),
+            mcp_refs: self.mcp_refs.clone(),
+            template_provenance: self.template_provenance.clone(),
+        }
     }
-    if let Some(model_name) = &bindings.model_name {
-        validate_visible_text(ValidationProfileField::ModelName, model_name, 256)?;
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -403,6 +457,14 @@ impl AgentProfileVersion {
         &self.bindings
     }
 
+    pub fn readiness(&self) -> AgentReadiness {
+        AgentBindingCatalogSnapshot::default().readiness(self.role, &self.bindings)
+    }
+
+    pub fn readiness_with_catalog(&self, catalog: &AgentBindingCatalogSnapshot) -> AgentReadiness {
+        catalog.readiness(self.role, &self.bindings)
+    }
+
     pub fn skill_refs(&self) -> &[SkillRef] {
         &self.skill_refs
     }
@@ -421,6 +483,22 @@ impl AgentProfileVersion {
 
     pub fn template_provenance(&self) -> Option<&ProfileTemplateProvenance> {
         self.template_provenance.as_ref()
+    }
+
+    pub fn to_draft(&self) -> AgentProfileDraft {
+        AgentProfileDraft {
+            display_name: self.display_name.clone(),
+            description: self.description.clone(),
+            role: self.role,
+            primary_specialty: self.primary_specialty.clone(),
+            specialty_tags: self.specialty_tags.clone(),
+            personality: self.personality.clone(),
+            instructions: self.instructions.clone(),
+            bindings: self.bindings.clone(),
+            skill_refs: self.skill_refs.clone(),
+            mcp_refs: self.mcp_refs.clone(),
+            template_provenance: self.template_provenance.clone(),
+        }
     }
 
     pub fn created_at_ms(&self) -> i64 {
@@ -468,6 +546,7 @@ impl AgentProfileVersion {
         template_provenance: Option<ProfileTemplateProvenance>,
         draft: AgentProfileDraft,
     ) -> Result<Self, DomainError> {
+        let draft = draft.canonicalized()?;
         let normalized_name = normalize_profile_name_key(&draft.display_name)?;
         let mut profile = Self {
             profile_id,

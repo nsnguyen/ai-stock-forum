@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     app::ApplicationEvent,
-    domain::{AgentProfileId, AgentProfileVersionId},
+    domain::{AgentProfileId, AgentProfileVersionId, MemoryNamespaceId, ObjectVersion},
     persistence::RecoveryError,
 };
 
@@ -16,6 +16,8 @@ pub struct AgentProfilesProjection {
     versions_by_id: BTreeMap<AgentProfileVersionId, AgentProfileVersion>,
     active_by_profile: BTreeMap<AgentProfileId, AgentProfileVersionId>,
     active_name_index: BTreeMap<NormalizedProfileName, AgentProfileId>,
+    #[serde(default)]
+    memory_namespace_index: BTreeMap<MemoryNamespaceId, AgentProfileId>,
 }
 
 impl AgentProfilesProjection {
@@ -23,6 +25,7 @@ impl AgentProfilesProjection {
         self.versions_by_id.is_empty()
             && self.active_by_profile.is_empty()
             && self.active_name_index.is_empty()
+            && self.memory_namespace_index.is_empty()
     }
 
     pub fn active_profiles(&self) -> Vec<AgentProfileVersion> {
@@ -47,6 +50,28 @@ impl AgentProfilesProjection {
             .and_then(|version_id| self.versions_by_id.get(version_id))
     }
 
+    pub fn active_profile_by_name(
+        &self,
+        normalized_name: &NormalizedProfileName,
+    ) -> Option<&AgentProfileVersion> {
+        self.active_name_index
+            .get(normalized_name)
+            .and_then(|profile_id| self.active_profile(*profile_id))
+    }
+
+    pub fn active_profile_count(&self) -> usize {
+        self.active_by_profile.len()
+    }
+
+    pub fn active_profiles_bounded(&self, limit: usize) -> Vec<AgentProfileVersion> {
+        self.active_name_index
+            .values()
+            .take(limit)
+            .filter_map(|profile_id| self.active_profile(*profile_id))
+            .cloned()
+            .collect()
+    }
+
     pub fn history(&self, profile_id: AgentProfileId) -> Vec<AgentProfileVersion> {
         let mut versions = self
             .versions_by_id
@@ -65,6 +90,45 @@ impl AgentProfilesProjection {
 
     pub fn version(&self, version_id: AgentProfileVersionId) -> Option<&AgentProfileVersion> {
         self.versions_by_id.get(&version_id)
+    }
+
+    pub fn profile_version(
+        &self,
+        profile_id: AgentProfileId,
+        version: ObjectVersion,
+    ) -> Option<&AgentProfileVersion> {
+        self.versions_by_id
+            .values()
+            .find(|profile| profile.profile_id() == profile_id && profile.version() == version)
+    }
+
+    pub fn history_count(&self, profile_id: AgentProfileId) -> usize {
+        self.versions_by_id
+            .values()
+            .filter(|profile| profile.profile_id() == profile_id)
+            .count()
+    }
+
+    pub fn history_bounded_desc(
+        &self,
+        profile_id: AgentProfileId,
+        limit: usize,
+    ) -> Vec<AgentProfileVersion> {
+        let mut versions = self
+            .versions_by_id
+            .values()
+            .filter(|profile| profile.profile_id() == profile_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        versions.sort_by(|left, right| {
+            right
+                .version()
+                .get()
+                .cmp(&left.version().get())
+                .then_with(|| right.profile_version_id().cmp(&left.profile_version_id()))
+        });
+        versions.truncate(limit);
+        versions
     }
 
     pub(crate) fn reduce(&mut self, event: &ApplicationEvent) -> Result<(), RecoveryError> {
@@ -93,6 +157,9 @@ impl AgentProfilesProjection {
             || self
                 .active_name_index
                 .contains_key(profile.normalized_name())
+            || self
+                .memory_namespace_index
+                .contains_key(&profile.memory_namespace_id())
         {
             return Err(RecoveryError::InvalidEventRecord);
         }
@@ -102,6 +169,8 @@ impl AgentProfilesProjection {
             .insert(profile.profile_id(), profile.profile_version_id());
         self.active_name_index
             .insert(profile.normalized_name().clone(), profile.profile_id());
+        self.memory_namespace_index
+            .insert(profile.memory_namespace_id(), profile.profile_id());
         Ok(())
     }
 
@@ -142,6 +211,10 @@ impl AgentProfilesProjection {
             || profile.memory_namespace_id() != current.memory_namespace_id()
             || profile.default_policy_ref() != current.default_policy_ref()
             || profile.template_provenance() != current.template_provenance()
+            || self
+                .memory_namespace_index
+                .get(&profile.memory_namespace_id())
+                != Some(&profile.profile_id())
             || !name_is_available
         {
             return Err(RecoveryError::InvalidEventRecord);

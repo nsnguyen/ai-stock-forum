@@ -50,23 +50,32 @@ pub fn validate_visible_text(
     value: &str,
     max_bytes: usize,
 ) -> Result<(), DomainError> {
-    if value.is_empty() || value.chars().all(char::is_whitespace) || value.len() > max_bytes {
-        return Err(DomainError::InvalidProfileField {
-            field: field.as_str(),
-        });
-    }
+    canonicalize_visible_text(field, value, max_bytes, false).map(|_| ())
+}
 
+pub fn canonicalize_visible_text(
+    field: ProfileField,
+    value: &str,
+    max_bytes: usize,
+    allow_empty: bool,
+) -> Result<String, DomainError> {
     if value.chars().any(is_unsafe_terminal_character) {
         return Err(DomainError::UnsafeProfileText {
             field: field.as_str(),
         });
     }
 
-    Ok(())
+    let canonical = fold_whitespace(value);
+    if (!allow_empty && canonical.is_empty()) || canonical.len() > max_bytes {
+        return Err(DomainError::InvalidProfileField {
+            field: field.as_str(),
+        });
+    }
+    Ok(canonical)
 }
 
 pub fn normalize_profile_name_key(value: &str) -> Result<NormalizedProfileName, DomainError> {
-    validate_visible_text(ProfileField::DisplayName, value, 64)?;
+    let value = canonicalize_visible_text(ProfileField::DisplayName, value, 64, false)?;
     let normalized = fold_whitespace(
         &value
             .nfkc()
@@ -85,7 +94,7 @@ pub fn normalize_profile_name_key(value: &str) -> Result<NormalizedProfileName, 
 }
 
 pub fn normalize_tag_key(value: &str) -> Result<String, DomainError> {
-    validate_visible_text(ProfileField::SpecialtyTag, value, 48)?;
+    let value = canonicalize_visible_text(ProfileField::SpecialtyTag, value, 48, false)?;
     let normalized = fold_whitespace(
         &value
             .nfkc()
@@ -123,6 +132,6 @@ fn fold_whitespace(value: &str) -> String {
 }
 
 fn is_unsafe_terminal_character(character: char) -> bool {
-    matches!(character, '\0'..='\u{0008}' | '\u{000A}'..='\u{001F}' | '\u{007F}'..='\u{009F}')
+    matches!(character, '\0'..='\u{001F}' | '\u{007F}'..='\u{009F}')
         || matches!(character, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
