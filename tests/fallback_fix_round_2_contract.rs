@@ -1,6 +1,7 @@
 #[cfg(unix)]
 mod unix_line_source_contract {
     use ai_stock_forum::ui::command::{CancellableLineSource, LineSourceEvent, UnixLineSource};
+    use std::io;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
@@ -43,11 +44,9 @@ mod unix_line_source_contract {
 
     #[test]
     fn invalid_input_descriptor_returns_a_typed_error_without_spinning() {
-        let descriptors = pipe();
-        let mut source = UnixLineSource::from_borrowed_fd(descriptors[0])
+        let mut source = UnixLineSource::from_borrowed_fd(libc::c_int::MAX)
             .expect("Unix source should initialize");
         let cancellation = source.cancellation();
-        unsafe { libc::close(descriptors[0]) };
         let (result_tx, result_rx) = mpsc::sync_channel(1);
 
         let reader = thread::spawn(move || {
@@ -61,9 +60,11 @@ mod unix_line_source_contract {
                 panic!("invalid descriptor did not terminate within bound: {error}");
             }
         };
-        assert!(result.is_err(), "POLLNVAL must become a typed input error");
+        assert!(
+            matches!(result, Err(error) if error.kind() == io::ErrorKind::InvalidInput),
+            "POLLNVAL must become a typed input error"
+        );
         reader.join().expect("reader must join after POLLNVAL");
-        unsafe { libc::close(descriptors[1]) };
     }
 
     #[test]
