@@ -173,22 +173,40 @@ pub enum SkillProvenance {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkillVersionRef {
-    pub skill_id: SkillId,
-    pub skill_version_id: SkillVersionId,
-    pub version: ObjectVersion,
-    pub content_digest: ContentDigest,
+    skill_id: SkillId,
+    skill_version_id: SkillVersionId,
+    version: ObjectVersion,
+    content_digest: ContentDigest,
+}
+
+impl SkillVersionRef {
+    pub fn skill_id(&self) -> SkillId {
+        self.skill_id
+    }
+
+    pub fn skill_version_id(&self) -> SkillVersionId {
+        self.skill_version_id
+    }
+
+    pub fn version(&self) -> ObjectVersion {
+        self.version
+    }
+
+    pub fn content_digest(&self) -> &ContentDigest {
+        &self.content_digest
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SkillVersion {
-    pub skill_id: SkillId,
-    pub skill_version_id: SkillVersionId,
-    pub version: ObjectVersion,
-    pub content: SkillDraft,
-    pub content_digest: ContentDigest,
-    pub created_at_ms: i64,
-    pub provenance: SkillProvenance,
-    pub predecessor: Option<SkillVersionId>,
+    skill_id: SkillId,
+    skill_version_id: SkillVersionId,
+    version: ObjectVersion,
+    content: SkillDraft,
+    content_digest: ContentDigest,
+    created_at_ms: i64,
+    provenance: SkillProvenance,
+    predecessor: Option<SkillVersionId>,
 }
 
 impl SkillVersion {
@@ -220,6 +238,9 @@ impl SkillVersion {
         if draft == current.content {
             return Err(DomainError::SkillUnchanged);
         }
+        if skill_version_id == current.skill_version_id {
+            return Err(DomainError::InvalidSkillVersion);
+        }
         let version = current
             .version
             .get()
@@ -243,6 +264,38 @@ impl SkillVersion {
             version: self.version,
             content_digest: self.content_digest.clone(),
         }
+    }
+
+    pub fn skill_id(&self) -> SkillId {
+        self.skill_id
+    }
+
+    pub fn skill_version_id(&self) -> SkillVersionId {
+        self.skill_version_id
+    }
+
+    pub fn version(&self) -> ObjectVersion {
+        self.version
+    }
+
+    pub fn content(&self) -> &SkillDraft {
+        &self.content
+    }
+
+    pub fn content_digest(&self) -> &ContentDigest {
+        &self.content_digest
+    }
+
+    pub fn created_at_ms(&self) -> i64 {
+        self.created_at_ms
+    }
+
+    pub fn provenance(&self) -> &SkillProvenance {
+        &self.provenance
+    }
+
+    pub fn predecessor(&self) -> Option<SkillVersionId> {
+        self.predecessor
     }
 
     pub fn normalized_name(&self) -> Result<NormalizedSkillName, DomainError> {
@@ -278,25 +331,6 @@ impl SkillVersion {
     }
 
     fn compute_digest(&self) -> Result<ContentDigest, DomainError> {
-        Ok(sha256(&canonical_json_bytes(&CanonicalSkillVersionPayload {
-            skill_id: self.skill_id,
-            skill_version_id: self.skill_version_id,
-            version: self.version,
-            content: &self.content,
-            created_at_ms: self.created_at_ms,
-            provenance: &self.provenance,
-            predecessor: self.predecessor,
-        })?))
+        Ok(sha256(&canonical_json_bytes(&self.content)?))
     }
-}
-
-#[derive(Serialize)]
-struct CanonicalSkillVersionPayload<'a> {
-    skill_id: SkillId,
-    skill_version_id: SkillVersionId,
-    version: ObjectVersion,
-    content: &'a SkillDraft,
-    created_at_ms: i64,
-    provenance: &'a SkillProvenance,
-    predecessor: Option<SkillVersionId>,
 }

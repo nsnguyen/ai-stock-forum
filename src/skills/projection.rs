@@ -14,24 +14,26 @@ pub struct SkillsProjection {
 
 impl SkillsProjection {
     pub fn insert(&mut self, skill: &SkillVersion) -> Result<(), DomainError> {
-        if skill.version.get() != 1
-            || skill.predecessor.is_some()
-            || self.versions_by_id.contains_key(&skill.skill_version_id)
-            || self.active_by_skill.contains_key(&skill.skill_id)
-            || self.version_index_by_skill.contains_key(&skill.skill_id)
+        if skill.version().get() != 1
+            || skill.predecessor().is_some()
+            || self.versions_by_id.contains_key(&skill.skill_version_id())
+            || self.active_by_skill.contains_key(&skill.skill_id())
+            || self.version_index_by_skill.contains_key(&skill.skill_id())
             || self.active_name_index.contains_key(&skill.normalized_name()?)
-            || skill.recompute_content_digest()? != skill.content_digest
+            || skill.recompute_content_digest()? != *skill.content_digest()
         {
             return Err(DomainError::InvalidSkillVersion);
         }
-        self.versions_by_id.insert(skill.skill_version_id, skill.clone());
+        self.versions_by_id
+            .insert(skill.skill_version_id(), skill.clone());
         self.version_index_by_skill
-            .entry(skill.skill_id)
+            .entry(skill.skill_id())
             .or_default()
-            .insert(skill.version, skill.skill_version_id);
-        self.active_by_skill.insert(skill.skill_id, skill.skill_version_id);
+            .insert(skill.version(), skill.skill_version_id());
+        self.active_by_skill
+            .insert(skill.skill_id(), skill.skill_version_id());
         self.active_name_index
-            .insert(skill.normalized_name()?, skill.skill_id);
+            .insert(skill.normalized_name()?, skill.skill_id());
         Ok(())
     }
 
@@ -42,14 +44,14 @@ impl SkillsProjection {
     ) -> Result<(), DomainError> {
         let current_id = *self
             .active_by_skill
-            .get(&skill.skill_id)
+            .get(&skill.skill_id())
             .ok_or(DomainError::InvalidSkillVersion)?;
         let current = self
             .versions_by_id
             .get(&current_id)
             .ok_or(DomainError::InvalidSkillVersion)?;
         let expected = current
-            .version
+            .version()
             .get()
             .checked_add(1)
             .ok_or(DomainError::InvalidObjectVersion)?;
@@ -57,26 +59,29 @@ impl SkillsProjection {
         let name_available = self
             .active_name_index
             .get(&normalized_name)
-            .is_none_or(|owner| *owner == skill.skill_id);
-        if skill.skill_id != current.skill_id
-            || skill.version.get() != expected
-            || skill.predecessor != Some(current_id)
+            .is_none_or(|owner| *owner == skill.skill_id());
+        if skill.skill_id() != current.skill_id()
+            || skill.version().get() != expected
+            || skill.predecessor() != Some(current_id)
             || previous_version_id != current_id
-            || self.versions_by_id.contains_key(&skill.skill_version_id)
+            || self.versions_by_id.contains_key(&skill.skill_version_id())
             || !name_available
-            || skill.recompute_content_digest()? != skill.content_digest
+            || skill.recompute_content_digest()? != *skill.content_digest()
         {
             return Err(DomainError::InvalidSkillVersion);
         }
         let previous_name = current.normalized_name()?;
-        self.versions_by_id.insert(skill.skill_version_id, skill.clone());
+        self.versions_by_id
+            .insert(skill.skill_version_id(), skill.clone());
         self.version_index_by_skill
-            .entry(skill.skill_id)
+            .entry(skill.skill_id())
             .or_default()
-            .insert(skill.version, skill.skill_version_id);
-        self.active_by_skill.insert(skill.skill_id, skill.skill_version_id);
+            .insert(skill.version(), skill.skill_version_id());
+        self.active_by_skill
+            .insert(skill.skill_id(), skill.skill_version_id());
         self.active_name_index.remove(&previous_name);
-        self.active_name_index.insert(normalized_name, skill.skill_id);
+        self.active_name_index
+            .insert(normalized_name, skill.skill_id());
         Ok(())
     }
 
