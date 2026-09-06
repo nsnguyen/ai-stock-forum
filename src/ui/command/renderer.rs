@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use crate::{
     agents::{
         AgentProfileDraft, AgentReadiness, McpRef, ProfileDiffField, ProfileFieldDiff,
-        ProfileFieldValue, ProfileTemplate, SkillRef,
+        ProfileFieldValue, ProfileTemplate,
     },
     app::{
         AppError, ApplicationCommand, CommandOutcome, CommandView, InputRejectionCategory,
@@ -13,6 +13,7 @@ use crate::{
     config::StartupError,
     domain::Actor,
     runtime::RuntimeError,
+    skills::SkillVersionRef,
     setup::SetupStatus,
     ui::{
         profile_editor::{ProfileEditor, ProfileEditorMode, ProfileEditorStep},
@@ -629,6 +630,9 @@ fn diff_field(field: ProfileDiffField) -> &'static str {
         ProfileDiffField::Personality => "personality",
         ProfileDiffField::Instructions => "instructions",
         ProfileDiffField::Bindings => "bindings",
+        ProfileDiffField::SkillRefsAdded => "skill_refs_added",
+        ProfileDiffField::SkillRefsUpgraded => "skill_refs_upgraded",
+        ProfileDiffField::SkillRefsRemoved => "skill_refs_removed",
     }
 }
 
@@ -652,8 +656,18 @@ fn escaped_list(values: &[String], maximum_scalars: usize) -> String {
         .join(", ")
 }
 
-fn escaped_skill_refs(values: &[SkillRef]) -> String {
-    escaped_refs(values.iter().map(SkillRef::as_str))
+fn escaped_skill_refs(values: &[SkillVersionRef]) -> String {
+    let labels = values.iter().map(skill_ref_label).collect::<Vec<_>>();
+    escaped_refs(labels.iter().map(String::as_str))
+}
+
+fn skill_ref_label(reference: &SkillVersionRef) -> String {
+    format!(
+        "{}@{}#{}",
+        reference.skill_id(),
+        reference.skill_version_id(),
+        reference.version().get(),
+    )
 }
 
 fn escaped_mcp_refs(values: &[McpRef]) -> String {

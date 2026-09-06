@@ -177,13 +177,15 @@ fn profile_version_lines(
         label_value("Personality", safe_text(profile.personality()), theme),
         label_value("Instructions", safe_text(profile.instructions()), theme),
     ];
+    let skill_refs = profile
+        .skill_refs()
+        .iter()
+        .map(skill_ref_label)
+        .collect::<Vec<_>>();
     append_references(
         &mut lines,
         "Skill refs",
-        profile
-            .skill_refs()
-            .iter()
-            .map(|reference| reference.as_str()),
+        skill_refs.iter().map(String::as_str),
         theme,
     );
     append_references(
@@ -237,6 +239,15 @@ fn append_references<'a>(
             theme,
         ));
     }
+}
+
+fn skill_ref_label(reference: &crate::skills::SkillVersionRef) -> String {
+    format!(
+        "{}@{}#{}",
+        reference.skill_id(),
+        reference.skill_version_id(),
+        reference.version().get(),
+    )
 }
 
 fn render_history(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
@@ -750,6 +761,9 @@ fn diff_name(field: ProfileDiffField) -> &'static str {
         ProfileDiffField::Personality => "Personality",
         ProfileDiffField::Instructions => "Instructions",
         ProfileDiffField::Bindings => "Bindings",
+        ProfileDiffField::SkillRefsAdded => "Skill references added",
+        ProfileDiffField::SkillRefsUpgraded => "Skill references upgraded",
+        ProfileDiffField::SkillRefsRemoved => "Skill references removed",
     }
 }
 

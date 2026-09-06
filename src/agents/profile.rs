@@ -11,6 +11,7 @@ use crate::{
         AgentProfileId, AgentProfileVersionId, Digest, DomainError, MemoryNamespaceId,
         ObjectVersion, canonical_json_bytes, sha256,
     },
+    skills::SkillVersionRef,
 };
 
 use super::{ProfileTemplateProvenance, normalization::ProfileField as ValidationProfileField};
@@ -22,6 +23,7 @@ pub const SPECIALTY_TAG_MAX_BYTES: usize = 48;
 pub const MAX_SPECIALTY_TAGS: usize = 5;
 pub const PERSONALITY_MAX_BYTES: usize = 1_024;
 pub const INSTRUCTIONS_MAX_BYTES: usize = 4_096;
+pub const MAX_SKILL_REFS: usize = 16;
 const DEFAULT_POLICY_REF: &str = "profile-default/v1";
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,16 +70,7 @@ impl AgentBindings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SkillRef(String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpRef(String);
-
-impl SkillRef {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
 
 impl McpRef {
     pub fn as_str(&self) -> &str {
@@ -103,7 +96,7 @@ pub struct AgentProfileDraft {
     pub personality: String,
     pub instructions: String,
     pub bindings: AgentBindings,
-    pub skill_refs: Vec<SkillRef>,
+    pub skill_refs: Vec<SkillVersionRef>,
     pub mcp_refs: Vec<McpRef>,
     template_provenance: Option<ProfileTemplateProvenance>,
 }
@@ -119,7 +112,7 @@ impl AgentProfileDraft {
         personality: String,
         instructions: String,
         bindings: AgentBindings,
-        skill_refs: Vec<SkillRef>,
+        skill_refs: Vec<SkillVersionRef>,
         mcp_refs: Vec<McpRef>,
     ) -> Result<Self, DomainError> {
         Self::new_with_provenance(
@@ -147,7 +140,7 @@ impl AgentProfileDraft {
         personality: String,
         instructions: String,
         bindings: AgentBindings,
-        skill_refs: Vec<SkillRef>,
+        skill_refs: Vec<SkillVersionRef>,
         mcp_refs: Vec<McpRef>,
         template_provenance: Option<ProfileTemplateProvenance>,
     ) -> Result<Self, DomainError> {
@@ -206,11 +199,22 @@ impl AgentProfileDraft {
         canonical_tags.sort_by(|left, right| left.0.cmp(&right.0));
         let specialty_tags = canonical_tags.into_iter().map(|(_, tag)| tag).collect();
 
-        if !skill_refs.is_empty() {
+        if skill_refs.len() > MAX_SKILL_REFS {
             return Err(DomainError::InvalidProfileField {
                 field: ValidationProfileField::SkillRefs.as_str(),
             });
         }
+        let mut skill_ids = BTreeSet::new();
+        let mut canonical_skill_refs = Vec::with_capacity(skill_refs.len());
+        for skill_ref in skill_refs {
+            if !skill_ids.insert(skill_ref.skill_id()) {
+                return Err(DomainError::InvalidProfileField {
+                    field: ValidationProfileField::SkillRefs.as_str(),
+                });
+            }
+            canonical_skill_refs.push(skill_ref);
+        }
+        canonical_skill_refs.sort_by_key(SkillVersionRef::skill_id);
         if !mcp_refs.is_empty() {
             return Err(DomainError::InvalidProfileField {
                 field: ValidationProfileField::McpRefs.as_str(),
@@ -226,7 +230,7 @@ impl AgentProfileDraft {
             personality,
             instructions,
             bindings,
-            skill_refs,
+            skill_refs: canonical_skill_refs,
             mcp_refs,
             template_provenance,
         })
@@ -258,6 +262,48 @@ impl AgentProfileDraft {
 
     pub fn template_provenance(&self) -> Option<&ProfileTemplateProvenance> {
         self.template_provenance.as_ref()
+    }
+
+    pub fn skill_refs(&self) -> &[SkillVersionRef] {
+        &self.skill_refs
+    }
+
+    pub fn assign_skill(&self, skill_ref: SkillVersionRef) -> Result<Self, DomainError> {
+        if self
+            .skill_refs
+            .iter()
+            .any(|current| current.skill_id() == skill_ref.skill_id())
+        {
+            return Err(DomainError::AgentProfileUnchanged);
+        }
+        let mut candidate = self.clone();
+        candidate.skill_refs.push(skill_ref);
+        candidate.canonicalized()
+    }
+
+    pub fn upgrade_skill(
+        &self,
+        expected: SkillVersionRef,
+        replacement: SkillVersionRef,
+    ) -> Result<Self, DomainError> {
+        if expected == replacement || expected.skill_id() != replacement.skill_id() {
+            return Err(DomainError::AgentProfileUnchanged);
+        }
+        let Some(index) = self.skill_refs.iter().position(|current| current == &expected) else {
+            return Err(DomainError::AgentProfileUnchanged);
+        };
+        let mut candidate = self.clone();
+        candidate.skill_refs[index] = replacement;
+        candidate.canonicalized()
+    }
+
+    pub fn unassign_skill(&self, expected: SkillVersionRef) -> Result<Self, DomainError> {
+        let Some(index) = self.skill_refs.iter().position(|current| current == &expected) else {
+            return Err(DomainError::AgentProfileUnchanged);
+        };
+        let mut candidate = self.clone();
+        candidate.skill_refs.remove(index);
+        candidate.canonicalized()
     }
 
     pub fn to_draft(&self) -> AgentProfileDraft {
@@ -292,7 +338,7 @@ pub struct AgentProfileVersion {
     personality: String,
     instructions: String,
     bindings: AgentBindings,
-    skill_refs: Vec<SkillRef>,
+    skill_refs: Vec<SkillVersionRef>,
     mcp_refs: Vec<McpRef>,
     memory_namespace_id: MemoryNamespaceId,
     default_policy_ref: String,
@@ -317,7 +363,7 @@ struct AgentProfileVersionWire {
     personality: String,
     instructions: String,
     bindings: AgentBindings,
-    skill_refs: Vec<SkillRef>,
+    skill_refs: Vec<SkillVersionRef>,
     mcp_refs: Vec<McpRef>,
     memory_namespace_id: MemoryNamespaceId,
     default_policy_ref: String,
@@ -465,8 +511,27 @@ impl AgentProfileVersion {
         catalog.readiness(self.role, &self.bindings)
     }
 
-    pub fn skill_refs(&self) -> &[SkillRef] {
+    pub fn skill_refs(&self) -> &[SkillVersionRef] {
         &self.skill_refs
+    }
+
+    pub fn assign_skill(&self, skill_ref: SkillVersionRef) -> Result<AgentProfileDraft, DomainError> {
+        self.to_draft().assign_skill(skill_ref)
+    }
+
+    pub fn upgrade_skill(
+        &self,
+        expected: SkillVersionRef,
+        replacement: SkillVersionRef,
+    ) -> Result<AgentProfileDraft, DomainError> {
+        self.to_draft().upgrade_skill(expected, replacement)
+    }
+
+    pub fn unassign_skill(
+        &self,
+        expected: SkillVersionRef,
+    ) -> Result<AgentProfileDraft, DomainError> {
+        self.to_draft().unassign_skill(expected)
     }
 
     pub fn mcp_refs(&self) -> &[McpRef] {
@@ -615,7 +680,7 @@ struct CanonicalProfileVersionPayload<'a> {
     personality: &'a str,
     instructions: &'a str,
     bindings: &'a AgentBindings,
-    skill_refs: &'a [SkillRef],
+    skill_refs: &'a [SkillVersionRef],
     mcp_refs: &'a [McpRef],
     memory_namespace_id: MemoryNamespaceId,
     default_policy_ref: &'a str,
