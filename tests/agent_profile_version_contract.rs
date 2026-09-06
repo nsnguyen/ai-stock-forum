@@ -201,7 +201,7 @@ fn valid_profile_drafts() -> impl Strategy<Value = AgentProfileDraft> {
                     description,
                     AgentRole::Custom,
                     primary_specialty,
-                    vec![specialty_tag],
+                    vec![format!("tag-{specialty_tag}")],
                     personality,
                     instructions,
                     AgentBindings::default(),

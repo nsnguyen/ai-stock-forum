@@ -587,7 +587,10 @@ fn profile(name: &str) -> AgentProfileDraft {
 #[test]
 fn reviewed_create_version_reads_and_exact_assignment_lifecycle_are_typed() {
     let mut app = support::app();
-    let create_candidate = skill("Evidence Review", "State evidence and disconfirming facts.");
+    let create_candidate = skill(
+        "Independent Evidence Review",
+        "State evidence and disconfirming facts.",
+    );
     let create_preview = app
         .preview_skill_creation(create_candidate.clone())
         .unwrap();
@@ -613,8 +616,13 @@ fn reviewed_create_version_reads_and_exact_assignment_lifecycle_are_typed() {
     let CommandView::Skills(listed) = listed.view else {
         panic!("skills view")
     };
-    assert_eq!(listed.total_count, 1);
-    assert_eq!(listed.skills[0].display_name, "Evidence Review");
+    assert_eq!(listed.total_count, 5);
+    assert!(
+        listed
+            .skills
+            .iter()
+            .any(|skill| skill.display_name == "Independent Evidence Review")
+    );
 
     let active = app
         .execute(envelope(
@@ -635,11 +643,14 @@ fn reviewed_create_version_reads_and_exact_assignment_lifecycle_are_typed() {
     )
     .unwrap();
     let rendered = String::from_utf8(rendered).unwrap();
-    assert!(rendered.contains("Evidence Review"));
+    assert!(rendered.contains("Independent Evidence Review"));
     assert!(rendered.contains(&created.skill_id.to_string()));
     assert!(!rendered.contains("Verify every material claim."));
 
-    let version_candidate = skill("Evidence Review", "Require primary-source citations.");
+    let version_candidate = skill(
+        "Independent Evidence Review",
+        "Require primary-source citations.",
+    );
     let version_preview = app
         .preview_skill_version(
             created.skill_id,
@@ -803,7 +814,7 @@ fn active_skill_ref(
 #[test]
 fn create_and_version_reject_name_conflicts_and_stale_active_versions() {
     let mut app = support::app();
-    let candidate = skill("Evidence Review", "State evidence.");
+    let candidate = skill("Independent Evidence Review", "State evidence.");
     let preview = app.preview_skill_creation(candidate.clone()).unwrap();
     let created = app
         .execute(envelope(
@@ -821,7 +832,10 @@ fn create_and_version_reject_name_conflicts_and_stale_active_versions() {
     };
 
     assert_eq!(
-        app.preview_skill_creation(skill("  EVIDENCE   review ", "Different content."))
+        app.preview_skill_creation(skill(
+            "  INDEPENDENT   EVIDENCE   review ",
+            "Different content.",
+        ))
             .unwrap_err(),
         AppError::DuplicateSkillName,
     );
@@ -829,7 +843,7 @@ fn create_and_version_reject_name_conflicts_and_stale_active_versions() {
         app.preview_skill_version(
             created.skill_id,
             ai_stock_forum::domain::SkillVersionId::from_uuid(Uuid::from_u128(999)),
-            skill("Evidence Review", "Changed."),
+            skill("Independent Evidence Review", "Changed."),
         )
         .unwrap_err(),
         AppError::StaleSkillVersion,

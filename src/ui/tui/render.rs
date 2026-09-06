@@ -620,7 +620,7 @@ mod tests {
             assert!(audit.contains(heading), "missing audit heading: {heading}");
         }
 
-        let help = render_text(model(View::Help), 100, 30, false);
+        let help = render_text(model(View::Help), 100, 40, false);
         for command in [
             "/help",
             "/status",

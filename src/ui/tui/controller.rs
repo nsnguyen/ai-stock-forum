@@ -250,6 +250,14 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         return handle_too_small_key(model, key);
     }
 
+    if active_confirmation(model) {
+        return handle_confirmation_key(model, key);
+    }
+
+    if active_profile_editor(model) {
+        return handle_profile_editor_key(model, key);
+    }
+
     if model.focus == Focus::Command {
         return handle_command_key(model, key);
     }
@@ -261,20 +269,12 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         return ControllerEffect::Redraw;
     }
 
-    if active_confirmation(model) {
-        return handle_confirmation_key(model, key);
-    }
-
     if active_skill_confirmation(model) {
         return handle_skill_confirmation_key(model, key);
     }
 
     if active_skill_editor(model) {
         return handle_skill_editor_key(model, key);
-    }
-
-    if active_profile_editor(model) {
-        return handle_profile_editor_key(model, key);
     }
 
     if model.skills.active {

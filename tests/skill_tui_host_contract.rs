@@ -852,56 +852,42 @@ fn agent_origin_upgrade_preview_builds_an_explicit_exact_upgrade_command() {
         returned_count: 2,
         truncated: false,
     };
+    let available = replacement_skill();
+    model.skills.replace_skills(SkillsView {
+        skills: vec![SkillSummary {
+            skill_ref: available.reference(),
+            display_name: available.content().display_name.clone(),
+            provenance: available.provenance().clone(),
+        }],
+        total_count: 1,
+        returned_count: 1,
+        truncated: false,
+    });
     model.skills.selected_agent = 0;
     handle_event(&mut model, key(KeyCode::Left));
-    assert_eq!(
-        handle_event(&mut model, key(KeyCode::Enter)),
-        ControllerEffect::LoadSkills
-    );
-    assert_eq!(
-        model.skills.workspace_origin,
-        Some(ai_stock_forum::ui::tui::SkillWorkspaceOrigin::AgentSkills {
-            profile_id: AgentProfileId::from_uuid(Uuid::from_u128(110)),
-        })
-    );
-    execute_skill_effect(
-        &runtime.client(),
-        &mut model,
-        ControllerEffect::LoadSkills,
-    )
-    .unwrap();
-    let replacement = model
-        .skills
-        .library
-        .skills
-        .first()
-        .expect("upgrade replacement in loaded library")
-        .skill_ref
-        .clone();
-
-    let effect = handle_event(&mut model, key(KeyCode::Enter));
-    execute_skill_effect(&runtime.client(), &mut model, effect).unwrap();
-    assert_eq!(model.skills.pane, SkillsPane::Detail);
-    assert_eq!(model.skills.selected_skill_ref(), Some(&replacement));
-
+    let replacement = available.reference();
     let effect = handle_event(&mut model, key(KeyCode::Enter));
     assert_eq!(
         effect,
-        ControllerEffect::LoadSkillAgent {
+        ControllerEffect::RequestSkillAssignmentPreview {
+            profile_id: AgentProfileId::from_uuid(Uuid::from_u128(110)),
+            expected_active_profile_version_id: AgentProfileVersionId::from_uuid(
+                Uuid::from_u128(111),
+            ),
+            target: replacement.clone(),
+            assignment: ai_stock_forum::ui::tui::AssignmentKind::Upgrade {
+                expected: expected.clone(),
+            },
+        }
+    );
+    assert_eq!(
+        model.skills.operation_origin,
+        SkillOperationOrigin::AgentSkills {
             profile_id: AgentProfileId::from_uuid(Uuid::from_u128(110)),
         }
     );
     execute_skill_effect(&runtime.client(), &mut model, effect).unwrap();
-    assert_eq!(model.skills.pane, SkillsPane::AssignmentReview);
-    assert_eq!(
-        model.skills.assignment,
-        Some(ai_stock_forum::ui::tui::AssignmentKind::Upgrade {
-            expected: expected.clone(),
-        })
-    );
-
-    let effect = handle_event(&mut model, key(KeyCode::Enter));
-    execute_skill_effect(&runtime.client(), &mut model, effect).unwrap();
+    assert_eq!(model.skills.pane, SkillsPane::Confirmation);
 
     let command = &model
         .skills
@@ -926,9 +912,6 @@ fn agent_origin_upgrade_preview_builds_an_explicit_exact_upgrade_command() {
             && *review_token == SkillReviewToken::from_uuid(Uuid::from_u128(93))
     ));
     assert!(model.skills.review_registered);
-    assert!(calls.lock().unwrap().contains(&Call::ShowAgent(
-        AgentProfileId::from_uuid(Uuid::from_u128(110)),
-    )));
     assert!(!calls.lock().unwrap().contains(&Call::ShowAgent(
         AgentProfileId::from_uuid(Uuid::from_u128(120)),
     )));

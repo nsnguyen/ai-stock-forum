@@ -143,10 +143,10 @@ fn schema_v1_upgrade_profile_lifecycle_restart_fallback_and_tui_are_accepted() {
     let clock = Arc::new(support::TestClock::new());
     let ids = Arc::new(support::TestIds::new());
     let mut service = ApplicationService::bootstrap(&paths, clock.clone(), ids.clone()).unwrap();
-    assert_eq!(scalar_i64(&paths, "PRAGMA user_version"), 2);
+    assert_eq!(scalar_i64(&paths, "PRAGMA user_version"), 3);
     assert_eq!(
         scalar_i64(&paths, "SELECT COUNT(*) FROM schema_migrations"),
-        2
+        3
     );
 
     let (draft, template) = bull_draft("Research North");
