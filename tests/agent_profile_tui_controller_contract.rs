@@ -828,68 +828,88 @@ fn agents_state_equality_detects_different_editor_drafts() {
     assert_ne!(left, right);
 }
 
+fn enter_modifier_variants() -> [KeyModifiers; 8] {
+    [
+        KeyModifiers::NONE,
+        KeyModifiers::SHIFT,
+        KeyModifiers::CONTROL,
+        KeyModifiers::ALT,
+        KeyModifiers::SUPER,
+        KeyModifiers::HYPER,
+        KeyModifiers::META,
+        KeyModifiers::SHIFT
+            | KeyModifiers::CONTROL
+            | KeyModifiers::ALT
+            | KeyModifiers::SUPER
+            | KeyModifiers::HYPER
+            | KeyModifiers::META,
+    ]
+}
+
 #[test]
-fn shifted_return_submits_template_controls_and_clears_stale_validation() {
-    let mut model = model();
-    model.active_view = View::Agents;
-    model.agents.pane = AgentsPane::Editor;
-    model.agents.editor = Some(create_editor());
+fn every_enter_modifier_submits_template_controls_and_clears_stale_validation() {
+    for modifiers in enter_modifier_variants() {
+        let mut model = model();
+        model.active_view = View::Agents;
+        model.agents.pane = AgentsPane::Editor;
+        model.agents.editor = Some(create_editor());
 
-    assert_eq!(
-        enter_line(&mut model, "text is unavailable here"),
-        ControllerEffect::Redraw
-    );
-    assert_eq!(
-        model
-            .agents
-            .editor
-            .as_ref()
-            .and_then(ProfileEditor::local_message)
-            .map(|message| message.code()),
-        Some("editor_field_unavailable")
-    );
-
-    for character in ":role bull".chars() {
         assert_eq!(
-            handle_event(&mut model, key(KeyCode::Char(character))),
+            enter_line(&mut model, "text is unavailable here"),
             ControllerEffect::Redraw
         );
-    }
-    assert_eq!(
-        handle_event(
-            &mut model,
-            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
-        ),
-        ControllerEffect::Redraw
-    );
-    assert!(model.command.text().is_empty());
-    assert!(
-        model
-            .agents
-            .editor
-            .as_ref()
-            .and_then(ProfileEditor::local_message)
-            .is_none()
-    );
-
-    for character in ":next".chars() {
         assert_eq!(
-            handle_event(&mut model, key(KeyCode::Char(character))),
+            model
+                .agents
+                .editor
+                .as_ref()
+                .and_then(ProfileEditor::local_message)
+                .map(|message| message.code()),
+            Some("editor_field_unavailable")
+        );
+
+        for character in ":role bull".chars() {
+            assert_eq!(
+                handle_event(&mut model, key(KeyCode::Char(character))),
+                ControllerEffect::Redraw
+            );
+        }
+        assert_eq!(
+            handle_event(
+                &mut model,
+                TuiEvent::Key(KeyEvent::new(KeyCode::Enter, modifiers)),
+            ),
             ControllerEffect::Redraw
         );
+        assert!(model.command.text().is_empty());
+        assert!(
+            model
+                .agents
+                .editor
+                .as_ref()
+                .and_then(ProfileEditor::local_message)
+                .is_none()
+        );
+
+        for character in ":next".chars() {
+            assert_eq!(
+                handle_event(&mut model, key(KeyCode::Char(character))),
+                ControllerEffect::Redraw
+            );
+        }
+        assert_eq!(
+            handle_event(
+                &mut model,
+                TuiEvent::Key(KeyEvent::new(KeyCode::Enter, modifiers)),
+            ),
+            ControllerEffect::Redraw
+        );
+        assert!(model.command.text().is_empty());
+        assert_eq!(
+            model.agents.editor.as_ref().unwrap().step().as_str(),
+            "identity"
+        );
     }
-    assert_eq!(
-        handle_event(
-            &mut model,
-            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
-        ),
-        ControllerEffect::Redraw
-    );
-    assert!(model.command.text().is_empty());
-    assert_eq!(
-        model.agents.editor.as_ref().unwrap().step().as_str(),
-        "identity"
-    );
 }
 
 #[test]
@@ -908,15 +928,10 @@ fn modified_enter_chords_do_not_execute_profile_confirmation() {
         );
     }
 
-    for modifiers in [
-        KeyModifiers::SHIFT,
-        KeyModifiers::CONTROL,
-        KeyModifiers::ALT,
-        KeyModifiers::SUPER,
-        KeyModifiers::HYPER,
-        KeyModifiers::META,
-        KeyModifiers::SHIFT | KeyModifiers::CONTROL,
-    ] {
+    for modifiers in enter_modifier_variants()
+        .into_iter()
+        .filter(|modifiers| !modifiers.is_empty())
+    {
         let mut candidate = model.clone();
         assert_eq!(
             handle_event(
