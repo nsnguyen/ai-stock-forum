@@ -364,7 +364,7 @@ fn agent_skill_panel_shows_exact_pin_upgrade_availability_and_explicit_actions()
         truncated: false,
     };
 
-    let text = render_text(&model, 120, 44);
+    let text = render_text(&model, 180, 60);
     for expected in [
         "Assigned skills",
         "PINNED EXACT VERSION",
@@ -551,7 +551,7 @@ fn compact_review_and_confirmation_keep_identity_and_actions_in_fixed_visible_re
 }
 
 #[test]
-fn create_confirmation_uses_only_authoritative_candidate_state_and_marks_pending_fields() {
+fn create_confirmation_uses_authoritative_candidate_state_and_names_version_one() {
     let candidate = skill(1_200, "Authoritative Candidate", SkillProvenance::User);
     let unrelated = builtin(1_300, "Unrelated Loaded Detail");
     let model = create_confirmation_model(&candidate, &unrelated);
@@ -560,8 +560,7 @@ fn create_confirmation_uses_only_authoritative_candidate_state_and_marks_pending
     for expected in [
         "Authoritative Candidate",
         "Digest",
-        "Version Pending",
-        "Provenance Pending",
+        "Version v1",
     ] {
         assert!(text.contains(expected), "missing {expected}");
     }
@@ -574,6 +573,7 @@ fn create_confirmation_uses_only_authoritative_candidate_state_and_marks_pending
     }
     assert!(!text.contains("Unrelated Loaded Detail"));
     assert!(!text.contains("builtin.unrelated-loaded-detail"));
+    assert!(!text.contains("Version Pending"));
 }
 
 #[test]
@@ -614,8 +614,16 @@ fn unknown_active_status_is_not_rendered_as_historical() {
 }
 
 #[test]
-fn editor_review_never_fabricates_the_next_exact_version() {
+fn editor_review_names_create_v1_and_the_next_object_version_without_fabricating_an_id() {
     let first = skill(1_500, "Pending Version", SkillProvenance::User);
+    let mut create = SkillEditor::for_create(Some(first.content().clone()));
+    create.go_to_review().expect("create review");
+    let mut create_model = skills_model(SkillsPane::Editor);
+    create_model.skills.editor = Some(create);
+    let create_text = render_text(&create_model, 180, 60);
+    assert!(create_text.contains("Exact version v1"));
+    assert!(create_text.contains("version ID assigned on commit"));
+
     let mut editor = SkillEditor::for_version(
         first.skill_id(),
         first.skill_version_id(),
@@ -626,9 +634,45 @@ fn editor_review_never_fabricates_the_next_exact_version() {
     model.skills.detail = Some(view(&first));
     model.skills.editor = Some(editor);
 
-    let text = render_text(&model, 100, 32);
-    assert!(text.contains("Exact version Pending"));
-    assert!(!text.contains("Exact version v2"));
+    let text = render_text(&model, 180, 60);
+    assert!(text.contains("Exact version v2"));
+    assert!(text.contains("version ID assigned on commit"));
+    assert!(!text.contains(&SkillVersionId::from_uuid(Uuid::from_u128(1_502)).to_string()));
+}
+
+#[test]
+fn assignment_review_distinguishes_forward_upgrade_from_historical_reassignment() {
+    let first = skill(1_550, "Version Direction", SkillProvenance::User);
+    let mut next_draft = first.content().clone();
+    next_draft.instructions = "Forward version guidance.".to_owned();
+    let second = SkillVersion::next_version(
+        &first,
+        SkillVersionId::from_uuid(Uuid::from_u128(1_552)),
+        1_800_000_001_552,
+        next_draft,
+    )
+    .expect("second version");
+
+    let mut forward = skills_model(SkillsPane::AssignmentReview);
+    forward.skills.detail = Some(view(&second));
+    forward.skills.selected_agent_detail = Some(profile_with_skills(vec![first.reference()]));
+    forward.skills.assignment = Some(AssignmentKind::classify(
+        &second.reference(),
+        Some(&first.reference()),
+    ));
+    let forward_text = render_text(&forward, 180, 60);
+    assert!(forward_text.contains("Upgrade explicit exact version"));
+
+    let mut historical = skills_model(SkillsPane::AssignmentReview);
+    historical.skills.detail = Some(view(&first));
+    historical.skills.selected_agent_detail = Some(profile_with_skills(vec![second.reference()]));
+    historical.skills.assignment = Some(AssignmentKind::classify(
+        &first.reference(),
+        Some(&second.reference()),
+    ));
+    let historical_text = render_text(&historical, 180, 60);
+    assert!(historical_text.contains("Reassign historical exact version"));
+    assert!(!historical_text.contains("Upgrade explicit exact version"));
 }
 
 #[test]

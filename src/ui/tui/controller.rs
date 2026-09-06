@@ -1,9 +1,9 @@
 use super::{
     TuiEvent,
     model::{
-        AgentSkillAction, AgentsPane, AssignmentKind, Focus, LayoutMode, ProfileConfirmation,
-        RuntimeStatus, Severity, SkillConfirmation, SkillDetailAction, SkillOperationOrigin,
-        SkillWorkspaceOrigin, SkillsPane, TuiModel, View,
+        AgentOutcomeIntent, AgentSkillAction, AgentsPane, AssignmentKind, Focus, LayoutMode,
+        ProfileConfirmation, RuntimeStatus, Severity, SkillConfirmation, SkillDetailAction,
+        SkillOperationOrigin, SkillWorkspaceOrigin, SkillsPane, TuiModel, View,
     },
     views,
 };
@@ -150,34 +150,49 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
             shutdown.disposition
         }
         CommandView::AgentProfiles(profiles) => {
+            let intent = model
+                .pending_agent_outcome
+                .take()
+                .unwrap_or(AgentOutcomeIntent::AgentsWorkspace);
             model.agents.replace_profiles(profiles);
-            if !model.skills.active {
-                model.agents.pane = AgentsPane::List;
-                select_workspace_view(model, View::Agents);
+            match intent {
+                AgentOutcomeIntent::AgentsWorkspace => {
+                    model.agents.pane = AgentsPane::List;
+                    select_workspace_view(model, View::Agents);
+                }
+                AgentOutcomeIntent::SkillAssignment => model.skills.active = true,
             }
             model.clear_message();
             ShutdownDisposition::Continue
         }
         CommandView::AgentProfile(profile) => {
-            let needs_skill_library = !model.skills.active
+            let intent = model
+                .pending_agent_outcome
+                .take()
+                .unwrap_or(AgentOutcomeIntent::AgentsWorkspace);
+            let needs_skill_library = intent == AgentOutcomeIntent::AgentsWorkspace
                 && !model.skills.library_loaded
                 && !profile.profile.skill_refs().is_empty();
-            if model.skills.active {
-                let target = model.skills.selected_skill_ref().cloned();
-                let current = target.as_ref().and_then(|target| {
-                    profile.profile.skill_refs().iter().find(|current| {
-                        current.skill_id() == target.skill_id()
-                    })
-                });
-                model.skills.assignment = target
-                    .as_ref()
-                    .map(|target| AssignmentKind::classify(target, current));
-                model.skills.selected_agent_detail = Some(profile);
-                model.skills.pane = SkillsPane::AssignmentReview;
-            } else {
-                model.agents.replace_detail(profile);
-                model.agents.pane = AgentsPane::Detail;
-                select_workspace_view(model, View::Agents);
+            match intent {
+                AgentOutcomeIntent::SkillAssignment => {
+                    let target = model.skills.selected_skill_ref().cloned();
+                    let current = target.as_ref().and_then(|target| {
+                        profile.profile.skill_refs().iter().find(|current| {
+                            current.skill_id() == target.skill_id()
+                        })
+                    });
+                    model.skills.assignment = target
+                        .as_ref()
+                        .map(|target| AssignmentKind::classify(target, current));
+                    model.skills.selected_agent_detail = Some(profile);
+                    model.skills.active = true;
+                    model.skills.pane = SkillsPane::AssignmentReview;
+                }
+                AgentOutcomeIntent::AgentsWorkspace => {
+                    model.agents.replace_detail(profile);
+                    model.agents.pane = AgentsPane::Detail;
+                    select_workspace_view(model, View::Agents);
+                }
             }
             if needs_skill_library {
                 follow_up = ControllerEffect::LoadAgentSkillLibrary;
@@ -417,6 +432,13 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
             }
             model.clear_message();
             model.set_command_in_flight(true);
+            if matches!(
+                command,
+                ApplicationCommand::ListAgentProfiles
+                    | ApplicationCommand::ShowAgentProfile { .. }
+            ) {
+                model.pending_agent_outcome = Some(AgentOutcomeIntent::AgentsWorkspace);
+            }
             ControllerEffect::Submit(command)
         }
         ParsedLine::AgentWorkflow(workflow) => {
@@ -719,6 +741,7 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             match model.skills.selected_action() {
                 SkillDetailAction::Assign => {
                     model.skills.pane = SkillsPane::AgentPicker;
+                    model.pending_agent_outcome = Some(AgentOutcomeIntent::SkillAssignment);
                     match model.skills.agent_origin_profile_id() {
                         Some(profile_id) => ControllerEffect::LoadSkillAgent { profile_id },
                         None => ControllerEffect::LoadSkillAgents,
@@ -767,6 +790,7 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
                 .profiles
                 .get(model.skills.selected_agent)?
                 .profile_id;
+            model.pending_agent_outcome = Some(AgentOutcomeIntent::SkillAssignment);
             ControllerEffect::LoadSkillAgent { profile_id }
         }
         (SkillsPane::AssignmentReview, KeyCode::Enter) if no_modifiers(key.modifiers) => {

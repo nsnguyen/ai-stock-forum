@@ -1759,6 +1759,29 @@ fn resolve_active_skill(
     skill.ok_or(AppError::SkillNotFound)
 }
 
+fn resolve_projected_active_skill<'a>(
+    projection: &'a ProjectionState,
+    selector: &SkillSelector,
+) -> Option<&'a SkillVersionRef> {
+    match selector {
+        SkillSelector::Id(skill_id) => projection.skills.active_skill(*skill_id),
+        SkillSelector::Name(_) => {
+            let normalized_name = selector.normalized_name()?;
+            projection.skills.active_refs().find(|active| {
+                projection.skills.version_metadata().any(
+                    |(version, display_name, _, _, _)| {
+                        version == *active
+                            && SkillSelector::Name(display_name.to_owned())
+                                .normalized_name()
+                                .as_ref()
+                                == Some(&normalized_name)
+                    },
+                )
+            })
+        }
+    }
+}
+
 fn skill_event_summary(skill: &SkillVersion) -> SkillEventSummary {
     SkillEventSummary {
         skill: skill.reference(),
@@ -2470,10 +2493,16 @@ fn materialize_success(
                 provenance,
             },
         ) => {
-            let active = resolve_active_skill(transaction.transaction(), selector)?;
             let accepted = load_skill_version(transaction.transaction(), skill)?
                 .ok_or_else(invalid_receipt)?;
-            if active.reference() != *skill
+            let active_matches = match resolve_projected_active_skill(projection, selector) {
+                Some(active) => active == skill,
+                None => {
+                    matches!(provenance, SkillProvenance::BuiltIn { .. })
+                        && seeded_skill_selector_matches(selector, skill, display_name)
+                }
+            };
+            if !active_matches
                 || accepted.content().display_name != *display_name
                 || accepted.provenance() != provenance
             {
@@ -2499,10 +2528,16 @@ fn materialize_success(
                 predecessor_version_id,
             },
         ) => {
-            let active = resolve_active_skill(transaction.transaction(), selector)?;
             let accepted = load_skill_version(transaction.transaction(), skill)?
                 .ok_or_else(invalid_receipt)?;
-            if active.skill_id() != accepted.skill_id()
+            let selected_skill_matches = match resolve_projected_active_skill(projection, selector) {
+                Some(active) => active.skill_id() == accepted.skill_id(),
+                None => {
+                    matches!(provenance, SkillProvenance::BuiltIn { .. })
+                        && seeded_skill_selector_matches(selector, skill, display_name)
+                }
+            };
+            if !selected_skill_matches
                 || accepted.version() != *version
                 || accepted.predecessor() != *predecessor_version_id
                 || accepted.content().display_name != *display_name
@@ -2530,14 +2565,72 @@ fn materialize_success(
                 truncated,
             },
         ) => {
-            let selected = resolve_active_skill(transaction.transaction(), selector)?;
-            if selected.reference() != *active
-                || active.skill_id() != *skill_id
-                || usize::try_from(*returned_count).ok() != Some(versions.len())
-                || *returned_count > *total_count
-                || *truncated != (*returned_count < *total_count)
-            {
-                return Err(invalid_receipt());
+            if let Some(selected) = resolve_projected_active_skill(projection, selector) {
+                let mut projected_versions = projection
+                    .skills
+                    .version_metadata()
+                    .filter(|(version, _, _, _, _)| version.skill_id() == *skill_id)
+                    .map(|(version, _, _, predecessor_version_id, _)| {
+                        (version.clone(), predecessor_version_id)
+                    })
+                    .collect::<Vec<_>>();
+                projected_versions.sort_by_key(|(version, _)| version.version());
+                let expected_versions = projected_versions
+                    .into_iter()
+                    .rev()
+                    .take(MAX_SKILL_HISTORY_RESULTS)
+                    .collect::<Vec<_>>();
+                if *selected != *active
+                    || active.skill_id() != *skill_id
+                    || usize::try_from(*total_count).ok()
+                        != Some(projection.skills.version_metadata().filter(
+                            |(version, _, _, _, _)| version.skill_id() == *skill_id,
+                        ).count())
+                    || versions.iter().zip(&expected_versions).any(|(version, expected)| {
+                        version.skill != expected.0
+                            || version.predecessor_version_id != expected.1
+                    })
+                    || usize::try_from(*returned_count).ok() != Some(versions.len())
+                    || versions.len() != expected_versions.len()
+                    || *returned_count > *total_count
+                    || *truncated != (*returned_count < *total_count)
+                {
+                    return Err(invalid_receipt());
+                }
+            } else {
+                let persisted_active = load_active_skill(transaction.transaction(), *skill_id)?
+                    .ok_or_else(invalid_receipt)?;
+                let persisted_history =
+                    load_skill_history(transaction.transaction(), *skill_id)?;
+                let expected_versions = persisted_history
+                    .iter()
+                    .rev()
+                    .take(MAX_SKILL_HISTORY_RESULTS)
+                    .collect::<Vec<_>>();
+                if !matches!(persisted_active.provenance(), SkillProvenance::BuiltIn { .. })
+                    || persisted_active.reference() != *active
+                    || active.skill_id() != *skill_id
+                    || !seeded_skill_selector_matches(
+                        selector,
+                        active,
+                        &persisted_active.content().display_name,
+                    )
+                    || persisted_history
+                        .iter()
+                        .any(|skill| !matches!(skill.provenance(), SkillProvenance::BuiltIn { .. }))
+                    || usize::try_from(*total_count).ok() != Some(persisted_history.len())
+                    || versions.iter().zip(&expected_versions).any(|(version, expected)| {
+                        version.skill != expected.reference()
+                            || version.created_at_ms != expected.created_at_ms()
+                            || version.predecessor_version_id != expected.predecessor()
+                    })
+                    || usize::try_from(*returned_count).ok() != Some(versions.len())
+                    || versions.len() != expected_versions.len()
+                    || *returned_count > *total_count
+                    || *truncated != (*returned_count < *total_count)
+                {
+                    return Err(invalid_receipt());
+                }
             }
             (
                 CommandView::SkillHistory(SkillHistoryView {
@@ -2808,6 +2901,20 @@ fn parse_capability(value: &str) -> Result<Capability, AppError> {
         "git_push" => Ok(Capability::GitPush),
         "finance_recommendation" => Ok(Capability::FinanceRecommendation),
         _ => Err(invalid_receipt()),
+    }
+}
+
+fn seeded_skill_selector_matches(
+    selector: &SkillSelector,
+    skill: &SkillVersionRef,
+    display_name: &str,
+) -> bool {
+    match selector {
+        SkillSelector::Id(skill_id) => *skill_id == skill.skill_id(),
+        SkillSelector::Name(name) => {
+            SkillSelector::Name(name.clone()).normalized_name()
+                == SkillSelector::Name(display_name.to_owned()).normalized_name()
+        }
     }
 }
 

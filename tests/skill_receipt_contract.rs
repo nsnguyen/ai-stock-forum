@@ -1,8 +1,8 @@
 mod support;
 
 use ai_stock_forum::{
-    app::{ApplicationCommand, CommandEnvelope, CommandView},
-    domain::{Actor, CommandId, CorrelationId},
+    app::{ApplicationCommand, CommandEnvelope, CommandView, SkillSelector},
+    domain::{Actor, CommandId, CorrelationId, ObjectVersion, SkillId, SkillVersionId},
     skills::SkillDraft,
 };
 use uuid::Uuid;
@@ -366,8 +366,12 @@ mod fix_round_one_replay_matrix {
 }
 
 fn draft(instructions: &str) -> SkillDraft {
+    named_draft("Receipt Skill", instructions)
+}
+
+fn named_draft(name: &str, instructions: &str) -> SkillDraft {
     SkillDraft::new(
-        "Receipt Skill".to_owned(),
+        name.to_owned(),
         "Receipt behavior.".to_owned(),
         "Use for receipt tests.".to_owned(),
         Vec::new(),
@@ -375,6 +379,142 @@ fn draft(instructions: &str) -> SkillDraft {
         Vec::new(),
     )
     .unwrap()
+}
+
+fn create_receipt_skill(
+    app: &mut support::TestApp,
+    command_id: u128,
+) -> (SkillId, SkillVersionId, ObjectVersion) {
+    let candidate = draft("Version one.");
+    let preview = app.preview_skill_creation(candidate.clone()).unwrap();
+    let created = app
+        .execute(envelope(
+            command_id,
+            ApplicationCommand::CreateSkill {
+                skill_id: preview.skill_id,
+                candidate,
+                review_token: preview.review_token,
+                review_digest: preview.review_digest,
+            },
+        ))
+        .unwrap();
+    let CommandView::SkillCreated(created) = created.view else {
+        panic!("skill created")
+    };
+    (
+        created.skill_id,
+        created.skill_version_id,
+        created.version,
+    )
+}
+
+fn activate_renamed_receipt_skill(
+    app: &mut support::TestApp,
+    command_id: u128,
+    skill_id: SkillId,
+    active_version_id: SkillVersionId,
+) -> SkillVersionId {
+    let candidate = named_draft("Renamed Receipt Skill", "Version two.");
+    let preview = app
+        .preview_skill_version(skill_id, active_version_id, candidate.clone())
+        .unwrap();
+    let activated = app
+        .execute(envelope(
+            command_id,
+            ApplicationCommand::ActivateSkillVersion {
+                skill_id,
+                expected_active_version_id: active_version_id,
+                candidate,
+                review_token: preview.review_token,
+                review_digest: preview.review_digest,
+            },
+        ))
+        .unwrap();
+    let CommandView::SkillVersionActivated(activated) = activated.view else {
+        panic!("skill version activated")
+    };
+    activated.skill_version_id
+}
+
+#[test]
+fn show_skill_receipt_replays_original_outcome_after_later_activation_and_rename() {
+    let mut app = support::app();
+    let (skill_id, version_one_id, _) = create_receipt_skill(&mut app, 34_000);
+    let command = envelope(
+        34_001,
+        ApplicationCommand::ShowSkill {
+            selector: SkillSelector::from(skill_id),
+        },
+    );
+    let original = app.execute(command.clone()).unwrap();
+
+    let version_two_id =
+        activate_renamed_receipt_skill(&mut app, 34_002, skill_id, version_one_id);
+
+    assert_eq!(app.execute(command).unwrap(), original);
+
+    let current = app
+        .execute(envelope(
+            34_003,
+            ApplicationCommand::ShowSkill {
+                selector: SkillSelector::from(skill_id),
+            },
+        ))
+        .unwrap();
+    let CommandView::Skill(current) = current.view else {
+        panic!("active skill")
+    };
+    assert_eq!(current.skill_ref.skill_version_id(), version_two_id);
+    assert_eq!(current.content.display_name, "Renamed Receipt Skill");
+}
+
+#[test]
+fn show_skill_history_receipt_replays_original_outcome_after_later_activation_and_rename() {
+    let mut app = support::app();
+    let (skill_id, version_one_id, _) = create_receipt_skill(&mut app, 35_000);
+    let command = envelope(
+        35_001,
+        ApplicationCommand::ShowSkillHistory {
+            selector: SkillSelector::from(skill_id),
+        },
+    );
+    let original = app.execute(command.clone()).unwrap();
+
+    activate_renamed_receipt_skill(&mut app, 35_002, skill_id, version_one_id);
+
+    assert_eq!(app.execute(command).unwrap(), original);
+}
+
+#[test]
+fn eventless_builtin_show_skill_history_receipt_replays_exact_outcome() {
+    let mut app = support::app();
+    let command = envelope(
+        35_100,
+        ApplicationCommand::ShowSkillHistory {
+            selector: SkillSelector::Name("Evidence Review".to_owned()),
+        },
+    );
+    let original = app.execute(command.clone()).unwrap();
+
+    assert_eq!(app.execute(command).unwrap(), original);
+}
+
+#[test]
+fn name_based_show_skill_version_receipt_replays_original_outcome_after_later_rename() {
+    let mut app = support::app();
+    let (skill_id, version_one_id, version_one) = create_receipt_skill(&mut app, 36_000);
+    let command = envelope(
+        36_001,
+        ApplicationCommand::ShowSkillVersion {
+            selector: SkillSelector::Name("Receipt Skill".to_owned()),
+            version: version_one,
+        },
+    );
+    let original = app.execute(command.clone()).unwrap();
+
+    activate_renamed_receipt_skill(&mut app, 36_002, skill_id, version_one_id);
+
+    assert_eq!(app.execute(command).unwrap(), original);
 }
 
 #[test]

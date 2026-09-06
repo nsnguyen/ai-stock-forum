@@ -4,7 +4,7 @@ use super::{
     TuiError,
     controller::{ControllerEffect, apply_outcome, handle_event},
     event::{CrosstermEventSource, EventSource, TuiEvent},
-    model::{RuntimeStatus, TuiModel},
+    model::{AgentOutcomeIntent, RuntimeStatus, TuiModel},
     terminal::{CrosstermScreen, Screen},
     theme::Theme,
 };
@@ -235,14 +235,20 @@ pub fn execute_skill_effect(
             let _ = apply_outcome(model, outcome);
         }
         ControllerEffect::LoadSkillAgents => {
-            let outcome = submit_agent_command(client, model, ApplicationCommand::ListAgentProfiles)?;
+            let outcome = submit_agent_command_for(
+                client,
+                model,
+                AgentOutcomeIntent::SkillAssignment,
+                ApplicationCommand::ListAgentProfiles,
+            )?;
             let _ = apply_outcome(model, outcome);
             model.skills.pane = super::model::SkillsPane::AgentPicker;
         }
         ControllerEffect::LoadSkillAgent { profile_id } => {
-            let outcome = submit_agent_command(
+            let outcome = submit_agent_command_for(
                 client,
                 model,
+                AgentOutcomeIntent::SkillAssignment,
                 ApplicationCommand::ShowAgentProfile {
                     selector: profile_id.into(),
                 },
@@ -265,6 +271,13 @@ pub fn execute_skill_effect(
                     target,
                 ),
                 super::model::AssignmentKind::Upgrade { expected } => client
+                    .preview_agent_skill_upgrade(
+                        profile_id,
+                        expected_active_profile_version_id,
+                        expected,
+                        target,
+                    ),
+                super::model::AssignmentKind::Reassign { expected } => client
                     .preview_agent_skill_upgrade(
                         profile_id,
                         expected_active_profile_version_id,
@@ -342,9 +355,10 @@ fn execute_typed_skill_workflow(
             };
             let skill = submit_agent_command(client, model, command)?;
             let _ = apply_outcome(model, skill);
-            let agent = submit_agent_command(
+            let agent = submit_agent_command_for(
                 client,
                 model,
+                AgentOutcomeIntent::SkillAssignment,
                 ApplicationCommand::ShowAgentProfile { selector: agent },
             )?;
             let _ = apply_outcome(model, agent);
@@ -359,9 +373,10 @@ fn execute_typed_skill_workflow(
             let Some(skill_id) = model.skills.current_skill_id() else {
                 return Ok(());
             };
-            let agent = submit_agent_command(
+            let agent = submit_agent_command_for(
                 client,
                 model,
+                AgentOutcomeIntent::SkillAssignment,
                 ApplicationCommand::ShowAgentProfile { selector: agent },
             )?;
             let _ = apply_outcome(model, agent);
@@ -526,6 +541,20 @@ fn submit_agent_command(
     result
 }
 
+fn submit_agent_command_for(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    intent: AgentOutcomeIntent,
+    command: ApplicationCommand,
+) -> Result<CommandOutcome, RuntimeError> {
+    model.pending_agent_outcome = Some(intent);
+    let result = submit_agent_command(client, model, command);
+    if result.is_err() {
+        model.pending_agent_outcome = None;
+    }
+    result
+}
+
 fn submit_protected_skill_command(
     client: &RuntimeClient,
     model: &mut TuiModel,
@@ -603,13 +632,19 @@ fn refresh_agent_skill_assignment_state(
     model: &mut TuiModel,
     profile_id: crate::domain::AgentProfileId,
 ) -> Result<(), RuntimeError> {
-    let profiles = submit_agent_command(client, model, ApplicationCommand::ListAgentProfiles)?;
+    let profiles = submit_agent_command_for(
+        client,
+        model,
+        AgentOutcomeIntent::SkillAssignment,
+        ApplicationCommand::ListAgentProfiles,
+    )?;
     apply_agent_outcome(model, profiles);
     model.agents.select_profile_id(profile_id);
 
-    let outcome = submit_agent_command(
+    let outcome = submit_agent_command_for(
         client,
         model,
+        AgentOutcomeIntent::SkillAssignment,
         ApplicationCommand::ShowAgentProfile {
             selector: profile_id.into(),
         },
@@ -1124,6 +1159,7 @@ impl TuiRunner {
             }
             Err(error) => {
                 self.model.set_command_in_flight(false);
+                self.model.pending_agent_outcome = None;
                 Err(error.into())
             }
         }

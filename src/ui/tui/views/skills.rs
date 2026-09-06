@@ -577,7 +577,8 @@ fn render_assignment_review(frame: &mut Frame<'_>, area: Rect, model: &TuiModel,
         append_exact_ref(&mut body, "Target", target, theme);
     }
     match assignment {
-        Some(AssignmentKind::Upgrade { expected }) => {
+        Some(AssignmentKind::Upgrade { expected })
+        | Some(AssignmentKind::Reassign { expected }) => {
             append_exact_ref(&mut body, "Current pin", expected, theme)
         }
         Some(AssignmentKind::Unassign { expected }) => {
@@ -830,16 +831,23 @@ fn confirmation_lines(
             replacement,
             review_digest,
             ..
-        } => ref_confirmation_lines(
-            model,
-            "upgrade",
-            "Upgrade",
-            *profile_id,
-            replacement,
-            Some(expected),
-            review_digest.to_string(),
-            theme,
-        ),
+        } => {
+            let (title, operation) = if replacement.version().get() > expected.version().get() {
+                ("upgrade", "Upgrade")
+            } else {
+                ("historical reassignment", "Reassign Historical")
+            };
+            ref_confirmation_lines(
+                model,
+                title,
+                operation,
+                *profile_id,
+                replacement,
+                Some(expected),
+                review_digest.to_string(),
+                theme,
+            )
+        }
         ApplicationCommand::UnassignAgentSkill {
             profile_id,
             expected,
@@ -874,6 +882,7 @@ fn candidate_confirmation_lines(
     review_digest: String,
     theme: &Theme,
 ) -> (&'static str, Vec<Line<'static>>, Vec<Line<'static>>) {
+    let version = forthcoming_version(model, expected_active_version_id);
     let candidate_digest = model
         .skills
         .editor
@@ -897,7 +906,7 @@ fn candidate_confirmation_lines(
             compact_identifier(&skill_id.to_string()),
             digest_label
         )),
-        Line::raw("Version Pending | Provenance Pending"),
+        Line::raw(format!("Version {version} | Provenance Pending")),
     ];
     let mut body = vec![
         label_value("Candidate", safe_text(&candidate.display_name), theme),
@@ -907,7 +916,7 @@ fn candidate_confirmation_lines(
             candidate_digest.unwrap_or_else(|| "Pending validation".to_owned()),
             theme,
         ),
-        label_value("Version", "Pending authoritative commit".to_owned(), theme),
+        label_value("Version", version, theme),
         label_value("Provenance", "Pending authoritative commit".to_owned(), theme),
     ];
     if let Some(expected) = expected_active_version_id {
@@ -995,10 +1004,32 @@ fn editor_operation(editor: &SkillEditor) -> &'static str {
     }
 }
 
-fn editor_target_version(_model: &TuiModel, editor: &SkillEditor) -> String {
+fn editor_target_version(model: &TuiModel, editor: &SkillEditor) -> String {
     match editor.mode() {
-        SkillEditorMode::Create | SkillEditorMode::Version { .. } => "Pending".to_owned(),
+        SkillEditorMode::Create => forthcoming_version(model, None),
+        SkillEditorMode::Version {
+            expected_active_version_id,
+            ..
+        } => forthcoming_version(model, Some(*expected_active_version_id)),
     }
+}
+
+fn forthcoming_version(
+    model: &TuiModel,
+    expected_active_version_id: Option<crate::domain::SkillVersionId>,
+) -> String {
+    let object_version = match expected_active_version_id {
+        None => Some(1),
+        Some(expected) => model
+            .skills
+            .detail
+            .as_ref()
+            .filter(|detail| detail.skill_ref.skill_version_id() == expected)
+            .and_then(|detail| detail.skill_ref.version().get().checked_add(1)),
+    };
+    object_version
+        .map(|version| format!("v{version} (version ID assigned on commit)"))
+        .unwrap_or_else(|| "Unavailable; reload the active version".to_owned())
 }
 
 fn editor_provenance(model: &TuiModel, editor: &SkillEditor) -> String {
@@ -1083,6 +1114,7 @@ fn assignment_name(assignment: Option<&AssignmentKind>) -> &'static str {
     match assignment {
         Some(AssignmentKind::Add) => "Assign exact version",
         Some(AssignmentKind::Upgrade { .. }) => "Upgrade explicit exact version",
+        Some(AssignmentKind::Reassign { .. }) => "Reassign historical exact version",
         Some(AssignmentKind::AlreadyAssigned) => "Already assigned",
         Some(AssignmentKind::Unassign { .. }) => "Unassign exact version",
         None => "Loading assignment state",
@@ -1125,6 +1157,7 @@ fn assignment_verb(assignment: Option<&AssignmentKind>) -> &'static str {
     match assignment {
         Some(AssignmentKind::Add) => "assignment",
         Some(AssignmentKind::Upgrade { .. }) => "upgrade",
+        Some(AssignmentKind::Reassign { .. }) => "historical reassignment",
         Some(AssignmentKind::Unassign { .. }) => "unassignment",
         Some(AssignmentKind::AlreadyAssigned) | None => "operation",
     }

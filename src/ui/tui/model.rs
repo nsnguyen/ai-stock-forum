@@ -78,8 +78,15 @@ pub enum SkillDetailAction {
 pub enum AssignmentKind {
     Add,
     Upgrade { expected: SkillVersionRef },
+    Reassign { expected: SkillVersionRef },
     AlreadyAssigned,
     Unassign { expected: SkillVersionRef },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentOutcomeIntent {
+    AgentsWorkspace,
+    SkillAssignment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +106,10 @@ impl AssignmentKind {
         match current {
             None => Self::Add,
             Some(current) if current == target => Self::AlreadyAssigned,
-            Some(current) => Self::Upgrade {
+            Some(current) if target.version().get() > current.version().get() => Self::Upgrade {
+                expected: current.clone(),
+            },
+            Some(current) => Self::Reassign {
                 expected: current.clone(),
             },
         }
@@ -709,6 +719,7 @@ pub struct TuiModel {
     pub active_view: View,
     pub agents: AgentsViewState,
     pub skills: SkillsViewState,
+    pub pending_agent_outcome: Option<AgentOutcomeIntent>,
     pub focus: Focus,
     pub layout_mode: LayoutMode,
     pub inspector_open: bool,
@@ -754,6 +765,7 @@ impl TuiModel {
             active_view: View::Overview,
             agents,
             skills: SkillsViewState::default(),
+            pending_agent_outcome: None,
             focus: Focus::Workspace,
             layout_mode: LayoutMode::Wide,
             inspector_open: false,

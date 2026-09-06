@@ -1593,6 +1593,8 @@ fn direct_agent_show_hydrates_upgrade_truth_without_visiting_skills() {
     )
     .unwrap();
     let mut scripted = VecDeque::new();
+    scripted.push_back(Ok(Some(key(KeyCode::Char('s')))));
+    scripted.extend((0..4).map(|_| Ok(None)));
     push_text(
         &mut scripted,
         &format!(
@@ -1624,6 +1626,38 @@ fn direct_agent_show_hydrates_upgrade_truth_without_visiting_skills() {
         AgentSkillUpgradeAvailability::Available(reference)
             if reference == &replacement_skill().reference()
     )));
+}
+
+#[test]
+fn skill_picker_profile_load_uses_picker_intent_instead_of_ambient_workspace_state() {
+    let runtime = ApplicationRuntime::spawn(
+        RouteRecorder {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            execute_error: None,
+        },
+        4,
+    )
+    .unwrap();
+    let target = assigned_skill();
+    let mut model = model();
+    model.skills.replace_detail(host_skill_view(&target));
+    model.skills.pane = SkillsPane::AgentPicker;
+    model.skills.active = false;
+
+    execute_skill_effect(
+        &runtime.client(),
+        &mut model,
+        ControllerEffect::LoadSkillAgent {
+            profile_id: AgentProfileId::from_uuid(Uuid::from_u128(110)),
+        },
+    )
+    .unwrap();
+
+    assert!(model.skills.active);
+    assert_eq!(model.skills.pane, SkillsPane::AssignmentReview);
+    assert_eq!(model.skills.assignment, Some(AssignmentKind::AlreadyAssigned));
+    assert!(model.skills.selected_agent_detail.is_some());
+    runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
 }
 
 #[test]

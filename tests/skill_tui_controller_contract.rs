@@ -1,6 +1,7 @@
 use ai_stock_forum::{
     app::{
-        AgentProfileSummary, AgentProfileView, AgentProfilesView, CommandOutcome, CommandView,
+        AgentProfileSummary, AgentProfileView, AgentProfilesView, ApplicationCommand,
+        CommandOutcome, CommandView,
         DatabaseReadiness, PresentationSnapshot, ProcessGuardOwnership, ShutdownDisposition,
         SkillHistoryEntry, SkillHistoryView, SkillSummary, SkillView, SkillsView,
     },
@@ -14,8 +15,9 @@ use ai_stock_forum::{
     ui::tui::{
         ControllerEffect, TuiEvent, apply_outcome, handle_event,
         model::{
-            AgentSkillAction, AgentsPane, AssignmentKind, SkillConfirmation, SkillDetailAction,
-            SkillOperationOrigin, SkillWorkspaceOrigin, SkillsPane, TuiModel, View,
+            AgentSkillAction, AgentsPane, AssignmentKind, Focus, SkillConfirmation,
+            SkillDetailAction, SkillOperationOrigin, SkillWorkspaceOrigin, SkillsPane, TuiModel,
+            View,
         },
     },
 };
@@ -74,6 +76,85 @@ fn opening_skills_from_agent_panel_tracks_and_restores_workspace_origin() {
 
 fn key(code: KeyCode) -> TuiEvent {
     TuiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+fn submit_command(model: &mut TuiModel, command: &str) -> ControllerEffect {
+    model.command.clear();
+    model.command.ingest(command);
+    model.set_focus(Focus::Command);
+    handle_event(model, key(KeyCode::Enter))
+}
+
+#[test]
+fn direct_agent_commands_from_active_skills_follow_the_requested_destination() {
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.pane = SkillsPane::Detail;
+
+    assert!(matches!(
+        submit_command(&mut model, "/agent list"),
+        ControllerEffect::Submit(ApplicationCommand::ListAgentProfiles)
+    ));
+    apply_outcome(
+        &mut model,
+        command_outcome(CommandView::AgentProfiles(AgentProfilesView {
+            profiles: vec![agent(900, "Direct Agent")],
+            total_count: 1,
+            returned_count: 1,
+            truncated: false,
+        })),
+    );
+    assert!(!model.skills.active);
+    assert_eq!(model.active_view, View::Agents);
+    assert_eq!(model.agents.pane, AgentsPane::List);
+
+    model.skills.active = true;
+    model.skills.pane = SkillsPane::Detail;
+    let direct_profile_id = AgentProfileId::from_uuid(Uuid::from_u128(900));
+    assert!(matches!(
+        submit_command(&mut model, &format!("/agent show {direct_profile_id}")),
+        ControllerEffect::Submit(ApplicationCommand::ShowAgentProfile { .. })
+    ));
+    let detail = profile_with_skills(900, Vec::new());
+    apply_outcome(
+        &mut model,
+        command_outcome(CommandView::AgentProfile(detail.clone())),
+    );
+    assert!(!model.skills.active);
+    assert_eq!(model.active_view, View::Agents);
+    assert_eq!(model.agents.pane, AgentsPane::Detail);
+    assert_eq!(model.agents.detail, Some(detail));
+}
+
+#[test]
+fn picker_profile_response_keeps_its_assignment_intent_when_workspace_state_changes() {
+    let target = skill(910, "Picker Target");
+    let detail = profile_with_skills(920, Vec::new());
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.replace_detail(skill_view(&target));
+    model.skills.pane = SkillsPane::AgentPicker;
+    model.agents.profiles = AgentProfilesView {
+        profiles: vec![agent(920, "Picker Agent")],
+        total_count: 1,
+        returned_count: 1,
+        truncated: false,
+    };
+
+    assert!(matches!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::LoadSkillAgent { .. }
+    ));
+    model.skills.active = false;
+    apply_outcome(
+        &mut model,
+        command_outcome(CommandView::AgentProfile(detail.clone())),
+    );
+
+    assert!(model.skills.active);
+    assert_eq!(model.skills.pane, SkillsPane::AssignmentReview);
+    assert_eq!(model.skills.selected_agent_detail, Some(detail));
+    assert_eq!(model.skills.assignment, Some(AssignmentKind::Add));
 }
 
 fn skill(seed: u128, name: &str) -> SkillVersion {
@@ -337,7 +418,7 @@ fn agent_view_history_and_historical_assignment_never_reuse_selected_skill_a() {
     assert_eq!(target, skill_b_v1.reference());
     assert_eq!(
         assignment,
-        AssignmentKind::Upgrade {
+        AssignmentKind::Reassign {
             expected: skill_b_v2.reference(),
         }
     );
@@ -345,7 +426,7 @@ fn agent_view_history_and_historical_assignment_never_reuse_selected_skill_a() {
 }
 
 #[test]
-fn opened_historical_version_assigns_its_exact_ref_and_classifies_downgrade_as_upgrade() {
+fn opened_historical_version_assigns_its_exact_ref_and_classifies_historical_reassignment() {
     let first = skill(840, "Historical");
     let active = SkillVersion::create(
         first.skill_id(),
@@ -413,11 +494,9 @@ fn opened_historical_version_assigns_its_exact_ref_and_classifies_downgrade_as_u
         panic!("historical assignment preview")
     };
     assert_eq!(target, first.reference());
-    assert_eq!(
-        assignment,
-        AssignmentKind::Upgrade {
-            expected: active.reference(),
-        }
+    assert!(
+        format!("{assignment:?}").starts_with("Reassign"),
+        "historical reassignment was mislabeled as {assignment:?}"
     );
 
     let skill_b = skill(860, "Skill B");
