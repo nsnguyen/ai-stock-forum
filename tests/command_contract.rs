@@ -5,6 +5,7 @@ fn command(bytes: &[u8]) -> ApplicationCommand {
     match parse_line(bytes) {
         ParsedLine::Command(command) => command,
         ParsedLine::AgentWorkflow(_) => panic!("expected direct command"),
+        ParsedLine::SkillWorkflow(_) => panic!("expected direct command"),
         ParsedLine::Ignored => panic!("expected command"),
     }
 }

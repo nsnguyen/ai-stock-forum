@@ -170,6 +170,12 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
         "Left/Right: choose action | Enter: open | Esc: library",
         theme.focus,
     )];
+    if model.skills.version_detail.is_some() {
+        lines.push(Line::styled(
+            "Historical detail is read-only; assignment and history remain available.",
+            theme.warning,
+        ));
+    }
     let detail = model
         .skills
         .version_detail
@@ -286,14 +292,12 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
 fn action_selector(model: &TuiModel, theme: &Theme) -> Line<'static> {
     let selected = model.skills.selected_action();
     let mut spans = vec![Span::styled("Actions  ", theme.accent)];
-    for (index, (action, label)) in [
-        (SkillDetailAction::Assign, "Assign"),
-        (SkillDetailAction::CreateVersion, "Create Version"),
-        (SkillDetailAction::History, "History"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (index, action) in model.skills.available_detail_actions().iter().copied().enumerate() {
+        let label = match action {
+            SkillDetailAction::Assign => "Assign",
+            SkillDetailAction::CreateVersion => "Create Version",
+            SkillDetailAction::History => "History",
+        };
         if index > 0 {
             spans.push(Span::raw("  "));
         }
@@ -423,6 +427,28 @@ fn render_editor(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
         label_value("Current field", editor_field_name(editor.field()).to_owned(), theme),
         Line::styled(editor_guidance(editor), theme.focus),
     ];
+    if editor.step() == SkillEditorStep::References {
+        lines.extend([Line::default(), Line::styled("ACCEPTED INERT NOTES", theme.accent)]);
+        if editor.references().is_empty() {
+            lines.push(Line::styled("None yet", theme.muted));
+        } else {
+            for (index, reference) in editor.references().iter().enumerate() {
+                let selected = editor.selected_reference() == Some(index);
+                lines.push(Line::styled(
+                    format!(
+                        "{} {}",
+                        if selected { ">" } else { " " },
+                        safe_text(&reference.name)
+                    ),
+                    if selected { theme.focus } else { theme.accent },
+                ));
+                lines.push(Line::styled(
+                    format!("  {}", safe_text(&reference.body)),
+                    theme.muted,
+                ));
+            }
+        }
+    }
     if let Some(error) = editor.local_error() {
         lines.extend([
             Line::default(),
@@ -1028,7 +1054,7 @@ fn editor_guidance(editor: &SkillEditor) -> &'static str {
         SkillEditorField::Review => "Enter: request validation review | Esc: back to references",
         SkillEditorField::DisplayName => "Type display name | Enter: purpose | Esc: cancel",
         SkillEditorField::ReferenceName => {
-            "Type note name, or leave blank to review | Enter: continue | Esc: back"
+            "Type note name, or leave blank to review | Up/Down: select note | Enter: edit | Delete: remove | Esc: back"
         }
         _ => "Type the focused value | Enter: continue | Esc: back",
     }
@@ -1109,4 +1135,40 @@ fn compact_identifier(value: &str) -> String {
         return value.to_owned();
     }
     format!("{}..{}", &value[..8], &value[value.len() - 8..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::skills::{SkillDraft, SkillResource};
+
+    #[test]
+    fn review_regression_reference_editor_guidance_exposes_keyboard_controls() {
+        let draft = SkillDraft {
+            display_name: "Research".to_owned(),
+            description: "Purpose".to_owned(),
+            use_when: "Use when reviewing evidence".to_owned(),
+            tags: vec!["evidence".to_owned()],
+            instructions: "Review carefully".to_owned(),
+            resources: vec![SkillResource {
+                name: "Source".to_owned(),
+                body: "Accepted note".to_owned(),
+            }],
+        };
+        let mut editor = SkillEditor::for_create(Some(draft.clone()));
+        for value in [
+            draft.display_name.as_str(),
+            draft.description.as_str(),
+            draft.use_when.as_str(),
+            "evidence",
+            draft.instructions.as_str(),
+        ] {
+            editor.submit_keyboard_line(value);
+        }
+
+        let guidance = editor_guidance(&editor);
+        assert!(guidance.contains("Up/Down: select note"));
+        assert!(guidance.contains("Enter: edit"));
+        assert!(guidance.contains("Delete: remove"));
+    }
 }

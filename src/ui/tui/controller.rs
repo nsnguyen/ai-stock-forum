@@ -15,7 +15,7 @@ use crate::{
         ShutdownReason,
     },
     audit::AuditEntry,
-    ui::command::{AgentWorkflowCommand, ParsedLine, parse_line},
+    ui::command::{AgentWorkflowCommand, ParsedLine, SkillWorkflowCommand, parse_line},
     ui::profile_editor::{
         PreviewEditRequest, ProfileEditorEffect, ProfileEditorMode, ProfileEditorStep,
     },
@@ -54,6 +54,7 @@ pub enum ControllerEffect {
     StartProfileEditBySelector {
         selector: AgentProfileSelector,
     },
+    StartSkillWorkflow(SkillWorkflowCommand),
     RequestProfilePreview(PreviewEditRequest),
     ExecuteProfile(ApplicationCommand),
     CancelProfileReview,
@@ -111,6 +112,7 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
         .iter()
         .map(AuditEntry::from_event)
         .collect::<Vec<_>>();
+    let mut follow_up = ControllerEffect::Redraw;
 
     let view_shutdown = match view {
         CommandView::Help(_) => {
@@ -197,11 +199,20 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
             model.skills.replace_skills(skills);
             model.skills.active = true;
             model.skills.pane = SkillsPane::List;
+            if let Some(skill_id) = model.skills.pending_active_skill {
+                follow_up = ControllerEffect::Submit(ApplicationCommand::ShowSkill {
+                    selector: skill_id.into(),
+                });
+            }
             model.clear_message();
             ShutdownDisposition::Continue
         }
         CommandView::Skill(skill) => {
+            let skill_id = skill.skill_ref.skill_id();
             model.skills.replace_detail(skill);
+            if model.skills.pending_active_skill == Some(skill_id) {
+                model.skills.pending_active_skill = None;
+            }
             model.skills.active = true;
             model.clear_message();
             ShutdownDisposition::Continue
@@ -220,9 +231,17 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
             model.clear_message();
             ShutdownDisposition::Continue
         }
-        CommandView::SkillCreated(_)
-        | CommandView::SkillVersionActivated(_)
-        | CommandView::AgentSkillAssigned(_)
+        CommandView::SkillCreated(created) => {
+            model.skills.pending_active_skill = Some(created.skill_id);
+            model.clear_message();
+            ShutdownDisposition::Continue
+        }
+        CommandView::SkillVersionActivated(activated) => {
+            model.skills.pending_active_skill = Some(activated.skill_id);
+            model.clear_message();
+            ShutdownDisposition::Continue
+        }
+        CommandView::AgentSkillAssigned(_)
         | CommandView::AgentSkillUpgraded(_)
         | CommandView::AgentSkillUnassigned(_) => {
             model.clear_message();
@@ -237,7 +256,7 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
         model.set_runtime_status(RuntimeStatus::Stopping);
         ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
     } else {
-        ControllerEffect::Redraw
+        follow_up
     }
 }
 
@@ -412,6 +431,18 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
                 }
             }
         }
+        ParsedLine::SkillWorkflow(workflow) => {
+            model.command.remember(input);
+            model.clear_message();
+            if !model.skills.active {
+                model.skills.workspace_origin = Some(SkillWorkspaceOrigin::Cockpit(model.active_view));
+            }
+            model.skills.clear_skill_context();
+            model.skills.active = true;
+            model.skills.operation_origin = SkillOperationOrigin::Skills(SkillsPane::Detail);
+            model.set_focus(Focus::Workspace);
+            ControllerEffect::StartSkillWorkflow(workflow)
+        }
     }
 }
 
@@ -499,6 +530,15 @@ fn handle_skill_confirmation_key(model: &mut TuiModel, key: KeyEvent) -> Control
 fn handle_skill_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
     match key.code {
         KeyCode::Esc if no_modifiers(key.modifiers) => {
+            if model
+                .skills
+                .editor
+                .as_mut()
+                .is_some_and(|editor| editor.cancel_reference_interaction())
+            {
+                synchronize_skill_editor_input(model);
+                return ControllerEffect::Redraw;
+            }
             let effect = model
                 .skills
                 .editor
@@ -515,6 +555,15 @@ fn handle_skill_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEff
             controller_effect
         }
         KeyCode::Enter if no_modifiers(key.modifiers) => {
+            if model
+                .skills
+                .editor
+                .as_mut()
+                .is_some_and(|editor| editor.begin_edit_selected_reference())
+            {
+                synchronize_skill_editor_input(model);
+                return ControllerEffect::Redraw;
+            }
             let input = model.command.text().to_owned();
             let effect = model
                 .skills
@@ -533,12 +582,44 @@ fn handle_skill_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEff
             }
             controller_effect
         }
+        KeyCode::Up | KeyCode::Down if no_modifiers(key.modifiers) => {
+            let reference_picker = model
+                .skills
+                .editor
+                .as_ref()
+                .is_some_and(|editor| {
+                    editor.field() == crate::ui::skill_editor::SkillEditorField::ReferenceName
+                        && model.command.text().is_empty()
+                });
+            if !reference_picker {
+                return ControllerEffect::None;
+            }
+            if let Some(editor) = model.skills.editor.as_mut() {
+                editor.select_reference(matches!(key.code, KeyCode::Down));
+            }
+            ControllerEffect::Redraw
+        }
         KeyCode::Char(character) if text_modifiers(key.modifiers) => {
+            if let Some(editor) = model.skills.editor.as_mut() {
+                editor.clear_reference_selection();
+            }
             model.command.insert(character);
             ControllerEffect::Redraw
         }
         KeyCode::Backspace if no_modifiers(key.modifiers) => edit(model, |model| model.command.backspace()),
-        KeyCode::Delete if no_modifiers(key.modifiers) => edit(model, |model| model.command.delete()),
+        KeyCode::Delete if no_modifiers(key.modifiers) => {
+            if model
+                .skills
+                .editor
+                .as_mut()
+                .is_some_and(|editor| editor.remove_selected_reference())
+            {
+                synchronize_skill_editor_input(model);
+                ControllerEffect::Redraw
+            } else {
+                edit(model, |model| model.command.delete())
+            }
+        }
         KeyCode::Left if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_left()),
         KeyCode::Right if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_right()),
         KeyCode::Home if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_home()),
@@ -618,7 +699,8 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             }
         }
         (SkillsPane::Detail, KeyCode::Down | KeyCode::Right) if no_modifiers(key.modifiers) => {
-            model.skills.selected_action_index = model.skills.selected_action_index.saturating_add(1).min(2);
+            let last = model.skills.available_detail_actions().len().saturating_sub(1);
+            model.skills.selected_action_index = model.skills.selected_action_index.saturating_add(1).min(last);
             ControllerEffect::Redraw
         }
         (SkillsPane::Detail, KeyCode::Up | KeyCode::Left) if no_modifiers(key.modifiers) => {
@@ -701,8 +783,12 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             }
         }
         (SkillsPane::Result, KeyCode::Enter | KeyCode::Esc) if no_modifiers(key.modifiers) => {
-            model.skills.pane = SkillsPane::Detail;
-            ControllerEffect::Redraw
+            if model.skills.pending_active_skill.is_some() {
+                ControllerEffect::Submit(ApplicationCommand::ListSkills)
+            } else {
+                model.skills.pane = SkillsPane::Detail;
+                ControllerEffect::Redraw
+            }
         }
         (_, KeyCode::Esc) if no_modifiers(key.modifiers) => return Some(unwind_skills(model)),
         _ => return None,

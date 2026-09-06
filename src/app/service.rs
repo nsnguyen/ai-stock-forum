@@ -826,6 +826,7 @@ impl CommandExecutor {
         validate_assignment_operation(self.database.connection(), current, &operation)?;
         self.skill_reviews.operation().issue_assignment(
             SkillReviewToken::from_uuid(self.ids.next_uuid()),
+            Actor::Human,
             profile_id,
             expected_active_profile_version_id,
             operation,
@@ -1255,6 +1256,7 @@ impl CommandExecutor {
                             .reserve_assignment(
                                 envelope.command_id,
                                 *review_token,
+                                &request.actor,
                                 *profile_id,
                                 *expected_active_profile_version_id,
                                 &operation,
@@ -1289,6 +1291,7 @@ impl CommandExecutor {
                             .reserve_assignment(
                                 envelope.command_id,
                                 *review_token,
+                                &request.actor,
                                 *profile_id,
                                 *expected_active_profile_version_id,
                                 &operation,
@@ -1321,6 +1324,7 @@ impl CommandExecutor {
                             .reserve_assignment(
                                 envelope.command_id,
                                 *review_token,
+                                &request.actor,
                                 *profile_id,
                                 *expected_active_profile_version_id,
                                 &operation,

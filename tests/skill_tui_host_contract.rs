@@ -10,7 +10,8 @@ use ai_stock_forum::{
         AgentProfileSelector, AgentProfileSummary, AgentProfileView, AgentProfilesView,
         AgentSkillAssignmentOperation, AgentSkillAssignmentPreview, AppError, ApplicationCommand,
         CommandOutcome, CommandView, PresentationSnapshot, ShutdownDisposition, ShutdownReason,
-        ShutdownView, SkillHistoryEntry, SkillHistoryView, SkillSummary, SkillView, SkillsView,
+        ShutdownView, SkillCreatedView, SkillHistoryEntry, SkillHistoryView, SkillSummary,
+        SkillVersionActivatedView, SkillView, SkillsView,
     },
     domain::{
         AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, InstallationId,
@@ -19,14 +20,15 @@ use ai_stock_forum::{
     runtime::{ApplicationRuntime, CommandExecutor},
     policy::{Capability, PolicyDecision},
     setup::SetupStatus,
-    skills::{SkillDraft, SkillEditPreview, SkillProvenance, SkillVersion},
+    skills::{SkillDraft, SkillEditPreview, SkillProvenance, SkillResource, SkillVersion},
     ui::{
         skill_editor::{SkillEditor, SkillEditorEffect, SkillPreviewRequest},
         tui::{
             ControllerEffect, EventSource, Screen, TuiError, TuiEvent,
-            execute_skill_effect, handle_event, run_tui_with_screen,
+            execute_agent_effect, execute_skill_effect, handle_event, run_tui_with_screen,
             model::{
-                AgentsPane, SkillConfirmation, SkillOperationOrigin, SkillsPane, TuiModel, View,
+                AgentSkillAction, AgentsPane, AssignmentKind, SkillConfirmation,
+                SkillOperationOrigin, SkillsPane, TuiModel, View,
             },
             theme::Theme,
         },
@@ -58,6 +60,109 @@ struct BlockingExecutor {
     entered: mpsc::SyncSender<()>,
     release: mpsc::Receiver<()>,
     block_next: bool,
+}
+
+struct SuccessfulSkillMutation {
+    view: Option<CommandView>,
+    active: SkillVersion,
+    calls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl CommandExecutor for SuccessfulSkillMutation {
+    fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError> {
+        match command {
+            ApplicationCommand::CreateSkill { .. }
+            | ApplicationCommand::ActivateSkillVersion { .. } => {
+                self.calls.lock().unwrap().push("mutation");
+                Ok(outcome(self.view.take().expect("one successful mutation")))
+            }
+            ApplicationCommand::ListSkills => {
+                self.calls.lock().unwrap().push("list");
+                Ok(outcome(CommandView::Skills(SkillsView {
+                    skills: vec![SkillSummary {
+                        skill_ref: self.active.reference(),
+                        display_name: self.active.content().display_name.clone(),
+                        provenance: self.active.provenance().clone(),
+                    }],
+                    total_count: 1,
+                    returned_count: 1,
+                    truncated: false,
+                })))
+            }
+            ApplicationCommand::ShowSkill { .. } => {
+                self.calls.lock().unwrap().push("show");
+                Ok(outcome(CommandView::Skill(host_skill_view(&self.active))))
+            }
+            ApplicationCommand::RequestShutdown => Ok(CommandOutcome {
+                command_id: CommandId::from_uuid(Uuid::from_u128(954)),
+                correlation_id: CorrelationId::from_uuid(Uuid::from_u128(955)),
+                committed_events: Vec::new(),
+                view: CommandView::Shutdown(ShutdownView {
+                    disposition: ShutdownDisposition::Requested,
+                }),
+                shutdown: ShutdownDisposition::Requested,
+            }),
+            _ => Err(AppError::LifecycleFinished),
+        }
+    }
+
+    fn preview_skill_creation(
+        &mut self,
+        candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, AppError> {
+        Ok(SkillEditPreview {
+            skill_id: self.active.skill_id(),
+            expected_active_version_id: None,
+            candidate_digest: sha256(candidate.display_name.as_bytes()),
+            review_token: SkillReviewToken::from_uuid(Uuid::from_u128(956)),
+            review_digest: sha256(b"successful-create-review"),
+        })
+    }
+
+    fn preview_skill_version(
+        &mut self,
+        _skill_id: SkillId,
+        _expected_active_version_id: SkillVersionId,
+        _candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, AppError> {
+        Err(AppError::SkillReviewUnavailable)
+    }
+
+    fn preview_agent_skill_assignment(
+        &mut self,
+        _profile_id: AgentProfileId,
+        _expected_active_profile_version_id: AgentProfileVersionId,
+        _skill: ai_stock_forum::skills::SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        Err(AppError::SkillReviewUnavailable)
+    }
+
+    fn preview_agent_skill_upgrade(
+        &mut self,
+        _profile_id: AgentProfileId,
+        _expected_active_profile_version_id: AgentProfileVersionId,
+        _expected: ai_stock_forum::skills::SkillVersionRef,
+        _replacement: ai_stock_forum::skills::SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        Err(AppError::SkillReviewUnavailable)
+    }
+
+    fn preview_agent_skill_unassignment(
+        &mut self,
+        _profile_id: AgentProfileId,
+        _expected_active_profile_version_id: AgentProfileVersionId,
+        _expected: ai_stock_forum::skills::SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        Err(AppError::SkillReviewUnavailable)
+    }
+
+    fn cancel_skill_review(&mut self) -> Result<(), AppError> {
+        Ok(())
+    }
+
+    fn finish(&mut self, _reason: ShutdownReason) -> Result<(), AppError> {
+        Ok(())
+    }
 }
 
 impl CommandExecutor for BlockingExecutor {
@@ -151,6 +256,7 @@ impl EventSource for ScriptedEvents {
 
 struct ContractScreen {
     fail_on_review: bool,
+    frames: Option<Arc<Mutex<Vec<(SkillsPane, usize, Option<ai_stock_forum::skills::SkillVersionRef>)>>>>,
 }
 
 impl Screen for ContractScreen {
@@ -161,6 +267,13 @@ impl Screen for ContractScreen {
     fn draw(&mut self, model: &TuiModel, _theme: &Theme) -> Result<(), TuiError> {
         if self.fail_on_review && model.skills.review_registered {
             return Err(TuiError::TerminalOutput);
+        }
+        if let Some(frames) = &self.frames {
+            frames.lock().unwrap().push((
+                model.skills.pane,
+                model.skills.library.skills.len(),
+                model.skills.detail.as_ref().map(|detail| detail.skill_ref.clone()),
+            ));
         }
         Ok(())
     }
@@ -495,7 +608,7 @@ fn run_review_host(
     let mut events = review_events();
     events.extend(tail);
     let mut events = ScriptedEvents { events };
-    let mut screen = ContractScreen { fail_on_review };
+    let mut screen = ContractScreen { fail_on_review, frames: None };
     let result = run_tui_with_screen(
         runtime,
         snapshot(),
@@ -940,6 +1053,161 @@ fn agent_origin_upgrade_preview_builds_an_explicit_exact_upgrade_command() {
 }
 
 #[test]
+fn post_create_success_returns_through_an_authoritative_library_refresh() {
+    let created = host_skill(940, 1, "Created");
+    let runtime = ApplicationRuntime::spawn(
+        SuccessfulSkillMutation {
+            view: Some(CommandView::SkillCreated(SkillCreatedView {
+                skill_id: created.skill_id(),
+                skill_version_id: created.skill_version_id(),
+                version: created.version(),
+                content_digest: created.content_digest().clone(),
+            })),
+            active: created.clone(),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        },
+        4,
+    )
+    .unwrap();
+    let command = ApplicationCommand::CreateSkill {
+        skill_id: created.skill_id(),
+        candidate: created.content().clone(),
+        review_token: SkillReviewToken::from_uuid(Uuid::from_u128(941)),
+        review_digest: sha256(b"create-success"),
+    };
+    let mut model = model();
+    model.skills.active = true;
+
+    execute_skill_effect(
+        &runtime.client(),
+        &mut model,
+        ControllerEffect::ExecuteSkill(command),
+    )
+    .unwrap();
+
+    assert_eq!(model.skills.pane, SkillsPane::Result);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::Submit(ApplicationCommand::ListSkills)
+    );
+    runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
+}
+
+#[test]
+fn post_version_success_returns_through_an_authoritative_library_refresh() {
+    let historical = host_skill(950, 1, "Versioned");
+    let mut active_content = historical.content().clone();
+    active_content.instructions = "Keep the newly active exact version.".to_owned();
+    let active = SkillVersion::next_version(
+        &historical,
+        SkillVersionId::from_uuid(Uuid::from_u128(952)),
+        2,
+        active_content,
+    )
+    .unwrap();
+    let runtime = ApplicationRuntime::spawn(
+        SuccessfulSkillMutation {
+            view: Some(CommandView::SkillVersionActivated(
+                SkillVersionActivatedView {
+                    skill_id: active.skill_id(),
+                    skill_version_id: active.skill_version_id(),
+                    previous_version_id: historical.skill_version_id(),
+                    version: active.version(),
+                    content_digest: active.content_digest().clone(),
+                },
+            )),
+            active: active.clone(),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        },
+        4,
+    )
+    .unwrap();
+    let command = ApplicationCommand::ActivateSkillVersion {
+        skill_id: active.skill_id(),
+        expected_active_version_id: historical.skill_version_id(),
+        candidate: active.content().clone(),
+        review_token: SkillReviewToken::from_uuid(Uuid::from_u128(953)),
+        review_digest: sha256(b"version-success"),
+    };
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.replace_skills(SkillsView {
+        skills: vec![SkillSummary {
+            skill_ref: historical.reference(),
+            display_name: historical.content().display_name.clone(),
+            provenance: historical.provenance().clone(),
+        }],
+        total_count: 1,
+        returned_count: 1,
+        truncated: false,
+    });
+    model.skills.replace_detail(host_skill_view(&historical));
+
+    execute_skill_effect(
+        &runtime.client(),
+        &mut model,
+        ControllerEffect::ExecuteSkill(command),
+    )
+    .unwrap();
+
+    assert_eq!(model.skills.pane, SkillsPane::Result);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::Submit(ApplicationCommand::ListSkills)
+    );
+    runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
+}
+
+#[test]
+fn async_post_create_refresh_completion_draws_populated_exact_detail() {
+    let created = host_skill(703, 1, "Host cleanup");
+    let expected_ref = created.reference();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let runtime = ApplicationRuntime::spawn(
+        SuccessfulSkillMutation {
+            view: Some(CommandView::SkillCreated(SkillCreatedView {
+                skill_id: created.skill_id(),
+                skill_version_id: created.skill_version_id(),
+                version: created.version(),
+                content_digest: created.content_digest().clone(),
+            })),
+            active: created,
+            calls: Arc::clone(&calls),
+        },
+        4,
+    )
+    .unwrap();
+    let mut events = review_events();
+    events.push_back(Ok(Some(key(KeyCode::Enter))));
+    events.push_back(Ok(Some(key(KeyCode::Enter))));
+    events.push_back(Ok(Some(key(KeyCode::Enter))));
+    events.extend((0..500).map(|_| Ok(None)));
+    push_text(&mut events, "/quit");
+    events.extend((0..4).map(|_| Ok(None)));
+    let mut events = ScriptedEvents { events };
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let mut screen = ContractScreen {
+        fail_on_review: false,
+        frames: Some(Arc::clone(&frames)),
+    };
+
+    let result = run_tui_with_screen(
+        runtime,
+        snapshot(),
+        false,
+        &mut screen,
+        &mut events,
+        &Theme::from_no_color(true),
+    );
+
+    assert!(result.is_ok());
+    let frames = frames.lock().unwrap();
+    assert!(frames.iter().any(|(pane, library_len, detail)| {
+        *pane == SkillsPane::Detail && *library_len == 1 && detail.as_ref() == Some(&expected_ref)
+    }), "worker calls: {:?}; drawn frames: {frames:?}", calls.lock().unwrap());
+}
+
+#[test]
 fn typed_backpressure_keeps_protected_confirmation_retryable_without_token_loss() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let (entered_tx, entered_rx) = mpsc::sync_channel(1);
@@ -1053,4 +1321,167 @@ fn registered_review_is_cancelled_on_terminal_output_failure() {
     assert_eq!(calls.iter().filter(|call| **call == Call::Cancel).count(), 1);
     assert_eq!(calls.iter().filter(|call| **call == Call::Finish).count(), 1);
     assert!(!calls.iter().any(|call| matches!(call, Call::Mutation)));
+}
+
+#[test]
+fn review_regression_cockpit_routes_skill_mutations_as_typed_workflows() {
+    for input in [
+        "/skill add",
+        "/skill assign Replacement Assigned-Agent",
+        "/skill unassign Replacement Assigned-Agent",
+    ] {
+        let mut model = model();
+        model.set_focus(ai_stock_forum::ui::tui::model::Focus::Command);
+        model.command.ingest(input);
+
+        let effect = handle_event(&mut model, key(KeyCode::Enter));
+        assert!(!matches!(
+            effect,
+            ControllerEffect::Submit(ApplicationCommand::RejectInput(_))
+        ));
+        assert_eq!(model.command.text(), "");
+        assert_eq!(model.command.history_len(), 1);
+        assert!(!model.command_in_flight);
+    }
+}
+
+#[test]
+fn review_regression_cockpit_skill_workflows_reuse_guided_states() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let runtime = ApplicationRuntime::spawn(
+        RouteRecorder {
+            calls,
+            execute_error: None,
+        },
+        4,
+    )
+    .unwrap();
+
+    let run = |model: &mut TuiModel, input: &str| {
+        model.set_focus(ai_stock_forum::ui::tui::model::Focus::Command);
+        model.command.ingest(input);
+        let effect = handle_event(model, key(KeyCode::Enter));
+        execute_skill_effect(&runtime.client(), model, effect).unwrap();
+    };
+
+    let mut add = model();
+    run(&mut add, "/skill add");
+    assert!(add.skills.active);
+    assert_eq!(add.skills.pane, SkillsPane::Editor);
+
+    let mut assign = model();
+    run(&mut assign, "/skill assign Replacement Assigned-Agent");
+    assert_eq!(assign.skills.pane, SkillsPane::AssignmentReview);
+    assert!(matches!(assign.skills.assignment, Some(AssignmentKind::Upgrade { .. })));
+
+    let mut unassign = model();
+    run(&mut unassign, "/skill unassign Replacement Assigned-Agent");
+    assert_eq!(unassign.skills.pane, SkillsPane::AssignmentReview);
+    assert!(matches!(unassign.skills.assignment, Some(AssignmentKind::Unassign { .. })));
+
+    runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
+}
+
+#[test]
+fn review_regression_reference_notes_are_keyboard_editable_and_removable() {
+    let mut seed = draft();
+    seed.resources = vec![
+        SkillResource { name: "First".to_owned(), body: "Old body".to_owned() },
+        SkillResource { name: "Second".to_owned(), body: "Remove me".to_owned() },
+    ];
+    let skill = host_skill(980, 2, "Editable");
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.pane = SkillsPane::Editor;
+    model.skills.editor = Some(SkillEditor::for_version(
+        skill.skill_id(),
+        skill.skill_version_id(),
+        seed.clone(),
+    ));
+    let tags = seed.tags.join(", ");
+
+    for value in [
+        seed.display_name.as_str(),
+        seed.description.as_str(),
+        seed.use_when.as_str(),
+        tags.as_str(),
+        seed.instructions.as_str(),
+    ] {
+        model.command.clear();
+        model.command.ingest(value);
+        assert_eq!(handle_event(&mut model, key(KeyCode::Enter)), ControllerEffect::Redraw);
+    }
+
+    assert_eq!(handle_event(&mut model, key(KeyCode::Down)), ControllerEffect::Redraw);
+    assert_eq!(handle_event(&mut model, key(KeyCode::Enter)), ControllerEffect::Redraw);
+    assert_eq!(model.command.text(), "First");
+    model.command.clear();
+    model.command.ingest("Edited");
+    handle_event(&mut model, key(KeyCode::Enter));
+    assert_eq!(model.command.text(), "Old body");
+    model.command.clear();
+    model.command.ingest("New body");
+    handle_event(&mut model, key(KeyCode::Enter));
+
+    assert_eq!(handle_event(&mut model, key(KeyCode::Down)), ControllerEffect::Redraw);
+    assert_eq!(handle_event(&mut model, key(KeyCode::Down)), ControllerEffect::Redraw);
+    assert_eq!(handle_event(&mut model, key(KeyCode::Delete)), ControllerEffect::Redraw);
+    assert_eq!(
+        model.skills.editor.as_ref().unwrap().draft().resources,
+        vec![SkillResource { name: "Edited".to_owned(), body: "New body".to_owned() }]
+    );
+}
+
+#[test]
+fn review_regression_agents_load_upgrade_truth_on_first_open() {
+    let runtime = ApplicationRuntime::spawn(
+        RouteRecorder {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            execute_error: None,
+        },
+        4,
+    )
+    .unwrap();
+    let mut model = model();
+
+    let open = handle_event(&mut model, key(KeyCode::Char('a')));
+    execute_agent_effect(&runtime.client(), &mut model, open).unwrap();
+    let detail = handle_event(&mut model, key(KeyCode::Enter));
+    execute_agent_effect(&runtime.client(), &mut model, detail).unwrap();
+    handle_event(&mut model, key(KeyCode::Enter));
+
+    assert!(model.available_agent_skill_actions().contains(&AgentSkillAction::Upgrade));
+    runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
+}
+
+#[test]
+fn review_regression_historical_detail_cannot_create_a_version_but_active_detail_can() {
+    let active = replacement_skill();
+    let historical = assigned_skill();
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.replace_skills(SkillsView {
+        skills: vec![SkillSummary {
+            skill_ref: active.reference(),
+            display_name: active.content().display_name.clone(),
+            provenance: active.provenance().clone(),
+        }],
+        total_count: 1,
+        returned_count: 1,
+        truncated: false,
+    });
+    model.skills.replace_detail(host_skill_view(&active));
+    model.skills.selected_action_index = 1;
+    assert_eq!(handle_event(&mut model, key(KeyCode::Enter)), ControllerEffect::Redraw);
+    assert_eq!(model.skills.pane, SkillsPane::Editor);
+
+    model.skills.editor = None;
+    model.skills.replace_version_detail(host_skill_view(&historical));
+    model.skills.pane = SkillsPane::Detail;
+    model.skills.selected_action_index = 1;
+    assert!(matches!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::LoadSkillHistory { .. }
+    ));
+    assert!(model.skills.editor.is_none());
 }

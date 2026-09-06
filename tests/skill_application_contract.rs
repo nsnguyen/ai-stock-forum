@@ -196,7 +196,7 @@ mod fix_round_one_review_and_exact_refs {
     }
 
     #[test]
-    fn review_tokens_bind_candidates_operations_refs_agents_and_single_use() {
+    fn review_tokens_bind_actors_candidates_operations_refs_agents_and_single_use() {
         let mut app = support::app();
 
         let original = skill("Bound Skill", "original candidate");
@@ -356,6 +356,21 @@ mod fix_round_one_review_and_exact_refs {
             &assign_preview.operation,
             AgentSkillAssignmentOperation::Assign { skill } if skill == &original_ref
         ));
+        let mut actor_swapped_assign = envelope(
+            12_225,
+            ApplicationCommand::AssignAgentSkill {
+                profile_id: profile_a.profile_id,
+                expected_active_profile_version_id: profile_a.profile_version_id,
+                skill: original_ref.clone(),
+                review_token: assign_preview.review_token,
+                review_digest: assign_preview.review_digest.clone(),
+            },
+        );
+        actor_swapped_assign.actor = Actor::System;
+        assert_eq!(
+            app.execute(actor_swapped_assign),
+            Err(AppError::SkillReviewMismatch)
+        );
         for (id, profile_id, command) in [
             (
                 222,
@@ -507,6 +522,22 @@ mod fix_round_one_review_and_exact_refs {
                 active_ref.clone(),
             )
             .unwrap();
+        let mut actor_swapped_upgrade = envelope(
+            12_227,
+            ApplicationCommand::UpgradeAgentSkill {
+                profile_id: profile_a.profile_id,
+                expected_active_profile_version_id: assigned_view.profile_version_id,
+                expected: original_ref.clone(),
+                replacement: active_ref.clone(),
+                review_token: upgrade_preview.review_token,
+                review_digest: upgrade_preview.review_digest.clone(),
+            },
+        );
+        actor_swapped_upgrade.actor = Actor::System;
+        assert_eq!(
+            app.execute(actor_swapped_upgrade),
+            Err(AppError::SkillReviewMismatch)
+        );
         let upgraded = app
             .execute(envelope(
                 227,
@@ -514,7 +545,7 @@ mod fix_round_one_review_and_exact_refs {
                     profile_id: profile_a.profile_id,
                     expected_active_profile_version_id: assigned_view.profile_version_id,
                     expected: original_ref.clone(),
-                    replacement: active_ref,
+                    replacement: active_ref.clone(),
                     review_token: upgrade_preview.review_token,
                     review_digest: upgrade_preview.review_digest,
                 },
@@ -523,6 +554,44 @@ mod fix_round_one_review_and_exact_refs {
         let CommandView::AgentSkillUpgraded(upgraded) = upgraded.view else {
             panic!("upgraded")
         };
+        let unassign_preview = app
+            .preview_agent_skill_unassignment(
+                profile_a.profile_id,
+                upgraded.profile_version_id,
+                active_ref.clone(),
+            )
+            .unwrap();
+        let mut actor_swapped_unassign = envelope(
+            12_228,
+            ApplicationCommand::UnassignAgentSkill {
+                profile_id: profile_a.profile_id,
+                expected_active_profile_version_id: upgraded.profile_version_id,
+                expected: active_ref.clone(),
+                review_token: unassign_preview.review_token,
+                review_digest: unassign_preview.review_digest.clone(),
+            },
+        );
+        actor_swapped_unassign.actor = Actor::System;
+        assert_eq!(
+            app.execute(actor_swapped_unassign),
+            Err(AppError::SkillReviewMismatch)
+        );
+        let unassigned = app
+            .execute(envelope(
+                12_229,
+                ApplicationCommand::UnassignAgentSkill {
+                    profile_id: profile_a.profile_id,
+                    expected_active_profile_version_id: upgraded.profile_version_id,
+                    expected: active_ref,
+                    review_token: unassign_preview.review_token,
+                    review_digest: unassign_preview.review_digest,
+                },
+            ))
+            .unwrap();
+        assert!(matches!(
+            unassigned.view,
+            CommandView::AgentSkillUnassigned(_)
+        ));
         let before = snapshot(
             &mut app,
             Some(created_view.skill_id),

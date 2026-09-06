@@ -707,6 +707,7 @@ enum SkillWorkflow {
     Confirming {
         command: ApplicationCommand,
         action: &'static str,
+        creation_draft: Option<SkillDraftInput>,
     },
 }
 
@@ -984,7 +985,11 @@ impl FallbackRunner {
         };
         let (command, action) = assignment_command(&preview);
         *self.skill_workflow.lock().map_err(|_| UiError::Panicked)? =
-            Some(SkillWorkflow::Confirming { command, action });
+            Some(SkillWorkflow::Confirming {
+                command,
+                action,
+                creation_draft: None,
+            });
         TextRenderer::render_skill_assignment_review(&preview, writer)
             .map_err(|_| UiError::Write)
     }
@@ -1033,6 +1038,7 @@ impl FallbackRunner {
                         Some(SkillWorkflow::Confirming {
                             command,
                             action: "create",
+                            creation_draft: Some(draft),
                         });
                     return TextRenderer::render_skill_creation_review(
                         &display_candidate,
@@ -1069,9 +1075,13 @@ impl FallbackRunner {
                 }
                 self.retain_skill_editor(draft, writer)
             }
-            SkillWorkflow::Confirming { command, action } => match line.trim() {
+            SkillWorkflow::Confirming {
+                command,
+                action,
+                creation_draft,
+            } => match line.trim() {
                 confirmation if confirmation == action => {
-                    self.execute_skill_confirmation(command, action, writer)
+                    self.execute_skill_confirmation(command, action, creation_draft, writer)
                 }
                 ":cancel" => {
                     self.client.cancel_skill_review().map_err(UiError::Runtime)?;
@@ -1082,6 +1092,7 @@ impl FallbackRunner {
                         Some(SkillWorkflow::Confirming {
                             command: command.clone(),
                             action,
+                            creation_draft,
                         });
                     TextRenderer::render_skill_confirmation_mismatch(writer)
                         .map_err(|_| UiError::Write)?;
@@ -1109,6 +1120,7 @@ impl FallbackRunner {
         &self,
         command: ApplicationCommand,
         action: &'static str,
+        creation_draft: Option<SkillDraftInput>,
         writer: &mut W,
     ) -> Result<(), UiError> {
         let outcome = match self.client.submit(command.clone()) {
@@ -1118,6 +1130,7 @@ impl FallbackRunner {
                     Some(SkillWorkflow::Confirming {
                         command: command.clone(),
                         action,
+                        creation_draft,
                     });
                 TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write)?;
                 TextRenderer::render_skill_confirmation(action, &command, writer)
@@ -1129,6 +1142,13 @@ impl FallbackRunner {
                     .map_err(|_| UiError::Write);
                 let cleanup = self.client.cancel_skill_review();
                 primary?;
+                if let Some(draft) = creation_draft {
+                    if let Err(cleanup_error) = cleanup {
+                        TextRenderer::render_runtime_error(&cleanup_error, writer)
+                            .map_err(|_| UiError::Write)?;
+                    }
+                    return self.retain_skill_editor(draft, writer);
+                }
                 TextRenderer::render_fresh_skill_review_required(writer)
                     .map_err(|_| UiError::Write)?;
                 if let Err(cleanup_error) = cleanup {

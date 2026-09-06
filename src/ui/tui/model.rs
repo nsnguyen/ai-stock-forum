@@ -132,6 +132,7 @@ pub struct SkillsViewState {
     pub pending_confirmation: Option<SkillConfirmation>,
     pub review_registered: bool,
     pub operation_origin: SkillOperationOrigin,
+    pub pending_active_skill: Option<crate::domain::SkillId>,
 }
 
 impl Default for SkillsViewState {
@@ -160,6 +161,7 @@ impl Default for SkillsViewState {
             pending_confirmation: None,
             review_registered: false,
             operation_origin: SkillOperationOrigin::Skills(SkillsPane::Detail),
+            pending_active_skill: None,
         }
     }
 }
@@ -214,6 +216,7 @@ impl SkillsViewState {
         self.history = None;
         self.version_detail = None;
         self.selected_history_version = 0;
+        self.pending_active_skill = None;
     }
 
     fn synchronize_selected_skill(&mut self, skill_id: crate::domain::SkillId) {
@@ -243,10 +246,22 @@ impl SkillsViewState {
     }
 
     pub fn selected_action(&self) -> SkillDetailAction {
-        match self.selected_action_index.min(2) {
-            0 => SkillDetailAction::Assign,
-            1 => SkillDetailAction::CreateVersion,
-            _ => SkillDetailAction::History,
+        let actions = self.available_detail_actions();
+        actions[self.selected_action_index.min(actions.len().saturating_sub(1))]
+    }
+
+    pub fn available_detail_actions(&self) -> &'static [SkillDetailAction] {
+        const ACTIVE: &[SkillDetailAction] = &[
+            SkillDetailAction::Assign,
+            SkillDetailAction::CreateVersion,
+            SkillDetailAction::History,
+        ];
+        const HISTORICAL: &[SkillDetailAction] =
+            &[SkillDetailAction::Assign, SkillDetailAction::History];
+        if self.version_detail.is_some() {
+            HISTORICAL
+        } else {
+            ACTIVE
         }
     }
 
@@ -278,6 +293,9 @@ impl SkillsViewState {
     }
 
     pub fn start_version(&mut self) -> bool {
+        if self.version_detail.is_some() {
+            return false;
+        }
         let Some(detail) = self.detail.as_ref() else {
             return false;
         };

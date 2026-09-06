@@ -17,6 +17,7 @@ use crate::{
     panic_boundary::catch_sensitive_unwind,
     runtime::{ApplicationRuntime, PendingOutcome, RuntimeClient, RuntimeError},
     ui::{
+        command::SkillWorkflowCommand,
         profile_editor::{PreviewEditRequest, ProfileEditor},
         skill_editor::SkillPreviewRequest,
     },
@@ -34,6 +35,9 @@ pub fn execute_agent_effect(
 ) -> Result<(), RuntimeError> {
     match effect {
         ControllerEffect::LoadAgentProfiles => {
+            let skills = submit_agent_command(client, model, ApplicationCommand::ListSkills)?;
+            let _ = apply_outcome(model, skills);
+            model.skills.active = false;
             let outcome =
                 submit_agent_command(client, model, ApplicationCommand::ListAgentProfiles)?;
             apply_agent_outcome(model, outcome);
@@ -141,6 +145,7 @@ pub fn execute_agent_effect(
         | ControllerEffect::LoadSkillAgent { .. }
         | ControllerEffect::RequestSkillPreview(_)
         | ControllerEffect::RequestSkillAssignmentPreview { .. }
+        | ControllerEffect::StartSkillWorkflow(_)
         | ControllerEffect::ExecuteSkill(_)
         | ControllerEffect::CancelSkillReview => {}
     }
@@ -154,6 +159,26 @@ pub fn execute_skill_effect(
     effect: ControllerEffect,
 ) -> Result<(), RuntimeError> {
     match effect {
+        ControllerEffect::StartSkillWorkflow(workflow) => {
+            if let Err(error) = execute_typed_skill_workflow(client, model, workflow) {
+                match error {
+                    error @ (RuntimeError::Application(_) | RuntimeError::Backpressure) => {
+                        model.set_command_in_flight(false);
+                        model.skills.pane = super::model::SkillsPane::List;
+                        model.set_message(
+                            super::model::Severity::Error,
+                            match error {
+                                RuntimeError::Backpressure => {
+                                    "Command queue is busy; skill workflow was not started."
+                                }
+                                _ => "Skill workflow could not be started.",
+                            },
+                        );
+                    }
+                    error => return Err(error),
+                }
+            }
+        }
         ControllerEffect::LoadSkills => {
             let outcome = submit_agent_command(client, model, ApplicationCommand::ListSkills)?;
             let _ = apply_outcome(model, outcome);
@@ -284,6 +309,86 @@ pub fn execute_skill_effect(
         }
         ControllerEffect::CancelSkillReview => cancel_skill_review_once(client, model)?,
         _ => {}
+    }
+    Ok(())
+}
+
+fn execute_typed_skill_workflow(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    workflow: SkillWorkflowCommand,
+) -> Result<(), RuntimeError> {
+    match workflow {
+        SkillWorkflowCommand::Add => {
+            model.skills.start_create(None);
+            synchronize_host_skill_input(model);
+            model.clear_message();
+        }
+        SkillWorkflowCommand::Assign { skill, agent, version } => {
+            let command = match version {
+                None => ApplicationCommand::ShowSkill { selector: skill },
+                Some(version) => ApplicationCommand::ShowSkillVersion {
+                    selector: skill,
+                    version,
+                },
+            };
+            let skill = submit_agent_command(client, model, command)?;
+            let _ = apply_outcome(model, skill);
+            let agent = submit_agent_command(
+                client,
+                model,
+                ApplicationCommand::ShowAgentProfile { selector: agent },
+            )?;
+            let _ = apply_outcome(model, agent);
+        }
+        SkillWorkflowCommand::Unassign { skill, agent } => {
+            let skill = submit_agent_command(
+                client,
+                model,
+                ApplicationCommand::ShowSkill { selector: skill },
+            )?;
+            let _ = apply_outcome(model, skill);
+            let Some(skill_id) = model.skills.current_skill_id() else {
+                return Ok(());
+            };
+            let agent = submit_agent_command(
+                client,
+                model,
+                ApplicationCommand::ShowAgentProfile { selector: agent },
+            )?;
+            let _ = apply_outcome(model, agent);
+            let Some(agent_detail) = model.skills.selected_agent_detail.clone() else {
+                return Ok(());
+            };
+            let Some(expected) = agent_detail
+                .profile
+                .skill_refs()
+                .iter()
+                .find(|reference| reference.skill_id() == skill_id)
+                .cloned()
+            else {
+                model.skills.pane = super::model::SkillsPane::Detail;
+                model.set_message(
+                    super::model::Severity::Warning,
+                    "Agent does not have this skill assigned.",
+                );
+                return Ok(());
+            };
+            let exact = submit_agent_command(
+                client,
+                model,
+                ApplicationCommand::ShowSkillVersion {
+                    selector: skill_id.into(),
+                    version: expected.version(),
+                },
+            )?;
+            let _ = apply_outcome(model, exact);
+            model.skills.selected_agent_detail = Some(agent_detail);
+            model.skills.assignment = Some(super::model::AssignmentKind::Unassign {
+                expected,
+            });
+            model.skills.pane = super::model::SkillsPane::AssignmentReview;
+        }
     }
     Ok(())
 }
@@ -879,6 +984,7 @@ impl TuiRunner {
                 Ok(LoopControl::Continue { redraw: true })
             }
             effect @ (ControllerEffect::LoadSkills
+            | ControllerEffect::StartSkillWorkflow(_)
             | ControllerEffect::LoadSkill { .. }
             | ControllerEffect::LoadSkillHistory { .. }
             | ControllerEffect::LoadSkillVersion { .. }

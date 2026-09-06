@@ -48,6 +48,7 @@ pub enum FallbackParsedLine {
 pub enum ParsedLine {
     Command(ApplicationCommand),
     AgentWorkflow(AgentWorkflowCommand),
+    SkillWorkflow(SkillWorkflowCommand),
     Ignored,
 }
 
@@ -55,11 +56,7 @@ pub fn parse_line(input: &[u8]) -> ParsedLine {
     match parse_fallback_line(input) {
         FallbackParsedLine::Command(command) => ParsedLine::Command(command),
         FallbackParsedLine::AgentWorkflow(command) => ParsedLine::AgentWorkflow(command),
-        FallbackParsedLine::SkillWorkflow(_) => ParsedLine::Command(reject(
-            InputRejectionCategory::Malformed,
-            safe_token(std::str::from_utf8(input).unwrap_or_default()),
-            input,
-        )),
+        FallbackParsedLine::SkillWorkflow(command) => ParsedLine::SkillWorkflow(command),
         FallbackParsedLine::Ignored => ParsedLine::Ignored,
     }
 }

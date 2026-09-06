@@ -131,6 +131,8 @@ pub struct SkillEditor {
     step: SkillEditorStep,
     field: SkillEditorField,
     raw: RawSkillDraft,
+    selected_reference: Option<usize>,
+    editing_reference: Option<usize>,
     pending_reference_name: Option<String>,
     pending_reference_body: String,
     review: Option<SkillEditorReview>,
@@ -164,6 +166,8 @@ impl SkillEditor {
             step: SkillEditorStep::Identity,
             field: SkillEditorField::DisplayName,
             raw: draft.into(),
+            selected_reference: None,
+            editing_reference: None,
             pending_reference_name: None,
             pending_reference_body: String::new(),
             review: None,
@@ -191,6 +195,80 @@ impl SkillEditor {
 
     pub fn pending_reference_name(&self) -> Option<&str> {
         self.pending_reference_name.as_deref()
+    }
+
+    pub fn references(&self) -> &[SkillResource] {
+        &self.raw.resources
+    }
+
+    pub fn selected_reference(&self) -> Option<usize> {
+        self.selected_reference
+    }
+
+    pub fn select_reference(&mut self, forward: bool) {
+        let Some(last) = self.raw.resources.len().checked_sub(1) else {
+            self.selected_reference = None;
+            return;
+        };
+        self.selected_reference = Some(match (self.selected_reference, forward) {
+            (None, true) => 0,
+            (None, false) => last,
+            (Some(index), true) => index.saturating_add(1).min(last),
+            (Some(index), false) => index.saturating_sub(1),
+        });
+    }
+
+    pub fn clear_reference_selection(&mut self) {
+        self.selected_reference = None;
+    }
+
+    pub fn begin_edit_selected_reference(&mut self) -> bool {
+        let Some(index) = self.selected_reference else {
+            return false;
+        };
+        let Some(resource) = self.raw.resources.get(index).cloned() else {
+            self.selected_reference = None;
+            return false;
+        };
+        self.selected_reference = None;
+        self.editing_reference = Some(index);
+        self.pending_reference_name = Some(resource.name);
+        self.pending_reference_body = resource.body;
+        self.field = SkillEditorField::ReferenceName;
+        self.local_error = None;
+        true
+    }
+
+    pub fn remove_selected_reference(&mut self) -> bool {
+        let Some(index) = self.selected_reference else {
+            return false;
+        };
+        if index >= self.raw.resources.len() {
+            self.selected_reference = None;
+            return false;
+        }
+        self.raw.resources.remove(index);
+        self.selected_reference = self
+            .raw
+            .resources
+            .len()
+            .checked_sub(1)
+            .map(|last| index.min(last));
+        self.review = None;
+        self.pending_preview_generation = None;
+        self.local_error = None;
+        true
+    }
+
+    pub fn cancel_reference_interaction(&mut self) -> bool {
+        if self.editing_reference.take().is_some() {
+            self.pending_reference_name = None;
+            self.pending_reference_body.clear();
+            self.field = SkillEditorField::ReferenceName;
+            self.local_error = None;
+            return true;
+        }
+        self.selected_reference.take().is_some()
     }
 
     pub fn current_value(&self) -> &str {
@@ -298,7 +376,9 @@ impl SkillEditor {
                 }
             }
             SkillEditorField::ReferenceName => {
-                if self.pending_reference_name.as_deref() != Some(input) {
+                if self.editing_reference.is_none()
+                    && self.pending_reference_name.as_deref() != Some(input)
+                {
                     self.pending_reference_body.clear();
                 }
                 self.pending_reference_name = Some(input.to_owned());
@@ -307,16 +387,34 @@ impl SkillEditor {
             SkillEditorField::ReferenceBody => {
                 self.pending_reference_body = input.to_owned();
                 let name = self.pending_reference_name.take().unwrap_or_default();
-                self.raw.resources.push(SkillResource {
+                let resource = SkillResource {
                     name: name.clone(),
                     body: self.pending_reference_body.clone(),
-                });
+                };
+                let editing_reference = self.editing_reference.take();
+                let previous = editing_reference
+                    .and_then(|index| self.raw.resources.get(index).cloned());
+                if let Some(index) = editing_reference {
+                    if let Some(slot) = self.raw.resources.get_mut(index) {
+                        *slot = resource;
+                    } else {
+                        self.raw.resources.push(resource);
+                    }
+                } else {
+                    self.raw.resources.push(resource);
+                }
                 if self.probe().is_err() {
-                    self.raw.resources.pop();
+                    if let (Some(index), Some(previous)) = (editing_reference, previous) {
+                        self.raw.resources[index] = previous;
+                    } else {
+                        self.raw.resources.pop();
+                    }
+                    self.editing_reference = editing_reference;
                     self.pending_reference_name = Some(name);
                     return self.invalid(SkillEditorField::ReferenceBody, "skill_reference_invalid");
                 }
                 self.pending_reference_body.clear();
+                self.selected_reference = None;
                 self.field = SkillEditorField::ReferenceName;
             }
             SkillEditorField::Review => return self.submit_review(),

@@ -5,8 +5,8 @@ use serde::Serialize;
 use crate::{
     app::{AgentSkillAssignmentOperation, AgentSkillAssignmentPreview},
     domain::{
-        AgentProfileId, AgentProfileVersionId, CommandId, DomainError, SkillId, SkillReviewToken,
-        SkillVersionId, canonical_json_bytes, sha256,
+        Actor, AgentProfileId, AgentProfileVersionId, CommandId, DomainError, SkillId,
+        SkillReviewToken, SkillVersionId, canonical_json_bytes, sha256,
     },
 };
 
@@ -32,6 +32,7 @@ enum PendingSkillReview {
     },
     Assignment {
         token: SkillReviewToken,
+        actor: Actor,
         profile_id: AgentProfileId,
         expected_active_profile_version_id: AgentProfileVersionId,
         operation: AgentSkillAssignmentOperation,
@@ -155,11 +156,13 @@ impl SkillReviewOperation<'_> {
     pub(crate) fn issue_assignment(
         &self,
         review_token: SkillReviewToken,
+        actor: Actor,
         profile_id: AgentProfileId,
         expected_active_profile_version_id: AgentProfileVersionId,
         operation: AgentSkillAssignmentOperation,
     ) -> Result<AgentSkillAssignmentPreview, DomainError> {
         let review_digest = assignment_review_digest(
+            &actor,
             profile_id,
             expected_active_profile_version_id,
             &operation,
@@ -167,6 +170,7 @@ impl SkillReviewOperation<'_> {
         *self.registry.state.lock().unwrap_or_else(|error| error.into_inner()) =
             Some(ReviewState::Available(PendingSkillReview::Assignment {
                 token: review_token,
+                actor,
                 profile_id,
                 expected_active_profile_version_id,
                 operation: operation.clone(),
@@ -214,6 +218,7 @@ impl SkillReviewOperation<'_> {
         &self,
         command_id: CommandId,
         review_token: SkillReviewToken,
+        actor: &Actor,
         profile_id: AgentProfileId,
         expected_active_profile_version_id: AgentProfileVersionId,
         operation: &AgentSkillAssignmentOperation,
@@ -224,11 +229,13 @@ impl SkillReviewOperation<'_> {
                 review,
                 PendingSkillReview::Assignment {
                     token,
+                    actor: pending_actor,
                     profile_id: pending_profile_id,
                     expected_active_profile_version_id: pending_expected,
                     operation: pending_operation,
                     review_digest,
                 } if *token == review_token
+                    && pending_actor == actor
                     && *pending_profile_id == profile_id
                     && *pending_expected == expected_active_profile_version_id
                     && pending_operation == operation
@@ -319,11 +326,13 @@ struct ReviewDigestMaterial<'a> {
 }
 
 fn assignment_review_digest(
+    actor: &Actor,
     profile_id: AgentProfileId,
     expected_active_profile_version_id: AgentProfileVersionId,
     operation: &AgentSkillAssignmentOperation,
 ) -> Result<ContentDigest, DomainError> {
     Ok(sha256(&canonical_json_bytes(&AssignmentReviewDigestMaterial {
+        actor,
         profile_id,
         expected_active_profile_version_id,
         operation,
@@ -332,6 +341,7 @@ fn assignment_review_digest(
 
 #[derive(Serialize)]
 struct AssignmentReviewDigestMaterial<'a> {
+    actor: &'a Actor,
     profile_id: AgentProfileId,
     expected_active_profile_version_id: AgentProfileVersionId,
     operation: &'a AgentSkillAssignmentOperation,

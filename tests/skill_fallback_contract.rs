@@ -106,6 +106,7 @@ struct ProbeState {
     cancel_calls: usize,
     mutation_attempts: usize,
     committed_mutations: usize,
+    preview_candidates: Vec<SkillDraft>,
 }
 
 struct ReviewProbeExecutor {
@@ -121,7 +122,7 @@ impl CommandExecutor for ReviewProbeExecutor {
             ApplicationCommand::CreateSkill { .. } => {
                 let mut state = self.state.lock().unwrap();
                 state.mutation_attempts += 1;
-                if let Some(error) = self.commit_error.clone() {
+                if let Some(error) = self.commit_error.take() {
                     return Err(error);
                 }
                 state.registered = false;
@@ -143,9 +144,12 @@ impl CommandExecutor for ReviewProbeExecutor {
 
     fn preview_skill_creation(
         &mut self,
-        _candidate: SkillDraft,
+        candidate: SkillDraft,
     ) -> Result<SkillEditPreview, AppError> {
-        self.state.lock().unwrap().registered = true;
+        let mut state = self.state.lock().unwrap();
+        state.registered = true;
+        state.preview_candidates.push(candidate);
+        drop(state);
         if let Some(interrupt) = self.interrupt.take() {
             interrupt.send(()).unwrap();
         }
@@ -664,7 +668,7 @@ fn host_interrupt_cancellation_and_reader_error_do_not_orphan_reviews() {
 }
 
 #[test]
-fn terminal_application_failures_clear_review_and_require_a_fresh_preview() {
+fn application_failures_cancel_review_and_restore_the_creation_editor() {
     let failures = [
         AppError::StaleSkillVersion,
         AppError::CapabilityDenied {
@@ -679,12 +683,12 @@ fn terminal_application_failures_clear_review_and_require_a_fresh_preview() {
         let mut output = Vec::new();
         let reason = FallbackRunner::new(runtime.client(), false)
             .run(
-                Cursor::new(add_review_script(b"create\n/skill add\n/quit\n")),
+                Cursor::new(add_review_script(b"create\n:cancel\n/quit\n")),
                 &mut output,
             )
             .unwrap();
         let text = String::from_utf8(output).unwrap();
-        assert!(text.contains("Start a fresh /skill command to request a new review."));
+        assert!(!text.contains("Start a fresh /skill command to request a new review."));
         assert_eq!(text.matches("Create skill editor").count(), 6);
         let snapshot = state.lock().unwrap();
         assert!(!snapshot.registered);
@@ -694,6 +698,36 @@ fn terminal_application_failures_clear_review_and_require_a_fresh_preview() {
         drop(snapshot);
         runtime.finish_and_join(reason).unwrap();
     }
+}
+
+#[test]
+fn recoverable_creation_failure_cancels_review_and_restores_the_exact_draft() {
+    let (runtime, state) = probe_runtime(Some(AppError::StaleSkillVersion), None, None);
+    let mut output = Vec::new();
+    let reason = FallbackRunner::new(runtime.client(), false)
+        .run(
+            Cursor::new(add_review_script(b"create\n:review\ncreate\n/quit\n")),
+            &mut output,
+        )
+        .unwrap();
+
+    let expected = SkillDraft::new(
+        "Cleanup Skill".to_owned(),
+        "Cleanup contract.".to_owned(),
+        "Use for cleanup.".to_owned(),
+        Vec::new(),
+        "Keep review ownership exact.".to_owned(),
+        Vec::new(),
+    )
+    .unwrap();
+    let snapshot = state.lock().unwrap();
+    assert!(!snapshot.registered);
+    assert_eq!(snapshot.cancel_calls, 1);
+    assert_eq!(snapshot.mutation_attempts, 2);
+    assert_eq!(snapshot.committed_mutations, 1);
+    assert_eq!(snapshot.preview_candidates, vec![expected.clone(), expected]);
+    drop(snapshot);
+    runtime.finish_and_join(reason).unwrap();
 }
 
 #[test]
