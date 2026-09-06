@@ -345,13 +345,13 @@ fn map_active_profile_insert_error(error: SqliteError) -> PersistenceError {
             if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
                 && message == "UNIQUE constraint failed: active_agent_profiles.normalized_name" =>
         {
-            PersistenceError::AgentProfileNamespaceConflict
+            PersistenceError::DuplicateAgentProfileName
         }
         SqliteError::SqliteFailure(error, Some(message))
             if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
                 && message == "agent_profile_namespace_conflict" =>
         {
-            PersistenceError::DuplicateAgentProfileName
+            PersistenceError::AgentProfileNamespaceConflict
         }
         _ => PersistenceError::ActiveAgentProfileRebuildFailed,
     }
