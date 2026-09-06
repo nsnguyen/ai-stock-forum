@@ -5,9 +5,13 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::{
     agents::AgentProfilesProjection,
     app::{ApplicationEvent, EVENT_SCHEMA_VERSION, EventEnvelope, ShutdownReason},
-    domain::{EventId, InstallationId, SessionId, Sha256Digest, canonical_json_bytes, sha256},
+    domain::{
+        EventId, InstallationId, ObjectVersion, SessionId, Sha256Digest, SkillId,
+        SkillVersionId, canonical_json_bytes, sha256,
+    },
     persistence::RecoveryError,
     setup::SetupStatus,
+    skills::{SkillProvenance, SkillVersionRef},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -16,6 +20,8 @@ pub struct ProjectionState {
     pub sessions: BTreeMap<SessionId, SessionProjection>,
     #[serde(skip_serializing_if = "AgentProfilesProjection::is_empty")]
     pub agent_profiles: AgentProfilesProjection,
+    #[serde(skip_serializing_if = "SkillsProjection::is_empty")]
+    pub skills: SkillsProjection,
     pub setup_status: SetupStatus,
     pub last_sequence: u64,
     pub last_event_digest: Option<Sha256Digest>,
@@ -27,6 +33,7 @@ impl Default for ProjectionState {
             installation: None,
             sessions: BTreeMap::new(),
             agent_profiles: AgentProfilesProjection::default(),
+            skills: SkillsProjection::default(),
             setup_status: SetupStatus::NotStarted,
             last_sequence: 0,
             last_event_digest: None,
@@ -41,6 +48,8 @@ struct ProjectionStateWire {
     sessions: BTreeMap<SessionId, SessionProjection>,
     #[serde(default)]
     agent_profiles: AgentProfilesProjection,
+    #[serde(default)]
+    skills: SkillsProjection,
     setup_status: SetupStatus,
     last_sequence: u64,
     last_event_digest: Option<Sha256Digest>,
@@ -56,6 +65,7 @@ impl<'de> Deserialize<'de> for ProjectionState {
             installation: wire.installation,
             sessions: wire.sessions,
             agent_profiles: wire.agent_profiles,
+            skills: wire.skills,
             setup_status: wire.setup_status,
             last_sequence: wire.last_sequence,
             last_event_digest: wire.last_event_digest,
@@ -90,6 +100,195 @@ pub struct SessionEndProjection {
     pub reason: ShutdownReason,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillsProjection {
+    versions_by_id: BTreeMap<SkillVersionId, ProjectedSkillVersion>,
+    active_by_skill: BTreeMap<SkillId, SkillVersionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectedSkillVersion {
+    skill: SkillVersionRef,
+    display_name: String,
+    provenance: SkillProvenance,
+    predecessor_version_id: Option<SkillVersionId>,
+    record_digest: Sha256Digest,
+}
+
+impl SkillsProjection {
+    pub fn is_empty(&self) -> bool {
+        self.versions_by_id.is_empty() && self.active_by_skill.is_empty()
+    }
+
+    pub fn active_skill(&self, skill_id: SkillId) -> Option<&SkillVersionRef> {
+        self.active_by_skill
+            .get(&skill_id)
+            .and_then(|version_id| self.versions_by_id.get(version_id))
+            .map(|version| &version.skill)
+    }
+
+    pub(crate) fn version_metadata(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &SkillVersionRef,
+            &str,
+            &SkillProvenance,
+            Option<SkillVersionId>,
+            &Sha256Digest,
+        ),
+    > {
+        self.versions_by_id.values().map(|version| {
+            (
+                &version.skill,
+                version.display_name.as_str(),
+                &version.provenance,
+                version.predecessor_version_id,
+                &version.record_digest,
+            )
+        })
+    }
+
+    pub(crate) fn active_refs(&self) -> impl Iterator<Item = &SkillVersionRef> {
+        self.active_by_skill.values().filter_map(|version_id| {
+            self.versions_by_id
+                .get(version_id)
+                .map(|version| &version.skill)
+        })
+    }
+
+    fn create(
+        &mut self,
+        skill: &SkillVersionRef,
+        display_name: &str,
+        provenance: &SkillProvenance,
+        record_digest: Sha256Digest,
+    ) -> Result<(), RecoveryError> {
+        if collides_with_canonical_builtin_identity(skill)?
+            || skill.version().get() != 1
+            || self.versions_by_id.contains_key(&skill.skill_version_id())
+            || self.active_by_skill.contains_key(&skill.skill_id())
+        {
+            return Err(RecoveryError::InvalidEventRecord);
+        }
+        self.versions_by_id.insert(
+            skill.skill_version_id(),
+            ProjectedSkillVersion {
+                skill: skill.clone(),
+                display_name: display_name.to_owned(),
+                provenance: provenance.clone(),
+                predecessor_version_id: None,
+                record_digest,
+            },
+        );
+        self.active_by_skill
+            .insert(skill.skill_id(), skill.skill_version_id());
+        Ok(())
+    }
+
+    fn activate(
+        &mut self,
+        skill: &SkillVersionRef,
+        previous_version_id: SkillVersionId,
+        display_name: &str,
+        provenance: &SkillProvenance,
+        record_digest: Sha256Digest,
+    ) -> Result<(), RecoveryError> {
+        if self.versions_by_id.contains_key(&skill.skill_version_id()) {
+            return Err(RecoveryError::InvalidEventRecord);
+        }
+        if let Some(current_id) = self.active_by_skill.get(&skill.skill_id()).copied() {
+            let current = self
+                .versions_by_id
+                .get(&current_id)
+                .ok_or(RecoveryError::InvalidEventRecord)?;
+            if current_id != previous_version_id
+                || current.skill.version().get().checked_add(1) != Some(skill.version().get())
+                || current.provenance != *provenance
+            {
+                return Err(RecoveryError::InvalidEventRecord);
+            }
+        } else if !is_canonical_builtin_successor(skill, previous_version_id, provenance)? {
+            return Err(RecoveryError::InvalidEventRecord);
+        }
+        self.versions_by_id.insert(
+            skill.skill_version_id(),
+            ProjectedSkillVersion {
+                skill: skill.clone(),
+                display_name: display_name.to_owned(),
+                provenance: provenance.clone(),
+                predecessor_version_id: Some(previous_version_id),
+                record_digest,
+            },
+        );
+        self.active_by_skill
+            .insert(skill.skill_id(), skill.skill_version_id());
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), RecoveryError> {
+        let mut by_skill = BTreeMap::<
+            SkillId,
+            BTreeMap<ObjectVersion, &ProjectedSkillVersion>,
+        >::new();
+        for (version_id, version) in &self.versions_by_id {
+            if version_id != &version.skill.skill_version_id()
+                || by_skill
+                    .entry(version.skill.skill_id())
+                    .or_default()
+                    .insert(version.skill.version(), version)
+                    .is_some()
+            {
+                return Err(RecoveryError::InvalidEventRecord);
+            }
+        }
+        if by_skill.len() != self.active_by_skill.len() {
+            return Err(RecoveryError::InvalidEventRecord);
+        }
+        for (skill_id, versions) in by_skill {
+            let mut previous: Option<&ProjectedSkillVersion> = None;
+            for version in versions.values() {
+                if let Some(previous) = previous {
+                    if previous.skill.version().get().checked_add(1)
+                        != Some(version.skill.version().get())
+                        || version.predecessor_version_id
+                            != Some(previous.skill.skill_version_id())
+                        || version.provenance != previous.provenance
+                    {
+                        return Err(RecoveryError::InvalidEventRecord);
+                    }
+                } else if version.skill.version().get() == 1 {
+                    if version.predecessor_version_id.is_some() {
+                        return Err(RecoveryError::InvalidEventRecord);
+                    }
+                } else {
+                    let predecessor = version
+                        .predecessor_version_id
+                        .ok_or(RecoveryError::InvalidEventRecord)?;
+                    if !is_canonical_builtin_successor(
+                        &version.skill,
+                        predecessor,
+                        &version.provenance,
+                    )? {
+                        return Err(RecoveryError::InvalidEventRecord);
+                    }
+                }
+                previous = Some(version);
+            }
+            let active_id = self
+                .active_by_skill
+                .get(&skill_id)
+                .ok_or(RecoveryError::InvalidEventRecord)?;
+            if previous.map(|version| version.skill.skill_version_id()) != Some(*active_id) {
+                return Err(RecoveryError::InvalidEventRecord);
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReducerEffect {
     None,
@@ -102,6 +301,7 @@ impl ProjectionState {
             installation: &self.installation,
             sessions: &self.sessions,
             agent_profiles: &self.agent_profiles,
+            skills: &self.skills,
             setup_status: &self.setup_status,
             last_sequence: self.last_sequence,
             last_event_digest: &self.last_event_digest,
@@ -119,6 +319,7 @@ impl ProjectionState {
         if self.setup_status != SetupStatus::NotStarted {
             return Err(RecoveryError::InvalidEventRecord);
         }
+        self.skills.validate()?;
         if self.installation.is_none() && !self.sessions.is_empty() {
             return Err(RecoveryError::InvalidEventRecord);
         }
@@ -168,6 +369,8 @@ struct PersistentProjectionState<'a> {
     sessions: &'a BTreeMap<SessionId, SessionProjection>,
     #[serde(skip_serializing_if = "agent_profiles_are_empty")]
     agent_profiles: &'a AgentProfilesProjection,
+    #[serde(skip_serializing_if = "skills_are_empty")]
+    skills: &'a SkillsProjection,
     setup_status: &'a SetupStatus,
     last_sequence: u64,
     last_event_digest: &'a Option<Sha256Digest>,
@@ -175,6 +378,10 @@ struct PersistentProjectionState<'a> {
 
 fn agent_profiles_are_empty(profiles: &&AgentProfilesProjection) -> bool {
     profiles.is_empty()
+}
+
+fn skills_are_empty(skills: &&SkillsProjection) -> bool {
+    skills.is_empty()
 }
 
 pub fn reduce(
@@ -253,7 +460,56 @@ pub fn reduce(
         | ApplicationEvent::AgentProfilesListed { .. }
         | ApplicationEvent::AgentProfileViewed { .. }
         | ApplicationEvent::AgentProfileHistoryViewed { .. }
-        | ApplicationEvent::AgentProfileVersionViewed { .. } => {}
+        | ApplicationEvent::AgentProfileVersionViewed { .. }
+        | ApplicationEvent::SkillsListed { .. }
+        | ApplicationEvent::SkillViewed { .. }
+        | ApplicationEvent::SkillHistoryViewed { .. }
+        | ApplicationEvent::SkillVersionViewed { .. } => {}
+        ApplicationEvent::SkillCreated {
+            skill,
+            display_name,
+            provenance,
+        } => {
+            let record_digest = authenticated_skill_record_digest(event, skill)?;
+            next.skills
+                .create(skill, display_name, provenance, record_digest)?;
+        }
+        ApplicationEvent::SkillVersionActivated {
+            skill,
+            previous_version_id,
+            display_name,
+            provenance,
+        } => {
+            let record_digest = authenticated_skill_record_digest(event, skill)?;
+            next.skills.activate(
+                skill,
+                *previous_version_id,
+                display_name,
+                provenance,
+                record_digest,
+            )?;
+        }
+        ApplicationEvent::AgentSkillAssigned {
+            profile,
+            previous_profile_version_id,
+            ..
+        }
+        | ApplicationEvent::AgentSkillUpgraded {
+            profile,
+            previous_profile_version_id,
+            ..
+        }
+        | ApplicationEvent::AgentSkillUnassigned {
+            profile,
+            previous_profile_version_id,
+            ..
+        } => {
+            next.agent_profiles
+                .reduce(&ApplicationEvent::AgentProfileVersionActivated {
+                    profile: profile.clone(),
+                    previous_version_id: *previous_profile_version_id,
+                })?;
+        }
     }
     next.agent_profiles.reduce(&event.event)?;
     next.last_sequence = event.sequence;
@@ -288,4 +544,49 @@ fn end_session(
         reason,
     });
     Ok(())
+}
+
+fn authenticated_skill_record_digest(
+    event: &EventEnvelope,
+    skill: &SkillVersionRef,
+) -> Result<Sha256Digest, RecoveryError> {
+    let object = event
+        .object
+        .as_ref()
+        .ok_or(RecoveryError::InvalidEventRecord)?;
+    if object.kind != "skill_version"
+        || object.id != skill.skill_version_id().to_string()
+        || object.version != skill.version()
+    {
+        return Err(RecoveryError::InvalidEventRecord);
+    }
+    Ok(object.digest.clone())
+}
+
+fn is_canonical_builtin_successor(
+    skill: &SkillVersionRef,
+    previous_version_id: SkillVersionId,
+    provenance: &SkillProvenance,
+) -> Result<bool, RecoveryError> {
+    let manifests =
+        crate::skills::builtin_manifests().map_err(|_| RecoveryError::InvalidEventRecord)?;
+    Ok(manifests.iter().any(|manifest| {
+        let previous = manifest.skill();
+        previous.skill_id() == skill.skill_id()
+            && previous.skill_version_id() == previous_version_id
+            && previous.version().get().checked_add(1) == Some(skill.version().get())
+            && previous.provenance() == provenance
+    }))
+}
+
+fn collides_with_canonical_builtin_identity(
+    skill: &SkillVersionRef,
+) -> Result<bool, RecoveryError> {
+    let manifests =
+        crate::skills::builtin_manifests().map_err(|_| RecoveryError::InvalidEventRecord)?;
+    Ok(manifests.iter().any(|manifest| {
+        let builtin = manifest.skill();
+        builtin.skill_id() == skill.skill_id()
+            || builtin.skill_version_id() == skill.skill_version_id()
+    }))
 }

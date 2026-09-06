@@ -1,0 +1,156 @@
+# Task 8 Report: Keyboard-first Skills state machines
+
+Date: 2026-09-06
+Branch: `codex/phase-2-declarative-skills`
+Base commit: `c5d4fe6fad58a5e3aa43e34c6849d08132de954f`
+Checkpoint: this report is committed with the implementation; the exact resulting SHA is returned in the task handoff because a commit cannot contain its own hash.
+
+## Files
+
+- `src/ui/skill_editor.rs`
+- `src/ui/mod.rs`
+- `src/ui/tui/model.rs`
+- `src/ui/tui/event.rs`
+- `src/ui/tui/controller.rs`
+- `src/ui/tui/host.rs`
+- `src/ui/tui/mod.rs`
+- `src/runtime/mod.rs`
+- `tests/skill_editor_contract.rs`
+- `tests/skill_tui_controller_contract.rs`
+- `tests/skill_tui_host_contract.rs`
+- `.superpowers/sdd/2026-09-05-declarative-skills/task-8-report.md`
+
+## RED evidence
+
+Command:
+
+```text
+cargo test --test skill_editor_contract --test skill_tui_controller_contract --test skill_tui_host_contract
+```
+
+Initial corrected RED exited 101. The compiler reported the intended absent `ui::skill_editor`, Skills model panes/actions/state, controller effects, host entry point, and `CommandExecutor::preview_skill_version` route.
+
+A focused recoverable-validation regression also exited 101 after compiling and failed with:
+
+```text
+left: Some("")
+right: Some("Source note")
+```
+
+The exact agent-detail unassignment contract exited 101 for the intended absent agent skill action state.
+
+The independent-review fix round added focused RED evidence for each valid defect:
+
+- Skills ownership: with Skills active over the Agents view, Down was consumed by Agents and left the Skills selection at `0` instead of advancing to `1`.
+- Historical reference isolation: after viewing skill A history and loading skill B detail, exact-ref selection still returned A.
+- Editor input ownership: seeded fields submitted empty values; invalid values disappeared; and Esc did not restore the prior field value.
+- Origin tracking: the explicit workspace-origin contract initially failed to compile because no typed origin state existed. Agent-origin unassign cancellation also exposed unconditional Skills activation in the host.
+- Confirmation cancellation: Esc retained the cancelled editor preview, allowing the next Enter to reuse it instead of requesting a fresh preview.
+- Exact-once cancellation: after a cancellation error, `review_registered` remained true. The strengthened route-level regression records the cancellation inside the worker before returning its configured error.
+- Host lifecycle coverage: a pending review initially could not complete `/quit` because confirmation dispatch preceded explicit command-mode dispatch; the host-exit regression reached EOF rather than a shutdown result.
+
+## GREEN evidence
+
+Fresh focused command:
+
+```text
+cargo test --test skill_editor_contract --test skill_tui_controller_contract --test skill_tui_host_contract
+```
+
+Result: exit 0, 32 passed, 0 failed.
+
+- `skill_editor_contract`: 5 passed.
+- `skill_tui_controller_contract`: 15 passed.
+- `skill_tui_host_contract`: 12 passed.
+
+No full suite was run, per Task 8 instructions.
+
+## Behavior decisions
+
+- `s` activates a dedicated non-rendered Skills workspace state and loads the library without mutating cached data. Adaptive rendering remains Task 9.
+- Up/Down select skill, history, create-source, agent, and assigned-skill rows. Arrow keys also select contextual actions. Enter advances or confirms; Esc unwinds one safe level.
+- The editor owns five stages: Identity, Usage, Instructions, References, and Review. Custom and library-seeded creation paths feed the same editor.
+- Validation remains in `SkillDraft`; presentation errors identify the active field and retain recoverable raw input, including invalid reference bodies.
+- Create/version confirmation commands use only `SkillEditPreview` tokens and digests returned by existing application preview paths.
+- Assignment classification is explicit Add, Upgrade, Already Assigned, or Unassign. Upgrade and unassign retain exact `SkillVersionRef` values; no auto-upgrade exists.
+- Agent detail exposes exact assigned refs through a keyboard-controlled selection panel without changing Task 9 rendering files.
+- The host owns review registration. Esc/cancel/host exit clears each registered Skill review at most once; successful commands mark consumed reviews without cancelling again.
+- Terminal stale, policy, and invalid-review application failures clear pending confirmation/review state and return to an actionable origin. Protected-submit backpressure instead retains the registered review and confirmation for retry.
+- Bare `q` never requests shutdown. `/quit` remains the normal user shutdown path.
+- Runtime version preview uses a distinct typed request/reply variant and delegates directly to `ApplicationService::preview_skill_version`; it adds no token generation, commit path, or business logic.
+
+## Independent-review findings
+
+1. **Skills routing ownership: fixed.** Active Skills state is dispatched before Agents state. Workspace origin is explicit for cockpit and agent-skill-panel entry, and `/quit` command mode, once explicitly entered with `/`, owns subsequent input even while a protected confirmation is present.
+2. **Historical exact-ref isolation: fixed.** Replacing detail clears historical version detail and cross-skill history, so A history cannot supply the selected ref after B detail loads. The A-history to B-detail assignment regression passes.
+3. **Editor input preservation and seeding: fixed.** The command buffer is synchronized from the editor draft, validation reads without destructively taking input, invalid text remains editable, unchanged seeded fields advance on Enter, and Esc restores the prior field value. Reference-name/body state remains recoverable.
+4. **Origin recovery: fixed for the reviewed paths.** Protected operations carry a typed Skills-pane or agent-panel origin. Cancellation and tested terminal stale-profile, policy-denied, and invalid-review outcomes restore the agent skill panel without also activating Skills or leaving an orphaned review.
+5. **Editor confirmation Esc: fixed.** Esc clears the editor's installed preview before restoring the editor, so the next Enter requests a new application preview.
+6. **Exact-once cancellation: fixed.** The host takes `review_registered` before dispatch. The worker-received-then-failed regression records one cancellation, returns an error, and proves a subsequent cleanup call does not dispatch again.
+7. **Focused regression coverage: added.** Contracts cover Skills-over-Agents ownership, explicit workspace return, historical A-to-B switching, seeded and unchanged edits, invalid input, Esc restoration, agent-origin cancellation and terminal failures, fresh preview after confirmation Esc, and cleanup on `/quit`, interruption, terminal input/EOF, terminal output failure, and cancellation failure. Host-exit tests assert no mutation command is dispatched.
+
+## Independent-review fix round 2
+
+### RED evidence
+
+- Agent-origin View initially had no `SkillWorkspaceOrigin`, retained stale A detail/history/version state while requesting assigned skill B, and routed the returned B `SkillVersion` back to `History` rather than a coherent exact-version detail.
+- Opening a historical version initially left the pane in `History`; the Detail Assign action therefore remained unreachable for the opened exact ref.
+- The host View route initially returned `LifecycleFinished` in the focused route contract because no exact-version response was exercised there. Assignment and Upgrade doubles initially returned `SkillReviewUnavailable`, so neither exact protected command was installed.
+- With a capacity-one runtime saturated by a blocked worker and one queued command, protected skill execution blocked instead of returning typed `RuntimeError::Backpressure`. The regression used a bounded timeout, released the worker safely, and failed with `protected skill submission blocked instead of returning typed backpressure`.
+
+### GREEN behavior and evidence
+
+1. **Agent-origin exact View:** View now records `SkillWorkspaceOrigin::AgentSkills` and clears prior detail/history/version state before requesting the assigned exact ref. A `SkillVersion` response installs same-identity detail/version state, clears mismatched history, and enters `SkillsPane::Detail`. Esc from agent-origin Detail closes Skills directly and restores the originating agent skill panel.
+2. **Historical exact-version Assign:** Opening a selected historical version now enters Detail. `selected_skill_ref` prefers `version_detail` only when its skill identity matches Detail; replacing detail for another skill still clears it. The existing Detail Assign route therefore previews the historical exact ref. Classification remains `Add` when the target agent has no version of that skill and becomes explicit `Upgrade { expected }` when replacing a different exact current ref, including historical reassignment/downgrade.
+3. **Typed host routes:** Focused host contracts verify the exact historical ref reaches `AssignAgentSkill`, and agent-origin Upgrade echoes exact expected/replacement refs into `UpgradeAgentSkill`. These commands continue to be constructed only from application preview responses and their returned review token/digest.
+4. **Retryable backpressure:** Protected execution now uses `RuntimeClient::try_submit`. Typed backpressure clears only the in-flight marker and retains the confirmation, registered review token, operation origin, and command for retry. The saturated-runtime contract verifies no mutation or cancellation dispatch occurs.
+
+Fresh focused fix-round-2 command:
+
+```text
+cargo test --test skill_editor_contract --test skill_tui_controller_contract --test skill_tui_host_contract
+```
+
+Result: exit 0, 31 passed, 0 failed: 5 editor, 14 controller, and 12 host contracts.
+
+## Independent-review fix round 3
+
+### RED evidence
+
+- The requested B-history regression initially failed to compile because `ControllerEffect::LoadSkillHistory` accepted only `selected_skill: usize`; the typed effect could not express the installed B identity and remained coupled to stale library selection A.
+- After the controller regression was made executable, the full Upgrade contract failed at `upgrade replacement in loaded library`: the prior host fixture returned an empty skill list, confirming the earlier test had bypassed real loading and classification by mutating intermediate model fields.
+
+### GREEN behavior and evidence
+
+1. **Detail-derived history identity:** `SkillsViewState::current_skill_id` derives the history target from the exact scoped selected ref. Installing detail or version detail synchronizes `selected_skill` when that identity exists in the loaded library. `LoadSkillHistory` now carries a typed `SkillId`, and the host submits `ShowSkillHistory` directly for that ID rather than resolving a mutable list index.
+2. **A-to-B history regression:** The controller contract starts with selected library/detail/history/version state for A, opens assigned B v2 from the agent skill panel, selects History with Right/Enter, and asserts the typed history request is B. It applies a B history outcome, opens B v1, drives Assign and agent selection through real controller effects, and verifies explicit downgrade classification targets B v1 against expected B v2; A cannot reappear.
+3. **True agent-origin Upgrade route:** The host contract starts at the agent skill panel and uses real keys/effects for Upgrade selection, skill list loading, replacement detail loading, agent list/detail loading, automatic classification, preview, confirmation cancellation, and Esc return. It asserts profile ID `110`, expected profile version `111`, exact current and replacement refs, `UpgradeAgentSkill`, the preview-owned review token, one cancellation, no mutation dispatch, and restored Agents panel state. No intermediate workflow state is assigned directly after the initial durable fixture.
+
+Fresh focused fix-round-3 command:
+
+```text
+cargo test --test skill_editor_contract --test skill_tui_controller_contract --test skill_tui_host_contract
+```
+
+Result: exit 0, 32 passed, 0 failed: 5 editor, 15 controller, and 12 host contracts.
+
+## Independent-review fix round 4
+
+### RED evidence
+
+- The multi-profile Upgrade contract initially failed to compile because `ControllerEffect::LoadSkillAgent` exposed only `selected_agent: usize`; the effect could not carry the originating `AgentProfileId` and therefore could not prove identity-safe routing.
+- Inspection confirmed `SkillWorkspaceOrigin::AgentSkills` and `SkillOperationOrigin::AgentSkills` were marker-only variants. Agent-origin Upgrade entered the generic picker, whose independent `selected_agent` index could select a different profile.
+
+### GREEN behavior and evidence
+
+1. **Typed agent origin:** Both Skills workspace and protected-operation origins now carry `AgentProfileId`. View, Upgrade, and Unassign capture the profile ID from the open agent detail when their flow begins.
+2. **Identity-safe loading:** `LoadSkillAgent` now carries `profile_id` rather than a picker index. Generic Skills assignment converts its selected row to an ID before dispatch. Agent-origin assignment bypasses repicking and loads the stored origin ID directly before classification.
+3. **Multi-profile Upgrade contract:** The focused host regression places a wrong profile at index 0, the origin profile at index 1, and leaves the Skills picker at stale index 0. Real controller/host transitions load profile `110`, never profile `120`; classification uses active profile version `111`, the exact current ref, and exact replacement ref. The preview-owned token reaches `UpgradeAgentSkill`, cancellation occurs once without mutation, and return restores profile `110` and its skill panel.
+4. **View and Unassign compatibility:** Existing View and Unassign regressions now assert profile-bearing origins and same-profile return state. Generic picker behavior remains available for cockpit-origin Skills assignment, but its host route is ID-based.
+5. **Backpressure wording:** Protected-submit `RuntimeError::Backpressure` retains the registered review, confirmation, command, and origin for retry. Terminal `RuntimeError::Application` paths clear terminal review state and recover to an actionable origin.
+
+## Concerns
+
+- Rendering and visual discoverability are intentionally deferred to Task 9.
+- Only the three authorized focused test targets were executed; broader integration remains outside this task's verification scope.
+- Backpressure coverage is limited to protected skill command submission; preview transport remains on its existing synchronous typed runtime path.

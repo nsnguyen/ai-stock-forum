@@ -3,6 +3,7 @@ mod audit;
 mod help;
 mod overview;
 mod setup;
+mod skills;
 
 use ratatui::{
     Frame,
@@ -17,6 +18,10 @@ use super::{
 };
 
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    if model.skills.active {
+        skills::render(frame, area, model, theme);
+        return;
+    }
     match model.active_view {
         View::Overview => overview::render(frame, area, model, theme),
         View::Setup => setup::render(frame, area, model, theme),
@@ -27,6 +32,9 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
 }
 
 pub(super) fn workspace_content_height(model: &TuiModel, width: u16) -> u16 {
+    if model.skills.active {
+        return skills::content_height(model, width);
+    }
     match model.active_view {
         View::Overview => overview::content_height(model, width),
         View::Setup => setup::content_height(model, width),
@@ -50,17 +58,25 @@ pub(super) fn render_inspector(frame: &mut Frame<'_>, area: Rect, model: &TuiMod
         theme.muted
     };
     let block = Block::default()
-        .title(" Inspector ")
+        .title(if model.skills.active {
+            " Skill context "
+        } else {
+            " Inspector "
+        })
         .borders(Borders::ALL)
         .border_style(border_style);
-    let lines = match model.active_view {
+    let lines = if model.skills.active {
+        skills::inspector_lines(model, theme)
+    } else {
+        match model.active_view {
         View::Audit => audit::inspector_lines(model, theme),
         View::Overview => contextual_lines("Overview", "Runtime and installation health", theme),
         View::Setup => contextual_lines("Setup", "State is read-only in Phase 0B", theme),
         View::Help => contextual_lines("Help", "Approved keyboard and slash grammar", theme),
         View::Agents => agents::inspector_lines(model, theme),
+        }
     };
-    let scroll = if model.active_view == View::Agents {
+    let scroll = if !model.skills.active && model.active_view == View::Agents {
         u16::try_from(model.agents.history_scroll).unwrap_or(u16::MAX)
     } else {
         0

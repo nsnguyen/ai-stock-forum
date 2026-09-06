@@ -3,8 +3,9 @@ use std::{fmt, sync::OnceLock};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agents::{AgentBindings, AgentProfileDraft, AgentRole, McpRef, SkillRef},
+    agents::{AgentBindings, AgentProfileDraft, AgentRole, McpRef},
     domain::{DomainError, Sha256Digest, canonical_json_bytes, sha256},
+    skills::SkillVersionRef,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -96,7 +97,7 @@ impl ProfileTemplate {
             personality.to_owned(),
             instructions.to_owned(),
             AgentBindings::default(),
-            Vec::<SkillRef>::new(),
+            Vec::<SkillVersionRef>::new(),
             Vec::<McpRef>::new(),
             Some(self.provenance()),
         )?;

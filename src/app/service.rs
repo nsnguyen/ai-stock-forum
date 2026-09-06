@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock, RwLockReadGuard};
+use std::{collections::BTreeSet, sync::{Arc, RwLock, RwLockReadGuard}};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -13,26 +13,35 @@ use crate::{
         AgentProfileCreatedView, AgentProfileHistoryEntry, AgentProfileHistoryView,
         AgentProfileSelector, AgentProfileSummary, AgentProfileVersionActivatedView,
         AgentProfileVersionView, AgentProfileView, AgentProfilesView, AppError, ApplicationCommand,
-        ApplicationEvent, AuditTailView, CommandEnvelope, CommandOutcome, CommandView,
+        ApplicationEvent, AgentSkillAssignmentOperation, AgentSkillAssignmentPreview,
+        AgentSkillMutationView, AuditTailView, CommandEnvelope, CommandOutcome, CommandView,
         EVENT_SCHEMA_VERSION, HelpView, InputRejectedView, MAX_AGENT_PROFILE_HISTORY_RESULTS,
-        MAX_AGENT_PROFILE_LIST_RESULTS, PendingEvent, SetupStatusView, ShutdownDisposition,
-        ShutdownReason, ShutdownView, StatusView,
+        MAX_AGENT_PROFILE_LIST_RESULTS, MAX_SKILL_HISTORY_RESULTS, MAX_SKILL_LIST_RESULTS,
+        PendingEvent, SetupStatusView, ShutdownDisposition, ShutdownReason, ShutdownView,
+        SkillCreatedView, SkillEventSummary, SkillHistoryEntry, SkillHistoryEventEntry,
+        SkillHistoryView, SkillSelector, SkillSummary, SkillVersionActivatedView, SkillView,
+        SkillsView, StatusView,
     },
     audit::AuditEntry,
     config::{AppPaths, StartupError},
     domain::{
         Actor, AgentProfileId, AgentProfileVersionId, CausationId, Clock, CommandId, CorrelationId,
-        EventId, IdGenerator, InstallationId, MemoryNamespaceId, ProfileReviewToken, SessionId,
-        Sha256Digest, canonical_json_bytes, sha256,
+        EventId, IdGenerator, InstallationId, MemoryNamespaceId, ObjectVersion,
+        ProfileReviewToken, SessionId, Sha256Digest, SkillId, SkillReviewToken, SkillVersionId,
+        canonical_json_bytes, sha256,
     },
     persistence::{
         CommandReceiptRecord, CommandReceiptRepository, Database, EventRepository,
         ImmediateTransaction, PersistenceError, ProjectionRepository, RecoveryError,
-        insert_expected_version,
+        insert_expected_version, insert_skill_version, load_active_skill,
+        load_active_skill_by_name, load_all_skill_versions, load_skill_history,
+        load_skill_version, set_active_skill,
     },
     policy::{Capability, Effect, PolicyDecision, PolicyRule, evaluate},
     recovery::{BootstrapState, ProjectionState, RecoveryCoordinator, reduce},
     setup::SetupStatus,
+    skills::{SkillDraft, SkillEditPreview, SkillProvenance, SkillReviewRegistry, SkillVersion,
+        SkillVersionRef},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,7 +161,7 @@ impl CommandTransactionHook for NoopCommandTransactionHook {
 }
 
 struct PhaseZeroPolicy {
-    rules: [PolicyRule; 9],
+    rules: [PolicyRule; 14],
 }
 
 impl Default for PhaseZeroPolicy {
@@ -167,6 +176,11 @@ impl Default for PhaseZeroPolicy {
                 PolicyRule::new(Effect::Grant, Capability::AgentProfileCreate),
                 PolicyRule::new(Effect::Grant, Capability::AgentProfilePreview),
                 PolicyRule::new(Effect::Grant, Capability::AgentProfileActivate),
+                PolicyRule::new(Effect::Grant, Capability::SkillRead),
+                PolicyRule::new(Effect::Grant, Capability::SkillCreate),
+                PolicyRule::new(Effect::Grant, Capability::SkillVersion),
+                PolicyRule::new(Effect::Grant, Capability::AgentSkillAssign),
+                PolicyRule::new(Effect::Grant, Capability::AgentSkillUnassign),
                 PolicyRule::new(Effect::Grant, Capability::Shutdown),
             ],
         }
@@ -317,6 +331,7 @@ struct CommandExecutor {
     hook: Arc<dyn CommandTransactionHook>,
     lifecycle: Arc<SharedLifecycle>,
     reviews: Arc<ProfileReviewRegistry>,
+    skill_reviews: Arc<SkillReviewRegistry>,
     binding_catalog: Arc<AgentBindingCatalogSnapshot>,
 }
 
@@ -340,7 +355,15 @@ impl ApplicationService {
         let worker = self.worker()?;
         let mut executor = worker.executor;
         executor.reviews = Arc::new(ProfileReviewRegistry::default());
+        executor.skill_reviews = Arc::new(SkillReviewRegistry::default());
         Ok(IndependentApplicationService { executor })
+    }
+
+    #[doc(hidden)]
+    pub fn independent_skill_instance(
+        &self,
+    ) -> Result<IndependentApplicationService, StartupError> {
+        self.independent_profile_instance()
     }
 
     pub fn bootstrap(
@@ -401,13 +424,18 @@ impl ApplicationService {
         binding_catalog: AgentBindingCatalogSnapshot,
     ) -> Result<Self, StartupError> {
         let mut database = Database::open(paths)?;
-        let state =
-            RecoveryCoordinator::bootstrap(&mut database, clock.as_ref(), ids.as_ref(), &[])?;
+        let state = RecoveryCoordinator::bootstrap_after_database_ready(
+            &mut database,
+            clock.as_ref(),
+            ids.as_ref(),
+            &[],
+        )?;
         let lifecycle = Arc::new(SharedLifecycle {
             session_id: state.session_id(),
             phase: RwLock::new(LifecyclePhase::Open),
         });
         let reviews = Arc::new(ProfileReviewRegistry::default());
+        let skill_reviews = Arc::new(SkillReviewRegistry::default());
         Ok(Self {
             paths: paths.clone(),
             state,
@@ -419,6 +447,7 @@ impl ApplicationService {
                 hook,
                 lifecycle,
                 reviews,
+                skill_reviews,
                 binding_catalog: Arc::new(binding_catalog),
             },
         })
@@ -434,6 +463,7 @@ impl ApplicationService {
                 hook: self.executor.hook.clone(),
                 lifecycle: self.executor.lifecycle.clone(),
                 reviews: self.executor.reviews.clone(),
+                skill_reviews: self.executor.skill_reviews.clone(),
                 binding_catalog: self.executor.binding_catalog.clone(),
             },
         })
@@ -473,6 +503,64 @@ impl ApplicationService {
         Ok(())
     }
 
+    pub fn preview_skill_creation(&self, candidate: SkillDraft) -> Result<SkillEditPreview, AppError> {
+        self.executor.preview_skill_creation(candidate)
+    }
+
+    pub fn preview_skill_version(
+        &self,
+        skill_id: SkillId,
+        expected_active_version_id: SkillVersionId,
+        candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, AppError> {
+        self.executor.preview_skill_version(skill_id, expected_active_version_id, candidate)
+    }
+
+    pub fn preview_agent_skill_assignment(
+        &self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        skill: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        self.executor.preview_agent_skill_operation(
+            profile_id,
+            expected_active_profile_version_id,
+            AgentSkillAssignmentOperation::Assign { skill },
+        )
+    }
+
+    pub fn preview_agent_skill_upgrade(
+        &self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+        replacement: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        self.executor.preview_agent_skill_operation(
+            profile_id,
+            expected_active_profile_version_id,
+            AgentSkillAssignmentOperation::Upgrade { expected, replacement },
+        )
+    }
+
+    pub fn preview_agent_skill_unassignment(
+        &self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        self.executor.preview_agent_skill_operation(
+            profile_id,
+            expected_active_profile_version_id,
+            AgentSkillAssignmentOperation::Unassign { expected },
+        )
+    }
+
+    pub fn cancel_skill_review(&self) -> Result<(), AppError> {
+        self.executor.skill_reviews.cancel();
+        Ok(())
+    }
+
     pub fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
         self.executor.hook.before_finish_lifecycle_write();
         let lifecycle = self.executor.lifecycle.clone();
@@ -484,6 +572,7 @@ impl ApplicationService {
             return Ok(());
         }
         self.executor.reviews.cancel();
+        self.executor.skill_reviews.cancel();
         RecoveryCoordinator::finish_session(
             &mut self.executor.database,
             &mut self.state,
@@ -583,6 +672,62 @@ impl IndependentApplicationService {
         self.executor
             .preview_agent_profile_edit(profile_id, expected_active_version_id, candidate)
     }
+
+    pub fn preview_skill_creation(&self, candidate: SkillDraft) -> Result<SkillEditPreview, AppError> {
+        self.executor.preview_skill_creation(candidate)
+    }
+
+    pub fn preview_skill_version(
+        &self,
+        skill_id: SkillId,
+        expected_active_version_id: SkillVersionId,
+        candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, AppError> {
+        self.executor.preview_skill_version(skill_id, expected_active_version_id, candidate)
+    }
+
+    pub fn preview_agent_skill_assignment(
+        &self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        skill: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        self.executor.preview_agent_skill_operation(
+            profile_id,
+            expected_active_profile_version_id,
+            AgentSkillAssignmentOperation::Assign { skill },
+        )
+    }
+
+    pub fn preview_agent_skill_upgrade(
+        &self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+        replacement: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        self.executor.preview_agent_skill_operation(
+            profile_id,
+            expected_active_profile_version_id,
+            AgentSkillAssignmentOperation::Upgrade {
+                expected,
+                replacement,
+            },
+        )
+    }
+
+    pub fn preview_agent_skill_unassignment(
+        &self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        self.executor.preview_agent_skill_operation(
+            profile_id,
+            expected_active_profile_version_id,
+            AgentSkillAssignmentOperation::Unassign { expected },
+        )
+    }
 }
 
 impl ApplicationWorker {
@@ -604,9 +749,99 @@ impl ApplicationWorker {
     pub fn execute(&mut self, envelope: CommandEnvelope) -> Result<CommandOutcome, AppError> {
         self.executor.execute(envelope)
     }
+
+    pub fn preview_skill_creation(&self, candidate: SkillDraft) -> Result<SkillEditPreview, AppError> {
+        self.executor.preview_skill_creation(candidate)
+    }
+
+    pub fn preview_skill_version(
+        &self,
+        skill_id: SkillId,
+        expected_active_version_id: SkillVersionId,
+        candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, AppError> {
+        self.executor.preview_skill_version(skill_id, expected_active_version_id, candidate)
+    }
 }
 
 impl CommandExecutor {
+    fn preview_skill_creation(&self, candidate: SkillDraft) -> Result<SkillEditPreview, AppError> {
+        self.ensure_passive_open(Capability::SkillCreate)?;
+        let candidate = candidate.canonicalized()?;
+        let normalized = candidate.normalized_name()?;
+        if load_active_skill_by_name(self.database.connection(), &normalized)?.is_some() {
+            return Err(AppError::DuplicateSkillName);
+        }
+        self.skill_reviews.operation().issue_edit(
+            SkillReviewToken::from_uuid(self.ids.next_uuid()),
+            Actor::Human,
+            SkillId::from_uuid(self.ids.next_uuid()),
+            None,
+            &candidate,
+        ).map_err(AppError::from)
+    }
+
+    fn preview_skill_version(
+        &self,
+        skill_id: SkillId,
+        expected_active_version_id: SkillVersionId,
+        candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, AppError> {
+        self.ensure_passive_open(Capability::SkillVersion)?;
+        let candidate = candidate.canonicalized()?;
+        let current = load_active_skill(self.database.connection(), skill_id)?
+            .ok_or(AppError::SkillNotFound)?;
+        if current.skill_version_id() != expected_active_version_id {
+            return Err(AppError::StaleSkillVersion);
+        }
+        if current.content() == &candidate {
+            return Err(crate::domain::DomainError::SkillUnchanged.into());
+        }
+        ensure_skill_name_available(self.database.connection(), Some(skill_id), &candidate)?;
+        self.skill_reviews.operation().issue_edit(
+            SkillReviewToken::from_uuid(self.ids.next_uuid()),
+            Actor::Human,
+            skill_id,
+            Some(expected_active_version_id),
+            &candidate,
+        ).map_err(AppError::from)
+    }
+
+    fn preview_agent_skill_operation(
+        &self,
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        operation: AgentSkillAssignmentOperation,
+    ) -> Result<AgentSkillAssignmentPreview, AppError> {
+        let capability = match operation {
+            AgentSkillAssignmentOperation::Unassign { .. } => Capability::AgentSkillUnassign,
+            AgentSkillAssignmentOperation::Assign { .. }
+            | AgentSkillAssignmentOperation::Upgrade { .. } => Capability::AgentSkillAssign,
+        };
+        self.ensure_passive_open(capability)?;
+        let projection = ProjectionRepository::load(self.database.connection())?;
+        let current = projection.agent_profiles.active_profile(profile_id)
+            .ok_or(AppError::AgentProfileNotFound)?;
+        if current.profile_version_id() != expected_active_profile_version_id {
+            return Err(AppError::StaleAgentProfileVersion);
+        }
+        validate_assignment_operation(self.database.connection(), current, &operation)?;
+        self.skill_reviews.operation().issue_assignment(
+            SkillReviewToken::from_uuid(self.ids.next_uuid()),
+            Actor::Human,
+            profile_id,
+            expected_active_profile_version_id,
+            operation,
+        ).map_err(AppError::from)
+    }
+
+    fn ensure_passive_open(&self, capability: Capability) -> Result<(), AppError> {
+        let phase = self.lifecycle.phase.read().map_err(|_| AppError::LifecycleFinished)?;
+        if *phase == LifecyclePhase::Closed {
+            return Err(AppError::LifecycleFinished);
+        }
+        authorize_passive(self.policy.as_ref(), capability)
+    }
     fn agent_binding_catalog(&self) -> Result<AgentBindingCatalogSnapshot, AppError> {
         let phase = self
             .lifecycle
@@ -726,10 +961,16 @@ impl CommandExecutor {
         let request = CommandRequest::from(&envelope);
         let request_json = encode_canonical(&request)?;
         let command_fingerprint = sha256(request_json.as_bytes());
-        let review_operation = if matches!(
+        let reviewed_mutation = matches!(
             &request.command,
             ApplicationCommand::ActivateAgentProfileVersion { .. }
-        ) {
+                | ApplicationCommand::CreateSkill { .. }
+                | ApplicationCommand::ActivateSkillVersion { .. }
+                | ApplicationCommand::AssignAgentSkill { .. }
+                | ApplicationCommand::UpgradeAgentSkill { .. }
+                | ApplicationCommand::UnassignAgentSkill { .. }
+        );
+        if reviewed_mutation {
             let replay_transaction = self.database.immediate_transaction()?;
             if let Some(receipt) =
                 CommandReceiptRepository::load(&replay_transaction, envelope.command_id)?
@@ -745,16 +986,31 @@ impl CommandExecutor {
                 return stored.into_result();
             }
             replay_transaction.commit()?;
-            self.hook
-                .before_profile_review_operation(envelope.command_id);
-            Some(self.reviews.operation())
-        } else {
-            None
-        };
+            self.hook.before_profile_review_operation(envelope.command_id);
+        }
+        let profile_review_operation = matches!(
+            &request.command,
+            ApplicationCommand::ActivateAgentProfileVersion { .. }
+        )
+        .then(|| self.reviews.operation());
+        let skill_review_operation = matches!(
+            &request.command,
+            ApplicationCommand::CreateSkill { .. }
+                | ApplicationCommand::ActivateSkillVersion { .. }
+                | ApplicationCommand::AssignAgentSkill { .. }
+                | ApplicationCommand::UpgradeAgentSkill { .. }
+                | ApplicationCommand::UnassignAgentSkill { .. }
+        )
+        .then(|| self.skill_reviews.operation());
         if matches!(
             &request.command,
             ApplicationCommand::CreateAgentProfile { .. }
                 | ApplicationCommand::ActivateAgentProfileVersion { .. }
+                | ApplicationCommand::CreateSkill { .. }
+                | ApplicationCommand::ActivateSkillVersion { .. }
+                | ApplicationCommand::AssignAgentSkill { .. }
+                | ApplicationCommand::UpgradeAgentSkill { .. }
+                | ApplicationCommand::UnassignAgentSkill { .. }
         ) {
             self.hook
                 .before_profile_mutation_transaction(envelope.command_id);
@@ -823,9 +1079,11 @@ impl CommandExecutor {
             return stored.into_result();
         }
 
-        let mut reserved = false;
+        let mut profile_reserved = false;
+        let mut skill_reserved = false;
         let precommit =
             (|| -> Result<(StoredExecution, Vec<crate::app::EventEnvelope>), AppError> {
+                let mut skill_event_object = None;
                 let event = match &request.command {
                     ApplicationCommand::ActivateAgentProfileVersion {
                         profile_id,
@@ -850,7 +1108,7 @@ impl CommandExecutor {
                         if &computed_review_digest != supplied_review_digest {
                             return Err(AppError::ReviewDigestMismatch);
                         }
-                        review_operation
+                        profile_review_operation
                             .as_ref()
                             .expect("activation owns the profile review operation")
                             .reserve(
@@ -867,7 +1125,7 @@ impl CommandExecutor {
                                 }
                                 ReviewReservationError::Mismatch => AppError::ProfileReviewMismatch,
                             })?;
-                        reserved = true;
+                        profile_reserved = true;
                         self.hook.after_profile_review_reservation(
                             transaction.transaction(),
                             envelope.command_id,
@@ -899,6 +1157,194 @@ impl CommandExecutor {
                             previous_version_id: *expected_active_version_id,
                         }
                     }
+                    ApplicationCommand::CreateSkill {
+                        skill_id,
+                        candidate,
+                        review_token,
+                        review_digest,
+                    } => {
+                        skill_review_operation
+                            .as_ref()
+                            .expect("skill creation owns the skill review operation")
+                            .reserve_edit(
+                                envelope.command_id,
+                                *review_token,
+                                &request.actor,
+                                *skill_id,
+                                None,
+                                candidate,
+                                review_digest,
+                            )?;
+                        skill_reserved = true;
+                        if !load_skill_history(transaction.transaction(), *skill_id)?.is_empty() {
+                            return Err(AppError::StaleSkillVersion);
+                        }
+                        ensure_skill_name_available(transaction.transaction(), None, candidate)?;
+                        let skill = SkillVersion::create(
+                            *skill_id,
+                            SkillVersionId::from_uuid(self.ids.next_uuid()),
+                            self.clock.now_millis(),
+                            SkillProvenance::User,
+                            candidate.clone(),
+                        )?;
+                        insert_skill_version(transaction.transaction(), &skill)?;
+                        set_active_skill(transaction.transaction(), &skill)
+                            .map_err(map_skill_write_error)?;
+                        skill_event_object = Some(skill_version_object(&skill)?);
+                        ApplicationEvent::SkillCreated {
+                            skill: skill.reference(),
+                            display_name: skill.content().display_name.clone(),
+                            provenance: skill.provenance().clone(),
+                        }
+                    }
+                    ApplicationCommand::ActivateSkillVersion {
+                        skill_id,
+                        expected_active_version_id,
+                        candidate,
+                        review_token,
+                        review_digest,
+                    } => {
+                        skill_review_operation
+                            .as_ref()
+                            .expect("skill versioning owns the skill review operation")
+                            .reserve_edit(
+                                envelope.command_id,
+                                *review_token,
+                                &request.actor,
+                                *skill_id,
+                                Some(*expected_active_version_id),
+                                candidate,
+                                review_digest,
+                            )?;
+                        skill_reserved = true;
+                        let current = load_active_skill(transaction.transaction(), *skill_id)?
+                            .ok_or(AppError::SkillNotFound)?;
+                        if current.skill_version_id() != *expected_active_version_id {
+                            return Err(AppError::StaleSkillVersion);
+                        }
+                        ensure_skill_name_available(
+                            transaction.transaction(),
+                            Some(*skill_id),
+                            candidate,
+                        )?;
+                        let skill = SkillVersion::next_version(
+                            &current,
+                            SkillVersionId::from_uuid(self.ids.next_uuid()),
+                            self.clock.now_millis(),
+                            candidate.clone(),
+                        )?;
+                        insert_skill_version(transaction.transaction(), &skill)?;
+                        set_active_skill(transaction.transaction(), &skill)
+                            .map_err(map_skill_write_error)?;
+                        skill_event_object = Some(skill_version_object(&skill)?);
+                        ApplicationEvent::SkillVersionActivated {
+                            skill: skill.reference(),
+                            previous_version_id: current.skill_version_id(),
+                            display_name: skill.content().display_name.clone(),
+                            provenance: skill.provenance().clone(),
+                        }
+                    }
+                    ApplicationCommand::AssignAgentSkill {
+                        profile_id,
+                        expected_active_profile_version_id,
+                        skill,
+                        review_token,
+                        review_digest,
+                    } => {
+                        let operation = AgentSkillAssignmentOperation::Assign {
+                            skill: skill.clone(),
+                        };
+                        skill_review_operation
+                            .as_ref()
+                            .expect("assignment owns the skill review operation")
+                            .reserve_assignment(
+                                envelope.command_id,
+                                *review_token,
+                                &request.actor,
+                                *profile_id,
+                                *expected_active_profile_version_id,
+                                &operation,
+                                review_digest,
+                            )?;
+                        skill_reserved = true;
+                        prepare_agent_skill_event(
+                            &projection,
+                            transaction.transaction(),
+                            self.ids.as_ref(),
+                            self.clock.as_ref(),
+                            *profile_id,
+                            *expected_active_profile_version_id,
+                            operation,
+                        )?
+                    }
+                    ApplicationCommand::UpgradeAgentSkill {
+                        profile_id,
+                        expected_active_profile_version_id,
+                        expected,
+                        replacement,
+                        review_token,
+                        review_digest,
+                    } => {
+                        let operation = AgentSkillAssignmentOperation::Upgrade {
+                            expected: expected.clone(),
+                            replacement: replacement.clone(),
+                        };
+                        skill_review_operation
+                            .as_ref()
+                            .expect("upgrade owns the skill review operation")
+                            .reserve_assignment(
+                                envelope.command_id,
+                                *review_token,
+                                &request.actor,
+                                *profile_id,
+                                *expected_active_profile_version_id,
+                                &operation,
+                                review_digest,
+                            )?;
+                        skill_reserved = true;
+                        prepare_agent_skill_event(
+                            &projection,
+                            transaction.transaction(),
+                            self.ids.as_ref(),
+                            self.clock.as_ref(),
+                            *profile_id,
+                            *expected_active_profile_version_id,
+                            operation,
+                        )?
+                    }
+                    ApplicationCommand::UnassignAgentSkill {
+                        profile_id,
+                        expected_active_profile_version_id,
+                        expected,
+                        review_token,
+                        review_digest,
+                    } => {
+                        let operation = AgentSkillAssignmentOperation::Unassign {
+                            expected: expected.clone(),
+                        };
+                        skill_review_operation
+                            .as_ref()
+                            .expect("unassignment owns the skill review operation")
+                            .reserve_assignment(
+                                envelope.command_id,
+                                *review_token,
+                                &request.actor,
+                                *profile_id,
+                                *expected_active_profile_version_id,
+                                &operation,
+                                review_digest,
+                            )?;
+                        skill_reserved = true;
+                        prepare_agent_skill_event(
+                            &projection,
+                            transaction.transaction(),
+                            self.ids.as_ref(),
+                            self.clock.as_ref(),
+                            *profile_id,
+                            *expected_active_profile_version_id,
+                            operation,
+                        )?
+                    }
                     command => prepare_event(
                         command,
                         &projection,
@@ -917,7 +1363,7 @@ impl CommandExecutor {
                         .unwrap_or_else(|| self.clock.now_millis()),
                     correlation_id: request.correlation_id,
                     causation_id: Some(CausationId::from_uuid(envelope.command_id.as_uuid())),
-                    object: None,
+                    object: skill_event_object,
                     event,
                 };
                 let committed = EventRepository::append(&transaction, pending)?;
@@ -935,6 +1381,18 @@ impl CommandExecutor {
                     )?;
                     self.hook
                         .after_profile_mirror_insert(transaction.transaction())?;
+                }
+                if let ApplicationEvent::AgentSkillAssigned { profile, .. }
+                | ApplicationEvent::AgentSkillUpgraded { profile, .. }
+                | ApplicationEvent::AgentSkillUnassigned { profile, .. } = &committed.event
+                {
+                    insert_expected_version(
+                        transaction.transaction(),
+                        i64::try_from(committed.sequence)
+                            .map_err(|_| PersistenceError::InvalidAgentProfilePayload)?,
+                        profile,
+                    )?;
+                    self.hook.after_profile_mirror_insert(transaction.transaction())?;
                 }
                 ProjectionRepository::store_with_after_active_profiles(
                     &transaction,
@@ -977,32 +1435,51 @@ impl CommandExecutor {
         let (stored, _) = match precommit {
             Ok(result) => result,
             Err(error) => {
-                if reserved {
-                    review_operation
+                if profile_reserved {
+                    profile_review_operation
                         .as_ref()
                         .expect("reserved review has an operation owner")
+                        .release(envelope.command_id);
+                }
+                if skill_reserved {
+                    skill_review_operation
+                        .as_ref()
+                        .expect("reserved skill review has an operation owner")
                         .release(envelope.command_id);
                 }
                 return Err(error);
             }
         };
         if let Err(error) = transaction.commit() {
-            if reserved {
-                review_operation
+            if profile_reserved {
+                profile_review_operation
                     .as_ref()
                     .expect("reserved review has an operation owner")
                     .release(envelope.command_id);
             }
+            if skill_reserved {
+                skill_review_operation
+                    .as_ref()
+                    .expect("reserved skill review has an operation owner")
+                    .release(envelope.command_id);
+            }
             return Err(error.into());
         }
-        if reserved {
-            review_operation
+        if profile_reserved {
+            profile_review_operation
                 .as_ref()
                 .expect("reserved review has an operation owner")
                 .consume(envelope.command_id);
         }
+        if skill_reserved {
+            skill_review_operation
+                .as_ref()
+                .expect("reserved skill review has an operation owner")
+                .consume_reserved(envelope.command_id);
+        }
         if matches!(request.command, ApplicationCommand::RequestShutdown) {
             self.reviews.cancel();
+            self.skill_reviews.cancel();
         }
         stored.into_result()
     }
@@ -1138,6 +1615,65 @@ fn prepare_event(
                 predecessor_version_id: profile.supersedes(),
             })
         }
+        ApplicationCommand::ListSkills => {
+            let skills = active_skills(transaction)?;
+            let total_count = skills.len();
+            let returned = skills.into_iter().take(MAX_SKILL_LIST_RESULTS).collect::<Vec<_>>();
+            Ok(ApplicationEvent::SkillsListed {
+                skills: returned.iter().map(skill_event_summary).collect(),
+                total_count: u32::try_from(total_count)
+                    .map_err(|_| PersistenceError::InvalidEventRecord)?,
+                returned_count: u32::try_from(returned.len())
+                    .map_err(|_| PersistenceError::InvalidEventRecord)?,
+                truncated: returned.len() < total_count,
+            })
+        }
+        ApplicationCommand::ShowSkill { selector } => {
+            let skill = resolve_active_skill(transaction, selector)?;
+            Ok(ApplicationEvent::SkillViewed {
+                skill: skill.reference(),
+                display_name: skill.content().display_name.clone(),
+                provenance: skill.provenance().clone(),
+            })
+        }
+        ApplicationCommand::ShowSkillHistory { selector } => {
+            let active = resolve_active_skill(transaction, selector)?;
+            let history = load_skill_history(transaction, active.skill_id())?;
+            let total_count = history.len();
+            let versions = history
+                .into_iter()
+                .rev()
+                .take(MAX_SKILL_HISTORY_RESULTS)
+                .map(|skill| SkillHistoryEventEntry {
+                    skill: skill.reference(),
+                    created_at_ms: skill.created_at_ms(),
+                    predecessor_version_id: skill.predecessor(),
+                })
+                .collect::<Vec<_>>();
+            Ok(ApplicationEvent::SkillHistoryViewed {
+                skill_id: active.skill_id(),
+                active: active.reference(),
+                versions: versions.clone(),
+                total_count: u32::try_from(total_count)
+                    .map_err(|_| PersistenceError::InvalidEventRecord)?,
+                returned_count: u32::try_from(versions.len())
+                    .map_err(|_| PersistenceError::InvalidEventRecord)?,
+                truncated: versions.len() < total_count,
+            })
+        }
+        ApplicationCommand::ShowSkillVersion { selector, version } => {
+            let active = resolve_active_skill(transaction, selector)?;
+            let skill = load_skill_history(transaction, active.skill_id())?
+                .into_iter()
+                .find(|skill| skill.version() == *version)
+                .ok_or(AppError::SkillNotFound)?;
+            Ok(ApplicationEvent::SkillVersionViewed {
+                skill: skill.reference(),
+                display_name: skill.content().display_name.clone(),
+                provenance: skill.provenance().clone(),
+                predecessor_version_id: skill.predecessor(),
+            })
+        }
         ApplicationCommand::ShowHelp => Ok(ApplicationEvent::HelpViewed),
         ApplicationCommand::ShowStatus => Ok(ApplicationEvent::StatusViewed),
         ApplicationCommand::ShowSetupStatus => Ok(ApplicationEvent::SetupStatusViewed),
@@ -1148,7 +1684,12 @@ fn prepare_event(
             rejection: rejection.clone(),
         }),
         ApplicationCommand::RequestShutdown => Ok(ApplicationEvent::ShutdownRequested),
-        ApplicationCommand::ActivateAgentProfileVersion { .. } => Err(invalid_receipt()),
+        ApplicationCommand::ActivateAgentProfileVersion { .. }
+        | ApplicationCommand::CreateSkill { .. }
+        | ApplicationCommand::ActivateSkillVersion { .. }
+        | ApplicationCommand::AssignAgentSkill { .. }
+        | ApplicationCommand::UpgradeAgentSkill { .. }
+        | ApplicationCommand::UnassignAgentSkill { .. } => Err(invalid_receipt()),
     }
 }
 
@@ -1158,7 +1699,189 @@ fn event_occurred_at(event: &ApplicationEvent) -> Option<i64> {
         | ApplicationEvent::AgentProfileVersionActivated { profile, .. } => {
             Some(profile.created_at_ms())
         }
+        ApplicationEvent::AgentSkillAssigned { profile, .. }
+        | ApplicationEvent::AgentSkillUpgraded { profile, .. }
+        | ApplicationEvent::AgentSkillUnassigned { profile, .. } => Some(profile.created_at_ms()),
         _ => None,
+    }
+}
+
+fn skill_version_object(skill: &SkillVersion) -> Result<crate::domain::ObjectRef, AppError> {
+    crate::domain::ObjectRef::new(
+        "skill_version",
+        skill.skill_version_id().to_string(),
+        skill.version(),
+        sha256(&canonical_json_bytes(skill)?),
+    )
+    .map_err(AppError::from)
+}
+
+fn ensure_skill_name_available(
+    connection: &rusqlite::Connection,
+    excluded_skill_id: Option<SkillId>,
+    candidate: &SkillDraft,
+) -> Result<(), AppError> {
+    let normalized = candidate.normalized_name()?;
+    match load_active_skill_by_name(connection, &normalized)? {
+        Some(existing) if Some(existing.skill_id()) != excluded_skill_id => {
+            Err(AppError::DuplicateSkillName)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn active_skills(connection: &rusqlite::Connection) -> Result<Vec<SkillVersion>, AppError> {
+    let ids = load_all_skill_versions(connection)?
+        .into_iter()
+        .map(|skill| skill.skill_id())
+        .collect::<BTreeSet<_>>();
+    let mut active = Vec::with_capacity(ids.len());
+    for skill_id in ids {
+        if let Some(skill) = load_active_skill(connection, skill_id)? {
+            active.push((skill.normalized_name()?.as_str().to_owned(), skill));
+        }
+    }
+    active.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(active.into_iter().map(|(_, skill)| skill).collect())
+}
+
+fn resolve_active_skill(
+    connection: &rusqlite::Connection,
+    selector: &SkillSelector,
+) -> Result<SkillVersion, AppError> {
+    let skill = match selector {
+        SkillSelector::Id(skill_id) => load_active_skill(connection, *skill_id)?,
+        SkillSelector::Name(_) => match selector.normalized_name() {
+            Some(name) => load_active_skill_by_name(connection, &name)?,
+            None => None,
+        },
+    };
+    skill.ok_or(AppError::SkillNotFound)
+}
+
+fn resolve_projected_active_skill<'a>(
+    projection: &'a ProjectionState,
+    selector: &SkillSelector,
+) -> Option<&'a SkillVersionRef> {
+    match selector {
+        SkillSelector::Id(skill_id) => projection.skills.active_skill(*skill_id),
+        SkillSelector::Name(_) => {
+            let normalized_name = selector.normalized_name()?;
+            projection.skills.active_refs().find(|active| {
+                projection.skills.version_metadata().any(
+                    |(version, display_name, _, _, _)| {
+                        version == *active
+                            && SkillSelector::Name(display_name.to_owned())
+                                .normalized_name()
+                                .as_ref()
+                                == Some(&normalized_name)
+                    },
+                )
+            })
+        }
+    }
+}
+
+fn skill_event_summary(skill: &SkillVersion) -> SkillEventSummary {
+    SkillEventSummary {
+        skill: skill.reference(),
+        display_name: skill.content().display_name.clone(),
+        provenance: skill.provenance().clone(),
+    }
+}
+
+fn validate_assignment_operation(
+    connection: &rusqlite::Connection,
+    current: &AgentProfileVersion,
+    operation: &AgentSkillAssignmentOperation,
+) -> Result<AgentProfileDraft, AppError> {
+    match operation {
+        AgentSkillAssignmentOperation::Assign { skill } => {
+            load_skill_version(connection, skill)?.ok_or(AppError::SkillNotFound)?;
+            if current
+                .skill_refs()
+                .iter()
+                .any(|assigned| assigned.skill_id() == skill.skill_id())
+            {
+                return Err(AppError::SkillAlreadyAssigned);
+            }
+            if current.skill_refs().len() >= 16 {
+                return Err(AppError::AgentSkillLimitExceeded);
+            }
+            current.assign_skill(skill.clone()).map_err(AppError::from)
+        }
+        AgentSkillAssignmentOperation::Upgrade { expected, replacement } => {
+            load_skill_version(connection, expected)?.ok_or(AppError::SkillNotFound)?;
+            load_skill_version(connection, replacement)?.ok_or(AppError::SkillNotFound)?;
+            if !current.skill_refs().contains(expected) {
+                return Err(AppError::SkillNotAssigned);
+            }
+            current
+                .upgrade_skill(expected.clone(), replacement.clone())
+                .map_err(AppError::from)
+        }
+        AgentSkillAssignmentOperation::Unassign { expected } => {
+            load_skill_version(connection, expected)?.ok_or(AppError::SkillNotFound)?;
+            if !current.skill_refs().contains(expected) {
+                return Err(AppError::SkillNotAssigned);
+            }
+            current.unassign_skill(expected.clone()).map_err(AppError::from)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_agent_skill_event(
+    projection: &ProjectionState,
+    connection: &rusqlite::Connection,
+    ids: &dyn IdGenerator,
+    clock: &dyn Clock,
+    profile_id: AgentProfileId,
+    expected_active_profile_version_id: AgentProfileVersionId,
+    operation: AgentSkillAssignmentOperation,
+) -> Result<ApplicationEvent, AppError> {
+    let current = projection
+        .agent_profiles
+        .active_profile(profile_id)
+        .ok_or(AppError::AgentProfileNotFound)?;
+    if current.profile_version_id() != expected_active_profile_version_id {
+        return Err(AppError::StaleAgentProfileVersion);
+    }
+    let candidate = validate_assignment_operation(connection, current, &operation)?;
+    let profile = AgentProfileVersion::next_version(
+        current,
+        AgentProfileVersionId::from_uuid(ids.next_uuid()),
+        clock.now_millis(),
+        candidate,
+    )?;
+    Ok(match operation {
+        AgentSkillAssignmentOperation::Assign { skill } => ApplicationEvent::AgentSkillAssigned {
+            profile,
+            previous_profile_version_id: expected_active_profile_version_id,
+            skill,
+        },
+        AgentSkillAssignmentOperation::Upgrade { expected, replacement } => {
+            ApplicationEvent::AgentSkillUpgraded {
+                profile,
+                previous_profile_version_id: expected_active_profile_version_id,
+                expected,
+                replacement,
+            }
+        }
+        AgentSkillAssignmentOperation::Unassign { expected } => {
+            ApplicationEvent::AgentSkillUnassigned {
+                profile,
+                previous_profile_version_id: expected_active_profile_version_id,
+                expected,
+            }
+        }
+    })
+}
+
+fn map_skill_write_error(error: PersistenceError) -> AppError {
+    match error {
+        PersistenceError::DuplicateSkillName => AppError::DuplicateSkillName,
+        error => AppError::Persistence(error),
     }
 }
 
@@ -1318,6 +2041,15 @@ fn normalize_catalog_readiness(view: &mut CommandView) {
         | CommandView::Status(_)
         | CommandView::SetupStatus(_)
         | CommandView::AuditTail(_)
+        | CommandView::SkillCreated(_)
+        | CommandView::SkillVersionActivated(_)
+        | CommandView::Skills(_)
+        | CommandView::Skill(_)
+        | CommandView::SkillHistory(_)
+        | CommandView::SkillVersion(_)
+        | CommandView::AgentSkillAssigned(_)
+        | CommandView::AgentSkillUpgraded(_)
+        | CommandView::AgentSkillUnassigned(_)
         | CommandView::InputRejected(_)
         | CommandView::Shutdown(_) => {}
     }
@@ -1337,9 +2069,20 @@ fn materialize_success(
     if event.actor != request.actor
         || event.correlation_id != request.correlation_id
         || event.causation_id != Some(CausationId::from_uuid(command_id.as_uuid()))
-        || event.object.is_some()
     {
         return Err(invalid_receipt());
+    }
+    match &event.event {
+        ApplicationEvent::SkillCreated { skill, .. }
+        | ApplicationEvent::SkillVersionActivated { skill, .. } => {
+            let accepted = load_skill_version(transaction.transaction(), skill)?
+                .ok_or_else(invalid_receipt)?;
+            if event.object.as_ref() != Some(&skill_version_object(&accepted)?) {
+                return Err(invalid_receipt());
+            }
+        }
+        _ if event.object.is_some() => return Err(invalid_receipt()),
+        _ => {}
     }
     let (view, shutdown) = match (&request.command, &event.event) {
         (ApplicationCommand::ShowHelp, ApplicationEvent::HelpViewed) => {
@@ -1631,6 +2374,348 @@ fn materialize_success(
                 ShutdownDisposition::Continue,
             )
         }
+        (
+            ApplicationCommand::CreateSkill {
+                skill_id, candidate, ..
+            },
+            ApplicationEvent::SkillCreated {
+                skill,
+                display_name,
+                provenance,
+            },
+        ) => {
+            let accepted = load_skill_version(transaction.transaction(), skill)?
+                .ok_or_else(invalid_receipt)?;
+            if accepted.skill_id() != *skill_id
+                || accepted.version() != ObjectVersion::new(1)?
+                || accepted.predecessor().is_some()
+                || accepted.content() != candidate
+                || accepted.content().display_name != *display_name
+                || accepted.provenance() != provenance
+                || provenance != &SkillProvenance::User
+                || projection.skills.active_skill(*skill_id) != Some(skill)
+            {
+                return Err(invalid_receipt());
+            }
+            (
+                CommandView::SkillCreated(SkillCreatedView {
+                    skill_id: accepted.skill_id(),
+                    skill_version_id: accepted.skill_version_id(),
+                    version: accepted.version(),
+                    content_digest: accepted.content_digest().clone(),
+                }),
+                ShutdownDisposition::Continue,
+            )
+        }
+        (
+            ApplicationCommand::ActivateSkillVersion {
+                skill_id,
+                expected_active_version_id,
+                candidate,
+                ..
+            },
+            ApplicationEvent::SkillVersionActivated {
+                skill,
+                previous_version_id,
+                display_name,
+                provenance,
+            },
+        ) => {
+            let accepted = load_skill_version(transaction.transaction(), skill)?
+                .ok_or_else(invalid_receipt)?;
+            let previous = load_skill_history(transaction.transaction(), *skill_id)?
+                .into_iter()
+                .find(|version| version.skill_version_id() == *expected_active_version_id)
+                .ok_or_else(invalid_receipt)?;
+            let expected = SkillVersion::next_version(
+                &previous,
+                accepted.skill_version_id(),
+                accepted.created_at_ms(),
+                candidate.clone(),
+            )?;
+            if previous_version_id != expected_active_version_id
+                || accepted.skill_id() != *skill_id
+                || accepted != expected
+                || accepted.content().display_name != *display_name
+                || accepted.provenance() != provenance
+                || projection.skills.active_skill(*skill_id) != Some(skill)
+            {
+                return Err(invalid_receipt());
+            }
+            (
+                CommandView::SkillVersionActivated(SkillVersionActivatedView {
+                    skill_id: accepted.skill_id(),
+                    skill_version_id: accepted.skill_version_id(),
+                    previous_version_id: *previous_version_id,
+                    version: accepted.version(),
+                    content_digest: accepted.content_digest().clone(),
+                }),
+                ShutdownDisposition::Continue,
+            )
+        }
+        (
+            ApplicationCommand::ListSkills,
+            ApplicationEvent::SkillsListed {
+                skills,
+                total_count,
+                returned_count,
+                truncated,
+            },
+        ) => {
+            if usize::try_from(*returned_count).ok() != Some(skills.len())
+                || *returned_count > *total_count
+                || *truncated != (*returned_count < *total_count)
+            {
+                return Err(invalid_receipt());
+            }
+            (
+                CommandView::Skills(SkillsView {
+                    skills: skills
+                        .iter()
+                        .map(|skill| SkillSummary {
+                            skill_ref: skill.skill.clone(),
+                            display_name: skill.display_name.clone(),
+                            provenance: skill.provenance.clone(),
+                        })
+                        .collect(),
+                    total_count: *total_count,
+                    returned_count: *returned_count,
+                    truncated: *truncated,
+                }),
+                ShutdownDisposition::Continue,
+            )
+        }
+        (
+            ApplicationCommand::ShowSkill { selector },
+            ApplicationEvent::SkillViewed {
+                skill,
+                display_name,
+                provenance,
+            },
+        ) => {
+            let accepted = load_skill_version(transaction.transaction(), skill)?
+                .ok_or_else(invalid_receipt)?;
+            let active_matches = match resolve_projected_active_skill(projection, selector) {
+                Some(active) => active == skill,
+                None => {
+                    matches!(provenance, SkillProvenance::BuiltIn { .. })
+                        && seeded_skill_selector_matches(selector, skill, display_name)
+                }
+            };
+            if !active_matches
+                || accepted.content().display_name != *display_name
+                || accepted.provenance() != provenance
+            {
+                return Err(invalid_receipt());
+            }
+            (
+                CommandView::Skill(SkillView {
+                    skill_ref: skill.clone(),
+                    content: accepted.content().clone(),
+                    created_at_ms: accepted.created_at_ms(),
+                    provenance: provenance.clone(),
+                    predecessor_version_id: accepted.predecessor(),
+                }),
+                ShutdownDisposition::Continue,
+            )
+        }
+        (
+            ApplicationCommand::ShowSkillVersion { selector, version },
+            ApplicationEvent::SkillVersionViewed {
+                skill,
+                display_name,
+                provenance,
+                predecessor_version_id,
+            },
+        ) => {
+            let accepted = load_skill_version(transaction.transaction(), skill)?
+                .ok_or_else(invalid_receipt)?;
+            let selected_skill_matches = match resolve_projected_active_skill(projection, selector) {
+                Some(active) => active.skill_id() == accepted.skill_id(),
+                None => {
+                    matches!(provenance, SkillProvenance::BuiltIn { .. })
+                        && seeded_skill_selector_matches(selector, skill, display_name)
+                }
+            };
+            if !selected_skill_matches
+                || accepted.version() != *version
+                || accepted.predecessor() != *predecessor_version_id
+                || accepted.content().display_name != *display_name
+                || accepted.provenance() != provenance
+            {
+                return Err(invalid_receipt());
+            }
+            let view = SkillView {
+                skill_ref: skill.clone(),
+                content: accepted.content().clone(),
+                created_at_ms: accepted.created_at_ms(),
+                provenance: provenance.clone(),
+                predecessor_version_id: accepted.predecessor(),
+            };
+            (CommandView::SkillVersion(view), ShutdownDisposition::Continue)
+        }
+        (
+            ApplicationCommand::ShowSkillHistory { selector },
+            ApplicationEvent::SkillHistoryViewed {
+                skill_id,
+                active,
+                versions,
+                total_count,
+                returned_count,
+                truncated,
+            },
+        ) => {
+            if let Some(selected) = resolve_projected_active_skill(projection, selector) {
+                let mut projected_versions = projection
+                    .skills
+                    .version_metadata()
+                    .filter(|(version, _, _, _, _)| version.skill_id() == *skill_id)
+                    .map(|(version, _, _, predecessor_version_id, _)| {
+                        (version.clone(), predecessor_version_id)
+                    })
+                    .collect::<Vec<_>>();
+                projected_versions.sort_by_key(|(version, _)| version.version());
+                let expected_versions = projected_versions
+                    .into_iter()
+                    .rev()
+                    .take(MAX_SKILL_HISTORY_RESULTS)
+                    .collect::<Vec<_>>();
+                if *selected != *active
+                    || active.skill_id() != *skill_id
+                    || usize::try_from(*total_count).ok()
+                        != Some(projection.skills.version_metadata().filter(
+                            |(version, _, _, _, _)| version.skill_id() == *skill_id,
+                        ).count())
+                    || versions.iter().zip(&expected_versions).any(|(version, expected)| {
+                        version.skill != expected.0
+                            || version.predecessor_version_id != expected.1
+                    })
+                    || usize::try_from(*returned_count).ok() != Some(versions.len())
+                    || versions.len() != expected_versions.len()
+                    || *returned_count > *total_count
+                    || *truncated != (*returned_count < *total_count)
+                {
+                    return Err(invalid_receipt());
+                }
+            } else {
+                let persisted_active = load_active_skill(transaction.transaction(), *skill_id)?
+                    .ok_or_else(invalid_receipt)?;
+                let persisted_history =
+                    load_skill_history(transaction.transaction(), *skill_id)?;
+                let expected_versions = persisted_history
+                    .iter()
+                    .rev()
+                    .take(MAX_SKILL_HISTORY_RESULTS)
+                    .collect::<Vec<_>>();
+                if !matches!(persisted_active.provenance(), SkillProvenance::BuiltIn { .. })
+                    || persisted_active.reference() != *active
+                    || active.skill_id() != *skill_id
+                    || !seeded_skill_selector_matches(
+                        selector,
+                        active,
+                        &persisted_active.content().display_name,
+                    )
+                    || persisted_history
+                        .iter()
+                        .any(|skill| !matches!(skill.provenance(), SkillProvenance::BuiltIn { .. }))
+                    || usize::try_from(*total_count).ok() != Some(persisted_history.len())
+                    || versions.iter().zip(&expected_versions).any(|(version, expected)| {
+                        version.skill != expected.reference()
+                            || version.created_at_ms != expected.created_at_ms()
+                            || version.predecessor_version_id != expected.predecessor()
+                    })
+                    || usize::try_from(*returned_count).ok() != Some(versions.len())
+                    || versions.len() != expected_versions.len()
+                    || *returned_count > *total_count
+                    || *truncated != (*returned_count < *total_count)
+                {
+                    return Err(invalid_receipt());
+                }
+            }
+            (
+                CommandView::SkillHistory(SkillHistoryView {
+                    skill_id: *skill_id,
+                    active_version_id: active.skill_version_id(),
+                    versions: versions
+                        .iter()
+                        .map(|version| SkillHistoryEntry {
+                            skill_ref: version.skill.clone(),
+                            created_at_ms: version.created_at_ms,
+                            predecessor_version_id: version.predecessor_version_id,
+                        })
+                        .collect(),
+                    total_count: *total_count,
+                    returned_count: *returned_count,
+                    truncated: *truncated,
+                }),
+                ShutdownDisposition::Continue,
+            )
+        }
+        (
+            ApplicationCommand::AssignAgentSkill {
+                profile_id,
+                expected_active_profile_version_id,
+                skill,
+                ..
+            },
+            ApplicationEvent::AgentSkillAssigned {
+                profile,
+                previous_profile_version_id,
+                skill: committed_skill,
+            },
+        ) if skill == committed_skill
+            && expected_active_profile_version_id == previous_profile_version_id => materialize_agent_skill_mutation(
+            projection,
+            *profile_id,
+            *previous_profile_version_id,
+            profile,
+            CommandView::AgentSkillAssigned,
+        )?,
+        (
+            ApplicationCommand::UpgradeAgentSkill {
+                profile_id,
+                expected_active_profile_version_id,
+                expected,
+                replacement,
+                ..
+            },
+            ApplicationEvent::AgentSkillUpgraded {
+                profile,
+                previous_profile_version_id,
+                expected: committed_expected,
+                replacement: committed_replacement,
+            },
+        ) if expected == committed_expected
+            && replacement == committed_replacement
+            && expected_active_profile_version_id == previous_profile_version_id => {
+            materialize_agent_skill_mutation(
+                projection,
+                *profile_id,
+                *previous_profile_version_id,
+                profile,
+                CommandView::AgentSkillUpgraded,
+            )?
+        }
+        (
+            ApplicationCommand::UnassignAgentSkill {
+                profile_id,
+                expected_active_profile_version_id,
+                expected,
+                ..
+            },
+            ApplicationEvent::AgentSkillUnassigned {
+                profile,
+                previous_profile_version_id,
+                expected: committed_expected,
+            },
+        ) if expected == committed_expected
+            && expected_active_profile_version_id == previous_profile_version_id => materialize_agent_skill_mutation(
+            projection,
+            *profile_id,
+            *previous_profile_version_id,
+            profile,
+            CommandView::AgentSkillUnassigned,
+        )?,
         _ => return Err(invalid_receipt()),
     };
     Ok(CommandOutcome {
@@ -1640,6 +2725,31 @@ fn materialize_success(
         view,
         shutdown,
     })
+}
+
+fn materialize_agent_skill_mutation(
+    projection: &ProjectionState,
+    profile_id: AgentProfileId,
+    previous_profile_version_id: AgentProfileVersionId,
+    profile: &AgentProfileVersion,
+    wrap: fn(AgentSkillMutationView) -> CommandView,
+) -> Result<(CommandView, ShutdownDisposition), AppError> {
+    if profile.profile_id() != profile_id
+        || profile.supersedes() != Some(previous_profile_version_id)
+        || projection.agent_profiles.active_profile(profile_id) != Some(profile)
+    {
+        return Err(invalid_receipt());
+    }
+    Ok((
+        wrap(AgentSkillMutationView {
+            profile_id,
+            profile_version_id: profile.profile_version_id(),
+            previous_profile_version_id,
+            version: profile.version(),
+            profile_content_digest: profile.content_digest().clone(),
+        }),
+        ShutdownDisposition::Continue,
+    ))
 }
 
 fn profile_readiness(
@@ -1753,6 +2863,11 @@ fn capability_name(capability: Capability) -> &'static str {
         Capability::AgentProfileCreate => "agent_profile_create",
         Capability::AgentProfilePreview => "agent_profile_preview",
         Capability::AgentProfileActivate => "agent_profile_activate",
+        Capability::SkillRead => "skill_read",
+        Capability::SkillCreate => "skill_create",
+        Capability::SkillVersion => "skill_version",
+        Capability::AgentSkillAssign => "skill_assign",
+        Capability::AgentSkillUnassign => "skill_unassign",
         Capability::Shutdown => "shutdown",
         Capability::DiscussionRun => "discussion_run",
         Capability::McpUse => "mcp_use",
@@ -1773,6 +2888,11 @@ fn parse_capability(value: &str) -> Result<Capability, AppError> {
         "agent_profile_create" => Ok(Capability::AgentProfileCreate),
         "agent_profile_preview" => Ok(Capability::AgentProfilePreview),
         "agent_profile_activate" => Ok(Capability::AgentProfileActivate),
+        "skill_read" => Ok(Capability::SkillRead),
+        "skill_create" => Ok(Capability::SkillCreate),
+        "skill_version" => Ok(Capability::SkillVersion),
+        "skill_assign" => Ok(Capability::AgentSkillAssign),
+        "skill_unassign" => Ok(Capability::AgentSkillUnassign),
         "shutdown" => Ok(Capability::Shutdown),
         "discussion_run" => Ok(Capability::DiscussionRun),
         "mcp_use" => Ok(Capability::McpUse),
@@ -1781,6 +2901,20 @@ fn parse_capability(value: &str) -> Result<Capability, AppError> {
         "git_push" => Ok(Capability::GitPush),
         "finance_recommendation" => Ok(Capability::FinanceRecommendation),
         _ => Err(invalid_receipt()),
+    }
+}
+
+fn seeded_skill_selector_matches(
+    selector: &SkillSelector,
+    skill: &SkillVersionRef,
+    display_name: &str,
+) -> bool {
+    match selector {
+        SkillSelector::Id(skill_id) => *skill_id == skill.skill_id(),
+        SkillSelector::Name(name) => {
+            SkillSelector::Name(name.clone()).normalized_name()
+                == SkillSelector::Name(display_name.to_owned()).normalized_name()
+        }
     }
 }
 

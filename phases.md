@@ -3,7 +3,7 @@
 **Status:** Approved version 1 roadmap, including the full-screen TUI,
 first-run configuration, and live-participation design
 
-**Updated:** 2026-09-05
+**Updated:** 2026-09-06
 
 **Canonical design:** [architecture.md](architecture.md)
 
@@ -314,14 +314,17 @@ rooms, engineering jobs, Git promotion, and finance-specific screens.
   references with computed tri-state readiness, passive edit preview, explicit
   activation, restart recovery, fallback workflows, and narrow/medium/wide
   Adaptive Cockpit coverage are complete.
-- [ ] **Milestone 2: Declarative skills.** Versioned skill manifests, assignment,
-  retrieval, and presentation remain deferred.
+- [x] **Milestone 2: Declarative skills.** Four deterministic built-ins,
+  immutable custom versions, exact assignment and explicit upgrade/unassign,
+  bounded local retrieval, schema-v3 persistence and recovery, optional command
+  fallbacks, and keyboard-first adaptive presentation are complete.
 - [ ] **Milestone 3: Hybrid memory.** Private KV memory, episodic summaries,
   proposals, approvals, and retrieval budgets remain deferred.
 
-Phase 2 as a whole remains in progress. Completing Milestone 1 does not mark
-skills, memory, model execution, rooms, debates, market data, or any later
-vertical slice complete.
+Phase 2 as a whole remains in progress. Completing Milestones 1 and 2 does not
+mark hybrid memory, model execution, rooms, debates, market data, or any later
+vertical slice complete. Phase 3 remains pending; bounded skill retrieval is a
+local foundation and does not perform inference or chat.
 
 ### Objective
 
@@ -330,11 +333,11 @@ a real model.
 
 ### User-visible result
 
-Milestone 1 lets the user create Bull, Bear, Chief, Engineering, and Custom
-profiles in guided TUI or fallback workflows; give each a personality and
-specialty; inspect immutable version history and authoritative field-level
-diffs; and explicitly activate a reviewed profile revision. Skill assignment
-and private-memory editing remain future Phase 2 milestones.
+Milestones 1 and 2 let the user create Bull, Bear, Chief, Engineering, and
+Custom profiles; manage four built-in and custom declarative skills; inspect
+immutable profile and skill history; and deliberately assign, upgrade, or
+unassign exact skill versions through reviewed TUI or fallback workflows.
+Private-memory editing remains a future Phase 2 milestone.
 
 ### Scope
 
@@ -366,8 +369,8 @@ and private-memory editing remain future Phase 2 milestones.
 ### Exit gate
 
 The following is the full Phase 2 exit gate and remains open until the deferred
-skills and hybrid-memory milestones are implemented. Milestone 1 independently
-passes its profile-foundation acceptance and release gates.
+hybrid-memory milestone is implemented. Milestones 1 and 2 independently pass
+their profile-foundation and declarative-skills acceptance gates.
 
 - Editing always creates a new version; existing versions and pinned references
   remain immutable.
@@ -385,10 +388,10 @@ passes its profile-foundation acceptance and release gates.
 
 ### Explicitly deferred
 
-After Agent Profiles Milestone 1: declarative skills, hybrid memory, memory
-proposals and approvals, retrieval budgets, real direct-provider model calls,
-model execution, MCP connections, rooms, debates, market data, engineering
-children, and finance-specific skills.
+After Declarative Skills Milestone 2: hybrid memory, memory proposals and
+approvals, memory retrieval budgets, real direct-provider model calls, model
+execution, MCP connections, rooms, debates, market data, engineering children,
+and finance-specific execution remain deferred.
 
 ## Phase 3 — Connections, normalized inference, and single-agent chat
 
@@ -1331,9 +1334,7 @@ merge/push are not planned defaults.
 
 ## 6. Immediate next step
 
-After the user reviews these two canonical documents, write a detailed,
-test-driven implementation plan for **Phase 0 only**. That plan must begin with
-README/legacy-document cleanup, inventory the current repository, identify
-exactly which legacy tracked files are replaced or retained, preserve unrelated
-user work, and define review checkpoints before any code rewrite begins. Every
-later phase receives its own newly approved plan when it becomes current.
+Complete a separately approved, test-driven design and implementation plan for
+**Phase 2 Milestone 3: Hybrid memory**. Do not begin Phase 3 provider execution,
+inference, or chat until the full Phase 2 exit gate is complete and Phase 3 has
+its own approved plan.

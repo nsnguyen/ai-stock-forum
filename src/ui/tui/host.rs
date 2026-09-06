@@ -4,19 +4,23 @@ use super::{
     TuiError,
     controller::{ControllerEffect, apply_outcome, handle_event},
     event::{CrosstermEventSource, EventSource, TuiEvent},
-    model::{RuntimeStatus, TuiModel},
+    model::{AgentOutcomeIntent, RuntimeStatus, TuiModel},
     terminal::{CrosstermScreen, Screen},
     theme::Theme,
 };
 use crate::{
     agents::AgentProfileDraft,
     app::{
-        AppError, ApplicationCommand, CommandOutcome, CommandView, PresentationSnapshot,
-        ShutdownReason,
+        AgentSkillAssignmentOperation, AgentSkillAssignmentPreview, AppError, ApplicationCommand,
+        CommandOutcome, CommandView, PresentationSnapshot, ShutdownReason,
     },
     panic_boundary::catch_sensitive_unwind,
     runtime::{ApplicationRuntime, PendingOutcome, RuntimeClient, RuntimeError},
-    ui::profile_editor::{PreviewEditRequest, ProfileEditor},
+    ui::{
+        command::SkillWorkflowCommand,
+        profile_editor::{PreviewEditRequest, ProfileEditor},
+        skill_editor::SkillPreviewRequest,
+    },
 };
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -31,6 +35,9 @@ pub fn execute_agent_effect(
 ) -> Result<(), RuntimeError> {
     match effect {
         ControllerEffect::LoadAgentProfiles => {
+            let skills = submit_agent_command(client, model, ApplicationCommand::ListSkills)?;
+            let _ = apply_outcome(model, skills);
+            model.skills.active = false;
             let outcome =
                 submit_agent_command(client, model, ApplicationCommand::ListAgentProfiles)?;
             apply_agent_outcome(model, outcome);
@@ -54,6 +61,9 @@ pub fn execute_agent_effect(
                 },
             )?;
             apply_agent_outcome(model, outcome);
+        }
+        ControllerEffect::LoadAgentSkillLibrary => {
+            load_agent_skill_library(client, model)?;
         }
         ControllerEffect::StartProfileCreate { template_index } => {
             model.set_command_in_flight(true);
@@ -128,8 +138,393 @@ pub fn execute_agent_effect(
         ControllerEffect::None
         | ControllerEffect::Redraw
         | ControllerEffect::Submit(_)
-        | ControllerEffect::RequestShutdown(_) => {}
+        | ControllerEffect::RequestShutdown(_)
+        | ControllerEffect::LoadSkills
+        | ControllerEffect::LoadSkill { .. }
+        | ControllerEffect::LoadSkillHistory { .. }
+        | ControllerEffect::LoadSkillVersion { .. }
+        | ControllerEffect::LoadSkillStarter { .. }
+        | ControllerEffect::LoadSkillAgents
+        | ControllerEffect::LoadSkillAgent { .. }
+        | ControllerEffect::RequestSkillPreview(_)
+        | ControllerEffect::RequestSkillAssignmentPreview { .. }
+        | ControllerEffect::StartSkillWorkflow(_)
+        | ControllerEffect::ExecuteSkill(_)
+        | ControllerEffect::CancelSkillReview => {}
     }
+    Ok(())
+}
+
+#[doc(hidden)]
+pub fn execute_skill_effect(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    effect: ControllerEffect,
+) -> Result<(), RuntimeError> {
+    match effect {
+        ControllerEffect::StartSkillWorkflow(workflow) => {
+            if let Err(error) = execute_typed_skill_workflow(client, model, workflow) {
+                match error {
+                    error @ (RuntimeError::Application(_) | RuntimeError::Backpressure) => {
+                        model.set_command_in_flight(false);
+                        model.skills.pane = super::model::SkillsPane::List;
+                        model.set_message(
+                            super::model::Severity::Error,
+                            match error {
+                                RuntimeError::Backpressure => {
+                                    "Command queue is busy; skill workflow was not started."
+                                }
+                                _ => "Skill workflow could not be started.",
+                            },
+                        );
+                    }
+                    error => return Err(error),
+                }
+            }
+        }
+        ControllerEffect::LoadSkills => {
+            let outcome = submit_agent_command(client, model, ApplicationCommand::ListSkills)?;
+            let _ = apply_outcome(model, outcome);
+        }
+        ControllerEffect::LoadSkill { selected_skill }
+        | ControllerEffect::LoadSkillStarter { selected_skill } => {
+            let Some(skill_id) = model
+                .skills
+                .library
+                .skills
+                .get(selected_skill)
+                .map(|summary| summary.skill_ref.skill_id())
+            else {
+                model.set_message(super::model::Severity::Warning, "No skill is selected.");
+                return Ok(());
+            };
+            let starter = matches!(effect, ControllerEffect::LoadSkillStarter { .. });
+            let outcome = submit_agent_command(
+                client,
+                model,
+                ApplicationCommand::ShowSkill {
+                    selector: skill_id.into(),
+                },
+            )?;
+            let _ = apply_outcome(model, outcome);
+            if starter {
+                let seed = model.skills.detail.as_ref().map(|detail| detail.content.clone());
+                model.skills.start_create(seed);
+                synchronize_host_skill_input(model);
+            }
+        }
+        ControllerEffect::LoadSkillHistory { skill_id } => {
+            let outcome = submit_agent_command(
+                client,
+                model,
+                ApplicationCommand::ShowSkillHistory {
+                    selector: skill_id.into(),
+                },
+            )?;
+            let _ = apply_outcome(model, outcome);
+        }
+        ControllerEffect::LoadSkillVersion { skill_id, version } => {
+            let outcome = submit_agent_command(
+                client,
+                model,
+                ApplicationCommand::ShowSkillVersion {
+                    selector: skill_id.into(),
+                    version,
+                },
+            )?;
+            let _ = apply_outcome(model, outcome);
+        }
+        ControllerEffect::LoadSkillAgents => {
+            let outcome = submit_agent_command_for(
+                client,
+                model,
+                AgentOutcomeIntent::SkillAssignment,
+                ApplicationCommand::ListAgentProfiles,
+            )?;
+            let _ = apply_outcome(model, outcome);
+            model.skills.pane = super::model::SkillsPane::AgentPicker;
+        }
+        ControllerEffect::LoadSkillAgent { profile_id } => {
+            let outcome = submit_agent_command_for(
+                client,
+                model,
+                AgentOutcomeIntent::SkillAssignment,
+                ApplicationCommand::ShowAgentProfile {
+                    selector: profile_id.into(),
+                },
+            )?;
+            let _ = apply_outcome(model, outcome);
+        }
+        ControllerEffect::RequestSkillPreview(request) => {
+            execute_skill_preview(client, model, request)?;
+        }
+        ControllerEffect::RequestSkillAssignmentPreview {
+            profile_id,
+            expected_active_profile_version_id,
+            target,
+            assignment,
+        } => {
+            let result = match assignment {
+                super::model::AssignmentKind::Add => client.preview_agent_skill_assignment(
+                    profile_id,
+                    expected_active_profile_version_id,
+                    target,
+                ),
+                super::model::AssignmentKind::Upgrade { expected } => client
+                    .preview_agent_skill_upgrade(
+                        profile_id,
+                        expected_active_profile_version_id,
+                        expected,
+                        target,
+                    ),
+                super::model::AssignmentKind::Reassign { expected } => client
+                    .preview_agent_skill_upgrade(
+                        profile_id,
+                        expected_active_profile_version_id,
+                        expected,
+                        target,
+                    ),
+                super::model::AssignmentKind::Unassign { expected } => client
+                    .preview_agent_skill_unassignment(
+                        profile_id,
+                        expected_active_profile_version_id,
+                        expected,
+                    ),
+                super::model::AssignmentKind::AlreadyAssigned => return Ok(()),
+            };
+            match result {
+                Ok(preview) => install_assignment_preview(model, preview),
+                Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+                    recover_skill_error(client, model, &error)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        ControllerEffect::ExecuteSkill(command) => {
+            let affected_profile_id = assignment_profile_id(&command);
+            match submit_protected_skill_command(client, model, command) {
+                Ok(outcome) => {
+                    let _ = apply_outcome(model, outcome);
+                    model.skills.review_registered = false;
+                    model.skills.pending_confirmation = None;
+                    model.skills.editor = None;
+                    model.skills.assignment = None;
+                    if let Some(profile_id) = affected_profile_id {
+                        refresh_agent_skill_assignment_state(client, model, profile_id)?;
+                    }
+                    model.skills.pane = super::model::SkillsPane::Result;
+                    model.set_message(super::model::Severity::Info, "Skill action completed.");
+                }
+                Err(RuntimeError::Backpressure) => {
+                    model.set_command_in_flight(false);
+                    model.set_message(
+                        super::model::Severity::Error,
+                        "Command queue is busy; review retained for retry.",
+                    );
+                }
+                Err(error @ RuntimeError::Application(_)) => {
+                    recover_skill_error(client, model, &error)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        ControllerEffect::CancelSkillReview => cancel_skill_review_once(client, model)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn execute_typed_skill_workflow(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    workflow: SkillWorkflowCommand,
+) -> Result<(), RuntimeError> {
+    match workflow {
+        SkillWorkflowCommand::Add => {
+            model.skills.start_create(None);
+            synchronize_host_skill_input(model);
+            model.clear_message();
+        }
+        SkillWorkflowCommand::Assign { skill, agent, version } => {
+            let command = match version {
+                None => ApplicationCommand::ShowSkill { selector: skill },
+                Some(version) => ApplicationCommand::ShowSkillVersion {
+                    selector: skill,
+                    version,
+                },
+            };
+            let skill = submit_agent_command(client, model, command)?;
+            let _ = apply_outcome(model, skill);
+            let agent = submit_agent_command_for(
+                client,
+                model,
+                AgentOutcomeIntent::SkillAssignment,
+                ApplicationCommand::ShowAgentProfile { selector: agent },
+            )?;
+            let _ = apply_outcome(model, agent);
+        }
+        SkillWorkflowCommand::Unassign { skill, agent } => {
+            let skill = submit_agent_command(
+                client,
+                model,
+                ApplicationCommand::ShowSkill { selector: skill },
+            )?;
+            let _ = apply_outcome(model, skill);
+            let Some(skill_id) = model.skills.current_skill_id() else {
+                return Ok(());
+            };
+            let agent = submit_agent_command_for(
+                client,
+                model,
+                AgentOutcomeIntent::SkillAssignment,
+                ApplicationCommand::ShowAgentProfile { selector: agent },
+            )?;
+            let _ = apply_outcome(model, agent);
+            let Some(agent_detail) = model.skills.selected_agent_detail.clone() else {
+                return Ok(());
+            };
+            let Some(expected) = agent_detail
+                .profile
+                .skill_refs()
+                .iter()
+                .find(|reference| reference.skill_id() == skill_id)
+                .cloned()
+            else {
+                model.skills.pane = super::model::SkillsPane::Detail;
+                model.set_message(
+                    super::model::Severity::Warning,
+                    "Agent does not have this skill assigned.",
+                );
+                return Ok(());
+            };
+            let exact = submit_agent_command(
+                client,
+                model,
+                ApplicationCommand::ShowSkillVersion {
+                    selector: skill_id.into(),
+                    version: expected.version(),
+                },
+            )?;
+            let _ = apply_outcome(model, exact);
+            model.skills.selected_agent_detail = Some(agent_detail);
+            model.skills.assignment = Some(super::model::AssignmentKind::Unassign {
+                expected,
+            });
+            model.skills.pane = super::model::SkillsPane::AssignmentReview;
+        }
+    }
+    Ok(())
+}
+
+fn synchronize_host_skill_input(model: &mut TuiModel) {
+    let value = model
+        .skills
+        .editor
+        .as_ref()
+        .map(|editor| editor.current_value().to_owned())
+        .unwrap_or_default();
+    model.command.clear();
+    model.command.ingest(&value);
+}
+
+fn execute_skill_preview(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    request: SkillPreviewRequest,
+) -> Result<(), RuntimeError> {
+    let generation = request.generation();
+    model.set_command_in_flight(true);
+    let result = match request {
+        SkillPreviewRequest::Create { candidate, .. } => client.preview_skill_creation(candidate),
+        SkillPreviewRequest::Version {
+            skill_id,
+            expected_active_version_id,
+            candidate,
+            ..
+        } => client.preview_skill_version(skill_id, expected_active_version_id, candidate),
+    };
+    model.set_command_in_flight(false);
+    match result {
+        Ok(preview) => {
+            let installed = model
+                .skills
+                .editor
+                .as_mut()
+                .is_some_and(|editor| editor.apply_preview(generation, preview));
+            model.skills.review_registered = true;
+            if !installed {
+                cancel_skill_review_once(client, model)?;
+            }
+            Ok(())
+        }
+        Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+            recover_skill_error(client, model, &error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn install_assignment_preview(model: &mut TuiModel, preview: AgentSkillAssignmentPreview) {
+    let command = match preview.operation {
+        AgentSkillAssignmentOperation::Assign { skill } => ApplicationCommand::AssignAgentSkill {
+            profile_id: preview.profile_id,
+            expected_active_profile_version_id: preview.expected_active_profile_version_id,
+            skill,
+            review_token: preview.review_token,
+            review_digest: preview.review_digest,
+        },
+        AgentSkillAssignmentOperation::Upgrade { expected, replacement } => {
+            ApplicationCommand::UpgradeAgentSkill {
+                profile_id: preview.profile_id,
+                expected_active_profile_version_id: preview.expected_active_profile_version_id,
+                expected,
+                replacement,
+                review_token: preview.review_token,
+                review_digest: preview.review_digest,
+            }
+        }
+        AgentSkillAssignmentOperation::Unassign { expected } => ApplicationCommand::UnassignAgentSkill {
+            profile_id: preview.profile_id,
+            expected_active_profile_version_id: preview.expected_active_profile_version_id,
+            expected,
+            review_token: preview.review_token,
+            review_digest: preview.review_digest,
+        },
+    };
+    model.skills.review_registered = true;
+    model.skills.pending_confirmation = Some(super::model::SkillConfirmation {
+        command,
+        origin: model.skills.operation_origin,
+    });
+    model.skills.pane = super::model::SkillsPane::Confirmation;
+}
+
+fn cancel_skill_review_once(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+) -> Result<(), RuntimeError> {
+    if std::mem::take(&mut model.skills.review_registered) {
+        client.cancel_skill_review()?;
+    }
+    Ok(())
+}
+
+fn recover_skill_error(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    error: &RuntimeError,
+) -> Result<(), RuntimeError> {
+    cancel_skill_review_once(client, model)?;
+    model.skills.pending_confirmation = None;
+    if let Some(editor) = model.skills.editor.as_mut() {
+        editor.clear_review();
+        editor.report_error(runtime_error_code(error));
+        model.skills.pane = super::model::SkillsPane::Editor;
+    } else {
+        model.skills.pane = super::model::SkillsPane::Detail;
+    }
+    model.set_command_in_flight(false);
+    model.set_message(super::model::Severity::Error, "Skill action failed; review cleared.");
     Ok(())
 }
 
@@ -146,6 +541,33 @@ fn submit_agent_command(
     result
 }
 
+fn submit_agent_command_for(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    intent: AgentOutcomeIntent,
+    command: ApplicationCommand,
+) -> Result<CommandOutcome, RuntimeError> {
+    model.pending_agent_outcome = Some(intent);
+    let result = submit_agent_command(client, model, command);
+    if result.is_err() {
+        model.pending_agent_outcome = None;
+    }
+    result
+}
+
+fn submit_protected_skill_command(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    command: ApplicationCommand,
+) -> Result<CommandOutcome, RuntimeError> {
+    model.set_command_in_flight(true);
+    let result = client.try_submit(command).and_then(|pending| pending.recv());
+    if result.is_err() {
+        model.set_command_in_flight(false);
+    }
+    result
+}
+
 fn apply_agent_outcome(model: &mut TuiModel, outcome: CommandOutcome) {
     let view = outcome.view.clone();
     let _ = apply_outcome(model, outcome);
@@ -156,6 +578,87 @@ fn apply_agent_outcome(model: &mut TuiModel, outcome: CommandOutcome) {
         CommandView::AgentProfileVersion(version) => model.agents.replace_version_detail(version),
         _ => {}
     }
+}
+
+fn assignment_profile_id(
+    command: &ApplicationCommand,
+) -> Option<crate::domain::AgentProfileId> {
+    match command {
+        ApplicationCommand::AssignAgentSkill { profile_id, .. }
+        | ApplicationCommand::UpgradeAgentSkill { profile_id, .. }
+        | ApplicationCommand::UnassignAgentSkill { profile_id, .. } => Some(*profile_id),
+        _ => None,
+    }
+}
+
+fn needs_agent_skill_library(model: &TuiModel) -> bool {
+    !model.skills.library_loaded
+        && model
+            .agents
+            .detail
+            .as_ref()
+            .is_some_and(|detail| !detail.profile.skill_refs().is_empty())
+}
+
+fn load_agent_skill_library(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+) -> Result<(), RuntimeError> {
+    let skills_active = model.skills.active;
+    let skills_pane = model.skills.pane;
+    let active_view = model.active_view;
+    let agents_pane = model.agents.pane;
+    let outcome = submit_agent_command(client, model, ApplicationCommand::ListSkills)?;
+    let _ = apply_outcome(model, outcome);
+    model.skills.active = skills_active;
+    model.skills.pane = skills_pane;
+    model.active_view = active_view;
+    model.agents.pane = agents_pane;
+    Ok(())
+}
+
+fn ensure_agent_skill_library(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+) -> Result<(), RuntimeError> {
+    if needs_agent_skill_library(model) {
+        load_agent_skill_library(client, model)?;
+    }
+    Ok(())
+}
+
+fn refresh_agent_skill_assignment_state(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+    profile_id: crate::domain::AgentProfileId,
+) -> Result<(), RuntimeError> {
+    let profiles = submit_agent_command_for(
+        client,
+        model,
+        AgentOutcomeIntent::SkillAssignment,
+        ApplicationCommand::ListAgentProfiles,
+    )?;
+    apply_agent_outcome(model, profiles);
+    model.agents.select_profile_id(profile_id);
+
+    let outcome = submit_agent_command_for(
+        client,
+        model,
+        AgentOutcomeIntent::SkillAssignment,
+        ApplicationCommand::ShowAgentProfile {
+            selector: profile_id.into(),
+        },
+    )?;
+    let refreshed = match &outcome.view {
+        CommandView::AgentProfile(detail) => Some(detail.clone()),
+        _ => None,
+    };
+    let _ = apply_outcome(model, outcome);
+    if let Some(detail) = refreshed {
+        model.agents.replace_detail(detail.clone());
+        model.skills.selected_agent_detail = Some(detail);
+    }
+    ensure_agent_skill_library(client, model)
 }
 
 fn selected_profile_id(
@@ -195,6 +698,7 @@ fn load_profile(
         },
     )?;
     apply_agent_outcome(model, outcome);
+    ensure_agent_skill_library(client, model)?;
     Ok(())
 }
 
@@ -324,6 +828,7 @@ fn refresh_profile_state(
         },
     )?;
     apply_agent_outcome(model, detail);
+    ensure_agent_skill_library(client, model)?;
     let history = submit_agent_command(
         client,
         model,
@@ -355,6 +860,9 @@ fn refresh_stale_profile(
     ) {
         Ok(outcome) => apply_agent_outcome(model, outcome),
         Err(_) => refresh_failed = true,
+    }
+    if ensure_agent_skill_library(client, model).is_err() {
+        refresh_failed = true;
     }
     model.agents.editor = None;
     model.agents.pending_confirmation = None;
@@ -588,6 +1096,7 @@ impl TuiRunner {
             | ControllerEffect::LoadAgentProfile { .. }
             | ControllerEffect::LoadAgentProfileHistory { .. }
             | ControllerEffect::LoadAgentProfileVersion { .. }
+            | ControllerEffect::LoadAgentSkillLibrary
             | ControllerEffect::StartProfileCreate { .. }
             | ControllerEffect::StartProfileEdit { .. }
             | ControllerEffect::StartProfileCreateByTemplate { .. }
@@ -596,6 +1105,21 @@ impl TuiRunner {
             | ControllerEffect::ExecuteProfile(_)
             | ControllerEffect::CancelProfileReview) => {
                 execute_agent_effect(&self.client, &mut self.model, effect)?;
+                Ok(LoopControl::Continue { redraw: true })
+            }
+            effect @ (ControllerEffect::LoadSkills
+            | ControllerEffect::StartSkillWorkflow(_)
+            | ControllerEffect::LoadSkill { .. }
+            | ControllerEffect::LoadSkillHistory { .. }
+            | ControllerEffect::LoadSkillVersion { .. }
+            | ControllerEffect::LoadSkillStarter { .. }
+            | ControllerEffect::LoadSkillAgents
+            | ControllerEffect::LoadSkillAgent { .. }
+            | ControllerEffect::RequestSkillPreview(_)
+            | ControllerEffect::RequestSkillAssignmentPreview { .. }
+            | ControllerEffect::ExecuteSkill(_)
+            | ControllerEffect::CancelSkillReview) => {
+                execute_skill_effect(&self.client, &mut self.model, effect)?;
                 Ok(LoopControl::Continue { redraw: true })
             }
         }
@@ -635,6 +1159,7 @@ impl TuiRunner {
             }
             Err(error) => {
                 self.model.set_command_in_flight(false);
+                self.model.pending_agent_outcome = None;
                 Err(error.into())
             }
         }
@@ -658,6 +1183,10 @@ impl TuiRunner {
         } else {
             Ok(())
         }
+    }
+
+    fn cancel_active_skill_review(&mut self) -> Result<(), RuntimeError> {
+        cancel_skill_review_once(&self.client, &mut self.model)
     }
 }
 
@@ -696,11 +1225,12 @@ fn run_with_screen(
     let cancellation = runner
         .cancel_active_profile_review()
         .map_err(TuiError::Runtime);
+    let skill_cancellation = runner.cancel_active_skill_review().map_err(TuiError::Runtime);
     let restoration = screen.restore();
     let finish = runner.finish(finish_reason).map_err(TuiError::Runtime);
     match primary {
         Err(error) => Err(error),
-        Ok(_) => cancellation.and(restoration).and(finish),
+        Ok(_) => cancellation.and(skill_cancellation).and(restoration).and(finish),
     }
 }
 

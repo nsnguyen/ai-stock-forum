@@ -6,6 +6,38 @@ use crossterm::event::{self, Event, KeyEventKind};
 use super::error::TuiError;
 use crate::ui::interrupt;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillKey {
+    Up,
+    Down,
+    Left,
+    Right,
+    Enter,
+    Escape,
+    Open,
+    Create,
+}
+
+impl SkillKey {
+    pub fn from_key(key: crossterm::event::KeyEvent) -> Option<Self> {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        if key.modifiers != KeyModifiers::NONE {
+            return None;
+        }
+        match key.code {
+            KeyCode::Up => Some(Self::Up),
+            KeyCode::Down => Some(Self::Down),
+            KeyCode::Left => Some(Self::Left),
+            KeyCode::Right => Some(Self::Right),
+            KeyCode::Enter => Some(Self::Enter),
+            KeyCode::Esc => Some(Self::Escape),
+            KeyCode::Char('s') => Some(Self::Open),
+            KeyCode::Char('c') => Some(Self::Create),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiEvent {
     Key(crossterm::event::KeyEvent),

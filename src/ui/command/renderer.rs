@@ -3,16 +3,18 @@ use std::io::{self, Write};
 use crate::{
     agents::{
         AgentProfileDraft, AgentReadiness, McpRef, ProfileDiffField, ProfileFieldDiff,
-        ProfileFieldValue, ProfileTemplate, SkillRef,
+        ProfileFieldValue, ProfileTemplate,
     },
     app::{
-        AppError, ApplicationCommand, CommandOutcome, CommandView, InputRejectionCategory,
-        ShutdownDisposition, ShutdownReason,
+        AgentSkillAssignmentOperation, AgentSkillAssignmentPreview, AppError, ApplicationCommand,
+        CommandOutcome, CommandView, InputRejectionCategory, SafeToken, ShutdownDisposition,
+        ShutdownReason,
     },
     cli::CliError,
     config::StartupError,
     domain::Actor,
     runtime::RuntimeError,
+    skills::{SkillDraft, SkillEditPreview, SkillVersionRef},
     setup::SetupStatus,
     ui::{
         profile_editor::{ProfileEditor, ProfileEditorMode, ProfileEditorStep},
@@ -33,7 +35,7 @@ impl TextRenderer {
     pub fn render_view<W: Write>(view: &CommandView, writer: &mut W) -> io::Result<()> {
         match view {
             CommandView::Help(_) => writer.write_all(
-                b"Available commands:\n  /help\n  /status\n  /setup status\n  /audit tail [limit: 1-100]\n  /quit\n",
+                b"Available commands:\n  /help\n  /status\n  /setup status\n  /audit tail [limit: 1-100]\n  /skill list\n  /skills\n  /skill add\n  /skill show <name-or-id> [version]\n  /skill assign <skill> <agent> [version]\n  /skill unassign <skill> <agent>\n  /quit\n",
             ),
             CommandView::Status(_) => {
                 writer.write_all(b"Installation: ready\nSession: active\n")
@@ -78,7 +80,15 @@ impl TextRenderer {
                     writer.write_all(b"Input rejected: input exceeds 4096 bytes.\n")
                 }
                 InputRejectionCategory::Malformed => {
-                    writer.write_all(b"Input rejected: malformed command.\n")
+                    writer.write_all(b"Input rejected: malformed command.\n")?;
+                    if matches!(
+                        view.rejection.safe_token.as_ref().map(SafeToken::as_str),
+                        Some("/skill" | "/skills")
+                    ) {
+                        writer.write_all(b"Usage: /skill list | /skill add | /skill show <name-or-id> [version] | /skill assign <skill> <agent> [version] | /skill unassign <skill> <agent>\n")
+                    } else {
+                        Ok(())
+                    }
                 }
                 InputRejectionCategory::Unknown => {
                     if let Some(token) = &view.rejection.safe_token {
@@ -290,6 +300,89 @@ impl TextRenderer {
                 writer.write_all(b"Predecessor diff:\n")?;
                 render_profile_diffs(&view.predecessor_diff, writer)
             }
+            CommandView::SkillCreated(view) => writeln!(
+                writer,
+                "Skill created: {} version {} digest {}",
+                view.skill_id,
+                view.version.get(),
+                view.content_digest,
+            ),
+            CommandView::SkillVersionActivated(view) => writeln!(
+                writer,
+                "Skill version activated: {} version {} digest {}",
+                view.skill_id,
+                view.version.get(),
+                view.content_digest,
+            ),
+            CommandView::Skills(view) => {
+                writer.write_all(b"NAME | VERSION | ID | DIGEST\n")?;
+                for skill in view.skills.iter().take(100) {
+                    writeln!(
+                        writer,
+                        "{} | {} | {} | {}",
+                        escaped_bounded(&skill.display_name, 64),
+                        skill.skill_ref.version().get(),
+                        skill.skill_ref.skill_id(),
+                        skill.skill_ref.content_digest(),
+                    )?;
+                }
+                let omitted = view.total_count.saturating_sub(view.returned_count);
+                if omitted > 0 {
+                    writeln!(writer, "... {omitted} skills omitted.")?;
+                }
+                Ok(())
+            }
+            CommandView::Skill(view) | CommandView::SkillVersion(view) => {
+                writeln!(writer, "Skill: {}", view.skill_ref.skill_id())?;
+                writeln!(
+                    writer,
+                    "Display name: {}",
+                    escaped_bounded(&view.content.display_name, 64)
+                )?;
+                writeln!(writer, "Version: {}", view.skill_ref.version().get())?;
+                writeln!(writer, "Version ID: {}", view.skill_ref.skill_version_id())?;
+                writeln!(writer, "Digest: {}", view.skill_ref.content_digest())?;
+                writeln!(writer, "Provenance: {:?}", view.provenance)?;
+                writeln!(writer, "Resource count: {}", view.content.resources.len())
+            }
+            CommandView::SkillHistory(view) => {
+                writeln!(writer, "Skill history: {}", view.skill_id)?;
+                writeln!(writer, "Active version ID: {}", view.active_version_id)?;
+                writer.write_all(b"VERSION | VERSION ID | PREDECESSOR | CREATED | DIGEST\n")?;
+                for version in view.versions.iter().take(100) {
+                    writeln!(
+                        writer,
+                        "{} | {} | {} | {} | {}",
+                        version.skill_ref.version().get(),
+                        version.skill_ref.skill_version_id(),
+                        version
+                            .predecessor_version_id
+                            .map(|id| id.to_string())
+                            .unwrap_or_else(|| "none".to_owned()),
+                        version.created_at_ms,
+                        version.skill_ref.content_digest(),
+                    )?;
+                }
+                Ok(())
+            }
+            CommandView::AgentSkillAssigned(view) => writeln!(
+                writer,
+                "Agent skill assigned: profile {} version {}",
+                view.profile_id,
+                view.version.get(),
+            ),
+            CommandView::AgentSkillUpgraded(view) => writeln!(
+                writer,
+                "Agent skill upgraded: profile {} version {}",
+                view.profile_id,
+                view.version.get(),
+            ),
+            CommandView::AgentSkillUnassigned(view) => writeln!(
+                writer,
+                "Agent skill unassigned: profile {} version {}",
+                view.profile_id,
+                view.version.get(),
+            ),
         }
     }
 
@@ -309,6 +402,101 @@ impl TextRenderer {
             )?;
         }
         writer.write_all(b"Enter a template ID, or :cancel.\n")
+    }
+
+    pub fn render_skill_editor<W: Write>(
+        draft: &SkillDraft,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writer.write_all(b"Create skill editor\n")?;
+        writeln!(writer, "  Display name: {}", escaped_bounded(&draft.display_name, 64))?;
+        writeln!(writer, "  Description: {}", escaped_bounded(&draft.description, 256))?;
+        writeln!(writer, "  Use when: {}", escaped_bounded(&draft.use_when, 512))?;
+        writeln!(writer, "  Tags: {}", escaped_list(&draft.tags, 32))?;
+        writeln!(writer, "  Instructions: {}", escaped_bounded(&draft.instructions, 4_096))?;
+        writer.write_all(b"Controls: :name <text> :description <text> :use-when <text> :tag add <tag> :tag remove <tag> :instructions <text> :review :cancel\n")
+    }
+
+    pub fn render_skill_editor_message<W: Write>(message: &str, writer: &mut W) -> io::Result<()> {
+        writeln!(writer, "Skill editor: {}", escaped_bounded(message, 128))
+    }
+
+    pub fn render_skill_creation_review<W: Write>(
+        candidate: &SkillDraft,
+        preview: &SkillEditPreview,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writeln!(
+            writer,
+            "Skill creation review: {} version 1 digest {}",
+            escaped_bounded(&candidate.display_name, 64),
+            preview.candidate_digest,
+        )?;
+        writer.write_all(b"Type exactly: create\n")
+    }
+
+    pub fn render_skill_assignment_review<W: Write>(
+        preview: &AgentSkillAssignmentPreview,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        let (action, reference) = match &preview.operation {
+            AgentSkillAssignmentOperation::Assign { skill } => ("assign", skill),
+            AgentSkillAssignmentOperation::Upgrade { replacement, .. } => ("upgrade", replacement),
+            AgentSkillAssignmentOperation::Unassign { expected } => ("unassign", expected),
+        };
+        writeln!(writer, "Skill assignment review: {action}")?;
+        writeln!(
+            writer,
+            "  Agent: {} base {}",
+            preview.profile_id,
+            preview.expected_active_profile_version_id,
+        )?;
+        writeln!(
+            writer,
+            "  Skill: {} exact version {} ({})",
+            reference.skill_id(),
+            reference.version().get(),
+            reference.content_digest(),
+        )?;
+        writeln!(writer, "Type exactly: {action}")
+    }
+
+    pub fn render_skill_confirmation<W: Write>(
+        action: &str,
+        command: &ApplicationCommand,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        let reference = match command {
+            ApplicationCommand::AssignAgentSkill { skill, .. } => Some(skill),
+            ApplicationCommand::UpgradeAgentSkill { replacement, .. } => Some(replacement),
+            ApplicationCommand::UnassignAgentSkill { expected, .. } => Some(expected),
+            ApplicationCommand::CreateSkill { .. } => None,
+            _ => return writer.write_all(b"Skill confirmation is unavailable.\n"),
+        };
+        if let Some(reference) = reference {
+            writeln!(
+                writer,
+                "Skill assignment review: {action}\n  Skill: {} exact version {} ({})",
+                reference.skill_id(),
+                reference.version().get(),
+                reference.content_digest(),
+            )?;
+        } else {
+            writer.write_all(b"Skill creation review\n")?;
+        }
+        writeln!(writer, "Type exactly: {action}")
+    }
+
+    pub fn render_skill_confirmation_mismatch<W: Write>(writer: &mut W) -> io::Result<()> {
+        writer.write_all(b"Confirmation did not match; skill review retained.\n")
+    }
+
+    pub fn render_fresh_skill_review_required<W: Write>(writer: &mut W) -> io::Result<()> {
+        writer.write_all(b"Start a fresh /skill command to request a new review.\n")
+    }
+
+    pub fn render_skill_cancelled<W: Write>(writer: &mut W) -> io::Result<()> {
+        writer.write_all(b"Skill review cancelled.\n")
     }
 
     pub fn render_profile_editor<W: Write>(
@@ -629,6 +817,9 @@ fn diff_field(field: ProfileDiffField) -> &'static str {
         ProfileDiffField::Personality => "personality",
         ProfileDiffField::Instructions => "instructions",
         ProfileDiffField::Bindings => "bindings",
+        ProfileDiffField::SkillRefsAdded => "skill_refs_added",
+        ProfileDiffField::SkillRefsUpgraded => "skill_refs_upgraded",
+        ProfileDiffField::SkillRefsRemoved => "skill_refs_removed",
     }
 }
 
@@ -652,8 +843,18 @@ fn escaped_list(values: &[String], maximum_scalars: usize) -> String {
         .join(", ")
 }
 
-fn escaped_skill_refs(values: &[SkillRef]) -> String {
-    escaped_refs(values.iter().map(SkillRef::as_str))
+fn escaped_skill_refs(values: &[SkillVersionRef]) -> String {
+    let labels = values.iter().map(skill_ref_label).collect::<Vec<_>>();
+    escaped_refs(labels.iter().map(String::as_str))
+}
+
+fn skill_ref_label(reference: &SkillVersionRef) -> String {
+    format!(
+        "{}@{}#{}",
+        reference.skill_id(),
+        reference.skill_version_id(),
+        reference.version().get(),
+    )
 }
 
 fn escaped_mcp_refs(values: &[McpRef]) -> String {
@@ -713,6 +914,14 @@ fn app_error_message(error: &AppError) -> &'static str {
         | AppError::ProfileReviewUnavailable
         | AppError::ProfileReviewMismatch
         | AppError::ReviewDigestMismatch => "Agent profile operation could not be completed.",
+        AppError::SkillNotFound
+        | AppError::DuplicateSkillName
+        | AppError::StaleSkillVersion
+        | AppError::SkillReviewUnavailable
+        | AppError::SkillReviewMismatch
+        | AppError::SkillAlreadyAssigned
+        | AppError::SkillNotAssigned
+        | AppError::AgentSkillLimitExceeded => "Skill operation could not be completed.",
         AppError::LifecycleFinished => "Application is shutting down.",
     }
 }

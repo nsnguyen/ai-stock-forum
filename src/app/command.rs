@@ -10,8 +10,10 @@ use crate::{
     },
     domain::{
         Actor, AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, Digest,
-        DomainError, ObjectVersion, ProfileReviewToken, Sha256Digest, sha256,
+        DomainError, ObjectVersion, ProfileReviewToken, Sha256Digest, SkillId, SkillReviewToken,
+        SkillVersionId, sha256,
     },
+    skills::{SkillDraft, SkillVersionRef},
 };
 
 pub const MAX_INPUT_BYTES: usize = 4096;
@@ -19,6 +21,70 @@ pub const DEFAULT_AUDIT_LIMIT: u16 = 20;
 pub const MAX_AUDIT_LIMIT: u16 = 100;
 pub const MAX_AGENT_PROFILE_LIST_RESULTS: usize = 100;
 pub const MAX_AGENT_PROFILE_HISTORY_RESULTS: usize = 100;
+pub const MAX_SKILL_LIST_RESULTS: usize = 100;
+pub const MAX_SKILL_HISTORY_RESULTS: usize = 100;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "selector_type",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum SkillSelector {
+    Id(SkillId),
+    Name(String),
+}
+
+impl From<SkillId> for SkillSelector {
+    fn from(value: SkillId) -> Self {
+        Self::Id(value)
+    }
+}
+
+impl SkillSelector {
+    pub fn from_input(value: &str) -> Result<Self, DomainError> {
+        if let Ok(id) = uuid::Uuid::parse_str(value) {
+            return Ok(Self::Id(SkillId::from_uuid(id)));
+        }
+        let probe = SkillDraft::new(
+            value.to_owned(),
+            String::new(),
+            "selector".to_owned(),
+            Vec::new(),
+            "selector".to_owned(),
+            Vec::new(),
+        )?;
+        Ok(Self::Name(probe.display_name))
+    }
+
+    pub(crate) fn normalized_name(&self) -> Option<crate::skills::NormalizedSkillName> {
+        match self {
+            Self::Id(_) => None,
+            Self::Name(name) => SkillDraft::new(
+                name.clone(),
+                String::new(),
+                "selector".to_owned(),
+                Vec::new(),
+                "selector".to_owned(),
+                Vec::new(),
+            )
+            .ok()
+            .and_then(|draft| draft.normalized_name().ok()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentSkillAssignmentOperation {
+    Assign { skill: SkillVersionRef },
+    Upgrade {
+        expected: SkillVersionRef,
+        replacement: SkillVersionRef,
+    },
+    Unassign { expected: SkillVersionRef },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentProfileSelector {
@@ -176,6 +242,52 @@ pub enum ApplicationCommand {
         selector: AgentProfileSelector,
         version: ObjectVersion,
     },
+    CreateSkill {
+        skill_id: SkillId,
+        candidate: SkillDraft,
+        review_token: SkillReviewToken,
+        review_digest: Digest,
+    },
+    ActivateSkillVersion {
+        skill_id: SkillId,
+        expected_active_version_id: SkillVersionId,
+        candidate: SkillDraft,
+        review_token: SkillReviewToken,
+        review_digest: Digest,
+    },
+    ListSkills,
+    ShowSkill {
+        selector: SkillSelector,
+    },
+    ShowSkillHistory {
+        selector: SkillSelector,
+    },
+    ShowSkillVersion {
+        selector: SkillSelector,
+        version: ObjectVersion,
+    },
+    AssignAgentSkill {
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        skill: SkillVersionRef,
+        review_token: SkillReviewToken,
+        review_digest: Digest,
+    },
+    UpgradeAgentSkill {
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+        replacement: SkillVersionRef,
+        review_token: SkillReviewToken,
+        review_digest: Digest,
+    },
+    UnassignAgentSkill {
+        profile_id: AgentProfileId,
+        expected_active_profile_version_id: AgentProfileVersionId,
+        expected: SkillVersionRef,
+        review_token: SkillReviewToken,
+        review_digest: Digest,
+    },
     RejectInput(InputRejection),
     RequestShutdown,
 }
@@ -185,6 +297,10 @@ impl ApplicationCommand {
         match self {
             Self::CreateAgentProfile { draft, .. } => *draft = draft.canonicalized()?,
             Self::ActivateAgentProfileVersion { candidate, .. } => {
+                *candidate = candidate.canonicalized()?;
+            }
+            Self::CreateSkill { candidate, .. }
+            | Self::ActivateSkillVersion { candidate, .. } => {
                 *candidate = candidate.canonicalized()?;
             }
             _ => {}
@@ -210,6 +326,16 @@ impl ApplicationCommand {
             | Self::ShowAgentProfile { .. }
             | Self::ShowAgentProfileHistory { .. }
             | Self::ShowAgentProfileVersion { .. } => Capability::AgentProfileRead,
+            Self::CreateSkill { .. } => Capability::SkillCreate,
+            Self::ActivateSkillVersion { .. } => Capability::SkillVersion,
+            Self::ListSkills
+            | Self::ShowSkill { .. }
+            | Self::ShowSkillHistory { .. }
+            | Self::ShowSkillVersion { .. } => Capability::SkillRead,
+            Self::AssignAgentSkill { .. } | Self::UpgradeAgentSkill { .. } => {
+                Capability::AgentSkillAssign
+            }
+            Self::UnassignAgentSkill { .. } => Capability::AgentSkillUnassign,
             Self::RequestShutdown => Capability::Shutdown,
         }
     }

@@ -9,13 +9,13 @@ use rusqlite::{Connection, Error as SqliteError, params};
 use uuid::Uuid;
 
 #[test]
-fn fresh_database_reaches_schema_version_two_with_strict_profile_storage() {
+fn fresh_database_reaches_schema_version_three_with_strict_profile_storage() {
     let temp = tempfile::tempdir().unwrap();
     let database = Database::open(&AppPaths::for_test(temp.path())).unwrap();
     let connection = database.connection();
 
-    assert_eq!(LATEST_SCHEMA_VERSION, 2);
-    assert_eq!(database.schema_version(), 2);
+    assert_eq!(LATEST_SCHEMA_VERSION, 3);
+    assert_eq!(database.schema_version(), 3);
     assert_eq!(
         database
             .applied_migrations()
@@ -23,7 +23,7 @@ fn fresh_database_reaches_schema_version_two_with_strict_profile_storage() {
             .iter()
             .map(|migration| migration.version())
             .collect::<Vec<_>>(),
-        vec![1, 2]
+        vec![1, 2, 3]
     );
     for table in ["agent_profile_versions", "active_agent_profiles"] {
         assert!(database.has_table(table).unwrap(), "missing {table}");
@@ -68,7 +68,7 @@ fn schema_v1_fixture_upgrades_without_changing_legacy_rows() {
 
     let database = Database::open(&paths).unwrap();
 
-    assert_eq!(database.schema_version(), 2);
+    assert_eq!(database.schema_version(), 3);
     assert!(database.has_table("agent_profile_versions").unwrap());
     assert!(database.has_table("active_agent_profiles").unwrap());
     assert_eq!(legacy_snapshot(database.connection()), before);
@@ -385,15 +385,15 @@ fn memory_namespace_is_global_to_one_profile_and_stable_across_versions() {
 }
 
 #[test]
-fn startup_is_idempotent_after_version_two_is_applied() {
+fn startup_is_idempotent_after_version_three_is_applied() {
     let temp = tempfile::tempdir().unwrap();
     let paths = AppPaths::for_test(temp.path());
 
     drop(Database::open(&paths).unwrap());
     let database = Database::open(&paths).unwrap();
 
-    assert_eq!(database.schema_version(), 2);
-    assert_eq!(database.applied_migrations().unwrap().len(), 2);
+    assert_eq!(database.schema_version(), 3);
+    assert_eq!(database.applied_migrations().unwrap().len(), 3);
 }
 
 fn create_schema_v1_fixture(paths: &AppPaths) {

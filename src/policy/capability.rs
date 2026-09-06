@@ -11,6 +11,13 @@ pub enum Capability {
     AgentProfileCreate,
     AgentProfilePreview,
     AgentProfileActivate,
+    SkillRead,
+    SkillCreate,
+    SkillVersion,
+    #[serde(rename = "skill_assign")]
+    AgentSkillAssign,
+    #[serde(rename = "skill_unassign")]
+    AgentSkillUnassign,
     Shutdown,
     DiscussionRun,
     McpUse,

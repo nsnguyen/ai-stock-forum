@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     agents::{AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentRole},
     domain::DomainError,
+    skills::SkillVersionRef,
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +17,9 @@ pub enum ProfileDiffField {
     Personality,
     Instructions,
     Bindings,
+    SkillRefsAdded,
+    SkillRefsUpgraded,
+    SkillRefsRemoved,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,12 +96,59 @@ pub fn diff_profile(
             after: ProfileFieldValue::Bindings(candidate.bindings.clone()),
         });
     }
+    push_skill_ref_changes(&mut changes, current.skill_refs(), &candidate.skill_refs);
 
     if changes.is_empty() {
         Err(DomainError::AgentProfileUnchanged)
     } else {
         Ok(changes)
     }
+}
+
+fn push_skill_ref_changes(
+    changes: &mut Vec<ProfileFieldDiff>,
+    current: &[SkillVersionRef],
+    candidate: &[SkillVersionRef],
+) {
+    for candidate_ref in candidate {
+        match current
+            .iter()
+            .find(|current_ref| current_ref.skill_id() == candidate_ref.skill_id())
+        {
+            None => changes.push(ProfileFieldDiff {
+                field: ProfileDiffField::SkillRefsAdded,
+                before: ProfileFieldValue::Text(String::new()),
+                after: ProfileFieldValue::Text(skill_ref_summary(candidate_ref)),
+            }),
+            Some(current_ref) if current_ref != candidate_ref => changes.push(ProfileFieldDiff {
+                field: ProfileDiffField::SkillRefsUpgraded,
+                before: ProfileFieldValue::Text(skill_ref_summary(current_ref)),
+                after: ProfileFieldValue::Text(skill_ref_summary(candidate_ref)),
+            }),
+            Some(_) => {}
+        }
+    }
+    for current_ref in current {
+        if !candidate
+            .iter()
+            .any(|candidate_ref| candidate_ref.skill_id() == current_ref.skill_id())
+        {
+            changes.push(ProfileFieldDiff {
+                field: ProfileDiffField::SkillRefsRemoved,
+                before: ProfileFieldValue::Text(skill_ref_summary(current_ref)),
+                after: ProfileFieldValue::Text(String::new()),
+            });
+        }
+    }
+}
+
+fn skill_ref_summary(skill_ref: &SkillVersionRef) -> String {
+    format!(
+        "{}@{}#{}",
+        skill_ref.skill_id(),
+        skill_ref.skill_version_id(),
+        skill_ref.version().get(),
+    )
 }
 
 fn push_text_change(

@@ -14,11 +14,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::{
     agents::{AgentProfileDraft, ProfileTemplateId, builtin_profile_templates},
     app::{
+        AgentProfileSelector, AgentSkillAssignmentOperation, AgentSkillAssignmentPreview, AppError,
         ApplicationCommand, CommandView, InputRejection, InputRejectionCategory,
-        ShutdownDisposition, ShutdownReason,
+        ShutdownDisposition, ShutdownReason, SkillSelector,
     },
     panic_boundary::catch_sensitive_unwind,
     runtime::{ApplicationRuntime, RuntimeClient, RuntimeError},
+    skills::SkillDraft,
     ui::profile_editor::{ProfileEditor, ProfileEditorEffect, ProfileEditorMode},
 };
 
@@ -28,8 +30,8 @@ use super::windows::{
     classify_read_error, may_begin_read,
 };
 use super::{
-    AgentWorkflowCommand, BoundedLineReader, FallbackParsedLine, RawLine, TextRenderer,
-    parse_fallback_line, reader::LineAccumulator,
+    AgentWorkflowCommand, BoundedLineReader, FallbackParsedLine, RawLine, SkillWorkflowCommand,
+    TextRenderer, parse_fallback_line, reader::LineAccumulator,
 };
 
 #[derive(Debug, Error)]
@@ -650,6 +652,7 @@ pub struct FallbackRunner {
     client: RuntimeClient,
     show_prompt: bool,
     profile_workflow: Mutex<Option<ProfileWorkflow>>,
+    skill_workflow: Mutex<Option<SkillWorkflow>>,
 }
 
 #[expect(
@@ -666,12 +669,55 @@ enum ProfileWorkflow {
     },
 }
 
+#[derive(Default)]
+struct SkillDraftInput {
+    display_name: String,
+    description: String,
+    use_when: String,
+    tags: Vec<String>,
+    instructions: String,
+}
+
+impl SkillDraftInput {
+    fn candidate(&self) -> Result<SkillDraft, crate::domain::DomainError> {
+        SkillDraft::new(
+            self.display_name.clone(),
+            self.description.clone(),
+            self.use_when.clone(),
+            self.tags.clone(),
+            self.instructions.clone(),
+            Vec::new(),
+        )
+    }
+
+    fn display_candidate(&self) -> SkillDraft {
+        SkillDraft {
+            display_name: self.display_name.clone(),
+            description: self.description.clone(),
+            use_when: self.use_when.clone(),
+            tags: self.tags.clone(),
+            instructions: self.instructions.clone(),
+            resources: Vec::new(),
+        }
+    }
+}
+
+enum SkillWorkflow {
+    EditingCreation(SkillDraftInput),
+    Confirming {
+        command: ApplicationCommand,
+        action: &'static str,
+        creation_draft: Option<SkillDraftInput>,
+    },
+}
+
 impl FallbackRunner {
     pub fn new(client: RuntimeClient, show_prompt: bool) -> Self {
         Self {
             client,
             show_prompt,
             profile_workflow: Mutex::new(None),
+            skill_workflow: Mutex::new(None),
         }
     }
 
@@ -681,17 +727,23 @@ impl FallbackRunner {
         mut writer: W,
     ) -> Result<ShutdownReason, UiError> {
         let mut reader = BoundedLineReader::new(reader);
-        loop {
-            self.prompt(&mut writer)?;
-            let line = reader.next_line().map_err(|_| UiError::Read)?;
-            let Some(line) = line else {
-                self.cancel_profile_workflow()?;
-                return Ok(ShutdownReason::InputClosed);
-            };
-            if let Some(reason) = self.process_line(line, &mut writer)? {
-                return Ok(reason);
+        let result = (|| {
+            loop {
+                self.prompt(&mut writer)?;
+                let line = reader.next_line().map_err(|_| UiError::Read)?;
+                let Some(line) = line else {
+                    self.cancel_workflows()?;
+                    return Ok(ShutdownReason::InputClosed);
+                };
+                if let Some(reason) = self.process_line(line, &mut writer)? {
+                    return Ok(reason);
+                }
             }
+        })();
+        if result.is_err() {
+            let _ = self.cancel_workflows();
         }
+        result
     }
 
     fn prompt<W: Write>(&self, writer: &mut W) -> Result<(), UiError> {
@@ -715,6 +767,34 @@ impl FallbackRunner {
                 input_digest: line.input_digest().clone(),
             };
             return self.execute_command(ApplicationCommand::RejectInput(rejection), writer);
+        }
+
+        if self
+            .skill_workflow
+            .lock()
+            .map_err(|_| UiError::Panicked)?
+            .is_some()
+        {
+            let line = match std::str::from_utf8(line.bytes()) {
+                Ok(line) => line,
+                Err(_) => {
+                    self.execute_command(
+                        ApplicationCommand::RejectInput(InputRejection::from_input(
+                            InputRejectionCategory::InvalidEncoding,
+                            None,
+                            line.bytes(),
+                        )),
+                        writer,
+                    )?;
+                    return Ok(None);
+                }
+            };
+            if line.trim() == "/quit" {
+                self.cancel_skill_workflow()?;
+                return self.execute_command(ApplicationCommand::RequestShutdown, writer);
+            }
+            self.process_skill_line(line, writer)?;
+            return Ok(None);
         }
 
         if self
@@ -748,7 +828,338 @@ impl FallbackRunner {
                 self.start_profile_workflow(command, writer)?;
                 Ok(None)
             }
+            FallbackParsedLine::SkillWorkflow(command) => {
+                self.start_skill_workflow(command, writer)?;
+                Ok(None)
+            }
         }
+    }
+
+    fn start_skill_workflow<W: Write>(
+        &self,
+        command: SkillWorkflowCommand,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        match command {
+            SkillWorkflowCommand::Add => {
+                let draft = SkillDraftInput::default();
+                TextRenderer::render_skill_editor(&draft.display_candidate(), writer)
+                    .map_err(|_| UiError::Write)?;
+                *self.skill_workflow.lock().map_err(|_| UiError::Panicked)? =
+                    Some(SkillWorkflow::EditingCreation(draft));
+                Ok(())
+            }
+            SkillWorkflowCommand::Assign {
+                skill,
+                agent,
+                version,
+            } => self.start_skill_assignment(skill, agent, version, writer),
+            SkillWorkflowCommand::Unassign { skill, agent } => {
+                self.start_skill_unassignment(skill, agent, writer)
+            }
+        }
+    }
+
+    fn start_skill_assignment<W: Write>(
+        &self,
+        skill: SkillSelector,
+        agent: AgentProfileSelector,
+        version: Option<crate::domain::ObjectVersion>,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        let skill_command = match version {
+            Some(version) => ApplicationCommand::ShowSkillVersion {
+                selector: skill,
+                version,
+            },
+            None => ApplicationCommand::ShowSkill { selector: skill },
+        };
+        let Some(skill_view) = self.read_view(skill_command, writer)? else {
+            return Ok(());
+        };
+        let target = match skill_view {
+            CommandView::Skill(view) | CommandView::SkillVersion(view) => view.skill_ref,
+            _ => return Err(UiError::Panicked),
+        };
+        let Some(profile_view) = self
+            .read_view(ApplicationCommand::ShowAgentProfile { selector: agent }, writer)?
+        else {
+            return Ok(());
+        };
+        let CommandView::AgentProfile(profile_view) = profile_view else {
+            return Err(UiError::Panicked);
+        };
+        let profile = profile_view.profile;
+        let existing = profile
+            .skill_refs()
+            .iter()
+            .find(|reference| reference.skill_id() == target.skill_id())
+            .cloned();
+        let preview = match existing {
+            Some(expected) if expected != target => self.client.preview_agent_skill_upgrade(
+                profile.profile_id(),
+                profile.profile_version_id(),
+                expected,
+                target,
+            ),
+            _ => self.client.preview_agent_skill_assignment(
+                profile.profile_id(),
+                profile.profile_version_id(),
+                target,
+            ),
+        };
+        self.stage_assignment_preview(preview, writer)
+    }
+
+    fn start_skill_unassignment<W: Write>(
+        &self,
+        skill: SkillSelector,
+        agent: AgentProfileSelector,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        let Some(skill_view) = self
+            .read_view(ApplicationCommand::ShowSkill { selector: skill }, writer)?
+        else {
+            return Ok(());
+        };
+        let CommandView::Skill(skill_view) = skill_view else {
+            return Err(UiError::Panicked);
+        };
+        let Some(profile_view) = self
+            .read_view(ApplicationCommand::ShowAgentProfile { selector: agent }, writer)?
+        else {
+            return Ok(());
+        };
+        let CommandView::AgentProfile(profile_view) = profile_view else {
+            return Err(UiError::Panicked);
+        };
+        let profile = profile_view.profile;
+        let Some(expected) = profile
+            .skill_refs()
+            .iter()
+            .find(|reference| reference.skill_id() == skill_view.skill_ref.skill_id())
+            .cloned()
+        else {
+            TextRenderer::render_runtime_error(
+                &RuntimeError::Application(AppError::SkillNotAssigned),
+                writer,
+            )
+            .map_err(|_| UiError::Write)?;
+            return Ok(());
+        };
+        let preview = self.client.preview_agent_skill_unassignment(
+            profile.profile_id(),
+            profile.profile_version_id(),
+            expected,
+        );
+        self.stage_assignment_preview(preview, writer)
+    }
+
+    fn read_view<W: Write>(
+        &self,
+        command: ApplicationCommand,
+        writer: &mut W,
+    ) -> Result<Option<CommandView>, UiError> {
+        match self.client.submit(command) {
+            Ok(outcome) => Ok(Some(outcome.view)),
+            Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+                TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write)?;
+                Ok(None)
+            }
+            Err(error) => Err(UiError::Runtime(error)),
+        }
+    }
+
+    fn stage_assignment_preview<W: Write>(
+        &self,
+        preview: Result<AgentSkillAssignmentPreview, RuntimeError>,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        let preview = match preview {
+            Ok(preview) => preview,
+            Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+                TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write)?;
+                return Ok(());
+            }
+            Err(error) => return Err(UiError::Runtime(error)),
+        };
+        let (command, action) = assignment_command(&preview);
+        *self.skill_workflow.lock().map_err(|_| UiError::Panicked)? =
+            Some(SkillWorkflow::Confirming {
+                command,
+                action,
+                creation_draft: None,
+            });
+        TextRenderer::render_skill_assignment_review(&preview, writer)
+            .map_err(|_| UiError::Write)
+    }
+
+    fn process_skill_line<W: Write>(&self, line: &str, writer: &mut W) -> Result<(), UiError> {
+        let state = self
+            .skill_workflow
+            .lock()
+            .map_err(|_| UiError::Panicked)?
+            .take()
+            .ok_or(UiError::Panicked)?;
+        match state {
+            SkillWorkflow::EditingCreation(mut draft) => {
+                let input = line.trim();
+                if input == ":cancel" {
+                    self.client.cancel_skill_review().map_err(UiError::Runtime)?;
+                    return TextRenderer::render_skill_cancelled(writer)
+                        .map_err(|_| UiError::Write);
+                }
+                if input == ":review" {
+                    let candidate = match draft.candidate() {
+                        Ok(candidate) => candidate,
+                        Err(error) => {
+                            TextRenderer::render_skill_editor_message(error.code(), writer)
+                                .map_err(|_| UiError::Write)?;
+                            return self.retain_skill_editor(draft, writer);
+                        }
+                    };
+                    let preview = match self.client.preview_skill_creation(candidate.clone()) {
+                        Ok(preview) => preview,
+                        Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+                            TextRenderer::render_runtime_error(&error, writer)
+                                .map_err(|_| UiError::Write)?;
+                            return self.retain_skill_editor(draft, writer);
+                        }
+                        Err(error) => return Err(UiError::Runtime(error)),
+                    };
+                    let display_candidate = candidate.clone();
+                    let command = ApplicationCommand::CreateSkill {
+                        skill_id: preview.skill_id,
+                        candidate,
+                        review_token: preview.review_token,
+                        review_digest: preview.review_digest.clone(),
+                    };
+                    *self.skill_workflow.lock().map_err(|_| UiError::Panicked)? =
+                        Some(SkillWorkflow::Confirming {
+                            command,
+                            action: "create",
+                            creation_draft: Some(draft),
+                        });
+                    return TextRenderer::render_skill_creation_review(
+                        &display_candidate,
+                        &preview,
+                        writer,
+                    )
+                    .map_err(|_| UiError::Write);
+                }
+
+                let mut recognized = true;
+                if let Some(value) = input.strip_prefix(":name ") {
+                    draft.display_name = value.to_owned();
+                } else if let Some(value) = input.strip_prefix(":description ") {
+                    draft.description = value.to_owned();
+                } else if input == ":description" {
+                    draft.description.clear();
+                } else if let Some(value) = input.strip_prefix(":use-when ") {
+                    draft.use_when = value.to_owned();
+                } else if let Some(value) = input.strip_prefix(":instructions ") {
+                    draft.instructions = value.to_owned();
+                } else if let Some(value) = input.strip_prefix(":tag add ") {
+                    draft.tags.push(value.to_owned());
+                } else if let Some(value) = input.strip_prefix(":tag remove ") {
+                    draft.tags.retain(|tag| tag != value);
+                } else {
+                    recognized = false;
+                }
+                if !recognized {
+                    TextRenderer::render_skill_editor_message(
+                        "unknown control; draft retained",
+                        writer,
+                    )
+                    .map_err(|_| UiError::Write)?;
+                }
+                self.retain_skill_editor(draft, writer)
+            }
+            SkillWorkflow::Confirming {
+                command,
+                action,
+                creation_draft,
+            } => match line.trim() {
+                confirmation if confirmation == action => {
+                    self.execute_skill_confirmation(command, action, creation_draft, writer)
+                }
+                ":cancel" => {
+                    self.client.cancel_skill_review().map_err(UiError::Runtime)?;
+                    TextRenderer::render_skill_cancelled(writer).map_err(|_| UiError::Write)
+                }
+                _ => {
+                    *self.skill_workflow.lock().map_err(|_| UiError::Panicked)? =
+                        Some(SkillWorkflow::Confirming {
+                            command: command.clone(),
+                            action,
+                            creation_draft,
+                        });
+                    TextRenderer::render_skill_confirmation_mismatch(writer)
+                        .map_err(|_| UiError::Write)?;
+                    TextRenderer::render_skill_confirmation(action, &command, writer)
+                        .map_err(|_| UiError::Write)?;
+                    Ok(())
+                }
+            },
+        }
+    }
+
+    fn retain_skill_editor<W: Write>(
+        &self,
+        draft: SkillDraftInput,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        TextRenderer::render_skill_editor(&draft.display_candidate(), writer)
+            .map_err(|_| UiError::Write)?;
+        *self.skill_workflow.lock().map_err(|_| UiError::Panicked)? =
+            Some(SkillWorkflow::EditingCreation(draft));
+        Ok(())
+    }
+
+    fn execute_skill_confirmation<W: Write>(
+        &self,
+        command: ApplicationCommand,
+        action: &'static str,
+        creation_draft: Option<SkillDraftInput>,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        let outcome = match self.client.submit(command.clone()) {
+            Ok(outcome) => outcome,
+            Err(error @ RuntimeError::Backpressure) => {
+                *self.skill_workflow.lock().map_err(|_| UiError::Panicked)? =
+                    Some(SkillWorkflow::Confirming {
+                        command: command.clone(),
+                        action,
+                        creation_draft,
+                    });
+                TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write)?;
+                TextRenderer::render_skill_confirmation(action, &command, writer)
+                    .map_err(|_| UiError::Write)?;
+                return Ok(());
+            }
+            Err(error @ RuntimeError::Application(_)) => {
+                let primary = TextRenderer::render_runtime_error(&error, writer)
+                    .map_err(|_| UiError::Write);
+                let cleanup = self.client.cancel_skill_review();
+                primary?;
+                if let Some(draft) = creation_draft {
+                    if let Err(cleanup_error) = cleanup {
+                        TextRenderer::render_runtime_error(&cleanup_error, writer)
+                            .map_err(|_| UiError::Write)?;
+                    }
+                    return self.retain_skill_editor(draft, writer);
+                }
+                TextRenderer::render_fresh_skill_review_required(writer)
+                    .map_err(|_| UiError::Write)?;
+                if let Err(cleanup_error) = cleanup {
+                    TextRenderer::render_runtime_error(&cleanup_error, writer)
+                        .map_err(|_| UiError::Write)?;
+                }
+                return Ok(());
+            }
+            Err(error) => return Err(UiError::Runtime(error)),
+        };
+        TextRenderer::render_outcome(&outcome, writer).map_err(|_| UiError::Write)
     }
 
     fn execute_command<W: Write>(
@@ -1031,6 +1442,24 @@ impl FallbackRunner {
         Ok(())
     }
 
+    fn cancel_skill_workflow(&self) -> Result<(), UiError> {
+        let active = self
+            .skill_workflow
+            .lock()
+            .map_err(|_| UiError::Panicked)?
+            .take()
+            .is_some();
+        if active {
+            self.client.cancel_skill_review().map_err(UiError::Runtime)?;
+        }
+        Ok(())
+    }
+
+    fn cancel_workflows(&self) -> Result<(), UiError> {
+        self.cancel_profile_workflow()?;
+        self.cancel_skill_workflow()
+    }
+
     fn execute_profile_confirmation<W: Write>(
         &self,
         editor: ProfileEditor,
@@ -1124,6 +1553,47 @@ impl FallbackRunner {
     }
 }
 
+fn assignment_command(
+    preview: &AgentSkillAssignmentPreview,
+) -> (ApplicationCommand, &'static str) {
+    match &preview.operation {
+        AgentSkillAssignmentOperation::Assign { skill } => (
+            ApplicationCommand::AssignAgentSkill {
+                profile_id: preview.profile_id,
+                expected_active_profile_version_id: preview.expected_active_profile_version_id,
+                skill: skill.clone(),
+                review_token: preview.review_token,
+                review_digest: preview.review_digest.clone(),
+            },
+            "assign",
+        ),
+        AgentSkillAssignmentOperation::Upgrade {
+            expected,
+            replacement,
+        } => (
+            ApplicationCommand::UpgradeAgentSkill {
+                profile_id: preview.profile_id,
+                expected_active_profile_version_id: preview.expected_active_profile_version_id,
+                expected: expected.clone(),
+                replacement: replacement.clone(),
+                review_token: preview.review_token,
+                review_digest: preview.review_digest.clone(),
+            },
+            "upgrade",
+        ),
+        AgentSkillAssignmentOperation::Unassign { expected } => (
+            ApplicationCommand::UnassignAgentSkill {
+                profile_id: preview.profile_id,
+                expected_active_profile_version_id: preview.expected_active_profile_version_id,
+                expected: expected.clone(),
+                review_token: preview.review_token,
+                review_digest: preview.review_digest.clone(),
+            },
+            "unassign",
+        ),
+    }
+}
+
 fn exact_profile_confirmation(command: &ApplicationCommand) -> Option<String> {
     match command {
         ApplicationCommand::CreateAgentProfile { .. } => Some("create".to_owned()),
@@ -1208,6 +1678,7 @@ impl FallbackHost {
                 self.previous_session_interrupted,
             )
         }));
+        let workflow_cleanup = runner.cancel_workflows();
         cancellation.cancel();
         let source_joined = source_thread.join().is_ok();
         let cancellation_failed = cancellation.failure().is_some();
@@ -1226,6 +1697,7 @@ impl FallbackHost {
         if let Some(error) = body_error {
             return Err(error);
         }
+        workflow_cleanup?;
         finish.map_err(UiError::Runtime)?;
         Ok(reason)
     }
@@ -1248,7 +1720,7 @@ fn run_host_loop<W: Write>(
             select_biased! {
                 recv(interrupts) -> signal => match signal {
                     Ok(()) => {
-                        runner.cancel_profile_workflow()?;
+                        runner.cancel_workflows()?;
                         TextRenderer::render_shutdown_reason(ShutdownReason::Interrupted, writer)
                             .map_err(|_| UiError::Write)?;
                         return Ok(ShutdownReason::Interrupted);
@@ -1266,7 +1738,7 @@ fn run_host_loop<W: Write>(
                         break;
                     }
                     Ok(Ok(LineSourceEvent::Eof)) => {
-                        runner.cancel_profile_workflow()?;
+                        runner.cancel_workflows()?;
                         return Ok(ShutdownReason::InputClosed);
                     }
                     Ok(Ok(LineSourceEvent::Cancelled)) => return Err(UiError::ReaderThread),

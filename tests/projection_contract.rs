@@ -732,6 +732,7 @@ fn projection_state_deserialization_rejects_zero_marker_installations_and_multip
         }),
         sessions,
         agent_profiles: Default::default(),
+        skills: Default::default(),
         setup_status: SetupStatus::NotStarted,
         last_sequence: 1,
         last_event_digest: Some(sha256(b"marker")),
@@ -908,6 +909,7 @@ fn projection_lower_bound_rejects_each_underrepresented_installation_session_and
             installation: Some(installation.clone()),
             sessions,
             agent_profiles: Default::default(),
+            skills: Default::default(),
             setup_status: SetupStatus::NotStarted,
             last_sequence: sequence,
             last_event_digest: if sequence == 0 {
@@ -933,6 +935,7 @@ fn newer_store_rejects_a_digest_consistent_fabricated_persisted_prefix() {
         installation: reduce_all(&events[..1]).installation,
         sessions: BTreeMap::new(),
         agent_profiles: Default::default(),
+        skills: Default::default(),
         setup_status: SetupStatus::NotStarted,
         last_sequence: 2,
         last_event_digest: Some(events[1].event_digest.clone()),

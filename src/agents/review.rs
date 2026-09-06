@@ -215,7 +215,7 @@ struct CandidateDigestMaterial<'a> {
     personality: &'a str,
     instructions: &'a str,
     bindings: &'a crate::agents::AgentBindings,
-    skill_refs: &'a [crate::agents::SkillRef],
+    skill_refs: &'a [crate::skills::SkillVersionRef],
     mcp_refs: &'a [crate::agents::McpRef],
 }
 

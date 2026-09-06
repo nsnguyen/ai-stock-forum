@@ -5,6 +5,7 @@ fn command(bytes: &[u8]) -> ApplicationCommand {
     match parse_line(bytes) {
         ParsedLine::Command(command) => command,
         ParsedLine::AgentWorkflow(_) => panic!("expected direct command"),
+        ParsedLine::SkillWorkflow(_) => panic!("expected direct command"),
         ParsedLine::Ignored => panic!("expected command"),
     }
 }
@@ -127,6 +128,15 @@ fn classifies_unknown_command_names_without_retaining_input() {
     let encoded = serde_json::to_string(&rejection).unwrap();
     assert!(!encoded.contains("hunter2"));
     assert!(!encoded.contains("raw_input"));
+}
+
+#[test]
+fn bare_q_is_inert_and_only_slash_quit_requests_shutdown() {
+    let ApplicationCommand::RejectInput(rejection) = command(b"q") else {
+        panic!("bare q must remain inert")
+    };
+    assert_eq!(rejection.category, InputRejectionCategory::Unknown);
+    assert_eq!(command(b"/quit"), ApplicationCommand::RequestShutdown);
 }
 
 #[test]

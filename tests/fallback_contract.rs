@@ -183,9 +183,12 @@ fn reader_propagates_io_errors_without_returning_partial_input() {
 #[test]
 fn renderer_exhaustively_maps_help_status_setup_and_shutdown_views() {
     let help = render(CommandView::Help(HelpView));
-    assert_eq!(help.matches("\n  /").count(), 5);
+    assert_eq!(help.matches("\n  /").count(), 11);
     assert!(help.contains("Available commands"));
     assert!(help.contains("/audit tail [limit: 1-100]"));
+    assert!(help.contains("/skill show <name-or-id> [version]"));
+    assert!(help.contains("/skill assign <skill> <agent> [version]"));
+    assert!(help.contains("/skill unassign <skill> <agent>"));
     assert!(!help.contains("broker"));
     assert!(!help.contains("network"));
 

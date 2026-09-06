@@ -17,7 +17,7 @@ use crate::{
         profile_editor::{ProfileEditor, ProfileEditorMode, ProfileEditorStep},
         tui::{
             layout::{agent_layout_mode, agent_workspace},
-            model::{AgentsPane, TuiModel},
+            model::{AgentSkillAction, AgentSkillUpgradeAvailability, AgentsPane, TuiModel},
             theme::Theme,
         },
     },
@@ -112,12 +112,15 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Them
 
 fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     let focused = workspace_focused(model) && model.agents.pane == AgentsPane::Detail;
-    let lines = model
-        .agents
-        .detail
-        .as_ref()
-        .map(|detail| detail_lines(detail, theme))
-        .unwrap_or_else(|| {
+    let lines = if model.agents.skill_panel_open {
+        assigned_skill_lines(model, theme)
+    } else {
+        model
+            .agents
+            .detail
+            .as_ref()
+            .map(|detail| detail_lines(detail, theme))
+            .unwrap_or_else(|| {
             if model.agents.profiles.profiles.is_empty() {
                 vec![
                     Line::styled("No agent profiles yet", theme.accent),
@@ -131,14 +134,135 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
                     Line::raw("Choose a profile and press Enter to load its detail."),
                 ]
             }
-        });
+            })
+    };
     frame.render_widget(
         Paragraph::new(lines)
-            .block(panel("Agent detail", focused, theme))
+            .block(panel(
+                if model.agents.skill_panel_open {
+                    "Assigned skills"
+                } else {
+                    "Agent detail"
+                },
+                focused,
+                theme,
+            ))
             .wrap(Wrap { trim: false })
             .scroll((scroll(model.agents.detail_scroll, area.height), 0)),
         area,
     );
+}
+
+fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
+    let Some(detail) = model.agents.detail.as_ref() else {
+        return vec![
+            Line::styled("Assigned skills unavailable", theme.warning),
+            Line::raw("Press Esc and reload the agent detail."),
+        ];
+    };
+    let Some(reference) = detail
+        .profile
+        .skill_refs()
+        .get(model.agents.selected_assigned_skill)
+    else {
+        return vec![
+            Line::styled("No assigned skills", theme.accent),
+            Line::raw("Assign a skill from the Skills workspace."),
+            Line::styled("Esc: agent detail", theme.focus),
+        ];
+    };
+    let selected_action = model.selected_available_agent_skill_action();
+    let mut action_spans = vec![Span::styled("Actions  ", theme.accent)];
+    for (index, action) in model.available_agent_skill_actions().iter().copied().enumerate() {
+        if index > 0 {
+            action_spans.push(Span::raw("  "));
+        }
+        let label = match action {
+            AgentSkillAction::View => "View",
+            AgentSkillAction::Upgrade => "Upgrade",
+            AgentSkillAction::Unassign => "Unassign",
+        };
+        action_spans.push(Span::styled(
+            format!("[{label}]"),
+            if action == selected_action { theme.focus } else { theme.muted },
+        ));
+    }
+    let availability = model.agent_skill_upgrade_availability();
+    let availability_text = match &availability {
+        AgentSkillUpgradeAvailability::Unknown => {
+            "UNKNOWN - active skill version data could not be verified".to_owned()
+        }
+        AgentSkillUpgradeAvailability::Current => {
+            "CURRENT - exact pin equals the loaded active reference".to_owned()
+        }
+        AgentSkillUpgradeAvailability::Available(active) => format!(
+            "AVAILABLE - Upgrade available: active v{}; explicit review required",
+            active.version().get()
+        ),
+        AgentSkillUpgradeAvailability::Inconsistent => {
+            "INCONSISTENT - press s to reload; Upgrade is hidden".to_owned()
+        }
+    };
+    let enter_guidance = match selected_action {
+        AgentSkillAction::View => "Enter: View",
+        AgentSkillAction::Upgrade => "Enter: Upgrade",
+        AgentSkillAction::Unassign => "Enter: Unassign",
+    };
+    let skill_refs = detail.profile.skill_refs();
+    let mut lines = vec![
+        Line::styled(
+            format!(
+                "Skill {} of {}",
+                model.agents.selected_assigned_skill.saturating_add(1),
+                skill_refs.len()
+            ),
+            theme.accent,
+        ),
+        Line::from(action_spans),
+        Line::styled(enter_guidance, theme.focus),
+        Line::styled("Esc: detail", theme.focus),
+        Line::styled("Left/Right: action | Up/Down: assigned skill", theme.muted),
+        Line::styled(
+            availability_text,
+            match availability {
+                AgentSkillUpgradeAvailability::Available(_) => theme.success,
+                AgentSkillUpgradeAvailability::Current => theme.accent,
+                AgentSkillUpgradeAvailability::Unknown
+                | AgentSkillUpgradeAvailability::Inconsistent => theme.warning,
+            },
+        ),
+        Line::default(),
+        Line::styled("ASSIGNED ROWS", theme.accent),
+    ];
+    for (index, assigned) in skill_refs.iter().enumerate() {
+        lines.push(Line::styled(
+            format!(
+                "{} {}  v{}  {}",
+                if index == model.agents.selected_assigned_skill { ">" } else { " " },
+                index + 1,
+                assigned.version().get(),
+                compact_identifier(&assigned.skill_id().to_string())
+            ),
+            if index == model.agents.selected_assigned_skill { theme.focus } else { theme.muted },
+        ));
+    }
+    lines.extend([
+        Line::default(),
+        Line::styled("PINNED EXACT VERSION", theme.accent),
+        label_value("Version", format!("v{}", reference.version().get()), theme),
+        label_value("Skill ID", reference.skill_id().to_string(), theme),
+        label_value("Version ID", reference.skill_version_id().to_string(), theme),
+        label_value("Digest", reference.content_digest().to_string(), theme),
+        Line::styled("No automatic upgrades. Skill text grants no capability.", theme.muted),
+    ]);
+    lines
+}
+
+fn compact_identifier(value: &str) -> String {
+    if value.len() <= 19 {
+        return value.to_owned();
+    }
+    format!("{}..{}", &value[..8], &value[value.len() - 8..])
 }
 
 fn detail_lines(detail: &crate::app::AgentProfileView, theme: &Theme) -> Vec<Line<'static>> {
@@ -177,13 +301,15 @@ fn profile_version_lines(
         label_value("Personality", safe_text(profile.personality()), theme),
         label_value("Instructions", safe_text(profile.instructions()), theme),
     ];
+    let skill_refs = profile
+        .skill_refs()
+        .iter()
+        .map(skill_ref_label)
+        .collect::<Vec<_>>();
     append_references(
         &mut lines,
         "Skill refs",
-        profile
-            .skill_refs()
-            .iter()
-            .map(|reference| reference.as_str()),
+        skill_refs.iter().map(String::as_str),
         theme,
     );
     append_references(
@@ -237,6 +363,15 @@ fn append_references<'a>(
             theme,
         ));
     }
+}
+
+fn skill_ref_label(reference: &crate::skills::SkillVersionRef) -> String {
+    format!(
+        "{}@{}#{}",
+        reference.skill_id(),
+        reference.skill_version_id(),
+        reference.version().get(),
+    )
 }
 
 fn render_history(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
@@ -750,6 +885,9 @@ fn diff_name(field: ProfileDiffField) -> &'static str {
         ProfileDiffField::Personality => "Personality",
         ProfileDiffField::Instructions => "Instructions",
         ProfileDiffField::Bindings => "Bindings",
+        ProfileDiffField::SkillRefsAdded => "Skill references added",
+        ProfileDiffField::SkillRefsUpgraded => "Skill references upgraded",
+        ProfileDiffField::SkillRefsRemoved => "Skill references removed",
     }
 }
 

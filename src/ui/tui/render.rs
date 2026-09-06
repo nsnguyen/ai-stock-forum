@@ -6,14 +6,18 @@ use ratatui::{
 };
 
 use super::{
-    layout::{MIN_HEIGHT, MIN_WIDTH, view_geometry},
+    layout::{MIN_HEIGHT, MIN_WIDTH, calculate_skills, view_geometry},
     model::{Focus, LayoutMode, Severity, TuiModel, View},
     theme::Theme,
     views,
 };
 
 pub fn render(frame: &mut Frame<'_>, model: &TuiModel, theme: &Theme) {
-    let cockpit = view_geometry(frame.area(), model.active_view, model.inspector_open).cockpit;
+    let cockpit = if model.skills.active {
+        calculate_skills(frame.area())
+    } else {
+        view_geometry(frame.area(), model.active_view, model.inspector_open).cockpit
+    };
     frame.render_widget(Clear, cockpit.viewport);
     if cockpit.mode == LayoutMode::TooSmall {
         render_too_small(frame, cockpit.viewport, model, theme);
@@ -43,11 +47,34 @@ fn render_header(
     let identity = Line::from(vec![
         Span::styled("AI STOCK FORUM", theme.accent),
         Span::raw("  /  "),
-        Span::styled(view_name(model.active_view), theme.focus),
+        Span::styled(
+            if model.skills.active {
+                "Skills"
+            } else {
+                view_name(model.active_view)
+            },
+            theme.focus,
+        ),
         Span::raw(format!("  /  {}", mode_name(mode))),
     ]);
     let mut lines = vec![identity];
-    if model.active_view == View::Agents {
+    if model.skills.active {
+        let total = model.skills.library.total_count;
+        let built_in = model
+            .skills
+            .library
+            .skills
+            .iter()
+            .filter(|skill| matches!(skill.provenance, crate::skills::SkillProvenance::BuiltIn { .. }))
+            .count();
+        let custom = model.skills.library.skills.len().saturating_sub(built_in);
+        lines.push(Line::from(vec![
+            Span::raw(format!("Library {total}  ")),
+            Span::styled(format!("Built-in {built_in}"), theme.accent),
+            Span::raw("  "),
+            Span::styled(format!("Custom {custom}"), theme.success),
+        ]));
+    } else if model.active_view == View::Agents {
         let active = model.agents.profiles.profiles.len();
         let ready = model
             .agents
@@ -105,11 +132,16 @@ fn numbered_tabs(model: &TuiModel, theme: &Theme) -> Line<'static> {
     spans.push(Span::raw("  "));
     spans.push(Span::styled(
         "a Agents",
-        if model.active_view == View::Agents {
+        if !model.skills.active && model.active_view == View::Agents {
             theme.focus
         } else {
             theme.muted
         },
+    ));
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        "s Skills",
+        if model.skills.active { theme.focus } else { theme.muted },
     ));
     Line::from(spans)
 }
@@ -141,21 +173,26 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
         Line::styled(
             format!(
                 "{} a Agents",
-                if model.active_view == View::Agents {
+                if !model.skills.active && model.active_view == View::Agents {
                     ">"
                 } else {
                     " "
                 }
             ),
-            if model.active_view == View::Agents {
+            if !model.skills.active && model.active_view == View::Agents {
                 theme.focus
             } else {
                 theme.muted
             },
         ),
+        Line::styled(
+            format!("{} s Skills", if model.skills.active { ">" } else { " " }),
+            if model.skills.active { theme.focus } else { theme.muted },
+        ),
         Line::default(),
         Line::styled("/ command", theme.muted),
         Line::styled("? help", theme.muted),
+        Line::styled("q inert", theme.muted),
         Line::styled("/quit exit", theme.muted),
     ]);
     frame.render_widget(
@@ -192,7 +229,11 @@ fn render_message(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
 
 fn render_command(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     let focused = model.focus == Focus::Command;
-    let title = if model.active_view == View::Agents
+    let title = if model.skills.active
+        && model.skills.pane == crate::ui::tui::model::SkillsPane::Editor
+    {
+        " Skill input "
+    } else if model.active_view == View::Agents
         && model.agents.pane == crate::ui::tui::model::AgentsPane::Editor
     {
         " Profile input "
@@ -579,7 +620,7 @@ mod tests {
             assert!(audit.contains(heading), "missing audit heading: {heading}");
         }
 
-        let help = render_text(model(View::Help), 100, 30, false);
+        let help = render_text(model(View::Help), 100, 40, false);
         for command in [
             "/help",
             "/status",

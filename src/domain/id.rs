@@ -50,6 +50,9 @@ uuid_id!(AgentProfileId);
 uuid_id!(AgentProfileVersionId);
 uuid_id!(MemoryNamespaceId);
 uuid_id!(ProfileReviewToken);
+uuid_id!(SkillId);
+uuid_id!(SkillVersionId);
+uuid_id!(SkillReviewToken);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Actor {

@@ -5,12 +5,13 @@ use crate::{
     app::{
         AgentProfileHistoryView, AgentProfileVersionView, AgentProfileView, AgentProfilesView,
         ApplicationCommand, DatabaseReadiness, MAX_INPUT_BYTES, PresentationSnapshot,
-        ProcessGuardOwnership,
+        ProcessGuardOwnership, SkillHistoryView, SkillView, SkillsView,
     },
     audit::AuditEntry,
     domain::{InstallationId, SessionId},
     setup::SetupStatus,
-    ui::profile_editor::ProfileEditor,
+    skills::{SkillDraft, SkillVersionRef},
+    ui::{profile_editor::ProfileEditor, skill_editor::SkillEditor},
 };
 
 pub const COMMAND_HISTORY_CAPACITY: usize = 100;
@@ -33,9 +34,297 @@ pub enum AgentsPane {
     Confirmation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentSkillAction {
+    View,
+    Upgrade,
+    Unassign,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentSkillUpgradeAvailability {
+    Unknown,
+    Current,
+    Available(SkillVersionRef),
+    Inconsistent,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileConfirmation {
     pub command: ApplicationCommand,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillsPane {
+    List,
+    CreateSource,
+    Detail,
+    History,
+    Editor,
+    AgentPicker,
+    AssignmentReview,
+    Confirmation,
+    Result,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillDetailAction {
+    Assign,
+    CreateVersion,
+    History,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignmentKind {
+    Add,
+    Upgrade { expected: SkillVersionRef },
+    Reassign { expected: SkillVersionRef },
+    AlreadyAssigned,
+    Unassign { expected: SkillVersionRef },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentOutcomeIntent {
+    AgentsWorkspace,
+    SkillAssignment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillOperationOrigin {
+    Skills(SkillsPane),
+    AgentSkills { profile_id: crate::domain::AgentProfileId },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillWorkspaceOrigin {
+    Cockpit(View),
+    AgentSkills { profile_id: crate::domain::AgentProfileId },
+}
+
+impl AssignmentKind {
+    pub fn classify(target: &SkillVersionRef, current: Option<&SkillVersionRef>) -> Self {
+        match current {
+            None => Self::Add,
+            Some(current) if current == target => Self::AlreadyAssigned,
+            Some(current) if target.version().get() > current.version().get() => Self::Upgrade {
+                expected: current.clone(),
+            },
+            Some(current) => Self::Reassign {
+                expected: current.clone(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillConfirmation {
+    pub command: ApplicationCommand,
+    pub origin: SkillOperationOrigin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillsViewState {
+    pub active: bool,
+    pub library_loaded: bool,
+    pub workspace_origin: Option<SkillWorkspaceOrigin>,
+    pub pane: SkillsPane,
+    pub selected_skill: usize,
+    pub selected_action_index: usize,
+    pub selected_create_source: usize,
+    pub selected_history_version: usize,
+    pub selected_agent: usize,
+    pub library: SkillsView,
+    pub detail: Option<SkillView>,
+    pub history: Option<SkillHistoryView>,
+    pub version_detail: Option<SkillView>,
+    pub selected_agent_detail: Option<AgentProfileView>,
+    pub assignment: Option<AssignmentKind>,
+    pub editor: Option<SkillEditor>,
+    pub editor_origin: SkillsPane,
+    pub pending_confirmation: Option<SkillConfirmation>,
+    pub review_registered: bool,
+    pub operation_origin: SkillOperationOrigin,
+    pub pending_active_skill: Option<crate::domain::SkillId>,
+}
+
+impl Default for SkillsViewState {
+    fn default() -> Self {
+        Self {
+            active: false,
+            library_loaded: false,
+            workspace_origin: None,
+            pane: SkillsPane::List,
+            selected_skill: 0,
+            selected_action_index: 0,
+            selected_create_source: 0,
+            selected_history_version: 0,
+            selected_agent: 0,
+            library: SkillsView {
+                skills: Vec::new(),
+                total_count: 0,
+                returned_count: 0,
+                truncated: false,
+            },
+            detail: None,
+            history: None,
+            version_detail: None,
+            selected_agent_detail: None,
+            assignment: None,
+            editor: None,
+            editor_origin: SkillsPane::CreateSource,
+            pending_confirmation: None,
+            review_registered: false,
+            operation_origin: SkillOperationOrigin::Skills(SkillsPane::Detail),
+            pending_active_skill: None,
+        }
+    }
+}
+
+impl SkillsViewState {
+    pub fn replace_skills(&mut self, library: SkillsView) {
+        let selected_id = self.selected_summary().map(|summary| summary.skill_ref.skill_id());
+        self.library = library;
+        self.library_loaded = true;
+        self.selected_skill = selected_id
+            .and_then(|id| {
+                self.library
+                    .skills
+                    .iter()
+                    .position(|summary| summary.skill_ref.skill_id() == id)
+            })
+            .unwrap_or_else(|| {
+                self.selected_skill
+                    .min(self.library.skills.len().saturating_sub(1))
+            });
+    }
+
+    pub fn replace_detail(&mut self, detail: SkillView) {
+        let skill_id = detail.skill_ref.skill_id();
+        self.synchronize_selected_skill(skill_id);
+        if self.history.as_ref().map(|history| history.skill_id) != Some(skill_id) {
+            self.history = None;
+        }
+        self.version_detail = None;
+        self.detail = Some(detail);
+        self.pane = SkillsPane::Detail;
+    }
+
+    pub fn replace_history(&mut self, history: SkillHistoryView) {
+        self.selected_history_version = 0;
+        self.version_detail = None;
+        self.history = Some(history);
+    }
+
+    pub fn replace_version_detail(&mut self, detail: SkillView) {
+        let skill_id = detail.skill_ref.skill_id();
+        self.synchronize_selected_skill(skill_id);
+        if self.history.as_ref().map(|history| history.skill_id) != Some(skill_id) {
+            self.history = None;
+            self.selected_history_version = 0;
+        }
+        self.detail = Some(detail.clone());
+        self.version_detail = Some(detail);
+    }
+
+    pub fn clear_skill_context(&mut self) {
+        self.detail = None;
+        self.history = None;
+        self.version_detail = None;
+        self.selected_history_version = 0;
+        self.pending_active_skill = None;
+    }
+
+    fn synchronize_selected_skill(&mut self, skill_id: crate::domain::SkillId) {
+        if let Some(index) = self
+            .library
+            .skills
+            .iter()
+            .position(|summary| summary.skill_ref.skill_id() == skill_id)
+        {
+            self.selected_skill = index;
+        }
+    }
+
+    pub fn current_skill_id(&self) -> Option<crate::domain::SkillId> {
+        self.selected_skill_ref().map(SkillVersionRef::skill_id)
+    }
+
+    pub fn agent_origin_profile_id(&self) -> Option<crate::domain::AgentProfileId> {
+        match self.workspace_origin {
+            Some(SkillWorkspaceOrigin::AgentSkills { profile_id }) => Some(profile_id),
+            _ => None,
+        }
+    }
+
+    pub fn selected_summary(&self) -> Option<&crate::app::SkillSummary> {
+        self.library.skills.get(self.selected_skill)
+    }
+
+    pub fn selected_action(&self) -> SkillDetailAction {
+        let actions = self.available_detail_actions();
+        actions[self.selected_action_index.min(actions.len().saturating_sub(1))]
+    }
+
+    pub fn available_detail_actions(&self) -> &'static [SkillDetailAction] {
+        const ACTIVE: &[SkillDetailAction] = &[
+            SkillDetailAction::Assign,
+            SkillDetailAction::CreateVersion,
+            SkillDetailAction::History,
+        ];
+        const HISTORICAL: &[SkillDetailAction] =
+            &[SkillDetailAction::Assign, SkillDetailAction::History];
+        if self.version_detail.is_some() {
+            HISTORICAL
+        } else {
+            ACTIVE
+        }
+    }
+
+    pub fn selected_skill_ref(&self) -> Option<&SkillVersionRef> {
+        if self.pane == SkillsPane::History {
+            self.history
+                .as_ref()
+                .and_then(|history| history.versions.get(self.selected_history_version))
+                .map(|entry| &entry.skill_ref)
+        } else {
+            self.version_detail
+                .as_ref()
+                .filter(|version| {
+                    self.detail.as_ref().map(|detail| detail.skill_ref.skill_id())
+                        == Some(version.skill_ref.skill_id())
+                })
+                .map(|version| &version.skill_ref)
+                .or_else(|| self.detail
+                .as_ref()
+                .map(|detail| &detail.skill_ref)
+                .or_else(|| self.selected_summary().map(|summary| &summary.skill_ref)))
+        }
+    }
+
+    pub fn start_create(&mut self, seed: Option<SkillDraft>) {
+        self.editor = Some(SkillEditor::for_create(seed));
+        self.editor_origin = SkillsPane::CreateSource;
+        self.pane = SkillsPane::Editor;
+        self.pending_confirmation = None;
+    }
+
+    pub fn start_version(&mut self) -> bool {
+        if self.version_detail.is_some() {
+            return false;
+        }
+        let Some(detail) = self.detail.as_ref() else {
+            return false;
+        };
+        self.editor = Some(SkillEditor::for_version(
+            detail.skill_ref.skill_id(),
+            detail.skill_ref.skill_version_id(),
+            detail.content.clone(),
+        ));
+        self.editor_origin = SkillsPane::Detail;
+        self.pane = SkillsPane::Editor;
+        self.pending_confirmation = None;
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +336,9 @@ pub struct AgentsViewState {
     pub detail_scroll: usize,
     pub history_scroll: usize,
     pub selected_history_version: usize,
+    pub skill_panel_open: bool,
+    pub selected_assigned_skill: usize,
+    pub selected_skill_action_index: usize,
     pub editor: Option<ProfileEditor>,
     pub pending_confirmation: Option<ProfileConfirmation>,
     pub profiles: AgentProfilesView,
@@ -65,6 +357,9 @@ impl Default for AgentsViewState {
             detail_scroll: 0,
             history_scroll: 0,
             selected_history_version: 0,
+            skill_panel_open: false,
+            selected_assigned_skill: 0,
+            selected_skill_action_index: 0,
             editor: None,
             pending_confirmation: None,
             profiles: AgentProfilesView {
@@ -81,6 +376,32 @@ impl Default for AgentsViewState {
 }
 
 impl AgentsViewState {
+    pub fn select_profile_id(&mut self, profile_id: crate::domain::AgentProfileId) {
+        if let Some(index) = self
+            .profiles
+            .profiles
+            .iter()
+            .position(|summary| summary.profile_id == profile_id)
+        {
+            self.selected_profile = index;
+            self.list_scroll = index;
+        }
+    }
+
+    pub fn selected_skill_action(&self) -> AgentSkillAction {
+        match self.selected_skill_action_index.min(2) {
+            0 => AgentSkillAction::View,
+            1 => AgentSkillAction::Upgrade,
+            _ => AgentSkillAction::Unassign,
+        }
+    }
+
+    pub fn selected_assigned_skill_ref(&self) -> Option<&SkillVersionRef> {
+        self.detail
+            .as_ref()
+            .and_then(|detail| detail.profile.skill_refs().get(self.selected_assigned_skill))
+    }
+
     pub fn selected_summary(&self) -> Option<&crate::app::AgentProfileSummary> {
         self.profiles.profiles.get(self.selected_profile)
     }
@@ -94,6 +415,7 @@ impl AgentsViewState {
             self.detail = None;
             self.history = None;
             self.version_detail = None;
+            self.skill_panel_open = false;
             return;
         }
         self.selected_profile = selected_id
@@ -136,6 +458,9 @@ impl AgentsViewState {
             self.version_detail = None;
         }
         self.detail = Some(detail);
+        self.selected_assigned_skill = self
+            .selected_assigned_skill
+            .min(self.detail.as_ref().map(|detail| detail.profile.skill_refs().len().saturating_sub(1)).unwrap_or(0));
     }
 
     pub fn replace_history(&mut self, history: AgentProfileHistoryView) {
@@ -393,6 +718,8 @@ fn bounded_safe_prefix(input: &str, byte_limit: usize) -> String {
 pub struct TuiModel {
     pub active_view: View,
     pub agents: AgentsViewState,
+    pub skills: SkillsViewState,
+    pub pending_agent_outcome: Option<AgentOutcomeIntent>,
     pub focus: Focus,
     pub layout_mode: LayoutMode,
     pub inspector_open: bool,
@@ -437,6 +764,8 @@ impl TuiModel {
         let mut model = Self {
             active_view: View::Overview,
             agents,
+            skills: SkillsViewState::default(),
+            pending_agent_outcome: None,
             focus: Focus::Workspace,
             layout_mode: LayoutMode::Wide,
             inspector_open: false,
@@ -573,6 +902,69 @@ impl TuiModel {
 
     pub fn set_runtime_status(&mut self, runtime_status: RuntimeStatus) {
         self.runtime_status = runtime_status;
+    }
+
+    pub fn agent_skill_upgrade_availability(&self) -> AgentSkillUpgradeAvailability {
+        let Some(pinned) = self.agents.selected_assigned_skill_ref() else {
+            return AgentSkillUpgradeAvailability::Unknown;
+        };
+        let Some(active) = self
+            .skills
+            .library
+            .skills
+            .iter()
+            .find(|summary| summary.skill_ref.skill_id() == pinned.skill_id())
+            .map(|summary| &summary.skill_ref)
+        else {
+            return AgentSkillUpgradeAvailability::Unknown;
+        };
+        if active == pinned {
+            AgentSkillUpgradeAvailability::Current
+        } else if active.version() > pinned.version() {
+            AgentSkillUpgradeAvailability::Available(active.clone())
+        } else {
+            AgentSkillUpgradeAvailability::Inconsistent
+        }
+    }
+
+    pub fn available_agent_skill_actions(&self) -> &'static [AgentSkillAction] {
+        const STANDARD: &[AgentSkillAction] =
+            &[AgentSkillAction::View, AgentSkillAction::Unassign];
+        const UPGRADEABLE: &[AgentSkillAction] = &[
+            AgentSkillAction::View,
+            AgentSkillAction::Upgrade,
+            AgentSkillAction::Unassign,
+        ];
+        if matches!(
+            self.agent_skill_upgrade_availability(),
+            AgentSkillUpgradeAvailability::Available(_)
+        ) {
+            UPGRADEABLE
+        } else {
+            STANDARD
+        }
+    }
+
+    pub fn selected_available_agent_skill_action(&self) -> AgentSkillAction {
+        let selected = self.agents.selected_skill_action();
+        if self.available_agent_skill_actions().contains(&selected) {
+            selected
+        } else {
+            AgentSkillAction::View
+        }
+    }
+
+    pub fn select_available_agent_skill_action(&mut self, action: AgentSkillAction) {
+        let action = if self.available_agent_skill_actions().contains(&action) {
+            action
+        } else {
+            AgentSkillAction::View
+        };
+        self.agents.selected_skill_action_index = match action {
+            AgentSkillAction::View => 0,
+            AgentSkillAction::Upgrade => 1,
+            AgentSkillAction::Unassign => 2,
+        };
     }
 
     fn audit_last_index(&self) -> Option<usize> {

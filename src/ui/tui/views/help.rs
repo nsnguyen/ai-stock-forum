@@ -26,6 +26,9 @@ fn content(theme: &Theme) -> Vec<Line<'static>> {
     vec![
         Line::styled("KEYS", theme.accent),
         Line::raw("1-4                 Open Overview / Setup / Audit / Help"),
+        Line::raw("a                   Open Agents"),
+        Line::raw("s                   Open Skills"),
+        Line::raw("q                   Inert; does not quit"),
         Line::raw("Tab / Shift+Tab     Move focus forward / backward"),
         Line::raw("Arrow keys          Move within the focused list or field"),
         Line::raw("PageUp / PageDown   Move by one visible page"),
@@ -43,6 +46,9 @@ fn content(theme: &Theme) -> Vec<Line<'static>> {
         Line::raw("/status"),
         Line::raw("/setup status"),
         Line::raw("/audit tail [limit: 1-100]"),
+        Line::raw("/skills              Open the skill library"),
+        Line::raw("/skill list          List saved skills"),
+        Line::raw("/skill add           Open the guided skill creator"),
         Line::raw("/quit               Request normal shutdown"),
     ]
 }

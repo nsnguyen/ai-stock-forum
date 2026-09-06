@@ -7,6 +7,7 @@ use crate::{
 };
 
 use super::PersistenceError;
+use super::skill_repository::validate_skill_version_ref;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredAgentProfileVersion {
@@ -39,6 +40,9 @@ pub fn insert_expected_version(
     event_sequence: i64,
     profile: &AgentProfileVersion,
 ) -> Result<(), PersistenceError> {
+    for reference in profile.skill_refs() {
+        validate_skill_version_ref(transaction, reference)?;
+    }
     let expected = expected_row(event_sequence, profile)?;
     let existing = load_rows_matching_logical_key(transaction, &expected)?;
     match existing.as_slice() {
@@ -56,6 +60,9 @@ pub fn load_all_versions(
         .map(|stored| {
             let profile = serde_json::from_slice::<AgentProfileVersion>(&stored.payload_json)
                 .map_err(|_| PersistenceError::InvalidAgentProfilePayload)?;
+            for reference in profile.skill_refs() {
+                validate_skill_version_ref(connection, reference)?;
+            }
             if expected_row(stored.source_event_sequence, &profile)? != stored {
                 return Err(PersistenceError::AgentProfileHistoryMismatch);
             }
