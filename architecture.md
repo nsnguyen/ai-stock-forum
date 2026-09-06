@@ -379,17 +379,17 @@ memory namespaces, skills, and grants.
 The accepted local aggregate is a stable profile identity plus immutable,
 positive-numbered versions. Each version contains a version ID, display and
 normalized name, description, role, primary specialty, ordered specialty tags,
-personality, operating instructions, optional provider/model binding labels,
-typed skill and MCP reference lists, a stable memory namespace, default policy
-reference, optional exact template provenance, creation time, predecessor, and
-canonical content digest. Milestone 1 accepts empty skill/MCP references and
-does not execute them.
+personality, operating instructions, typed optional inference and engineering
+binding references, typed skill and MCP reference lists, a stable memory
+namespace, default policy reference, optional exact template provenance,
+creation time, predecessor, and canonical content digest. Milestone 1 accepts
+empty skill/MCP references and does not execute them.
 
-An active version is `Ready` only when both provider and model binding labels
-are present. It is `Not Ready` when either is absent. Both states are valid;
-neither state tests a connection, stores a credential, authorizes execution, or
-causes provider fallback. Provider/model values in this milestone are local
-labels, never secret material or live adapters.
+Readiness is `Unbound`, `BindingUnavailable`, or `Ready`, computed against a
+typed catalog and the binding requirements of the profile role. The production
+catalog is empty in this milestone, so normal profiles are unbound and display
+`Not Ready`; injected catalogs exercise the other states. No state contacts a
+provider, stores a credential, authorizes execution, or causes fallback.
 
 Creation copies one pinned built-in template into presentation-local draft
 state and installs immutable version 1 only after explicit confirmation. Edit
@@ -401,12 +401,13 @@ immutable version, advances the active pointer, and records the command/event
 evidence. Decline, cancel, replacement, shutdown, and restart invalidate the
 pending review.
 
-`agent create`, `agent list`, `agent show <profile-id>`, `agent edit
-<profile-id>`, and `agent history <profile-id>` are the fallback surface. The
-Adaptive Cockpit opens Agents with `a` outside command entry while preserving
-`1` through `4`; its list, detail, editor, review, and history surfaces adapt at
-narrow, medium, and wide widths. Both adapters use the same typed application
-service and never own profile business rules.
+Canonical `/agent create`, `/agent list`, `/agent show <name-or-id>`, `/agent
+edit <name-or-id>`, and `/agent history <name-or-id> [version]` commands are
+shared by both hosts; fallback also accepts the bare `agent` alias. The Adaptive
+Cockpit opens Agents with `a` outside command entry while preserving `1` through
+`4`; its list, detail, editor, review, and history surfaces adapt at narrow,
+medium, and wide widths. Both adapters use the same typed application service
+and never own profile business rules.
 
 The verified event stream is authoritative, but `agent_profile_versions` is an
 immutable materialized mirror rather than a disposable projection. Recovery
@@ -415,6 +416,14 @@ an existing byte-equivalent row. It must refuse startup for an altered row or
 an extra row with no verified event, and it never updates or deletes suspicious
 immutable history. Only `active_agent_profiles` is disposable: after immutable
 reconciliation succeeds, recovery may transactionally rebuild that pointer.
+The immutable mirror stores independently constrained query fields rather than
+trusting only serialized payload bytes, the active pointer pins the exact
+content digest, and one global constraint prevents a memory namespace from
+being reused by another stable profile across any historical version.
+
+Because this milestone is prerelease, migration `0002_agent_profiles.sql` may
+be amended. Exact schema-v1 installations remain supported upgrade sources;
+databases made by intermediate Phase 2 development builds must be recreated.
 
 This milestone deliberately excludes declarative skill behavior, hybrid
 memory, model/provider execution, MCP use, rooms, debates, market data, and all

@@ -310,9 +310,10 @@ rooms, engineering jobs, Git promotion, and finance-specific screens.
 ### Milestone status
 
 - [x] **Milestone 1: Agent Profile Foundation.** Local schema-v1 upgrade,
-  immutable profile versions, active pointers, pinned templates, Ready/Not Ready
-  state, passive edit preview, explicit activation, restart recovery, fallback
-  workflows, and narrow/medium/wide Adaptive Cockpit coverage are complete.
+  immutable profile versions, active pointers, pinned templates, typed binding
+  references with computed tri-state readiness, passive edit preview, explicit
+  activation, restart recovery, fallback workflows, and narrow/medium/wide
+  Adaptive Cockpit coverage are complete.
 - [ ] **Milestone 2: Declarative skills.** Versioned skill manifests, assignment,
   retrieval, and presentation remain deferred.
 - [ ] **Milestone 3: Hybrid memory.** Private KV memory, episodic summaries,
@@ -339,7 +340,9 @@ and private-memory editing remain future Phase 2 milestones.
 
 - Implement immutable `AgentProfileVersion` records and current-version
   projections.
-- Add `agent create|list|show|edit|history` with guided editing, validation,
+- Add canonical `/agent create|list|show|edit|history` commands, with the bare
+  `agent` prefix retained as a fallback alias, guided editing, name-or-ID
+  selectors, exact-version history inspection, validation,
   field-level diffs, and activation confirmation.
 - Add TUI list/detail/editor/history views for profiles, skills, memory, and
   proposals; every action maps to the same typed commands as fallback mode.

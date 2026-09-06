@@ -4,6 +4,29 @@
 
 **Goal:** Deliver the first Phase 2 vertical slice: users can create, inspect, edit, version, and activate safe agent profiles from both the fallback terminal and the full-screen adaptive cockpit, with deterministic validation, immutable history, crash-safe persistence, and explicit edit confirmation.
 
+> **Final design correction (2026-09-05):** The design specification is
+> authoritative over older examples below. The completed implementation uses
+> canonicalized persisted drafts with recursively strict serde, rejects tabs in
+> every forbidden profile field, preserves empty descriptions, normalizes and
+> deduplicates tags, and pins exact canonical bytes and SHA-256 digests for all
+> five templates. Bindings are typed catalog references with `Unbound`,
+> `BindingUnavailable`, and `Ready` states; they are not free-form provider or
+> model labels. Read, create, preview-edit, and activate-revision are four
+> separate deny-wins capabilities. Canonical commands use `/agent`, accept
+> name-or-ID selectors and short template names, and support exact historical
+> version inspection. Creation requires `create`; revision activation requires
+> `activate <review-digest>`. Input and output bounds apply before event,
+> outcome, and receipt metadata construction, and oversized or invalid UTF-8
+> lines reach authoritative `RejectInput` handling. Recoverable errors retain
+> editor and confirmation state. The TUI handles resize, exact restoration,
+> unconditional `q` in Too Small, and stepwise `Esc`. Schema v2 independently
+> constrains mirrored fields, pins the active digest, enforces globally unique
+> per-profile memory namespaces across history, reports history divergence with
+> a dedicated error, and is rollback-tested at every migration boundary.
+> Migration 0002 may be amended while Phase 2 is prerelease: exact schema-v1
+> upgrades remain supported, while databases created by intermediate Phase 2
+> builds must be recreated.
+
 **Architecture:** Add an agents domain with bounded validated values, pinned templates, canonical profile versions, deterministic digests, semantic diffs, and an active-profile projection. Accepted mutations flow through the existing application command, event, reducer, receipt, SQLite, and audit boundaries. Edit preview remains process-local and non-durable; activation carries the candidate again and proves it matches a one-use review token. SQLite stores an append-only mirror of immutable profile-version events plus a rebuildable active pointer.
 
 **Tech Stack:** Rust 1.98, serde/serde_json, sha2, uuid, rusqlite, unicode-normalization 0.1.24, unicode-casefold 0.2.0, ratatui, crossterm, proptest, existing application/event/persistence/recovery infrastructure.
@@ -166,12 +189,14 @@ In src/agents/profile.rs add serde-enabled types:
         pub mcp_refs: Vec<McpRef>,
     }
 
-    pub struct AgentBindings {
-        pub model_provider: Option<String>,
-        pub model_name: Option<String>,
-    }
-
-Add a validating constructor that applies every byte limit, preserves user-visible spelling, rejects duplicate folded tags, requires empty skill_refs and mcp_refs for this milestone, and allows both bindings to be absent. Add readiness() returning Ready only when both provider and model are present; otherwise return NotReady without rejecting activation.
+`AgentBindings` contains typed optional inference and engineering references
+selected from an injected `BindingCatalog`; it contains no free-form provider,
+model, or runtime strings. Add a validating constructor that applies every byte
+limit cumulatively, canonicalizes accepted values, rejects folded duplicate
+tags, recursively rejects unknown serialized fields, requires empty skill_refs
+and mcp_refs for this milestone, and allows bindings to be absent. Readiness is
+computed as `Unbound`, `BindingUnavailable`, or `Ready` against role-specific
+requirements and catalog availability. Production uses an empty catalog.
 
 - [ ] **Step 6: Implement five immutable built-in templates**
 
@@ -471,31 +496,14 @@ Expected: schema remains version 1 and profile tables are absent.
 
 Create STRICT tables with explicit constraints:
 
-    CREATE TABLE agent_profile_versions (
-        profile_id TEXT NOT NULL,
-        profile_version_id TEXT NOT NULL UNIQUE,
-        version INTEGER NOT NULL CHECK (version >= 1),
-        normalized_name TEXT NOT NULL,
-        content_digest TEXT NOT NULL,
-        payload_json BLOB NOT NULL,
-        source_event_sequence INTEGER NOT NULL UNIQUE,
-        created_at_ms INTEGER NOT NULL,
-        PRIMARY KEY (profile_id, version),
-        UNIQUE (profile_id, profile_version_id)
-    ) STRICT;
-
-    CREATE TABLE active_agent_profiles (
-        profile_id TEXT PRIMARY KEY,
-        profile_version_id TEXT NOT NULL UNIQUE,
-        version INTEGER NOT NULL CHECK (version >= 1),
-        normalized_name TEXT NOT NULL UNIQUE,
-        readiness TEXT NOT NULL CHECK (readiness IN ('ready', 'not_ready')),
-        FOREIGN KEY (profile_id, profile_version_id)
-            REFERENCES agent_profile_versions(profile_id, profile_version_id)
-            DEFERRABLE INITIALLY DEFERRED
-    ) STRICT;
-
-Add indexes for profile history and active folded-name lookup. Add BEFORE UPDATE and BEFORE DELETE triggers on agent_profile_versions that abort with agent_profile_versions_immutable. Do not add such triggers to active_agent_profiles.
+Create STRICT immutable-version and active-pointer tables. The immutable table
+stores independently constrained mirror columns for every query-critical field
+as well as canonical payload bytes; persistence compares both representations.
+The active row pins profile ID, exact version ID and number, normalized name, and
+content digest through a composite deferred foreign key. Enforce active-name
+uniqueness and prevent one memory namespace from being used by two stable
+profiles across historical versions. Add immutable UPDATE/DELETE triggers only
+to `agent_profile_versions`.
 
 - [ ] **Step 4: Register ordered migration version 2**
 
@@ -619,7 +627,8 @@ Expected: all append-only and recovery rules pass.
 Cover:
 
 - Create from a fully edited template copy activates version 1.
-- Create without provider bindings succeeds and returns NotReady.
+- Create with unbound typed references succeeds and returns `Unbound` / `Not
+  Ready`; injected catalogs cover unavailable and role-specific ready states.
 - Case-folded active-name collision is rejected.
 - List, show, and history return deterministic structured views.
 - Preview returns ordered field diffs, a token, and a review digest without writing an event, receipt, audit row, profile row, or command history entry.
@@ -639,13 +648,9 @@ Expected: commands, views, capabilities, and review APIs are missing.
 
 - [ ] **Step 3: Add explicit capabilities**
 
-Add:
-
-    AgentProfileRead
-    AgentProfileCreate
-    AgentProfileEdit
-
-Map commands to exactly one required capability. Do not infer any capability from AgentRole or content.
+Add four distinct capabilities: profile read, profile create, profile edit
+preview, and profile revision activation. Map every operation to exactly one
+required capability. Do not infer any capability from AgentRole or content.
 
 - [ ] **Step 4: Add mutation and read commands**
 
@@ -665,8 +670,12 @@ Extend ApplicationCommand with:
     }
 
     ListAgentProfiles
-    ShowAgentProfile { profile_id: AgentProfileId }
-    ShowAgentProfileHistory { profile_id: AgentProfileId }
+    ShowAgentProfile { selector: AgentProfileSelector }
+    ShowAgentProfileHistory { selector: AgentProfileSelector }
+    ShowAgentProfileVersion {
+        selector: AgentProfileSelector,
+        version: ObjectVersion,
+    }
 
 Accepted create data may be persisted in its command receipt because it is no longer a draft. Edit preview must not be an ApplicationCommand and must not enter receipt storage.
 
@@ -920,14 +929,18 @@ Expected: all state transitions and local-only guarantees pass.
 
 Cover:
 
-    agent list
-    agent show <profile-id>
-    agent history <profile-id>
-    agent create
-    agent create <template-id>
-    agent edit <profile-id>
+    /agent list
+    /agent show <name-or-id>
+    /agent history <name-or-id> [version]
+    /agent create
+    /agent create <bull|bear|chief|engineering|custom>
+    /agent edit <name-or-id>
 
-Assert create defaults to a template selection screen, edit loads the active version, guided field lines are not command-history entries, review displays a field-by-field diff, :activate asks for an explicit y/yes confirmation, n/no returns to review, and EOF/cancel leaves no durable draft.
+Assert create defaults to a template selection screen, edit loads the active
+version, guided field lines are not command-history entries, review displays a
+field-by-field diff, `:create` requires exact `create`, `:activate` requires
+exact `activate <review-digest>`, `Esc` returns one step, recoverable errors
+retain the exact workflow, and EOF/cancel leaves no durable draft.
 
 - [ ] **Step 2: Run the fallback contract and confirm RED**
 
@@ -937,7 +950,11 @@ Expected: parser rejects agent commands and runner has no editor mode.
 
 - [ ] **Step 3: Extend command parsing without weakening limits**
 
-Parse only the six exact forms above. Validate IDs using typed parsers. Keep the existing maximum line length. When an editor is active, route input to ProfileEditor before the normal command parser.
+Parse only the canonical forms above, while retaining the equivalent bare
+`agent` aliases in fallback mode. Resolve quoted normalized names or typed IDs.
+Keep the maximum cumulative input length and provide numeric limit guidance.
+When an editor is active, route input to ProfileEditor before the normal command
+parser.
 
 - [ ] **Step 4: Render deterministic safe profile output**
 
@@ -1134,12 +1151,14 @@ Exercise a real temporary SQLite database and application service:
 
 1. Start from a schema-v1 database and migrate.
 2. Create an unbound Bull template copy renamed Research North.
-3. Verify it activates as version 1 with NotReady.
+3. Verify it activates as version 1 with `Unbound` / `Not Ready`.
 4. List and show it.
-5. Preview an edit that changes specialty, tags, personality, instructions, and bindings.
+5. Preview an edit that changes specialty, tags, personality, and instructions;
+   exercise bound readiness separately with an injected typed catalog.
 6. Verify no durable write occurred during preview.
 7. Activate after explicit simulated confirmation.
-8. Verify version 2 is Ready and version 1 remains byte-stable.
+8. Verify version 2 remains honestly Unbound in production, injected-catalog
+   readiness is role-specific, and version 1 remains byte-stable.
 9. Restart the service and verify recovery reproduces the same active state and history.
 10. Exercise fallback list/show/history output.
 11. Exercise TUI model and renderer at narrow, medium, and wide sizes.
@@ -1193,11 +1212,15 @@ In a real PTY:
 
 1. Launch the release binary against an isolated temporary data directory.
 2. Open Agents with a.
-3. Create an unbound profile and observe Not Ready.
-4. Edit it, inspect the field diff, decline once, then confirm.
-5. Verify list, detail, and history.
+3. Create an unbound profile with a short template name, use exact `create`, and
+   observe Not Ready.
+4. Edit it through both name and ID selectors, inspect the field diff, return
+   once with `Esc`, then use exact `activate <review-digest>`.
+5. Verify bounded list/detail/history and exact historical-version content plus
+   predecessor diff.
 6. Resize across narrow, medium, and wide layouts.
-7. Quit normally.
+7. Resize below the minimum and verify `q` still quits unconditionally while
+   `Esc` does not.
 8. Confirm alternate screen, cursor, bracketed paste, and terminal modes are restored.
 9. Repeat the read workflow in fallback mode.
 10. Confirm the second-instance guard still rejects a concurrent process.

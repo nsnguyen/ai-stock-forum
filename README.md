@@ -78,10 +78,13 @@ Engineering, and Custom templates; local create, list, detail, edit-review,
 activation, and immutable history workflows; schema version 2 persistence;
 restart recovery; Adaptive Cockpit views; and command-mode parity.
 
-`Not Ready` means an active profile does not have both a local provider label
-and model label. `Ready` means both labels are present. Readiness does not test a
-provider or authorize model execution. Unbound profiles are valid and activate
-as `Not Ready` without inventing a provider or fallback.
+Profile bindings are typed references selected only from an application-supplied
+catalog, never free-form provider or model labels. Readiness is computed as
+`Unbound`, `Binding unavailable`, or `Ready` from the role's required bindings
+and the current catalog snapshot. The production Milestone 1 catalog is empty,
+so normal profiles remain unbound and display `Not Ready`; deterministic tests
+inject catalogs to cover unavailable and ready states. Readiness never contacts
+a provider, authorizes execution, or selects a fallback.
 
 Every accepted create installs immutable version 1. An accepted edit first uses
 a passive, local-only preview that writes no event, receipt, draft, profile row,
@@ -95,6 +98,11 @@ profile row may be backfilled from its verified event, but an altered row or an
 unexpected extra row causes safe startup refusal. Recovery never updates or
 deletes suspicious immutable history. Only the active-profile pointer is a
 rebuildable projection.
+
+Milestone 1 is prerelease software, so migration `0002_agent_profiles.sql` was
+amended to its final shape. Databases at the released schema-v1 boundary upgrade
+in place. Databases created by an intermediate Phase 2 development build must be
+recreated rather than treated as a supported upgrade source.
 
 Milestone 1 does not execute a model or agent. Declarative skills, hybrid
 memory, provider connections, model execution, MCP use, rooms, debates, market
@@ -126,8 +134,9 @@ for those checks.
 
 ## Supported commands
 
-Each supported command form has one typed application effect. Profile workflow
-lines use the bare `agent` prefix in command mode:
+Each supported command form has one typed application effect. `/agent` is the
+canonical profile prefix in both hosts; command mode also accepts the equivalent
+bare `agent` alias for compatibility:
 
 | Form | Output/effect | Continuation |
 | --- | --- | --- |
@@ -136,13 +145,17 @@ lines use the bare `agent` prefix in command mode:
 | `/audit tail` | Outputs `Audit tail (limit 20):` plus the selected entries or `No audit entries.`; commits `AuditTailViewed(limit=20)`. | Continues. |
 | `/audit tail N` | Outputs `Audit tail (limit N):` plus the selected entries or `No audit entries.` for `N` from 1 through 100; commits `AuditTailViewed(limit=N)`. | Continues. |
 | `/setup status` | Outputs exactly `Setup: not started` and `Guided setup is not implemented in Phase 0.` on a fresh installation; commits `SetupStatusViewed`. | Continues. |
-| `agent create` | Lists pinned templates and enters the local guided creator after selection. | Continues until confirmation or cancel. |
-| `agent create <template-id>` | Copies the exact pinned template into a local guided creator. | Continues until confirmation or cancel. |
-| `agent list` | Lists active profiles with role, specialty, readiness, version, and ID. | Continues. |
-| `agent show <profile-id>` | Shows the accepted active profile fields and immutable metadata. | Continues. |
-| `agent edit <profile-id>` | Loads the active version into a local editor, previews an authoritative diff, and requires explicit activation confirmation. | Continues until confirmation or cancel. |
-| `agent history <profile-id>` | Shows newest-first immutable version metadata without exposing raw SQLite payloads. | Continues. |
+| `/agent create` | Lists the five pinned templates and enters the local guided creator after selection. | Continues until confirmation or cancel. |
+| `/agent create <bull\|bear\|chief\|engineering\|custom>` | Copies the exact pinned template into a local guided creator. | Continues until confirmation or cancel. |
+| `/agent list` | Lists at most 100 active profiles with role, specialty, readiness, version, and ID. | Continues. |
+| `/agent show <name-or-id>` | Shows the accepted active profile fields and immutable metadata. | Continues. |
+| `/agent edit <name-or-id>` | Loads the active version into a local editor, previews an authoritative diff, and requires explicit activation confirmation. | Continues until confirmation or cancel. |
+| `/agent history <name-or-id> [version]` | Shows bounded newest-first metadata, or the exact immutable version with complete accepted content and predecessor diff. | Continues. |
 | `/quit` | Outputs exactly `Shutting down.`; commits `ShutdownRequested` and ends the session with `UserQuit`. | Ends normally. |
+
+Creation requires the exact phrase `create`. Revision activation requires
+`activate <review-digest>`. Recoverable submission errors retain the same draft,
+review, and confirmation so the user can retry without reconstructing work.
 
 Rejected input is also audited as a typed event and the command host continues.
 Rejected full lines are not stored verbatim.

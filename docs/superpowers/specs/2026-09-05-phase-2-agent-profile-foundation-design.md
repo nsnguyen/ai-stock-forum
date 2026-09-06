@@ -333,6 +333,7 @@ The application command surface adds typed operations equivalent to:
 - `ShowAgentProfile`
 - `ActivateAgentProfileRevision`
 - `ShowAgentProfileHistory`
+- `ShowAgentProfileVersion`
 
 Selectors accept a stable profile ID or a normalized active display name.
 Ambiguous selectors are impossible because active names are unique.
@@ -437,6 +438,10 @@ contract.
 ## 14. Persistence design
 
 The next ordered SQLite migration adds normalized profile projections.
+Migration `0002_agent_profiles.sql` may be amended while Phase 2 remains
+prerelease. Upgrade compatibility is required from the exact schema-v1 release
+boundary; databases created by intermediate Phase 2 development builds must be
+recreated rather than migrated.
 
 ### 14.1 Immutable version table
 
@@ -603,7 +608,7 @@ Fallback mode supports:
 - `/agent list`
 - `/agent show <name-or-id>`
 - `/agent edit <name-or-id>`
-- `/agent history <name-or-id>`
+- `/agent history <name-or-id> [version]`
 
 Create and edit enter a presentation-local guided editor. While that editor is
 active, bounded field responses are not parsed as global slash commands and are

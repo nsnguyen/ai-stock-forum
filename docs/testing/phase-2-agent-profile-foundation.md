@@ -11,7 +11,9 @@ skills, hybrid memory, provider execution, rooms, debates, or market data.
 - A pinned Bull, Bear, Chief, Engineering, or Custom template can be copied into
   a local draft and explicitly activated as immutable version 1.
 - An unbound profile is valid and displays `Not Ready`.
-- A profile with both local provider and model labels displays `Ready`.
+- Typed binding references can only be selected from an application catalog.
+  Injected catalog tests distinguish `Unbound`, `Binding unavailable`, and
+  `Ready`; the production Milestone 1 catalog is empty.
 - Edit preview is local-only and passive. It writes no event, receipt, profile
   row, active pointer, persistent draft, or generic audit entry.
 - Activation is separate from preview and requires explicit confirmation.
@@ -24,8 +26,7 @@ skills, hybrid memory, provider execution, rooms, debates, or market data.
 
 `Ready` does not mean a provider was contacted or a model can run. Milestone 1
 has no provider adapter, secret input, model execution, automatic fallback, or
-agent process. Binding values are local labels only and must not contain keys or
-credentials.
+agent process. Binding controls never accept free-form IDs, keys, or labels.
 
 ## Release gates
 
@@ -76,23 +77,26 @@ Perform this exact flow in the cockpit:
 2. Press `c` to copy the selected pinned template. Keep bindings empty, rename
    the draft `Research North`, walk every guided step, and inspect the Review
    screen. No durable profile exists before confirmation.
-3. Enter `:activate`, then press `Enter` on `Confirm Create`. The new active
-   profile must show version 1 and `Not Ready`.
+3. Enter `:create`, then type the exact phrase `create` at `Confirm Create` and
+   press `Enter`. The new active profile must show version 1 and `Not Ready`.
 4. Select `Research North`, open detail with `Enter`, and press `e`.
-5. Change primary specialty, specialty tags, personality, instructions, provider
-   label, and model label. Enter `:review` and inspect every ordered Before/After
-   field diff.
+5. Change primary specialty, specialty tags, personality, and instructions.
+   Leave the unavailable production bindings unbound. Enter `:review` and
+   inspect every ordered Before/After field diff.
 6. Enter `:activate`, then press `Esc` at `Confirm Activate`. Confirm the editor
    returns to the unchanged review and history still has only version 1.
-7. Enter `:activate` again and press `Enter`. Confirm detail shows version 2 and
-   `Ready`.
-8. Press `h`. Confirm history is newest-first, version 2 supersedes version 1,
-   and inspection does not move the active pointer.
+7. Enter `:activate` again, then type the exact displayed `activate
+   <review-digest>` phrase and press `Enter`. Confirm detail shows version 2 and
+   remains honestly `Not Ready`.
+8. Press `h`. Confirm history is newest-first, then select version 1 and inspect
+   its complete accepted content, immutable metadata, and predecessor diff.
+   Inspection must not move the active pointer.
 9. Resize to at least `70x24`, `100x30`, and `140x40`. Confirm the Agents view
    respectively uses one-pane narrow, two-pane medium, and three-pane wide
    presentation without losing selection, editor/detail state, or history.
-10. Return outside editor/confirmation and press `q`. Confirm normal success
-    exit and shell usability.
+10. Resize below `60x18`; press `Esc` and confirm the app remains open, then
+    press `q` and confirm unconditional normal quit from the Too Small view.
+11. Confirm shell usability after exit.
 
 If the terminal harness cannot resize, record exactly that limitation. Do not
 claim those resize actions; run the automated ratatui narrow/medium/wide
@@ -126,21 +130,32 @@ target/release/ai-stock-forum --command-mode
 At the prompt run:
 
 ```text
-agent list
-agent show <profile-id-from-agent-list>
-agent history <profile-id-from-agent-list>
+/agent list
+/agent show <name-or-id-from-agent-list>
+/agent history <name-or-id-from-agent-list>
+/agent history <name-or-id-from-agent-list> 1
 /quit
 ```
 
-`agent list` must show `Research North`, version 2, and `ready`. `agent show`
-must display accepted fields and immutable metadata through typed labels.
-`agent history` is the supported way to inspect version history without
-exposing raw SQLite `payload_json`; it must show versions 2 and 1 newest-first.
+`/agent list` must show `Research North`, version 2, and `not ready`. `/agent
+show` must display accepted fields and immutable metadata through typed labels.
+The history commands are the supported way to inspect version history without
+exposing raw SQLite `payload_json`; the list must show versions 2 and 1
+newest-first, while the exact-version form must show version 1 content and its
+predecessor diff.
 Do not use a database browser or dump raw profile rows for routine inspection.
 
-For a complete fallback-only create/edit rehearsal, use `agent create
-builtin.bull`, the same guided colon controls, `n` or `no` to decline once, and
-`y` or `yes` to confirm. EOF and `:cancel` must discard local draft/review state.
+For a complete fallback-only create/edit rehearsal, use `/agent create bull`
+and the same guided colon controls. Creation uses `:create` followed by exact
+`create`; editing uses `:activate` followed by exact `activate
+<review-digest>`. Cause one recoverable duplicate-name or transient submission
+error and verify the exact draft, review, and confirmation remain available for
+retry. EOF and `:cancel` discard local draft/review state.
+
+Oversized and invalid UTF-8 command lines must produce the authoritative typed
+`RejectInput` result, with bounded metadata, and must not be pre-dispatch local
+substitutes. List and history outcomes, events, and receipt payloads are capped
+at 100 rows before durable metadata is constructed.
 
 ## Restart and recovery
 
@@ -162,6 +177,12 @@ Recovery fails closed for suspicious immutable history:
 Only the active pointer may be transactionally rebuilt after immutable-history
 reconciliation succeeds. Corruption experiments belong in automated temporary
 database tests, not a user's normal state directory.
+
+Migration `0002_agent_profiles.sql` is amendable while Phase 2 is prerelease.
+The automated contract proves a real schema-v1 database upgrades without
+altering legacy rows and proves rollback at each migration boundary. A database
+created by an intermediate Phase 2 development build is not an upgrade fixture
+and must be recreated.
 
 ## Second-instance guard
 
