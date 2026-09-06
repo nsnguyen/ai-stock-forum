@@ -11,6 +11,6 @@ pub use error::DomainError;
 pub use id::{
     Actor, AgentProfileId, AgentProfileVersionId, ApprovalId, CausationId, CommandId,
     ConfigurationVersionId, CorrelationId, EventId, InstallationId, MemoryNamespaceId,
-    ProfileReviewToken, SessionId, SetupDraftId,
+    ProfileReviewToken, SessionId, SetupDraftId, SkillId, SkillReviewToken, SkillVersionId,
 };
 pub use object::{ObjectRef, ObjectVersion};

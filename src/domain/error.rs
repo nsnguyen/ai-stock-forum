@@ -26,6 +26,28 @@ pub enum DomainError {
     InvalidProfileTemplateProvenance,
     #[error("agent profile candidate has no semantic changes")]
     AgentProfileUnchanged,
+    #[error("invalid skill field")]
+    InvalidSkillField { field: &'static str },
+    #[error("skill text contains unsafe characters")]
+    UnsafeSkillText { field: &'static str },
+    #[error("skill has too many tags")]
+    TooManySkillTags,
+    #[error("skill has too many resources")]
+    TooManySkillResources,
+    #[error("skill resource bodies are too large")]
+    SkillResourcesTooLarge,
+    #[error("skill canonical payload is too large")]
+    SkillPayloadTooLarge,
+    #[error("skill has duplicate normalized tags")]
+    DuplicateSkillTag,
+    #[error("skill has duplicate normalized resource names")]
+    DuplicateSkillResourceName,
+    #[error("skill candidate has no semantic changes")]
+    SkillUnchanged,
+    #[error("skill version is invalid")]
+    InvalidSkillVersion,
+    #[error("skill review token is invalid")]
+    InvalidSkillReviewToken,
 }
 
 impl DomainError {
@@ -43,6 +65,17 @@ impl DomainError {
             Self::UnknownProfileTemplate => "unknown_profile_template",
             Self::InvalidProfileTemplateProvenance => "invalid_profile_template_provenance",
             Self::AgentProfileUnchanged => "agent_profile_unchanged",
+            Self::InvalidSkillField { .. } => "invalid_skill_field",
+            Self::UnsafeSkillText { .. } => "unsafe_skill_text",
+            Self::TooManySkillTags => "too_many_skill_tags",
+            Self::TooManySkillResources => "too_many_skill_resources",
+            Self::SkillResourcesTooLarge => "skill_resources_too_large",
+            Self::SkillPayloadTooLarge => "skill_payload_too_large",
+            Self::DuplicateSkillTag => "duplicate_skill_tag",
+            Self::DuplicateSkillResourceName => "duplicate_skill_resource_name",
+            Self::SkillUnchanged => "skill_unchanged",
+            Self::InvalidSkillVersion => "invalid_skill_version",
+            Self::InvalidSkillReviewToken => "invalid_skill_review_token",
         }
     }
 }
