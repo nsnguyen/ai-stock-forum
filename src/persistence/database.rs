@@ -47,6 +47,14 @@ pub enum PersistenceError {
     InvalidAgentProfilePayload,
     #[error("active agent profile projection rebuild failed")]
     ActiveAgentProfileRebuildFailed,
+    #[error("database skill version integrity check failed")]
+    SkillVersionIntegrityMismatch,
+    #[error("agent profile skill reference does not match an immutable skill version")]
+    SkillVersionReferenceMismatch,
+    #[error("an active skill already uses that normalized name")]
+    DuplicateSkillName,
+    #[error("active skill projection rebuild failed")]
+    ActiveSkillRebuildFailed,
 }
 
 impl PersistenceError {
@@ -67,6 +75,10 @@ impl PersistenceError {
             Self::AgentProfileNamespaceConflict => "agent_profile_namespace_conflict",
             Self::InvalidAgentProfilePayload => "invalid_agent_profile_payload",
             Self::ActiveAgentProfileRebuildFailed => "active_agent_profile_rebuild_failed",
+            Self::SkillVersionIntegrityMismatch => "skill_version_integrity_mismatch",
+            Self::SkillVersionReferenceMismatch => "skill_version_reference_mismatch",
+            Self::DuplicateSkillName => "active_skill_name_conflict",
+            Self::ActiveSkillRebuildFailed => "active_skill_rebuild_failed",
         }
     }
 }
@@ -162,6 +174,18 @@ impl Database {
             .iter()
             .find(|migration| migration.version == 2)
             .expect("schema v2 migration is registered");
+        let mut boundaries = migration_boundary_names(migration.sql);
+        boundaries.push("schema_migration_record");
+        boundaries
+    }
+
+    #[doc(hidden)]
+    pub fn v3_migration_boundaries() -> Vec<&'static str> {
+        let migrations = ordered();
+        let migration = migrations
+            .iter()
+            .find(|migration| migration.version == 3)
+            .expect("schema v3 migration is registered");
         let mut boundaries = migration_boundary_names(migration.sql);
         boundaries.push("schema_migration_record");
         boundaries

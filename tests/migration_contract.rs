@@ -116,7 +116,7 @@ fn migration_records_ahead_of_user_version_are_rejected() {
     let raw = rusqlite::Connection::open(paths.database_path()).unwrap();
     raw.execute(
         "INSERT INTO schema_migrations (version, checksum) VALUES (?1, ?2)",
-        (3_i64, "0".repeat(64)),
+        (4_i64, "0".repeat(64)),
     )
     .unwrap();
     drop(raw);
@@ -161,7 +161,7 @@ fn migration_records_and_complete_schema_are_exact() {
     let connection = database.connection();
 
     let migration = database.applied_migrations().unwrap();
-    assert_eq!(migration.len(), 2);
+    assert_eq!(migration.len(), 3);
     assert_eq!(migration[0].version(), 1);
     assert_eq!(
         migration[0].checksum().as_str(),
@@ -173,6 +173,14 @@ fn migration_records_and_complete_schema_are_exact() {
         migration[1].checksum().as_str(),
         ai_stock_forum::domain::sha256(
             include_str!("../migrations/0002_agent_profiles.sql").as_bytes()
+        )
+        .as_str()
+    );
+    assert_eq!(migration[2].version(), 3);
+    assert_eq!(
+        migration[2].checksum().as_str(),
+        ai_stock_forum::domain::sha256(
+            include_str!("../migrations/0003_declarative_skills.sql").as_bytes()
         )
         .as_str()
     );
@@ -491,7 +499,8 @@ fn migration_records_and_complete_schema_are_exact() {
                 capability TEXT NOT NULL CHECK (capability IN (
                     'help_read', 'status_read', 'setup_status_read', 'audit_read',
                     'agent_profile_read', 'agent_profile_create', 'agent_profile_preview',
-                    'agent_profile_activate', 'shutdown',
+                    'agent_profile_activate', 'skill_read', 'skill_create', 'skill_version',
+                    'skill_assign', 'skill_unassign', 'shutdown',
                     'discussion_run', 'mcp_use', 'engineering_job_run', 'git_merge', 'git_push',
                     'finance_recommendation'
                 )),
@@ -866,6 +875,10 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
             ),
             (
                 "index".to_owned(),
+                "active_skills_normalized_name_idx".to_owned()
+            ),
+            (
+                "index".to_owned(),
                 "agent_profile_versions_history_idx".to_owned()
             ),
             ("index".to_owned(), "approval_records_status_idx".to_owned()),
@@ -879,11 +892,13 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
             ),
             ("index".to_owned(), "event_stream_type_idx".to_owned()),
             ("index".to_owned(), "setup_drafts_state_idx".to_owned()),
+            ("index".to_owned(), "skill_versions_history_idx".to_owned()),
             ("table".to_owned(), "active_agent_profiles".to_owned()),
             (
                 "table".to_owned(),
                 "active_installation_configuration".to_owned()
             ),
+            ("table".to_owned(), "active_skills".to_owned()),
             ("table".to_owned(), "agent_profile_versions".to_owned()),
             ("table".to_owned(), "approval_records".to_owned()),
             ("table".to_owned(), "capability_readiness".to_owned()),
@@ -900,6 +915,7 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
             ("table".to_owned(), "schema_migrations".to_owned()),
             ("table".to_owned(), "setup_drafts".to_owned()),
             ("table".to_owned(), "setup_step_outcomes".to_owned()),
+            ("table".to_owned(), "skill_versions".to_owned()),
             (
                 "trigger".to_owned(),
                 "agent_profile_namespace_insert_guard".to_owned()
@@ -937,6 +953,12 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
             (
                 "trigger".to_owned(),
                 "installation_configuration_versions_no_update".to_owned()
+            ),
+            ("trigger".to_owned(), "skill_versions_no_delete".to_owned()),
+            ("trigger".to_owned(), "skill_versions_no_update".to_owned()),
+            (
+                "trigger".to_owned(),
+                "skill_versions_predecessor_guard".to_owned()
             ),
         ]
     );
