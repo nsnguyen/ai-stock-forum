@@ -3,9 +3,9 @@ use std::{collections::{BTreeMap, BTreeSet}, str::FromStr};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
-    agents::AgentProfilesProjection,
     app::{EventEnvelope, ShutdownReason},
-    domain::{Sha256Digest, SkillId, SkillVersionId},
+    config::StartupError,
+    domain::{Sha256Digest, SkillId, SkillVersionId, canonical_json_bytes, sha256},
     recovery::{
         InstallationProjection, ProjectionState, SessionEndProjection, SessionProjection,
         SkillsProjection,
@@ -31,7 +31,7 @@ impl ProjectionRepository {
         transaction: &ImmediateTransaction<'_>,
     ) -> Result<ProjectionState, RecoveryError> {
         let expected = reduce_verified_stream(transaction.transaction())?;
-        match read_projection_rows(transaction.transaction(), &expected.agent_profiles)? {
+        match read_projection_rows(transaction.transaction(), &expected)? {
             None if expected == ProjectionState::default() => Ok(expected),
             None => Err(RecoveryError::InvalidEventRecord),
             Some(persisted) if persisted == expected => Ok(persisted),
@@ -70,7 +70,7 @@ impl ProjectionRepository {
             .map_err(|_| RecoveryError::QueryFailed)?;
         let expected = reduce_verified_stream(&transaction)?;
         before_projection_rows();
-        let result = match read_projection_rows(&transaction, &expected.agent_profiles)? {
+        let result = match read_projection_rows(&transaction, &expected)? {
             None if expected == ProjectionState::default() => Ok(expected),
             None => Err(RecoveryError::InvalidEventRecord),
             Some(persisted) if persisted == expected => Ok(persisted),
@@ -114,7 +114,8 @@ impl ProjectionRepository {
         let state = prepare_rebuild(&transaction, events)?;
         reconcile_skill_projection(&transaction, &state.skills)
             .map_err(recovery_from_persistence)?;
-        reconcile_expected_versions(&transaction, events)?;
+        let profile_events = profile_recovery_events(events);
+        reconcile_expected_versions(&transaction, &profile_events)?;
         load_all_versions(&transaction).map_err(recovery_from_persistence)?;
         clear_rebuildable_projection_rows(&transaction)?;
         store_transaction(&transaction, &state).map_err(recovery_from_persistence)?;
@@ -124,35 +125,30 @@ impl ProjectionRepository {
         Ok(state)
     }
 
-    pub(crate) fn reconcile_skills(
+    pub(crate) fn reconcile_startup(
         connection: &mut Connection,
         events: &[EventEnvelope],
-    ) -> Result<(), PersistenceError> {
+    ) -> Result<(), StartupError> {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|_| PersistenceError::QueryFailed)?;
-        let state = prepare_rebuild(&transaction, events).map_err(persistence_from_recovery)?;
-        reconcile_skill_projection(&transaction, &state.skills)?;
-        transaction
-            .commit()
-            .map_err(|_| PersistenceError::ActiveSkillRebuildFailed)
-    }
-
-    pub(crate) fn reconcile_agent_profiles(
-        connection: &mut Connection,
-        events: &[EventEnvelope],
-    ) -> Result<(), RecoveryError> {
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|_| RecoveryError::QueryFailed)?;
-        let state = prepare_rebuild(&transaction, events)?;
-        reconcile_expected_versions(&transaction, events)?;
-        load_all_versions(&transaction).map_err(recovery_from_persistence)?;
+            .map_err(|_| StartupError::Persistence(PersistenceError::QueryFailed))?;
+        let state = prepare_rebuild(&transaction, events)
+            .map_err(StartupError::EventStreamRecovery)?;
+        reconcile_skill_projection(&transaction, &state.skills)
+            .map_err(StartupError::Persistence)?;
+        let profile_events = profile_recovery_events(events);
+        reconcile_expected_versions(&transaction, &profile_events)
+            .map_err(StartupError::EventStreamRecovery)?;
+        load_all_versions(&transaction).map_err(startup_from_profile_persistence)?;
         replace_active_profiles(&transaction, &state.agent_profiles)
-            .map_err(recovery_from_persistence)?;
+            .map_err(startup_from_profile_persistence)?;
         transaction
             .commit()
-            .map_err(|_| RecoveryError::ActiveAgentProfileRebuildFailed)
+            .map_err(|_| {
+                StartupError::EventStreamRecovery(
+                    RecoveryError::ActiveAgentProfileRebuildFailed,
+                )
+            })
     }
 
     /// Clears rebuildable projection rows after proving that `events` is the current,
@@ -165,7 +161,8 @@ impl ProjectionRepository {
         let state = prepare_rebuild(transaction.transaction(), events)?;
         reconcile_skill_projection(transaction.transaction(), &state.skills)
             .map_err(recovery_from_persistence)?;
-        reconcile_expected_versions(transaction.transaction(), events)?;
+        let profile_events = profile_recovery_events(events);
+        reconcile_expected_versions(transaction.transaction(), &profile_events)?;
         load_all_versions(transaction.transaction()).map_err(recovery_from_persistence)?;
         clear_rebuildable_projection_rows(transaction.transaction())?;
         Ok(state)
@@ -222,7 +219,7 @@ fn reduce_events(events: &[EventEnvelope]) -> Result<ProjectionState, RecoveryEr
 
 fn read_projection_rows(
     connection: &Connection,
-    agent_profiles: &AgentProfilesProjection,
+    expected: &ProjectionState,
 ) -> Result<Option<ProjectionState>, RecoveryError> {
     let installation = connection
         .query_row(
@@ -316,7 +313,8 @@ fn read_projection_rows(
     let state = ProjectionState {
         installation,
         sessions,
-        agent_profiles: agent_profiles.clone(),
+        agent_profiles: expected.agent_profiles.clone(),
+        skills: expected.skills.clone(),
         last_sequence: u64::try_from(sequence).map_err(|_| RecoveryError::InvalidEventRecord)?,
         last_event_digest: digest
             .map(|value| Sha256Digest::parse(&value))
@@ -324,7 +322,9 @@ fn read_projection_rows(
             .map_err(|_| RecoveryError::InvalidEventRecord)?,
         ..ProjectionState::default()
     };
-    if !active_profiles_match(connection, agent_profiles).map_err(recovery_from_persistence)? {
+    if !active_profiles_match(connection, &expected.agent_profiles)
+        .map_err(recovery_from_persistence)?
+    {
         return Err(RecoveryError::InvalidEventRecord);
     }
     state.validate()?;
@@ -385,10 +385,9 @@ where
         })
         .transpose()?
         .unwrap_or_default();
-    let persisted_agent_profiles = reduce_events(&persisted_prefix)
-        .map_err(persistence_from_recovery)?
-        .agent_profiles;
-    if let Some(persisted) = read_projection_rows(transaction, &persisted_agent_profiles)
+    let persisted_state =
+        reduce_events(&persisted_prefix).map_err(persistence_from_recovery)?;
+    if let Some(persisted) = read_projection_rows(transaction, &persisted_state)
         .map_err(persistence_from_recovery)?
     {
         if reduce_events(&persisted_prefix).map_err(persistence_from_recovery)? != persisted {
@@ -524,7 +523,7 @@ fn validated_active_skills(
         builtin_by_id.insert(builtin.skill_version_id(), builtin);
     }
     let projected = projection.version_metadata().collect::<Vec<_>>();
-    for (reference, _, _, _) in &projected {
+    for (reference, _, _, _, _) in &projected {
         if !expected_ids.insert(reference.skill_version_id())
             && !builtin_by_id.contains_key(&reference.skill_version_id())
         {
@@ -541,13 +540,21 @@ fn validated_active_skills(
             }
             continue;
         }
-        let matches = projected.iter().any(|(reference, display_name, provenance, predecessor)| {
-            skill.reference() == **reference
-                && skill.content().display_name == **display_name
-                && skill.provenance() == *provenance
-                && skill.predecessor() == *predecessor
-        });
-        if !matches {
+        let Some((_reference, display_name, provenance, predecessor, record_digest)) = projected
+            .iter()
+            .find(|(reference, _, _, _, _)| skill.reference() == **reference)
+        else {
+            return Err(PersistenceError::SkillVersionIntegrityMismatch);
+        };
+        let canonical_record_digest = sha256(
+            &canonical_json_bytes(skill)
+                .map_err(|_| PersistenceError::SkillVersionIntegrityMismatch)?,
+        );
+        if skill.content().display_name != **display_name
+            || skill.provenance() != *provenance
+            || skill.predecessor() != *predecessor
+            || canonical_record_digest != **record_digest
+        {
             return Err(PersistenceError::SkillVersionIntegrityMismatch);
         }
     }
@@ -565,6 +572,37 @@ fn validated_active_skills(
         active.insert(skill.skill_id(), skill.clone());
     }
     Ok(active.into_values().collect())
+}
+
+fn profile_recovery_events(events: &[EventEnvelope]) -> Vec<EventEnvelope> {
+    events
+        .iter()
+        .cloned()
+        .map(|mut envelope| {
+            envelope.event = match envelope.event {
+                crate::app::ApplicationEvent::AgentSkillAssigned {
+                    profile,
+                    previous_profile_version_id,
+                    ..
+                }
+                | crate::app::ApplicationEvent::AgentSkillUpgraded {
+                    profile,
+                    previous_profile_version_id,
+                    ..
+                }
+                | crate::app::ApplicationEvent::AgentSkillUnassigned {
+                    profile,
+                    previous_profile_version_id,
+                    ..
+                } => crate::app::ApplicationEvent::AgentProfileVersionActivated {
+                    profile,
+                    previous_version_id: previous_profile_version_id,
+                },
+                event => event,
+            };
+            envelope
+        })
+        .collect()
 }
 
 fn parse_id<T: FromStr>(value: String) -> Result<T, RecoveryError> {
@@ -621,5 +659,12 @@ fn recovery_from_persistence(error: PersistenceError) -> RecoveryError {
             RecoveryError::ActiveAgentProfileRebuildFailed
         }
         _ => RecoveryError::QueryFailed,
+    }
+}
+
+fn startup_from_profile_persistence(error: PersistenceError) -> StartupError {
+    match error {
+        PersistenceError::SkillVersionReferenceMismatch => StartupError::Persistence(error),
+        other => StartupError::EventStreamRecovery(recovery_from_persistence(other)),
     }
 }

@@ -1080,6 +1080,7 @@ impl CommandExecutor {
         let mut skill_reserved = false;
         let precommit =
             (|| -> Result<(StoredExecution, Vec<crate::app::EventEnvelope>), AppError> {
+                let mut skill_event_object = None;
                 let event = match &request.command {
                     ApplicationCommand::ActivateAgentProfileVersion {
                         profile_id,
@@ -1185,6 +1186,7 @@ impl CommandExecutor {
                         insert_skill_version(transaction.transaction(), &skill)?;
                         set_active_skill(transaction.transaction(), &skill)
                             .map_err(map_skill_write_error)?;
+                        skill_event_object = Some(skill_version_object(&skill)?);
                         ApplicationEvent::SkillCreated {
                             skill: skill.reference(),
                             display_name: skill.content().display_name.clone(),
@@ -1229,6 +1231,7 @@ impl CommandExecutor {
                         insert_skill_version(transaction.transaction(), &skill)?;
                         set_active_skill(transaction.transaction(), &skill)
                             .map_err(map_skill_write_error)?;
+                        skill_event_object = Some(skill_version_object(&skill)?);
                         ApplicationEvent::SkillVersionActivated {
                             skill: skill.reference(),
                             previous_version_id: current.skill_version_id(),
@@ -1352,7 +1355,7 @@ impl CommandExecutor {
                         .unwrap_or_else(|| self.clock.now_millis()),
                     correlation_id: request.correlation_id,
                     causation_id: Some(CausationId::from_uuid(envelope.command_id.as_uuid())),
-                    object: None,
+                    object: skill_event_object,
                     event,
                 };
                 let committed = EventRepository::append(&transaction, pending)?;
@@ -1695,6 +1698,16 @@ fn event_occurred_at(event: &ApplicationEvent) -> Option<i64> {
     }
 }
 
+fn skill_version_object(skill: &SkillVersion) -> Result<crate::domain::ObjectRef, AppError> {
+    crate::domain::ObjectRef::new(
+        "skill_version",
+        skill.skill_version_id().to_string(),
+        skill.version(),
+        sha256(&canonical_json_bytes(skill)?),
+    )
+    .map_err(AppError::from)
+}
+
 fn ensure_skill_name_available(
     connection: &rusqlite::Connection,
     excluded_skill_id: Option<SkillId>,
@@ -2025,9 +2038,20 @@ fn materialize_success(
     if event.actor != request.actor
         || event.correlation_id != request.correlation_id
         || event.causation_id != Some(CausationId::from_uuid(command_id.as_uuid()))
-        || event.object.is_some()
     {
         return Err(invalid_receipt());
+    }
+    match &event.event {
+        ApplicationEvent::SkillCreated { skill, .. }
+        | ApplicationEvent::SkillVersionActivated { skill, .. } => {
+            let accepted = load_skill_version(transaction.transaction(), skill)?
+                .ok_or_else(invalid_receipt)?;
+            if event.object.as_ref() != Some(&skill_version_object(&accepted)?) {
+                return Err(invalid_receipt());
+            }
+        }
+        _ if event.object.is_some() => return Err(invalid_receipt()),
+        _ => {}
     }
     let (view, shutdown) = match (&request.command, &event.event) {
         (ApplicationCommand::ShowHelp, ApplicationEvent::HelpViewed) => {

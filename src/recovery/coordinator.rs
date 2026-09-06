@@ -86,10 +86,7 @@ impl RecoveryCoordinator {
         EventRepository::verify(database.connection()).map_err(startup_from_recovery)?;
         let events =
             EventRepository::load_all(database.connection()).map_err(startup_from_recovery)?;
-        ProjectionRepository::reconcile_skills(database.connection_mut(), &events)
-            .map_err(startup_from_persistence)?;
-        ProjectionRepository::reconcile_agent_profiles(database.connection_mut(), &events)
-            .map_err(startup_from_recovery)?;
+        ProjectionRepository::reconcile_startup(database.connection_mut(), &events)?;
         let mut state = match ProjectionRepository::load(database.connection()) {
             Ok(state) => state,
             Err(RecoveryError::InvalidEventRecord) => {

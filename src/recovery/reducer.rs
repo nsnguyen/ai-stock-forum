@@ -114,6 +114,7 @@ struct ProjectedSkillVersion {
     display_name: String,
     provenance: SkillProvenance,
     predecessor_version_id: Option<SkillVersionId>,
+    record_digest: Sha256Digest,
 }
 
 impl SkillsProjection {
@@ -136,6 +137,7 @@ impl SkillsProjection {
             &str,
             &SkillProvenance,
             Option<SkillVersionId>,
+            &Sha256Digest,
         ),
     > {
         self.versions_by_id.values().map(|version| {
@@ -144,6 +146,7 @@ impl SkillsProjection {
                 version.display_name.as_str(),
                 &version.provenance,
                 version.predecessor_version_id,
+                &version.record_digest,
             )
         })
     }
@@ -161,6 +164,7 @@ impl SkillsProjection {
         skill: &SkillVersionRef,
         display_name: &str,
         provenance: &SkillProvenance,
+        record_digest: Sha256Digest,
     ) -> Result<(), RecoveryError> {
         if skill.version().get() != 1
             || self.versions_by_id.contains_key(&skill.skill_version_id())
@@ -175,6 +179,7 @@ impl SkillsProjection {
                 display_name: display_name.to_owned(),
                 provenance: provenance.clone(),
                 predecessor_version_id: None,
+                record_digest,
             },
         );
         self.active_by_skill
@@ -188,6 +193,7 @@ impl SkillsProjection {
         previous_version_id: SkillVersionId,
         display_name: &str,
         provenance: &SkillProvenance,
+        record_digest: Sha256Digest,
     ) -> Result<(), RecoveryError> {
         if self.versions_by_id.contains_key(&skill.skill_version_id()) {
             return Err(RecoveryError::InvalidEventRecord);
@@ -203,7 +209,7 @@ impl SkillsProjection {
             {
                 return Err(RecoveryError::InvalidEventRecord);
             }
-        } else if skill.version().get() <= 1 {
+        } else if !is_canonical_builtin_successor(skill, previous_version_id, provenance)? {
             return Err(RecoveryError::InvalidEventRecord);
         }
         self.versions_by_id.insert(
@@ -213,6 +219,7 @@ impl SkillsProjection {
                 display_name: display_name.to_owned(),
                 provenance: provenance.clone(),
                 predecessor_version_id: Some(previous_version_id),
+                record_digest,
             },
         );
         self.active_by_skill
@@ -251,14 +258,21 @@ impl SkillsProjection {
                     {
                         return Err(RecoveryError::InvalidEventRecord);
                     }
-                } else if version.skill.version().get() == 1
-                    && version.predecessor_version_id.is_some()
-                {
-                    return Err(RecoveryError::InvalidEventRecord);
-                } else if version.skill.version().get() > 1
-                    && version.predecessor_version_id.is_none()
-                {
-                    return Err(RecoveryError::InvalidEventRecord);
+                } else if version.skill.version().get() == 1 {
+                    if version.predecessor_version_id.is_some() {
+                        return Err(RecoveryError::InvalidEventRecord);
+                    }
+                } else {
+                    let predecessor = version
+                        .predecessor_version_id
+                        .ok_or(RecoveryError::InvalidEventRecord)?;
+                    if !is_canonical_builtin_successor(
+                        &version.skill,
+                        predecessor,
+                        &version.provenance,
+                    )? {
+                        return Err(RecoveryError::InvalidEventRecord);
+                    }
                 }
                 previous = Some(version);
             }
@@ -454,15 +468,26 @@ pub fn reduce(
             skill,
             display_name,
             provenance,
-        } => next.skills.create(skill, display_name, provenance)?,
+        } => {
+            let record_digest = authenticated_skill_record_digest(event, skill)?;
+            next.skills
+                .create(skill, display_name, provenance, record_digest)?;
+        }
         ApplicationEvent::SkillVersionActivated {
             skill,
             previous_version_id,
             display_name,
             provenance,
-        } => next
-            .skills
-            .activate(skill, *previous_version_id, display_name, provenance)?,
+        } => {
+            let record_digest = authenticated_skill_record_digest(event, skill)?;
+            next.skills.activate(
+                skill,
+                *previous_version_id,
+                display_name,
+                provenance,
+                record_digest,
+            )?;
+        }
         ApplicationEvent::AgentSkillAssigned {
             profile,
             previous_profile_version_id,
@@ -518,4 +543,37 @@ fn end_session(
         reason,
     });
     Ok(())
+}
+
+fn authenticated_skill_record_digest(
+    event: &EventEnvelope,
+    skill: &SkillVersionRef,
+) -> Result<Sha256Digest, RecoveryError> {
+    let object = event
+        .object
+        .as_ref()
+        .ok_or(RecoveryError::InvalidEventRecord)?;
+    if object.kind != "skill_version"
+        || object.id != skill.skill_version_id().to_string()
+        || object.version != skill.version()
+    {
+        return Err(RecoveryError::InvalidEventRecord);
+    }
+    Ok(object.digest.clone())
+}
+
+fn is_canonical_builtin_successor(
+    skill: &SkillVersionRef,
+    previous_version_id: SkillVersionId,
+    provenance: &SkillProvenance,
+) -> Result<bool, RecoveryError> {
+    let manifests =
+        crate::skills::builtin_manifests().map_err(|_| RecoveryError::InvalidEventRecord)?;
+    Ok(manifests.iter().any(|manifest| {
+        let previous = manifest.skill();
+        previous.skill_id() == skill.skill_id()
+            && previous.skill_version_id() == previous_version_id
+            && previous.version().get().checked_add(1) == Some(skill.version().get())
+            && previous.provenance() == provenance
+    }))
 }
