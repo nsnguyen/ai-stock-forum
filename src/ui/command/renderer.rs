@@ -491,6 +491,10 @@ impl TextRenderer {
         writer.write_all(b"Confirmation did not match; skill review retained.\n")
     }
 
+    pub fn render_fresh_skill_review_required<W: Write>(writer: &mut W) -> io::Result<()> {
+        writer.write_all(b"Start a fresh /skill command to request a new review.\n")
+    }
+
     pub fn render_skill_cancelled<W: Write>(writer: &mut W) -> io::Result<()> {
         writer.write_all(b"Skill review cancelled.\n")
     }

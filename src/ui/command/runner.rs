@@ -726,17 +726,23 @@ impl FallbackRunner {
         mut writer: W,
     ) -> Result<ShutdownReason, UiError> {
         let mut reader = BoundedLineReader::new(reader);
-        loop {
-            self.prompt(&mut writer)?;
-            let line = reader.next_line().map_err(|_| UiError::Read)?;
-            let Some(line) = line else {
-                self.cancel_workflows()?;
-                return Ok(ShutdownReason::InputClosed);
-            };
-            if let Some(reason) = self.process_line(line, &mut writer)? {
-                return Ok(reason);
+        let result = (|| {
+            loop {
+                self.prompt(&mut writer)?;
+                let line = reader.next_line().map_err(|_| UiError::Read)?;
+                let Some(line) = line else {
+                    self.cancel_workflows()?;
+                    return Ok(ShutdownReason::InputClosed);
+                };
+                if let Some(reason) = self.process_line(line, &mut writer)? {
+                    return Ok(reason);
+                }
             }
+        })();
+        if result.is_err() {
+            let _ = self.cancel_workflows();
         }
+        result
     }
 
     fn prompt<W: Write>(&self, writer: &mut W) -> Result<(), UiError> {
@@ -976,12 +982,11 @@ impl FallbackRunner {
             }
             Err(error) => return Err(UiError::Runtime(error)),
         };
-        TextRenderer::render_skill_assignment_review(&preview, writer)
-            .map_err(|_| UiError::Write)?;
-        let (command, action) = assignment_command(preview);
+        let (command, action) = assignment_command(&preview);
         *self.skill_workflow.lock().map_err(|_| UiError::Panicked)? =
             Some(SkillWorkflow::Confirming { command, action });
-        Ok(())
+        TextRenderer::render_skill_assignment_review(&preview, writer)
+            .map_err(|_| UiError::Write)
     }
 
     fn process_skill_line<W: Write>(&self, line: &str, writer: &mut W) -> Result<(), UiError> {
@@ -1017,20 +1022,24 @@ impl FallbackRunner {
                         }
                         Err(error) => return Err(UiError::Runtime(error)),
                     };
-                    TextRenderer::render_skill_creation_review(&candidate, &preview, writer)
-                        .map_err(|_| UiError::Write)?;
+                    let display_candidate = candidate.clone();
                     let command = ApplicationCommand::CreateSkill {
                         skill_id: preview.skill_id,
                         candidate,
                         review_token: preview.review_token,
-                        review_digest: preview.review_digest,
+                        review_digest: preview.review_digest.clone(),
                     };
                     *self.skill_workflow.lock().map_err(|_| UiError::Panicked)? =
                         Some(SkillWorkflow::Confirming {
                             command,
                             action: "create",
                         });
-                    return Ok(());
+                    return TextRenderer::render_skill_creation_review(
+                        &display_candidate,
+                        &preview,
+                        writer,
+                    )
+                    .map_err(|_| UiError::Write);
                 }
 
                 let mut recognized = true;
@@ -1069,12 +1078,15 @@ impl FallbackRunner {
                     TextRenderer::render_skill_cancelled(writer).map_err(|_| UiError::Write)
                 }
                 _ => {
+                    *self.skill_workflow.lock().map_err(|_| UiError::Panicked)? =
+                        Some(SkillWorkflow::Confirming {
+                            command: command.clone(),
+                            action,
+                        });
                     TextRenderer::render_skill_confirmation_mismatch(writer)
                         .map_err(|_| UiError::Write)?;
                     TextRenderer::render_skill_confirmation(action, &command, writer)
                         .map_err(|_| UiError::Write)?;
-                    *self.skill_workflow.lock().map_err(|_| UiError::Panicked)? =
-                        Some(SkillWorkflow::Confirming { command, action });
                     Ok(())
                 }
             },
@@ -1101,12 +1113,28 @@ impl FallbackRunner {
     ) -> Result<(), UiError> {
         let outcome = match self.client.submit(command.clone()) {
             Ok(outcome) => outcome,
-            Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+            Err(error @ RuntimeError::Backpressure) => {
+                *self.skill_workflow.lock().map_err(|_| UiError::Panicked)? =
+                    Some(SkillWorkflow::Confirming {
+                        command: command.clone(),
+                        action,
+                    });
                 TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write)?;
                 TextRenderer::render_skill_confirmation(action, &command, writer)
                     .map_err(|_| UiError::Write)?;
-                *self.skill_workflow.lock().map_err(|_| UiError::Panicked)? =
-                    Some(SkillWorkflow::Confirming { command, action });
+                return Ok(());
+            }
+            Err(error @ RuntimeError::Application(_)) => {
+                let primary = TextRenderer::render_runtime_error(&error, writer)
+                    .map_err(|_| UiError::Write);
+                let cleanup = self.client.cancel_skill_review();
+                primary?;
+                TextRenderer::render_fresh_skill_review_required(writer)
+                    .map_err(|_| UiError::Write)?;
+                if let Err(cleanup_error) = cleanup {
+                    TextRenderer::render_runtime_error(&cleanup_error, writer)
+                        .map_err(|_| UiError::Write)?;
+                }
                 return Ok(());
             }
             Err(error) => return Err(UiError::Runtime(error)),
@@ -1506,23 +1534,16 @@ impl FallbackRunner {
 }
 
 fn assignment_command(
-    preview: AgentSkillAssignmentPreview,
+    preview: &AgentSkillAssignmentPreview,
 ) -> (ApplicationCommand, &'static str) {
-    let AgentSkillAssignmentPreview {
-        profile_id,
-        expected_active_profile_version_id,
-        operation,
-        review_token,
-        review_digest,
-    } = preview;
-    match operation {
+    match &preview.operation {
         AgentSkillAssignmentOperation::Assign { skill } => (
             ApplicationCommand::AssignAgentSkill {
-                profile_id,
-                expected_active_profile_version_id,
-                skill,
-                review_token,
-                review_digest,
+                profile_id: preview.profile_id,
+                expected_active_profile_version_id: preview.expected_active_profile_version_id,
+                skill: skill.clone(),
+                review_token: preview.review_token,
+                review_digest: preview.review_digest.clone(),
             },
             "assign",
         ),
@@ -1531,22 +1552,22 @@ fn assignment_command(
             replacement,
         } => (
             ApplicationCommand::UpgradeAgentSkill {
-                profile_id,
-                expected_active_profile_version_id,
-                expected,
-                replacement,
-                review_token,
-                review_digest,
+                profile_id: preview.profile_id,
+                expected_active_profile_version_id: preview.expected_active_profile_version_id,
+                expected: expected.clone(),
+                replacement: replacement.clone(),
+                review_token: preview.review_token,
+                review_digest: preview.review_digest.clone(),
             },
             "upgrade",
         ),
         AgentSkillAssignmentOperation::Unassign { expected } => (
             ApplicationCommand::UnassignAgentSkill {
-                profile_id,
-                expected_active_profile_version_id,
-                expected,
-                review_token,
-                review_digest,
+                profile_id: preview.profile_id,
+                expected_active_profile_version_id: preview.expected_active_profile_version_id,
+                expected: expected.clone(),
+                review_token: preview.review_token,
+                review_digest: preview.review_digest.clone(),
             },
             "unassign",
         ),
@@ -1637,6 +1658,7 @@ impl FallbackHost {
                 self.previous_session_interrupted,
             )
         }));
+        let workflow_cleanup = runner.cancel_workflows();
         cancellation.cancel();
         let source_joined = source_thread.join().is_ok();
         let cancellation_failed = cancellation.failure().is_some();
@@ -1655,6 +1677,7 @@ impl FallbackHost {
         if let Some(error) = body_error {
             return Err(error);
         }
+        workflow_cleanup?;
         finish.map_err(UiError::Runtime)?;
         Ok(reason)
     }
