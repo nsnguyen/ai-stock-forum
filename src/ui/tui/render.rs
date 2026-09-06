@@ -387,6 +387,9 @@ mod tests {
                 }],
                 agent_profiles: crate::app::AgentProfilesView {
                     profiles: Vec::new(),
+                    total_count: 0,
+                    returned_count: 0,
+                    truncated: false,
                 },
                 selected_agent_profile: None,
                 selected_agent_profile_history: None,

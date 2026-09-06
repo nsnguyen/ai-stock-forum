@@ -41,6 +41,20 @@ pub fn execute_agent_effect(
         ControllerEffect::LoadAgentProfileHistory { selected_profile } => {
             load_history(client, model, selected_profile)?;
         }
+        ControllerEffect::LoadAgentProfileVersion {
+            profile_id,
+            version,
+        } => {
+            let outcome = submit_agent_command(
+                client,
+                model,
+                ApplicationCommand::ShowAgentProfileVersion {
+                    selector: profile_id.into(),
+                    version,
+                },
+            )?;
+            apply_agent_outcome(model, outcome);
+        }
         ControllerEffect::StartProfileCreate { template_index } => {
             model.set_command_in_flight(true);
             let templates = client.agent_profile_templates();
@@ -62,17 +76,43 @@ pub fn execute_agent_effect(
         }
         ControllerEffect::StartProfileEdit { selected_profile } => {
             load_profile(client, model, selected_profile)?;
-            if let Some(detail) = model.agents.detail.as_ref() {
-                let draft = draft_from_profile(&detail.profile)
-                    .map_err(|error| RuntimeError::Application(error.into()))?;
-                model.agents.editor = Some(ProfileEditor::for_edit(
-                    detail.profile.profile_id(),
-                    detail.profile.profile_version_id(),
-                    draft,
-                ));
-                model.agents.pane = super::model::AgentsPane::Editor;
+            start_profile_editor_from_detail(model)?;
+        }
+        ControllerEffect::StartProfileCreateByTemplate { template_id } => {
+            model.set_command_in_flight(true);
+            let templates = client.agent_profile_templates();
+            model.set_command_in_flight(false);
+            let templates = templates?;
+            let template_index = templates
+                .iter()
+                .position(|template| template.id == template_id);
+            if template_index
+                .is_some_and(|index| model.agents.start_profile_create(index, &templates))
+            {
                 model.command.clear();
                 model.clear_message();
+            } else {
+                model.agents.pane = super::model::AgentsPane::List;
+                model.set_message(
+                    super::model::Severity::Warning,
+                    "Profile template is unavailable.",
+                );
+            }
+        }
+        ControllerEffect::StartProfileEditBySelector { selector } => {
+            match submit_agent_command(
+                client,
+                model,
+                ApplicationCommand::ShowAgentProfile { selector },
+            ) {
+                Ok(outcome) => {
+                    apply_agent_outcome(model, outcome);
+                    start_profile_editor_from_detail(model)?;
+                }
+                Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+                    retain_profile_error(model, &error, super::model::AgentsPane::List);
+                }
+                Err(error) => return Err(error),
             }
         }
         ControllerEffect::RequestProfilePreview(request) => {
@@ -113,6 +153,7 @@ fn apply_agent_outcome(model: &mut TuiModel, outcome: CommandOutcome) {
         CommandView::AgentProfiles(profiles) => model.agents.replace_profiles(profiles),
         CommandView::AgentProfile(detail) => model.agents.replace_detail(detail),
         CommandView::AgentProfileHistory(history) => model.agents.replace_history(history),
+        CommandView::AgentProfileVersion(version) => model.agents.replace_version_detail(version),
         _ => {}
     }
 }
@@ -149,7 +190,9 @@ fn load_profile(
     let outcome = submit_agent_command(
         client,
         model,
-        ApplicationCommand::ShowAgentProfile { profile_id },
+        ApplicationCommand::ShowAgentProfile {
+            selector: profile_id.into(),
+        },
     )?;
     apply_agent_outcome(model, outcome);
     Ok(())
@@ -166,7 +209,9 @@ fn load_history(
     let outcome = submit_agent_command(
         client,
         model,
-        ApplicationCommand::ShowAgentProfileHistory { profile_id },
+        ApplicationCommand::ShowAgentProfileHistory {
+            selector: profile_id.into(),
+        },
     )?;
     apply_agent_outcome(model, outcome);
     Ok(())
@@ -196,6 +241,13 @@ fn execute_preview(
             Ok(())
         }
         Err(error) if is_stale(&error) => refresh_stale_profile(client, model, profile_id),
+        Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+            if let Some(editor) = model.agents.editor.as_mut() {
+                editor.report_error(runtime_error_code(&error));
+            }
+            retain_profile_error(model, &error, super::model::AgentsPane::Editor);
+            Ok(())
+        }
         Err(error) => Err(error),
     }
 }
@@ -217,6 +269,13 @@ fn execute_profile_command(
                 model,
                 stale_profile_id.expect("stale profile activation carries an ID"),
             );
+        }
+        Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+            if let Some(editor) = model.agents.editor.as_mut() {
+                editor.report_error(runtime_error_code(&error));
+            }
+            retain_profile_error(model, &error, super::model::AgentsPane::Confirmation);
+            return Ok(());
         }
         Err(error) => return Err(error),
     };
@@ -260,13 +319,17 @@ fn refresh_profile_state(
     let detail = submit_agent_command(
         client,
         model,
-        ApplicationCommand::ShowAgentProfile { profile_id },
+        ApplicationCommand::ShowAgentProfile {
+            selector: profile_id.into(),
+        },
     )?;
     apply_agent_outcome(model, detail);
     let history = submit_agent_command(
         client,
         model,
-        ApplicationCommand::ShowAgentProfileHistory { profile_id },
+        ApplicationCommand::ShowAgentProfileHistory {
+            selector: profile_id.into(),
+        },
     )?;
     apply_agent_outcome(model, history);
     Ok(())
@@ -286,7 +349,9 @@ fn refresh_stale_profile(
     match submit_agent_command(
         client,
         model,
-        ApplicationCommand::ShowAgentProfile { profile_id },
+        ApplicationCommand::ShowAgentProfile {
+            selector: profile_id.into(),
+        },
     ) {
         Ok(outcome) => apply_agent_outcome(model, outcome),
         Err(_) => refresh_failed = true,
@@ -315,6 +380,45 @@ fn is_stale(error: &RuntimeError) -> bool {
         error,
         RuntimeError::Application(AppError::StaleAgentProfileVersion)
     )
+}
+
+fn start_profile_editor_from_detail(model: &mut TuiModel) -> Result<(), RuntimeError> {
+    if let Some(detail) = model.agents.detail.as_ref() {
+        let draft = draft_from_profile(&detail.profile)
+            .map_err(|error| RuntimeError::Application(error.into()))?;
+        model.agents.editor = Some(ProfileEditor::for_edit(
+            detail.profile.profile_id(),
+            detail.profile.profile_version_id(),
+            draft,
+        ));
+        model.agents.pane = super::model::AgentsPane::Editor;
+        model.command.clear();
+        model.clear_message();
+    }
+    Ok(())
+}
+
+fn retain_profile_error(
+    model: &mut TuiModel,
+    error: &RuntimeError,
+    pane: super::model::AgentsPane,
+) {
+    model.set_command_in_flight(false);
+    model.agents.pane = pane;
+    let message = match error {
+        RuntimeError::Backpressure => "Command queue is busy; draft retained.",
+        RuntimeError::Application(_) => "Profile action failed; draft retained.",
+        _ => "Profile action is unavailable.",
+    };
+    model.set_message(super::model::Severity::Error, message);
+}
+
+fn runtime_error_code(error: &RuntimeError) -> &'static str {
+    match error {
+        RuntimeError::Application(error) => error.code(),
+        RuntimeError::Backpressure => "command_backpressure",
+        _ => "runtime_unavailable",
+    }
 }
 
 fn draft_from_profile(
@@ -483,8 +587,11 @@ impl TuiRunner {
             effect @ (ControllerEffect::LoadAgentProfiles
             | ControllerEffect::LoadAgentProfile { .. }
             | ControllerEffect::LoadAgentProfileHistory { .. }
+            | ControllerEffect::LoadAgentProfileVersion { .. }
             | ControllerEffect::StartProfileCreate { .. }
             | ControllerEffect::StartProfileEdit { .. }
+            | ControllerEffect::StartProfileCreateByTemplate { .. }
+            | ControllerEffect::StartProfileEditBySelector { .. }
             | ControllerEffect::RequestProfilePreview(_)
             | ControllerEffect::ExecuteProfile(_)
             | ControllerEffect::CancelProfileReview) => {
@@ -916,6 +1023,9 @@ mod tests {
             recent_audit: Vec::new(),
             agent_profiles: crate::app::AgentProfilesView {
                 profiles: Vec::new(),
+                total_count: 0,
+                returned_count: 0,
+                truncated: false,
             },
             selected_agent_profile: None,
             selected_agent_profile_history: None,

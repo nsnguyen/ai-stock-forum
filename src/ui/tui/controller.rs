@@ -6,15 +6,20 @@ use super::{
     views,
 };
 use crate::{
-    app::{ApplicationCommand, CommandOutcome, CommandView, ShutdownDisposition, ShutdownReason},
+    agents::ProfileTemplateId,
+    app::{
+        AgentProfileSelector, ApplicationCommand, CommandOutcome, CommandView, ShutdownDisposition,
+        ShutdownReason,
+    },
     audit::AuditEntry,
-    ui::command::{ParsedLine, parse_line},
-    ui::profile_editor::{PreviewEditRequest, ProfileEditorEffect, ProfileEditorMode},
+    ui::command::{AgentWorkflowCommand, ParsedLine, parse_line},
+    ui::profile_editor::{PreviewEditRequest, ProfileEditorEffect, ProfileEditorStep},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 const COMMAND_IN_FLIGHT_MESSAGE: &str = "A command is already running.";
 const COMMAND_REJECTED_MESSAGE: &str = "Command rejected. Check the command and try again.";
+const CONFIRMATION_MISMATCH_MESSAGE: &str = "Confirmation did not match; draft retained.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControllerEffect {
@@ -23,10 +28,28 @@ pub enum ControllerEffect {
     Submit(ApplicationCommand),
     RequestShutdown(ShutdownReason),
     LoadAgentProfiles,
-    LoadAgentProfile { selected_profile: usize },
-    LoadAgentProfileHistory { selected_profile: usize },
-    StartProfileCreate { template_index: usize },
-    StartProfileEdit { selected_profile: usize },
+    LoadAgentProfile {
+        selected_profile: usize,
+    },
+    LoadAgentProfileHistory {
+        selected_profile: usize,
+    },
+    LoadAgentProfileVersion {
+        profile_id: crate::domain::AgentProfileId,
+        version: crate::domain::ObjectVersion,
+    },
+    StartProfileCreate {
+        template_index: usize,
+    },
+    StartProfileEdit {
+        selected_profile: usize,
+    },
+    StartProfileCreateByTemplate {
+        template_id: ProfileTemplateId,
+    },
+    StartProfileEditBySelector {
+        selector: AgentProfileSelector,
+    },
     RequestProfilePreview(PreviewEditRequest),
     ExecuteProfile(ApplicationCommand),
     CancelProfileReview,
@@ -104,7 +127,8 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
         | CommandView::AgentProfileVersionActivated(_)
         | CommandView::AgentProfiles(_)
         | CommandView::AgentProfile(_)
-        | CommandView::AgentProfileHistory(_) => ShutdownDisposition::Continue,
+        | CommandView::AgentProfileHistory(_)
+        | CommandView::AgentProfileVersion(_) => ShutdownDisposition::Continue,
     };
 
     merge_committed_audit(model, committed_audit);
@@ -123,6 +147,14 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         return ControllerEffect::RequestShutdown(ShutdownReason::Interrupted);
     }
 
+    if model.layout_mode == LayoutMode::TooSmall {
+        return if is_plain_char(key, 'q') {
+            ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
+        } else {
+            ControllerEffect::None
+        };
+    }
+
     if active_confirmation(model) {
         return handle_confirmation_key(model, key);
     }
@@ -133,24 +165,6 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
 
     if model.focus == Focus::Command {
         return handle_command_key(model, key);
-    }
-
-    if model.layout_mode == LayoutMode::TooSmall {
-        if model.active_view == View::Agents
-            && matches!(key.code, KeyCode::Esc)
-            && no_modifiers(key.modifiers)
-        {
-            return unwind_agents(model);
-        }
-        return if is_plain_char(key, 'q') {
-            if agents_input_owner_active(model) {
-                ControllerEffect::None
-            } else {
-                ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
-            }
-        } else {
-            ControllerEffect::None
-        };
     }
 
     if model.active_view == View::Agents
@@ -252,6 +266,25 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
             model.set_command_in_flight(true);
             ControllerEffect::Submit(command)
         }
+        ParsedLine::AgentWorkflow(workflow) => {
+            model.command.remember(input);
+            model.clear_message();
+            model.select_view(View::Agents);
+            model.set_focus(Focus::Workspace);
+            match workflow {
+                AgentWorkflowCommand::SelectCreateTemplate => {
+                    ControllerEffect::StartProfileCreate {
+                        template_index: model.agents.selected_template,
+                    }
+                }
+                AgentWorkflowCommand::Create { template_id } => {
+                    ControllerEffect::StartProfileCreateByTemplate { template_id }
+                }
+                AgentWorkflowCommand::Edit { selector } => {
+                    ControllerEffect::StartProfileEditBySelector { selector }
+                }
+            }
+        }
     }
 }
 
@@ -287,23 +320,52 @@ fn active_profile_editor(model: &TuiModel) -> bool {
         && model.agents.editor.is_some()
 }
 
-fn agents_input_owner_active(model: &TuiModel) -> bool {
-    active_confirmation(model) || active_profile_editor(model) || model.focus == Focus::Command
-}
-
 fn handle_confirmation_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
     match key.code {
         KeyCode::Enter if no_modifiers(key.modifiers) => {
-            let confirmation = model.agents.pending_confirmation.take();
-            model.agents.editor = None;
-            model.agents.pane = AgentsPane::Detail;
-            confirmation
-                .map(|confirmation| ControllerEffect::ExecuteProfile(confirmation.command))
-                .unwrap_or(ControllerEffect::None)
+            let input = model.command.take_text();
+            let Some(command) = model
+                .agents
+                .pending_confirmation
+                .as_ref()
+                .map(|confirmation| confirmation.command.clone())
+            else {
+                return ControllerEffect::None;
+            };
+            if exact_profile_confirmation(&command).as_deref() == Some(input.as_str()) {
+                model.clear_message();
+                ControllerEffect::ExecuteProfile(command)
+            } else {
+                model.set_message(Severity::Error, CONFIRMATION_MISMATCH_MESSAGE);
+                ControllerEffect::Redraw
+            }
         }
         KeyCode::Esc if no_modifiers(key.modifiers) => {
+            model.command.clear();
             model.agents.pending_confirmation = None;
             model.agents.pane = AgentsPane::Editor;
+            ControllerEffect::Redraw
+        }
+        KeyCode::Backspace if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.backspace())
+        }
+        KeyCode::Delete if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.delete())
+        }
+        KeyCode::Left if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_left())
+        }
+        KeyCode::Right if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_right())
+        }
+        KeyCode::Home if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_home())
+        }
+        KeyCode::End if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_end())
+        }
+        KeyCode::Char(character) if text_modifiers(key.modifiers) => {
+            model.command.insert(character);
             ControllerEffect::Redraw
         }
         _ => ControllerEffect::None,
@@ -313,11 +375,25 @@ fn handle_confirmation_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEff
 fn handle_profile_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
     match key.code {
         KeyCode::Esc if no_modifiers(key.modifiers) => {
-            model.agents.pane = match model.agents.editor.as_ref().map(|editor| editor.mode()) {
-                Some(ProfileEditorMode::Create { .. }) => AgentsPane::List,
-                Some(ProfileEditorMode::Edit { .. }) | None => AgentsPane::Detail,
-            };
-            ControllerEffect::Redraw
+            let at_first_step = model
+                .agents
+                .editor
+                .as_ref()
+                .is_none_or(|editor| editor.step() == ProfileEditorStep::Template);
+            if at_first_step {
+                model.command.clear();
+                model.agents.editor = None;
+                model.agents.pane = AgentsPane::Detail;
+                ControllerEffect::CancelProfileReview
+            } else {
+                let effect = model
+                    .agents
+                    .editor
+                    .as_mut()
+                    .map(|editor| editor.submit_line(":back"))
+                    .unwrap_or(ProfileEditorEffect::None);
+                apply_profile_editor_effect(model, effect)
+            }
         }
         KeyCode::Enter if no_modifiers(key.modifiers) => {
             let input = model.command.take_text();
@@ -365,6 +441,7 @@ fn apply_profile_editor_effect(
             ControllerEffect::RequestProfilePreview(request)
         }
         ProfileEditorEffect::Execute(command) => {
+            model.command.clear();
             model.agents.pending_confirmation = Some(ProfileConfirmation { command });
             model.agents.pane = AgentsPane::Confirmation;
             ControllerEffect::Redraw
@@ -374,6 +451,16 @@ fn apply_profile_editor_effect(
             model.agents.pane = AgentsPane::Detail;
             ControllerEffect::CancelProfileReview
         }
+    }
+}
+
+fn exact_profile_confirmation(command: &ApplicationCommand) -> Option<String> {
+    match command {
+        ApplicationCommand::CreateAgentProfile { .. } => Some("create".to_owned()),
+        ApplicationCommand::ActivateAgentProfileVersion { review_digest, .. } => {
+            Some(format!("activate {review_digest}"))
+        }
+        _ => None,
     }
 }
 
@@ -430,12 +517,40 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             }
         }
         (AgentsPane::History, KeyCode::Down) if no_modifiers(key.modifiers) => {
-            model.agents.history_scroll = model.agents.history_scroll.saturating_add(1);
+            let last = model
+                .agents
+                .history
+                .as_ref()
+                .map(|history| history.versions.len().saturating_sub(1))
+                .unwrap_or(0);
+            model.agents.selected_history_version = model
+                .agents
+                .selected_history_version
+                .saturating_add(1)
+                .min(last);
+            model.agents.history_scroll = model.agents.selected_history_version;
             ControllerEffect::Redraw
         }
         (AgentsPane::History, KeyCode::Up) if no_modifiers(key.modifiers) => {
-            model.agents.history_scroll = model.agents.history_scroll.saturating_sub(1);
+            model.agents.selected_history_version =
+                model.agents.selected_history_version.saturating_sub(1);
+            model.agents.history_scroll = model.agents.selected_history_version;
             ControllerEffect::Redraw
+        }
+        (AgentsPane::History, KeyCode::Enter) if no_modifiers(key.modifiers) => {
+            let selection = model.agents.history.as_ref().and_then(|history| {
+                history
+                    .versions
+                    .get(model.agents.selected_history_version)
+                    .map(|entry| (history.profile_id, entry.version))
+            });
+            let Some((profile_id, version)) = selection else {
+                return Some(ControllerEffect::Redraw);
+            };
+            ControllerEffect::LoadAgentProfileVersion {
+                profile_id,
+                version,
+            }
         }
         (_, KeyCode::Esc) if no_modifiers(key.modifiers) => return Some(unwind_agents(model)),
         _ => return None,
@@ -713,6 +828,9 @@ mod tests {
                 recent_audit: Vec::new(),
                 agent_profiles: crate::app::AgentProfilesView {
                     profiles: Vec::new(),
+                    total_count: 0,
+                    returned_count: 0,
+                    truncated: false,
                 },
                 selected_agent_profile: None,
                 selected_agent_profile_history: None,
@@ -1007,7 +1125,7 @@ mod tests {
     }
 
     #[test]
-    fn too_small_routes_quit_to_command_text_owner() {
+    fn too_small_q_quits_even_when_command_text_owns_input() {
         let mut tiny = model();
         tiny.layout_mode = LayoutMode::TooSmall;
         let before = tiny.clone();
@@ -1031,9 +1149,9 @@ mod tests {
         command_tiny.layout_mode = LayoutMode::TooSmall;
         assert_eq!(
             handle_event(&mut command_tiny, key('q')),
-            ControllerEffect::Redraw
+            ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
         );
-        assert_eq!(command_tiny.command.text(), "q");
+        assert_eq!(command_tiny.command.text(), "");
     }
 
     #[test]
@@ -1226,7 +1344,7 @@ mod tests {
     }
 
     #[test]
-    fn too_small_resize_keeps_command_text_owner_active() {
+    fn too_small_resize_preserves_command_text_but_q_still_quits() {
         let mut model = model();
         assert_eq!(handle_event(&mut model, key('/')), ControllerEffect::Redraw);
         assert_eq!(model.focus, Focus::Command);
@@ -1235,8 +1353,11 @@ mod tests {
             ControllerEffect::Redraw
         );
 
-        assert_eq!(handle_event(&mut model, key('q')), ControllerEffect::Redraw);
-        assert_eq!(model.command.text(), "/q");
+        assert_eq!(
+            handle_event(&mut model, key('q')),
+            ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
+        );
+        assert_eq!(model.command.text(), "/");
     }
 
     #[test]

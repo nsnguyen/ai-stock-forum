@@ -152,12 +152,20 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
 }
 
 fn detail_lines(detail: &crate::app::AgentProfileView, theme: &Theme) -> Vec<Line<'static>> {
-    let profile = &detail.profile;
+    profile_version_lines(&detail.profile, detail.readiness, "Active version", theme)
+}
+
+fn profile_version_lines(
+    profile: &crate::agents::AgentProfileVersion,
+    readiness: AgentReadiness,
+    version_label: &'static str,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::styled(safe_text(profile.display_name()), theme.accent),
         label_value("Profile ID", profile.profile_id().to_string(), theme),
         label_value(
-            "Active version",
+            version_label,
             format!(
                 "v{} / {}",
                 profile.version().get(),
@@ -172,7 +180,7 @@ fn detail_lines(detail: &crate::app::AgentProfileView, theme: &Theme) -> Vec<Lin
             safe_text(&profile.specialty_tags().join(", ")),
             theme,
         ),
-        readiness_line("Readiness", detail.readiness, theme),
+        readiness_line("Readiness", readiness, theme),
         Line::default(),
         Line::styled("ACCEPTED CONTENT", theme.accent),
         label_value("Description", safe_text(profile.description()), theme),
@@ -214,16 +222,8 @@ fn detail_lines(detail: &crate::app::AgentProfileView, theme: &Theme) -> Vec<Lin
         label_value("Digest", profile.content_digest().to_string(), theme),
         Line::default(),
         Line::styled("Bindings", theme.accent),
-        label_value(
-            "Provider",
-            optional_text(profile.bindings().model_provider.as_deref()),
-            theme,
-        ),
-        label_value(
-            "Model",
-            optional_text(profile.bindings().model_name.as_deref()),
-            theme,
-        ),
+        label_value("Inference", inference_text(profile.bindings()), theme),
+        label_value("Engineering", engineering_text(profile.bindings()), theme),
     ]);
     append_provenance(&mut lines, profile.template_provenance(), theme);
     lines
@@ -277,19 +277,23 @@ fn history_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
             history.active_version_id.to_string(),
             theme,
         ),
-        label_value("Versions", history.versions.len().to_string(), theme),
+        label_value("Total versions", history.total_count.to_string(), theme),
+        label_value("Returned", history.returned_count.to_string(), theme),
+        label_value("Truncated", history.truncated.to_string(), theme),
         Line::default(),
     ];
-    for entry in &history.versions {
+    for (index, entry) in history.versions.iter().enumerate() {
         let active = entry.profile_version_id == history.active_version_id;
+        let selected = index == model.agents.selected_history_version;
         lines.push(Line::styled(
             format!(
-                "{} v{}  {}",
-                if active { ">" } else { " " },
+                "{} v{}  {}{}",
+                if selected { ">" } else { " " },
                 entry.version.get(),
-                readiness_name(entry.readiness)
+                readiness_name(entry.readiness),
+                if active { "  ACTIVE" } else { "" },
             ),
-            if active {
+            if selected {
                 theme.focus
             } else {
                 readiness_style(entry.readiness, theme)
@@ -319,6 +323,23 @@ fn history_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
             theme,
         ));
         lines.push(Line::default());
+    }
+    if let Some(detail) = &model.agents.version_detail {
+        lines.push(Line::styled("HISTORICAL VERSION", theme.accent));
+        lines.extend(profile_version_lines(
+            &detail.profile,
+            detail.readiness,
+            "Historical version",
+            theme,
+        ));
+        lines.push(Line::default());
+        lines.push(Line::styled("PREDECESSOR DIFF", theme.accent));
+        append_diffs(&mut lines, &detail.predecessor_diff, theme);
+    } else if !history.versions.is_empty() {
+        lines.push(Line::styled(
+            "Use Up/Down to select a version, then Enter to inspect it.",
+            theme.muted,
+        ));
     }
     lines
 }
@@ -372,7 +393,7 @@ fn editor_lines(editor: &ProfileEditor, theme: &Theme) -> Vec<Line<'static>> {
         } else if let Some(baseline) = editor.create_baseline() {
             append_create_diffs(&mut lines, baseline, editor.draft(), theme);
             lines.push(Line::styled(
-                "Use :activate to continue to explicit confirmation.",
+                "Use :create to continue to explicit confirmation.",
                 theme.muted,
             ));
         } else {
@@ -476,24 +497,7 @@ fn append_create_diffs(
 }
 
 fn render_confirmation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
-    let action = model
-        .agents
-        .pending_confirmation
-        .as_ref()
-        .map(|confirmation| match confirmation.command {
-            ApplicationCommand::CreateAgentProfile { .. } => "Create",
-            ApplicationCommand::ActivateAgentProfileVersion { .. } => "Activate",
-            _ => "Apply",
-        })
-        .unwrap_or("Apply");
-    let lines = vec![
-        Line::styled(format!("Confirm {action}"), theme.warning),
-        Line::default(),
-        Line::raw("This action writes a new immutable profile version."),
-        Line::default(),
-        Line::styled(format!("Enter  Confirm {action}"), theme.focus),
-        Line::styled("Esc    Cancel and return to review", theme.muted),
-    ];
+    let (action, lines) = confirmation_lines(model, theme);
     frame.render_widget(
         Paragraph::new(lines)
             .block(panel(
@@ -504,6 +508,78 @@ fn render_confirmation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, them
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn confirmation_lines(model: &TuiModel, theme: &Theme) -> (&'static str, Vec<Line<'static>>) {
+    let Some(confirmation) = &model.agents.pending_confirmation else {
+        return (
+            "Apply",
+            vec![Line::styled(
+                "Profile confirmation is unavailable. Press Esc to return.",
+                theme.warning,
+            )],
+        );
+    };
+    let mut lines = match &confirmation.command {
+        ApplicationCommand::CreateAgentProfile {
+            template_provenance,
+            ..
+        } => {
+            let context = template_provenance.as_ref().map_or_else(
+                || "Custom profile without template provenance".to_owned(),
+                |provenance| {
+                    format!(
+                        "Template {}@{} {}",
+                        safe_text(provenance.template_id.as_str()),
+                        provenance.template_version.get(),
+                        provenance.template_digest
+                    )
+                },
+            );
+            vec![
+                Line::styled("Confirm Create", theme.warning),
+                Line::default(),
+                Line::raw("This action creates and activates immutable profile version 1."),
+                label_value("Provenance", context, theme),
+                Line::default(),
+                Line::styled("Type exactly: create", theme.focus),
+            ]
+        }
+        ApplicationCommand::ActivateAgentProfileVersion {
+            expected_active_version_id,
+            review_digest,
+            ..
+        } => vec![
+            Line::styled("Confirm Activate", theme.warning),
+            Line::default(),
+            Line::raw("This action appends and activates one immutable profile version."),
+            label_value(
+                "Reviewed base",
+                expected_active_version_id.to_string(),
+                theme,
+            ),
+            label_value("Review digest", review_digest.to_string(), theme),
+            Line::default(),
+            Line::styled(
+                format!("Type exactly: activate {review_digest}"),
+                theme.focus,
+            ),
+        ],
+        _ => vec![Line::styled(
+            "Profile confirmation is unavailable. Press Esc to return.",
+            theme.warning,
+        )],
+    };
+    lines.push(Line::styled(
+        "Enter submits the typed phrase; Esc returns to review.",
+        theme.muted,
+    ));
+    let action = match confirmation.command {
+        ApplicationCommand::CreateAgentProfile { .. } => "Create",
+        ApplicationCommand::ActivateAgentProfileVersion { .. } => "Activate",
+        _ => "Apply",
+    };
+    (action, lines)
 }
 
 pub(super) fn inspector_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
@@ -524,13 +600,13 @@ pub(super) fn inspector_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'stat
     ));
     lines.push(readiness_line("Readiness", detail.readiness, theme));
     lines.push(label_value(
-        "Provider",
-        optional_text(profile.bindings().model_provider.as_deref()),
+        "Inference",
+        inference_text(profile.bindings()),
         theme,
     ));
     lines.push(label_value(
-        "Model",
-        optional_text(profile.bindings().model_name.as_deref()),
+        "Engineering",
+        engineering_text(profile.bindings()),
         theme,
     ));
     lines.push(Line::default());
@@ -610,29 +686,44 @@ fn readiness_line(label: &'static str, readiness: AgentReadiness, theme: &Theme)
 
 fn readiness_name(readiness: AgentReadiness) -> &'static str {
     match readiness {
+        AgentReadiness::Unbound => "Unbound",
+        AgentReadiness::BindingUnavailable => "Binding unavailable",
         AgentReadiness::Ready => "Ready",
-        AgentReadiness::NotReady => "Not Ready",
     }
 }
 
 fn readiness_style(readiness: AgentReadiness, theme: &Theme) -> ratatui::style::Style {
     match readiness {
         AgentReadiness::Ready => theme.success,
-        AgentReadiness::NotReady => theme.warning,
+        AgentReadiness::Unbound | AgentReadiness::BindingUnavailable => theme.warning,
     }
-}
-
-fn optional_text(value: Option<&str>) -> String {
-    value
-        .map(safe_text)
-        .unwrap_or_else(|| "Not configured".to_owned())
 }
 
 fn bindings_value(bindings: &AgentBindings) -> String {
     format!(
         "{} / {}",
-        optional_text(bindings.model_provider.as_deref()),
-        optional_text(bindings.model_name.as_deref())
+        inference_text(bindings),
+        engineering_text(bindings)
+    )
+}
+
+fn inference_text(bindings: &AgentBindings) -> String {
+    bindings.inference.as_ref().map_or_else(
+        || "Not configured".to_owned(),
+        |binding| {
+            format!(
+                "{} / {}",
+                safe_text(binding.connection_id().as_str()),
+                safe_text(binding.model_id().as_str())
+            )
+        },
+    )
+}
+
+fn engineering_text(bindings: &AgentBindings) -> String {
+    bindings.engineering.as_ref().map_or_else(
+        || "Not configured".to_owned(),
+        |binding| safe_text(binding.runtime_id().as_str()),
     )
 }
 

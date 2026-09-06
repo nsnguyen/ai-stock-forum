@@ -662,6 +662,7 @@ enum ProfileWorkflow {
     Confirming {
         editor: ProfileEditor,
         command: ApplicationCommand,
+        expected_confirmation: String,
     },
 }
 
@@ -713,14 +714,7 @@ impl FallbackRunner {
                 byte_length: line.full_byte_length(),
                 input_digest: line.input_digest().clone(),
             };
-            TextRenderer::render_view(
-                &crate::app::CommandView::InputRejected(crate::app::InputRejectedView {
-                    rejection,
-                }),
-                writer,
-            )
-            .map_err(|_| UiError::Write)?;
-            return Ok(None);
+            return self.execute_command(ApplicationCommand::RejectInput(rejection), writer);
         }
 
         if self
@@ -732,17 +726,14 @@ impl FallbackRunner {
             let line = match std::str::from_utf8(line.bytes()) {
                 Ok(line) => line,
                 Err(_) => {
-                    TextRenderer::render_view(
-                        &CommandView::InputRejected(crate::app::InputRejectedView {
-                            rejection: InputRejection::from_input(
-                                InputRejectionCategory::InvalidEncoding,
-                                None,
-                                line.bytes(),
-                            ),
-                        }),
+                    self.execute_command(
+                        ApplicationCommand::RejectInput(InputRejection::from_input(
+                            InputRejectionCategory::InvalidEncoding,
+                            None,
+                            line.bytes(),
+                        )),
                         writer,
-                    )
-                    .map_err(|_| UiError::Write)?;
+                    )?;
                     return Ok(None);
                 }
             };
@@ -797,11 +788,19 @@ impl FallbackRunner {
                     .map_err(|_| UiError::Write)
             }
             AgentWorkflowCommand::Create { template_id } => self.start_create(template_id, writer),
-            AgentWorkflowCommand::Edit { profile_id } => {
-                let outcome = self
+            AgentWorkflowCommand::Edit { selector } => {
+                let outcome = match self
                     .client
-                    .submit(ApplicationCommand::ShowAgentProfile { profile_id })
-                    .map_err(UiError::Runtime)?;
+                    .submit(ApplicationCommand::ShowAgentProfile { selector })
+                {
+                    Ok(outcome) => outcome,
+                    Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+                        TextRenderer::render_runtime_error(&error, writer)
+                            .map_err(|_| UiError::Write)?;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(UiError::Runtime(error)),
+                };
                 let CommandView::AgentProfile(view) = outcome.view else {
                     return Err(UiError::Panicked);
                 };
@@ -868,19 +867,28 @@ impl FallbackRunner {
                         .cancel_agent_profile_edit()
                         .map_err(UiError::Runtime)?;
                     TextRenderer::render_profile_cancelled(true, writer).map_err(|_| UiError::Write)
-                } else if let Some(template) = builtin_profile_templates()
-                    .iter()
-                    .find(|template| template.id.as_str() == input)
-                {
-                    self.start_create(template.id.clone(), writer)
                 } else {
-                    TextRenderer::render_profile_templates(builtin_profile_templates(), writer)
-                        .map_err(|_| UiError::Write)?;
-                    *self
-                        .profile_workflow
-                        .lock()
-                        .map_err(|_| UiError::Panicked)? = Some(ProfileWorkflow::SelectingTemplate);
-                    Ok(())
+                    let canonical_id = match input {
+                        "bull" | "bear" | "chief" | "engineering" | "custom" => {
+                            format!("builtin.{input}")
+                        }
+                        value => value.to_owned(),
+                    };
+                    if let Some(template) = builtin_profile_templates()
+                        .iter()
+                        .find(|template| template.id.as_str() == canonical_id)
+                    {
+                        self.start_create(template.id.clone(), writer)
+                    } else {
+                        TextRenderer::render_profile_templates(builtin_profile_templates(), writer)
+                            .map_err(|_| UiError::Write)?;
+                        *self
+                            .profile_workflow
+                            .lock()
+                            .map_err(|_| UiError::Panicked)? =
+                            Some(ProfileWorkflow::SelectingTemplate);
+                        Ok(())
+                    }
                 }
             }
             ProfileWorkflow::Editing(mut editor) => {
@@ -897,14 +905,29 @@ impl FallbackRunner {
                         Ok(())
                     }
                     ProfileEditorEffect::PreviewEdit(request) => {
-                        let preview = self
-                            .client
-                            .preview_agent_profile_edit(
-                                request.profile_id,
-                                request.expected_active_version_id,
-                                request.candidate,
-                            )
-                            .map_err(UiError::Runtime)?;
+                        let preview = match self.client.preview_agent_profile_edit(
+                            request.profile_id,
+                            request.expected_active_version_id,
+                            request.candidate,
+                        ) {
+                            Ok(preview) => preview,
+                            Err(
+                                error @ (RuntimeError::Application(_) | RuntimeError::Backpressure),
+                            ) => {
+                                editor.report_error(runtime_error_code(&error));
+                                TextRenderer::render_runtime_error(&error, writer)
+                                    .map_err(|_| UiError::Write)?;
+                                TextRenderer::render_profile_editor(&editor, writer)
+                                    .map_err(|_| UiError::Write)?;
+                                *self
+                                    .profile_workflow
+                                    .lock()
+                                    .map_err(|_| UiError::Panicked)? =
+                                    Some(ProfileWorkflow::Editing(editor));
+                                return Ok(());
+                            }
+                            Err(error) => return Err(UiError::Runtime(error)),
+                        };
                         editor.apply_preview(request.generation, preview);
                         TextRenderer::render_profile_editor(&editor, writer)
                             .map_err(|_| UiError::Write)?;
@@ -916,13 +939,23 @@ impl FallbackRunner {
                         Ok(())
                     }
                     ProfileEditorEffect::Execute(command) => {
-                        TextRenderer::render_activation_confirmation(writer)
-                            .map_err(|_| UiError::Write)?;
+                        let expected_confirmation =
+                            exact_profile_confirmation(&command).ok_or(UiError::Panicked)?;
+                        TextRenderer::render_profile_confirmation(
+                            &editor,
+                            &command,
+                            &expected_confirmation,
+                            writer,
+                        )
+                        .map_err(|_| UiError::Write)?;
                         *self
                             .profile_workflow
                             .lock()
-                            .map_err(|_| UiError::Panicked)? =
-                            Some(ProfileWorkflow::Confirming { editor, command });
+                            .map_err(|_| UiError::Panicked)? = Some(ProfileWorkflow::Confirming {
+                            editor,
+                            command,
+                            expected_confirmation,
+                        });
                         Ok(())
                     }
                     ProfileEditorEffect::Cancelled => {
@@ -934,9 +967,14 @@ impl FallbackRunner {
                     }
                 }
             }
-            ProfileWorkflow::Confirming { editor, command } => match line.trim() {
-                "y" | "yes" => self.execute_profile_confirmation(editor, command, writer),
-                "n" | "no" => {
+            ProfileWorkflow::Confirming {
+                editor,
+                command,
+                expected_confirmation,
+            } => match line.trim() {
+                confirmation if confirmation == expected_confirmation => self
+                    .execute_profile_confirmation(editor, command, expected_confirmation, writer),
+                ":back" => {
                     TextRenderer::render_activation_declined(writer).map_err(|_| UiError::Write)?;
                     TextRenderer::render_profile_editor(&editor, writer)
                         .map_err(|_| UiError::Write)?;
@@ -955,13 +993,23 @@ impl FallbackRunner {
                         .map_err(|_| UiError::Write)
                 }
                 _ => {
-                    TextRenderer::render_activation_confirmation(writer)
+                    TextRenderer::render_confirmation_mismatch(writer)
                         .map_err(|_| UiError::Write)?;
+                    TextRenderer::render_profile_confirmation(
+                        &editor,
+                        &command,
+                        &expected_confirmation,
+                        writer,
+                    )
+                    .map_err(|_| UiError::Write)?;
                     *self
                         .profile_workflow
                         .lock()
-                        .map_err(|_| UiError::Panicked)? =
-                        Some(ProfileWorkflow::Confirming { editor, command });
+                        .map_err(|_| UiError::Panicked)? = Some(ProfileWorkflow::Confirming {
+                        editor,
+                        command,
+                        expected_confirmation,
+                    });
                     Ok(())
                 }
             },
@@ -987,6 +1035,7 @@ impl FallbackRunner {
         &self,
         editor: ProfileEditor,
         command: ApplicationCommand,
+        expected_confirmation: String,
         writer: &mut W,
     ) -> Result<(), UiError> {
         let pending = match self.client.try_submit(command.clone()) {
@@ -995,13 +1044,25 @@ impl FallbackRunner {
                 *self
                     .profile_workflow
                     .lock()
-                    .map_err(|_| UiError::Panicked)? =
-                    Some(ProfileWorkflow::Confirming { editor, command });
+                    .map_err(|_| UiError::Panicked)? = Some(ProfileWorkflow::Confirming {
+                    editor,
+                    command,
+                    expected_confirmation,
+                });
                 if TextRenderer::render_runtime_error(&error, writer).is_err() {
                     let _ = self.cancel_profile_workflow();
                     return Err(UiError::Write);
                 }
                 return Ok(());
+            }
+            Err(error @ RuntimeError::Application(_)) => {
+                return self.retain_failed_confirmation(
+                    editor,
+                    command,
+                    expected_confirmation,
+                    error,
+                    writer,
+                );
             }
             Err(error) => {
                 self.cancel_abandoned_edit(&editor);
@@ -1010,6 +1071,15 @@ impl FallbackRunner {
         };
         let outcome = match pending.recv() {
             Ok(outcome) => outcome,
+            Err(error @ RuntimeError::Application(_)) => {
+                return self.retain_failed_confirmation(
+                    editor,
+                    command,
+                    expected_confirmation,
+                    error,
+                    writer,
+                );
+            }
             Err(error) => {
                 self.cancel_abandoned_edit(&editor);
                 return Err(UiError::Runtime(error));
@@ -1018,10 +1088,57 @@ impl FallbackRunner {
         TextRenderer::render_outcome(&outcome, writer).map_err(|_| UiError::Write)
     }
 
+    fn retain_failed_confirmation<W: Write>(
+        &self,
+        mut editor: ProfileEditor,
+        command: ApplicationCommand,
+        expected_confirmation: String,
+        error: RuntimeError,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        editor.report_error(runtime_error_code(&error));
+        TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write)?;
+        TextRenderer::render_profile_editor(&editor, writer).map_err(|_| UiError::Write)?;
+        TextRenderer::render_profile_confirmation(
+            &editor,
+            &command,
+            &expected_confirmation,
+            writer,
+        )
+        .map_err(|_| UiError::Write)?;
+        *self
+            .profile_workflow
+            .lock()
+            .map_err(|_| UiError::Panicked)? = Some(ProfileWorkflow::Confirming {
+            editor,
+            command,
+            expected_confirmation,
+        });
+        Ok(())
+    }
+
     fn cancel_abandoned_edit(&self, editor: &ProfileEditor) {
         if matches!(editor.mode(), ProfileEditorMode::Edit { .. }) {
             let _ = self.client.cancel_agent_profile_edit();
         }
+    }
+}
+
+fn exact_profile_confirmation(command: &ApplicationCommand) -> Option<String> {
+    match command {
+        ApplicationCommand::CreateAgentProfile { .. } => Some("create".to_owned()),
+        ApplicationCommand::ActivateAgentProfileVersion { review_digest, .. } => {
+            Some(format!("activate {review_digest}"))
+        }
+        _ => None,
+    }
+}
+
+fn runtime_error_code(error: &RuntimeError) -> &'static str {
+    match error {
+        RuntimeError::Application(error) => error.code(),
+        RuntimeError::Backpressure => "command_backpressure",
+        _ => "runtime_unavailable",
     }
 }
 

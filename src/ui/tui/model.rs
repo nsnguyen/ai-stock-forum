@@ -3,8 +3,9 @@ use std::collections::VecDeque;
 use crate::{
     agents::ProfileTemplate,
     app::{
-        AgentProfileHistoryView, AgentProfileView, AgentProfilesView, ApplicationCommand,
-        DatabaseReadiness, MAX_INPUT_BYTES, PresentationSnapshot, ProcessGuardOwnership,
+        AgentProfileHistoryView, AgentProfileVersionView, AgentProfileView, AgentProfilesView,
+        ApplicationCommand, DatabaseReadiness, MAX_INPUT_BYTES, PresentationSnapshot,
+        ProcessGuardOwnership,
     },
     audit::AuditEntry,
     domain::{InstallationId, SessionId},
@@ -45,11 +46,13 @@ pub struct AgentsViewState {
     pub list_scroll: usize,
     pub detail_scroll: usize,
     pub history_scroll: usize,
+    pub selected_history_version: usize,
     pub editor: Option<ProfileEditor>,
     pub pending_confirmation: Option<ProfileConfirmation>,
     pub profiles: AgentProfilesView,
     pub detail: Option<AgentProfileView>,
     pub history: Option<AgentProfileHistoryView>,
+    pub version_detail: Option<AgentProfileVersionView>,
 }
 
 impl Default for AgentsViewState {
@@ -61,13 +64,18 @@ impl Default for AgentsViewState {
             list_scroll: 0,
             detail_scroll: 0,
             history_scroll: 0,
+            selected_history_version: 0,
             editor: None,
             pending_confirmation: None,
             profiles: AgentProfilesView {
                 profiles: Vec::new(),
+                total_count: 0,
+                returned_count: 0,
+                truncated: false,
             },
             detail: None,
             history: None,
+            version_detail: None,
         }
     }
 }
@@ -85,6 +93,7 @@ impl AgentsViewState {
             self.list_scroll = 0;
             self.detail = None;
             self.history = None;
+            self.version_detail = None;
             return;
         }
         self.selected_profile = selected_id
@@ -108,6 +117,7 @@ impl AgentsViewState {
         {
             self.detail = None;
             self.history = None;
+            self.version_detail = None;
         }
     }
 
@@ -123,12 +133,20 @@ impl AgentsViewState {
         }
         if self.history.as_ref().map(|history| history.profile_id) != Some(profile_id) {
             self.history = None;
+            self.version_detail = None;
         }
         self.detail = Some(detail);
     }
 
     pub fn replace_history(&mut self, history: AgentProfileHistoryView) {
+        self.selected_history_version = 0;
+        self.history_scroll = 0;
+        self.version_detail = None;
         self.history = Some(history);
+    }
+
+    pub fn replace_version_detail(&mut self, version: AgentProfileVersionView) {
+        self.version_detail = Some(version);
     }
 
     pub fn start_profile_create(
@@ -560,6 +578,9 @@ mod tests {
             recent_audit: vec![audit_entry(1)],
             agent_profiles: crate::app::AgentProfilesView {
                 profiles: Vec::new(),
+                total_count: 0,
+                returned_count: 0,
+                truncated: false,
             },
             selected_agent_profile: None,
             selected_agent_profile_history: None,

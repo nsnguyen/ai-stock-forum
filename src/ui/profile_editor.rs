@@ -7,14 +7,17 @@
 
 use crate::{
     agents::{
-        AgentProfileDraft, AgentRole, ProfileEditPreview, ProfileTemplate,
-        ProfileTemplateProvenance, normalize_tag_key,
+        AgentBindings, AgentProfileDraft, AgentRole, DESCRIPTION_MAX_BYTES, DISPLAY_NAME_MAX_BYTES,
+        INSTRUCTIONS_MAX_BYTES, PERSONALITY_MAX_BYTES, PRIMARY_SPECIALTY_MAX_BYTES,
+        ProfileEditPreview, ProfileField, ProfileTemplate, ProfileTemplateProvenance,
+        SPECIALTY_TAG_MAX_BYTES, canonicalize_visible_text, normalize_profile_name_key,
+        normalize_tag_key,
     },
     app::ApplicationCommand,
     domain::{AgentProfileId, AgentProfileVersionId, DomainError},
 };
 
-const MAX_SPECIALTY_TAGS: usize = 5;
+const MAX_SPECIALTY_TAGS: usize = crate::agents::MAX_SPECIALTY_TAGS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfileEditorMode {
@@ -178,6 +181,10 @@ impl ProfileEditor {
         self.local_message.as_ref()
     }
 
+    pub fn report_error(&mut self, code: &'static str) {
+        self.message(code);
+    }
+
     /// Provides only control state suitable for a host's command history or
     /// diagnostics. Draft values and review diff values are deliberately not
     /// included.
@@ -253,6 +260,7 @@ impl ProfileEditor {
                 ProfileEditorEffect::None
             }
             "review" => self.request_review(),
+            "create" => self.create(),
             "activate" => self.activate(),
             "cancel" => {
                 self.invalidate_review();
@@ -289,30 +297,57 @@ impl ProfileEditor {
     fn submit_text(&mut self, line: &str) {
         let changed = match self.step {
             ProfileEditorStep::Identity => match self.identity_field {
-                IdentityField::DisplayName => replace_text(&mut self.draft.display_name, line),
-                IdentityField::Description => replace_text(&mut self.draft.description, line),
+                IdentityField::DisplayName => replace_text(
+                    &mut self.draft.display_name,
+                    line,
+                    ProfileField::DisplayName,
+                    DISPLAY_NAME_MAX_BYTES,
+                    false,
+                ),
+                IdentityField::Description => replace_text(
+                    &mut self.draft.description,
+                    line,
+                    ProfileField::Description,
+                    DESCRIPTION_MAX_BYTES,
+                    true,
+                ),
             },
-            ProfileEditorStep::Specialty => replace_text(&mut self.draft.primary_specialty, line),
+            ProfileEditorStep::Specialty => replace_text(
+                &mut self.draft.primary_specialty,
+                line,
+                ProfileField::PrimarySpecialty,
+                PRIMARY_SPECIALTY_MAX_BYTES,
+                false,
+            ),
             ProfileEditorStep::Personality => append_line(
                 &mut self.draft.personality,
                 &mut self.personality_started,
                 line,
+                ProfileField::Personality,
+                PERSONALITY_MAX_BYTES,
             ),
             ProfileEditorStep::Instructions => append_line(
                 &mut self.draft.instructions,
                 &mut self.instructions_started,
                 line,
+                ProfileField::Instructions,
+                INSTRUCTIONS_MAX_BYTES,
             ),
             ProfileEditorStep::Template
             | ProfileEditorStep::OptionalBindings
             | ProfileEditorStep::Review => {
                 self.message("editor_field_unavailable");
-                false
+                Ok(false)
             }
         };
-        if changed {
-            self.invalidate_review();
-            self.local_message = None;
+        match changed {
+            Ok(true) => {
+                self.invalidate_review();
+                self.local_message = None;
+            }
+            Ok(false) => {}
+            Err(TextEditError::Limit) => self.message("profile_field_limit"),
+            Err(TextEditError::Invalid) => self.message("invalid_profile_field"),
         }
     }
 
@@ -324,7 +359,7 @@ impl ProfileEditor {
             }
             ProfileEditorStep::Identity => match self.identity_field {
                 IdentityField::DisplayName => {
-                    if self.is_valid() {
+                    if self.validate_current() {
                         self.identity_field = IdentityField::Description;
                         self.local_message = None;
                     }
@@ -396,10 +431,8 @@ impl ProfileEditor {
                 self.instructions_started = true;
             }),
             ProfileEditorStep::OptionalBindings => {
-                let changed = self.draft.bindings.model_provider.is_some()
-                    || self.draft.bindings.model_name.is_some();
-                self.draft.bindings.model_provider = None;
-                self.draft.bindings.model_name = None;
+                let changed = self.draft.bindings != AgentBindings::default();
+                self.draft.bindings = AgentBindings::default();
                 changed
             }
             ProfileEditorStep::Template | ProfileEditorStep::Review => {
@@ -422,7 +455,41 @@ impl ProfileEditor {
             self.message("specialty_tag_limit");
             return;
         }
-        self.draft.specialty_tags.push(value.to_owned());
+        let tag = match canonicalize_visible_text(
+            ProfileField::SpecialtyTag,
+            value,
+            SPECIALTY_TAG_MAX_BYTES,
+            false,
+        ) {
+            Ok(tag) => tag,
+            Err(_) if value.len() > SPECIALTY_TAG_MAX_BYTES => {
+                self.message("profile_field_limit");
+                return;
+            }
+            Err(_) => {
+                self.message("invalid_profile_field");
+                return;
+            }
+        };
+        let Ok(key) = normalize_tag_key(&tag) else {
+            self.message("invalid_profile_field");
+            return;
+        };
+        if normalize_profile_name_key(&self.draft.primary_specialty)
+            .is_ok_and(|primary| primary.as_str() == key)
+            || self
+                .draft
+                .specialty_tags
+                .iter()
+                .any(|existing| normalize_tag_key(existing).is_ok_and(|existing| existing == key))
+        {
+            self.message("invalid_profile_field");
+            return;
+        }
+        self.draft.specialty_tags.push(tag);
+        self.draft
+            .specialty_tags
+            .sort_by_cached_key(|tag| normalize_tag_key(tag).unwrap_or_else(|_| tag.clone()));
         self.invalidate_review();
         self.local_message = None;
     }
@@ -455,12 +522,8 @@ impl ProfileEditor {
             self.message("editor_field_unavailable");
             return;
         }
-        let next = Some(value.to_owned());
-        if self.draft.bindings.model_provider != next {
-            self.draft.bindings.model_provider = next;
-            self.invalidate_review();
-        }
-        self.local_message = None;
+        let _ = value;
+        self.message("binding_reference_unavailable");
     }
 
     fn set_role(&mut self, value: &str) {
@@ -491,12 +554,8 @@ impl ProfileEditor {
             self.message("editor_field_unavailable");
             return;
         }
-        let next = Some(value.to_owned());
-        if self.draft.bindings.model_name != next {
-            self.draft.bindings.model_name = next;
-            self.invalidate_review();
-        }
-        self.local_message = None;
+        let _ = value;
+        self.message("binding_reference_unavailable");
     }
 
     fn request_review(&mut self) -> ProfileEditorEffect {
@@ -534,9 +593,25 @@ impl ProfileEditor {
         }
     }
 
+    fn create(&mut self) -> ProfileEditorEffect {
+        if !matches!(self.mode, ProfileEditorMode::Create { .. }) {
+            self.message("activation_action_required");
+            return ProfileEditorEffect::None;
+        }
+        self.execute_create()
+    }
+
     fn activate(&mut self) -> ProfileEditorEffect {
+        if !matches!(self.mode, ProfileEditorMode::Edit { .. }) {
+            self.message("create_action_required");
+            return ProfileEditorEffect::None;
+        }
+        self.execute_activation()
+    }
+
+    fn execute_create(&mut self) -> ProfileEditorEffect {
         if self.step != ProfileEditorStep::Review {
-            self.message("activation_unavailable");
+            self.message("create_unavailable");
             return ProfileEditorEffect::None;
         }
         if !self.is_valid() {
@@ -549,6 +624,19 @@ impl ProfileEditor {
                     template_provenance: Some(provenance.clone()),
                 })
             }
+            ProfileEditorMode::Edit { .. } => ProfileEditorEffect::None,
+        }
+    }
+
+    fn execute_activation(&mut self) -> ProfileEditorEffect {
+        if self.step != ProfileEditorStep::Review {
+            self.message("activation_unavailable");
+            return ProfileEditorEffect::None;
+        }
+        if !self.is_valid() {
+            return ProfileEditorEffect::None;
+        }
+        match &self.mode {
             ProfileEditorMode::Edit {
                 profile_id,
                 expected_active_version_id,
@@ -567,30 +655,83 @@ impl ProfileEditor {
                     review_digest: review.preview.review_digest.clone(),
                 })
             }
+            ProfileEditorMode::Create { .. } => ProfileEditorEffect::None,
         }
     }
 
     fn advance_after_validation(&mut self, next: ProfileEditorStep) {
-        if self.is_valid() {
+        if self.validate_current() {
             self.step = next;
             self.local_message = None;
         }
     }
 
     fn is_valid(&mut self) -> bool {
-        match AgentProfileDraft::new(
-            self.draft.display_name.clone(),
-            self.draft.description.clone(),
-            self.draft.role,
-            self.draft.primary_specialty.clone(),
-            self.draft.specialty_tags.clone(),
-            self.draft.personality.clone(),
-            self.draft.instructions.clone(),
-            self.draft.bindings.clone(),
-            self.draft.skill_refs.clone(),
-            self.draft.mcp_refs.clone(),
-        ) {
-            Ok(_) => true,
+        match self.draft.canonicalized() {
+            Ok(canonical) => {
+                self.draft = canonical;
+                true
+            }
+            Err(_) => {
+                self.message("invalid_profile_field");
+                false
+            }
+        }
+    }
+
+    fn validate_current(&mut self) -> bool {
+        let result = match self.step {
+            ProfileEditorStep::Template | ProfileEditorStep::OptionalBindings => Ok(()),
+            ProfileEditorStep::Identity => match self.identity_field {
+                IdentityField::DisplayName => canonicalize_visible_text(
+                    ProfileField::DisplayName,
+                    &self.draft.display_name,
+                    DISPLAY_NAME_MAX_BYTES,
+                    false,
+                )
+                .map(|value| self.draft.display_name = value),
+                IdentityField::Description => canonicalize_visible_text(
+                    ProfileField::Description,
+                    &self.draft.description,
+                    DESCRIPTION_MAX_BYTES,
+                    true,
+                )
+                .map(|value| self.draft.description = value),
+            },
+            ProfileEditorStep::Specialty => canonicalize_visible_text(
+                ProfileField::PrimarySpecialty,
+                &self.draft.primary_specialty,
+                PRIMARY_SPECIALTY_MAX_BYTES,
+                false,
+            )
+            .and_then(|value| {
+                self.draft.primary_specialty = value;
+                for tag in &self.draft.specialty_tags {
+                    normalize_tag_key(tag)?;
+                }
+                Ok(())
+            }),
+            ProfileEditorStep::Personality => canonicalize_visible_text(
+                ProfileField::Personality,
+                &self.draft.personality,
+                PERSONALITY_MAX_BYTES,
+                false,
+            )
+            .map(|value| self.draft.personality = value),
+            ProfileEditorStep::Instructions => canonicalize_visible_text(
+                ProfileField::Instructions,
+                &self.draft.instructions,
+                INSTRUCTIONS_MAX_BYTES,
+                false,
+            )
+            .map(|value| self.draft.instructions = value),
+            ProfileEditorStep::Review => self
+                .draft
+                .canonicalized()
+                .map(|canonical| self.draft = canonical),
+        };
+        match result {
+            Ok(()) => true,
             Err(_) => {
                 self.message("invalid_profile_field");
                 false
@@ -608,27 +749,74 @@ impl ProfileEditor {
     }
 }
 
-fn replace_text(field: &mut String, value: &str) -> bool {
-    if field == value {
-        return false;
-    }
-    field.clear();
-    field.push_str(value);
-    true
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum TextEditError {
+    Invalid,
+    Limit,
 }
 
-fn append_line(field: &mut String, started: &mut bool, value: &str) -> bool {
+fn replace_text(
+    field: &mut String,
+    value: &str,
+    profile_field: ProfileField,
+    max_bytes: usize,
+    allow_empty: bool,
+) -> Result<bool, TextEditError> {
+    let canonical = match canonicalize_visible_text(profile_field, value, max_bytes, allow_empty) {
+        Ok(canonical) => canonical,
+        Err(_)
+            if !allow_empty
+                && !value.is_empty()
+                && value.chars().all(char::is_whitespace)
+                && !value.chars().any(char::is_control)
+                && value.len() <= max_bytes =>
+        {
+            value.to_owned()
+        }
+        Err(_) if value.len() > max_bytes => return Err(TextEditError::Limit),
+        Err(_) => return Err(TextEditError::Invalid),
+    };
+    if field == &canonical {
+        return Ok(false);
+    }
+    *field = canonical;
+    Ok(true)
+}
+
+fn append_line(
+    field: &mut String,
+    started: &mut bool,
+    value: &str,
+    profile_field: ProfileField,
+    max_bytes: usize,
+) -> Result<bool, TextEditError> {
+    let value =
+        canonicalize_visible_text(profile_field, value, max_bytes, false).map_err(|_| {
+            if value.len() > max_bytes {
+                TextEditError::Limit
+            } else {
+                TextEditError::Invalid
+            }
+        })?;
     if !*started {
         *started = true;
-        return replace_text(field, value);
+        if field == &value {
+            return Ok(false);
+        }
+        *field = value;
+        return Ok(true);
+    }
+    let separator_bytes = usize::from(!field.is_empty());
+    if field.len() + separator_bytes + value.len() > max_bytes {
+        return Err(TextEditError::Limit);
     }
     if field.is_empty() {
-        field.push_str(value);
+        field.push_str(&value);
     } else {
         field.push(' ');
-        field.push_str(value);
+        field.push_str(&value);
     }
-    true
+    Ok(true)
 }
 
 trait BoolClear {
