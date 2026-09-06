@@ -827,3 +827,104 @@ fn agents_state_equality_detects_different_editor_drafts() {
 
     assert_ne!(left, right);
 }
+
+#[test]
+fn shifted_return_submits_template_controls_and_clears_stale_validation() {
+    let mut model = model();
+    model.active_view = View::Agents;
+    model.agents.pane = AgentsPane::Editor;
+    model.agents.editor = Some(create_editor());
+
+    assert_eq!(
+        enter_line(&mut model, "text is unavailable here"),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(
+        model
+            .agents
+            .editor
+            .as_ref()
+            .and_then(ProfileEditor::local_message)
+            .map(|message| message.code()),
+        Some("editor_field_unavailable")
+    );
+
+    for character in ":role bull".chars() {
+        assert_eq!(
+            handle_event(&mut model, key(KeyCode::Char(character))),
+            ControllerEffect::Redraw
+        );
+    }
+    assert_eq!(
+        handle_event(
+            &mut model,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+        ),
+        ControllerEffect::Redraw
+    );
+    assert!(model.command.text().is_empty());
+    assert!(
+        model
+            .agents
+            .editor
+            .as_ref()
+            .and_then(ProfileEditor::local_message)
+            .is_none()
+    );
+
+    for character in ":next".chars() {
+        assert_eq!(
+            handle_event(&mut model, key(KeyCode::Char(character))),
+            ControllerEffect::Redraw
+        );
+    }
+    assert_eq!(
+        handle_event(
+            &mut model,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+        ),
+        ControllerEffect::Redraw
+    );
+    assert!(model.command.text().is_empty());
+    assert_eq!(
+        model.agents.editor.as_ref().unwrap().step().as_str(),
+        "identity"
+    );
+}
+
+#[test]
+fn modified_enter_chords_do_not_execute_profile_confirmation() {
+    let mut model = model();
+    model.active_view = View::Agents;
+    model.agents.pane = AgentsPane::Editor;
+    model.agents.editor = Some(create_editor());
+    advance_create_editor_to_review(&mut model);
+    assert_eq!(enter_line(&mut model, ":create"), ControllerEffect::Redraw);
+    assert_eq!(model.agents.pane, AgentsPane::Confirmation);
+    for character in "create".chars() {
+        assert_eq!(
+            handle_event(&mut model, key(KeyCode::Char(character))),
+            ControllerEffect::Redraw
+        );
+    }
+
+    for modifiers in [
+        KeyModifiers::SHIFT,
+        KeyModifiers::CONTROL,
+        KeyModifiers::ALT,
+        KeyModifiers::SUPER,
+        KeyModifiers::HYPER,
+        KeyModifiers::META,
+        KeyModifiers::SHIFT | KeyModifiers::CONTROL,
+    ] {
+        let mut candidate = model.clone();
+        assert_eq!(
+            handle_event(
+                &mut candidate,
+                TuiEvent::Key(KeyEvent::new(KeyCode::Enter, modifiers)),
+            ),
+            ControllerEffect::None
+        );
+        assert_eq!(candidate, model);
+    }
+}

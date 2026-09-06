@@ -420,7 +420,7 @@ fn handle_profile_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerE
                 apply_profile_editor_effect(model, effect)
             }
         }
-        KeyCode::Enter if no_modifiers(key.modifiers) => {
+        KeyCode::Enter if text_modifiers(key.modifiers) => {
             let input = model.command.take_text();
             let effect = model
                 .agents
