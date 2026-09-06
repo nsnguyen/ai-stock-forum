@@ -252,7 +252,8 @@ pub fn reduce(
         | ApplicationEvent::AgentProfileVersionActivated { .. }
         | ApplicationEvent::AgentProfilesListed { .. }
         | ApplicationEvent::AgentProfileViewed { .. }
-        | ApplicationEvent::AgentProfileHistoryViewed { .. } => {}
+        | ApplicationEvent::AgentProfileHistoryViewed { .. }
+        | ApplicationEvent::AgentProfileVersionViewed { .. } => {}
     }
     next.agent_profiles.reduce(&event.event)?;
     next.last_sequence = event.sequence;

@@ -39,6 +39,8 @@ pub enum PersistenceError {
     ProjectionStateConflict,
     #[error("database agent profile history does not match the authoritative event stream")]
     AgentProfileHistoryMismatch,
+    #[error("an active agent profile already uses that normalized name")]
+    DuplicateAgentProfileName,
     #[error("agent profile payload is invalid")]
     InvalidAgentProfilePayload,
     #[error("active agent profile projection rebuild failed")]
@@ -59,6 +61,7 @@ impl PersistenceError {
             Self::EventDigestMismatch => "event_digest_mismatch",
             Self::ProjectionStateConflict => "projection_state_conflict",
             Self::AgentProfileHistoryMismatch => "database_agent_profile_history_mismatch",
+            Self::DuplicateAgentProfileName => "active_name_conflict",
             Self::InvalidAgentProfilePayload => "invalid_agent_profile_payload",
             Self::ActiveAgentProfileRebuildFailed => "active_agent_profile_rebuild_failed",
         }

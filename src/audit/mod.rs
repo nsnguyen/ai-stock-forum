@@ -84,9 +84,13 @@ fn summary(event: &ApplicationEvent) -> String {
             profile.version().get(),
             readiness(profile),
         ),
-        ApplicationEvent::AgentProfilesListed { result_count, .. } => {
-            format!("agent profiles listed: result_count={result_count}")
-        }
+        ApplicationEvent::AgentProfilesListed {
+            total_count,
+            returned_count,
+            truncated,
+        } => format!(
+            "agent profiles listed: total_count={total_count}, returned_count={returned_count}, truncated={truncated}"
+        ),
         ApplicationEvent::AgentProfileViewed {
             profile_id,
             active_version_id,
@@ -95,21 +99,33 @@ fn summary(event: &ApplicationEvent) -> String {
         ),
         ApplicationEvent::AgentProfileHistoryViewed {
             profile_id,
-            result_count,
+            total_count,
+            returned_count,
+            truncated,
             active_version_id,
         } => format!(
-            "agent profile history viewed: profile={profile_id}, active_version={active_version_id}, result_count={result_count}"
+            "agent profile history viewed: profile={profile_id}, active_version={active_version_id}, total_count={total_count}, returned_count={returned_count}, truncated={truncated}"
+        ),
+        ApplicationEvent::AgentProfileVersionViewed {
+            profile_id,
+            profile_version_id,
+            version,
+            predecessor_version_id,
+        } => format!(
+            "agent profile version viewed: profile={profile_id}, profile_version={profile_version_id}, version={}, predecessor={}",
+            version.get(),
+            predecessor_version_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".to_owned())
         ),
     }
 }
 
 fn readiness(profile: &AgentProfileVersion) -> &'static str {
-    match (
-        &profile.bindings().model_provider,
-        &profile.bindings().model_name,
-    ) {
-        (Some(_), Some(_)) => "ready",
-        _ => "not_ready",
+    match profile.readiness() {
+        crate::agents::AgentReadiness::Unbound => "unbound",
+        crate::agents::AgentReadiness::BindingUnavailable => "binding_unavailable",
+        crate::agents::AgentReadiness::Ready => "ready",
     }
 }
 

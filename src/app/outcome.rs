@@ -1,5 +1,5 @@
 use crate::{
-    agents::{AgentProfileVersion, AgentReadiness, AgentRole},
+    agents::{AgentProfileVersion, AgentReadiness, AgentRole, ProfileFieldDiff},
     app::{AuditLimit, EventEnvelope, InputRejection},
     audit::AuditEntry,
     domain::{
@@ -16,8 +16,9 @@ impl Serialize for AgentReadiness {
         S: Serializer,
     {
         serializer.serialize_str(match self {
+            Self::Unbound => "unbound",
+            Self::BindingUnavailable => "binding_unavailable",
             Self::Ready => "ready",
-            Self::NotReady => "not_ready",
         })
     }
 }
@@ -28,8 +29,9 @@ impl<'de> Deserialize<'de> for AgentReadiness {
         D: Deserializer<'de>,
     {
         match String::deserialize(deserializer)?.as_str() {
+            "unbound" => Ok(Self::Unbound),
+            "binding_unavailable" => Ok(Self::BindingUnavailable),
             "ready" => Ok(Self::Ready),
-            "not_ready" => Ok(Self::NotReady),
             _ => Err(serde::de::Error::custom("invalid agent readiness")),
         }
     }
@@ -122,6 +124,9 @@ pub struct AgentProfileSummary {
 #[serde(deny_unknown_fields)]
 pub struct AgentProfilesView {
     pub profiles: Vec<AgentProfileSummary>,
+    pub total_count: u32,
+    pub returned_count: u32,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +153,17 @@ pub struct AgentProfileHistoryView {
     pub profile_id: AgentProfileId,
     pub active_version_id: AgentProfileVersionId,
     pub versions: Vec<AgentProfileHistoryEntry>,
+    pub total_count: u32,
+    pub returned_count: u32,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentProfileVersionView {
+    pub profile: AgentProfileVersion,
+    pub readiness: AgentReadiness,
+    pub predecessor_diff: Vec<ProfileFieldDiff>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,10 +180,6 @@ pub enum ShutdownDisposition {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "typed command views remain value-semantic at the application boundary"
-)]
 pub enum CommandView {
     Help(HelpView),
     Status(StatusView),
@@ -178,6 +190,7 @@ pub enum CommandView {
     AgentProfiles(AgentProfilesView),
     AgentProfile(AgentProfileView),
     AgentProfileHistory(AgentProfileHistoryView),
+    AgentProfileVersion(AgentProfileVersionView),
     InputRejected(InputRejectedView),
     Shutdown(ShutdownView),
 }

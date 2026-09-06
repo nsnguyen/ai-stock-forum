@@ -1,7 +1,7 @@
 use rusqlite::{Connection, Error as SqliteError, ErrorCode, Transaction, params};
 
 use crate::{
-    agents::{AgentProfileVersion, AgentProfilesProjection, AgentReadiness},
+    agents::{AgentProfileVersion, AgentProfilesProjection},
     app::{ApplicationEvent, EventEnvelope},
     domain::canonical_json_bytes,
 };
@@ -19,7 +19,15 @@ struct StoredRow {
     profile_id: String,
     profile_version_id: String,
     version: i64,
+    supersedes_version_id: Option<String>,
+    template_id: Option<String>,
+    template_version: Option<i64>,
+    template_digest: Option<String>,
+    role: String,
+    display_name: String,
     normalized_name: String,
+    memory_namespace_id: String,
+    policy_profile_ref: String,
     content_digest: String,
     payload_json: Vec<u8>,
     source_event_sequence: i64,
@@ -70,7 +78,7 @@ pub fn replace_active_profiles(
         transaction
             .execute(
                 "INSERT INTO active_agent_profiles (
-                    profile_id, profile_version_id, version, normalized_name, readiness
+                    profile_id, profile_version_id, version, normalized_name, content_digest
                  ) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     profile.profile_id().to_string(),
@@ -78,7 +86,7 @@ pub fn replace_active_profiles(
                     i64::try_from(profile.version().get())
                         .map_err(|_| PersistenceError::ActiveAgentProfileRebuildFailed)?,
                     profile.normalized_name().as_str(),
-                    readiness(profile_readiness(&profile)),
+                    profile.content_digest().as_str(),
                 ],
             )
             .map_err(map_active_profile_insert_error)?;
@@ -137,7 +145,7 @@ pub(crate) fn active_profiles_match(
 ) -> Result<bool, PersistenceError> {
     let mut statement = connection
         .prepare(
-            "SELECT profile_id, profile_version_id, version, normalized_name, readiness
+            "SELECT profile_id, profile_version_id, version, normalized_name, content_digest
              FROM active_agent_profiles ORDER BY normalized_name, profile_id",
         )
         .map_err(|_| PersistenceError::QueryFailed)?;
@@ -164,7 +172,7 @@ pub(crate) fn active_profiles_match(
                 i64::try_from(profile.version().get())
                     .map_err(|_| PersistenceError::InvalidAgentProfilePayload)?,
                 profile.normalized_name().as_str().to_owned(),
-                readiness(profile_readiness(&profile)).to_owned(),
+                profile.content_digest().as_str().to_owned(),
             ))
         })
         .collect::<Result<Vec<_>, PersistenceError>>()?;
@@ -183,7 +191,21 @@ fn expected_row(
         profile_version_id: profile.profile_version_id().to_string(),
         version: i64::try_from(profile.version().get())
             .map_err(|_| PersistenceError::InvalidAgentProfilePayload)?,
+        supersedes_version_id: profile.supersedes().map(|id| id.to_string()),
+        template_id: profile
+            .template_provenance()
+            .map(|provenance| provenance.template_id.as_str().to_owned()),
+        template_version: profile
+            .template_provenance()
+            .map(|provenance| i64::from(provenance.template_version.get())),
+        template_digest: profile
+            .template_provenance()
+            .map(|provenance| provenance.template_digest.as_str().to_owned()),
+        role: profile.role().as_str().to_owned(),
+        display_name: profile.display_name().to_owned(),
         normalized_name: profile.normalized_name().as_str().to_owned(),
+        memory_namespace_id: profile.memory_namespace_id().to_string(),
+        policy_profile_ref: profile.default_policy_ref().to_owned(),
         content_digest: profile.content_digest().as_str().to_owned(),
         payload_json: canonical_json_bytes(profile)
             .map_err(|_| PersistenceError::InvalidAgentProfilePayload)?,
@@ -198,7 +220,9 @@ fn load_rows_matching_logical_key(
 ) -> Result<Vec<StoredRow>, PersistenceError> {
     let mut statement = connection
         .prepare(
-            "SELECT profile_id, profile_version_id, version, normalized_name, content_digest,
+            "SELECT profile_id, profile_version_id, version, supersedes_version_id,
+                    template_id, template_version, template_digest, role, display_name,
+                    normalized_name, memory_namespace_id, policy_profile_ref, content_digest,
                     payload_json, source_event_sequence, created_at_ms
              FROM agent_profile_versions
              WHERE (profile_id = ?1 AND version = ?2)
@@ -225,7 +249,9 @@ fn load_rows_matching_logical_key(
 fn load_all_rows(connection: &Connection) -> Result<Vec<StoredRow>, PersistenceError> {
     let mut statement = connection
         .prepare(
-            "SELECT profile_id, profile_version_id, version, normalized_name, content_digest,
+            "SELECT profile_id, profile_version_id, version, supersedes_version_id,
+                    template_id, template_version, template_digest, role, display_name,
+                    normalized_name, memory_namespace_id, policy_profile_ref, content_digest,
                     payload_json, source_event_sequence, created_at_ms
              FROM agent_profile_versions ORDER BY source_event_sequence",
         )
@@ -242,11 +268,19 @@ fn decode_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
         profile_id: row.get(0)?,
         profile_version_id: row.get(1)?,
         version: row.get(2)?,
-        normalized_name: row.get(3)?,
-        content_digest: row.get(4)?,
-        payload_json: row.get(5)?,
-        source_event_sequence: row.get(6)?,
-        created_at_ms: row.get(7)?,
+        supersedes_version_id: row.get(3)?,
+        template_id: row.get(4)?,
+        template_version: row.get(5)?,
+        template_digest: row.get(6)?,
+        role: row.get(7)?,
+        display_name: row.get(8)?,
+        normalized_name: row.get(9)?,
+        memory_namespace_id: row.get(10)?,
+        policy_profile_ref: row.get(11)?,
+        content_digest: row.get(12)?,
+        payload_json: row.get(13)?,
+        source_event_sequence: row.get(14)?,
+        created_at_ms: row.get(15)?,
     })
 }
 
@@ -254,14 +288,26 @@ fn insert_row(transaction: &Transaction<'_>, row: &StoredRow) -> Result<(), Pers
     transaction
         .execute(
             "INSERT INTO agent_profile_versions (
-                profile_id, profile_version_id, version, normalized_name, content_digest,
+                profile_id, profile_version_id, version, supersedes_version_id,
+                template_id, template_version, template_digest, role, display_name,
+                normalized_name, memory_namespace_id, policy_profile_ref, content_digest,
                 payload_json, source_event_sequence, created_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+             )",
             params![
                 row.profile_id,
                 row.profile_version_id,
                 row.version,
+                row.supersedes_version_id,
+                row.template_id,
+                row.template_version,
+                row.template_digest,
+                row.role,
+                row.display_name,
                 row.normalized_name,
+                row.memory_namespace_id,
+                row.policy_profile_ref,
                 row.content_digest,
                 row.payload_json,
                 row.source_event_sequence,
@@ -278,25 +324,14 @@ fn same_logical_key(left: &StoredRow, right: &StoredRow) -> bool {
         || left.source_event_sequence == right.source_event_sequence
 }
 
-fn readiness(readiness: AgentReadiness) -> &'static str {
-    match readiness {
-        AgentReadiness::Ready => "ready",
-        AgentReadiness::NotReady => "not_ready",
-    }
-}
-
-fn profile_readiness(profile: &AgentProfileVersion) -> AgentReadiness {
-    match (
-        &profile.bindings().model_provider,
-        &profile.bindings().model_name,
-    ) {
-        (Some(_), Some(_)) => AgentReadiness::Ready,
-        _ => AgentReadiness::NotReady,
-    }
-}
-
 fn map_insert_error(error: SqliteError) -> PersistenceError {
     match error {
+        SqliteError::SqliteFailure(error, Some(message))
+            if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+                && message == "agent_profile_namespace_conflict" =>
+        {
+            PersistenceError::DuplicateAgentProfileName
+        }
         SqliteError::SqliteFailure(error, _) if error.code == ErrorCode::ConstraintViolation => {
             PersistenceError::AgentProfileHistoryMismatch
         }
@@ -310,7 +345,13 @@ fn map_active_profile_insert_error(error: SqliteError) -> PersistenceError {
             if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
                 && message == "UNIQUE constraint failed: active_agent_profiles.normalized_name" =>
         {
-            PersistenceError::AgentProfileHistoryMismatch
+            PersistenceError::DuplicateAgentProfileName
+        }
+        SqliteError::SqliteFailure(error, Some(message))
+            if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+                && message == "agent_profile_namespace_conflict" =>
+        {
+            PersistenceError::DuplicateAgentProfileName
         }
         _ => PersistenceError::ActiveAgentProfileRebuildFailed,
     }

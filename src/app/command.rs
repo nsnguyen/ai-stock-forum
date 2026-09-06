@@ -4,16 +4,100 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::policy::Capability;
 use crate::{
-    agents::{AgentProfileDraft, ProfileTemplateProvenance},
+    agents::{
+        AgentProfileDraft, NormalizedProfileName, ProfileField, ProfileTemplateProvenance,
+        canonicalize_visible_text, normalize_profile_name_key,
+    },
     domain::{
         Actor, AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, Digest,
-        ProfileReviewToken, Sha256Digest, sha256,
+        DomainError, ObjectVersion, ProfileReviewToken, Sha256Digest, sha256,
     },
 };
 
 pub const MAX_INPUT_BYTES: usize = 4096;
 pub const DEFAULT_AUDIT_LIMIT: u16 = 20;
 pub const MAX_AUDIT_LIMIT: u16 = 100;
+pub const MAX_AGENT_PROFILE_LIST_RESULTS: usize = 100;
+pub const MAX_AGENT_PROFILE_HISTORY_RESULTS: usize = 100;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentProfileSelector {
+    Id(AgentProfileId),
+    Name(String),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(
+    tag = "selector_type",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum AgentProfileSelectorWire {
+    Id(AgentProfileId),
+    Name(String),
+}
+
+impl AgentProfileSelector {
+    pub fn from_input(value: &str) -> Result<Self, DomainError> {
+        if let Ok(id) = uuid::Uuid::parse_str(value) {
+            return Ok(Self::Id(AgentProfileId::from_uuid(id)));
+        }
+        Ok(Self::Name(canonicalize_visible_text(
+            ProfileField::DisplayName,
+            value,
+            64,
+            false,
+        )?))
+    }
+
+    pub fn display_name(&self) -> Option<&str> {
+        match self {
+            Self::Id(_) => None,
+            Self::Name(display_name) => Some(display_name),
+        }
+    }
+
+    pub fn normalized_name(&self) -> Option<NormalizedProfileName> {
+        match self {
+            Self::Id(_) => None,
+            Self::Name(display_name) => normalize_profile_name_key(display_name).ok(),
+        }
+    }
+}
+
+impl From<AgentProfileId> for AgentProfileSelector {
+    fn from(value: AgentProfileId) -> Self {
+        Self::Id(value)
+    }
+}
+
+impl Serialize for AgentProfileSelector {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Id(id) => AgentProfileSelectorWire::Id(*id),
+            Self::Name(name) => AgentProfileSelectorWire::Name(name.clone()),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentProfileSelector {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match AgentProfileSelectorWire::deserialize(deserializer)? {
+            AgentProfileSelectorWire::Id(id) => Ok(Self::Id(id)),
+            AgentProfileSelectorWire::Name(name) => {
+                Self::from_input(&name).map_err(serde::de::Error::custom)
+            }
+        }
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -83,16 +167,31 @@ pub enum ApplicationCommand {
     },
     ListAgentProfiles,
     ShowAgentProfile {
-        profile_id: AgentProfileId,
+        selector: AgentProfileSelector,
     },
     ShowAgentProfileHistory {
-        profile_id: AgentProfileId,
+        selector: AgentProfileSelector,
+    },
+    ShowAgentProfileVersion {
+        selector: AgentProfileSelector,
+        version: ObjectVersion,
     },
     RejectInput(InputRejection),
     RequestShutdown,
 }
 
 impl ApplicationCommand {
+    pub(crate) fn canonicalize_profile_payloads(&mut self) -> Result<(), DomainError> {
+        match self {
+            Self::CreateAgentProfile { draft, .. } => *draft = draft.canonicalized()?,
+            Self::ActivateAgentProfileVersion { candidate, .. } => {
+                *candidate = candidate.canonicalized()?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     pub fn audit_tail(limit: u16) -> Result<Self, AuditLimitError> {
         Ok(Self::ShowAuditTail {
             limit: AuditLimit::new(limit)?,
@@ -106,10 +205,11 @@ impl ApplicationCommand {
             Self::ShowSetupStatus => Capability::SetupStatusRead,
             Self::ShowAuditTail { .. } => Capability::AuditRead,
             Self::CreateAgentProfile { .. } => Capability::AgentProfileCreate,
-            Self::ActivateAgentProfileVersion { .. } => Capability::AgentProfileEdit,
+            Self::ActivateAgentProfileVersion { .. } => Capability::AgentProfileActivate,
             Self::ListAgentProfiles
             | Self::ShowAgentProfile { .. }
-            | Self::ShowAgentProfileHistory { .. } => Capability::AgentProfileRead,
+            | Self::ShowAgentProfileHistory { .. }
+            | Self::ShowAgentProfileVersion { .. } => Capability::AgentProfileRead,
             Self::RequestShutdown => Capability::Shutdown,
         }
     }

@@ -18,9 +18,9 @@ CREATE TABLE command_receipts (
     request_json TEXT NOT NULL CHECK (json_valid(request_json)),
     capability TEXT NOT NULL CHECK (capability IN (
         'help_read', 'status_read', 'setup_status_read', 'audit_read',
-        'agent_profile_read', 'agent_profile_create', 'agent_profile_edit', 'shutdown',
-        'discussion_run', 'mcp_use', 'engineering_job_run', 'git_merge', 'git_push',
-        'finance_recommendation'
+        'agent_profile_read', 'agent_profile_create', 'agent_profile_preview',
+        'agent_profile_activate', 'shutdown', 'discussion_run', 'mcp_use',
+        'engineering_job_run', 'git_merge', 'git_push', 'finance_recommendation'
     )),
     policy_decision TEXT NOT NULL CHECK (policy_decision IN (
         'granted', 'denied', 'denied_by_default', 'approval_required'
@@ -73,26 +73,91 @@ CREATE TABLE agent_profile_versions (
     profile_id TEXT NOT NULL,
     profile_version_id TEXT NOT NULL UNIQUE,
     version INTEGER NOT NULL CHECK (version >= 1),
-    normalized_name TEXT NOT NULL,
-    content_digest TEXT NOT NULL,
-    payload_json BLOB NOT NULL,
-    source_event_sequence INTEGER NOT NULL UNIQUE,
+    supersedes_version_id TEXT,
+    template_id TEXT,
+    template_version INTEGER,
+    template_digest TEXT,
+    role TEXT NOT NULL CHECK (role IN ('bull', 'bear', 'chief', 'engineering', 'custom')),
+    display_name TEXT NOT NULL CHECK (
+        length(CAST(display_name AS BLOB)) BETWEEN 1 AND 64
+        AND instr(display_name, char(0)) = 0
+    ),
+    normalized_name TEXT NOT NULL CHECK (
+        length(CAST(normalized_name AS BLOB)) BETWEEN 1 AND 256
+        AND instr(normalized_name, char(0)) = 0
+    ),
+    memory_namespace_id TEXT NOT NULL CHECK (
+        length(CAST(memory_namespace_id AS BLOB)) = 36
+        AND instr(memory_namespace_id, char(0)) = 0
+    ),
+    policy_profile_ref TEXT NOT NULL CHECK (
+        length(CAST(policy_profile_ref AS BLOB)) BETWEEN 1 AND 128
+        AND instr(policy_profile_ref, char(0)) = 0
+    ),
+    content_digest TEXT NOT NULL CHECK (
+        typeof(content_digest) = 'text'
+        AND length(CAST(content_digest AS BLOB)) = 64
+        AND instr(content_digest, char(0)) = 0
+        AND content_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    payload_json BLOB NOT NULL CHECK (json_valid(CAST(payload_json AS TEXT))),
+    source_event_sequence INTEGER NOT NULL UNIQUE CHECK (source_event_sequence >= 1),
     created_at_ms INTEGER NOT NULL,
     PRIMARY KEY (profile_id, version),
-    UNIQUE (profile_id, profile_version_id)
+    UNIQUE (profile_id, profile_version_id),
+    UNIQUE (profile_id, profile_version_id, content_digest),
+    CHECK (
+        (version = 1 AND supersedes_version_id IS NULL)
+        OR (version > 1 AND supersedes_version_id IS NOT NULL)
+    ),
+    CHECK (
+        (template_id IS NULL AND template_version IS NULL AND template_digest IS NULL)
+        OR (
+            template_id IS NOT NULL
+            AND length(CAST(template_id AS BLOB)) BETWEEN 1 AND 128
+            AND template_version >= 1
+            AND template_digest IS NOT NULL
+            AND length(CAST(template_digest AS BLOB)) = 64
+            AND template_digest NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    FOREIGN KEY (profile_id, supersedes_version_id)
+        REFERENCES agent_profile_versions(profile_id, profile_version_id)
+        DEFERRABLE INITIALLY DEFERRED
 ) STRICT;
 
 CREATE INDEX agent_profile_versions_history_idx
 ON agent_profile_versions(profile_id, version DESC);
 
+CREATE TRIGGER agent_profile_namespace_insert_guard
+BEFORE INSERT ON agent_profile_versions
+WHEN EXISTS (
+    SELECT 1 FROM agent_profile_versions existing
+    WHERE existing.memory_namespace_id = NEW.memory_namespace_id
+      AND existing.profile_id <> NEW.profile_id
+) OR EXISTS (
+    SELECT 1 FROM agent_profile_versions existing
+    WHERE existing.profile_id = NEW.profile_id
+      AND existing.memory_namespace_id <> NEW.memory_namespace_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'agent_profile_namespace_conflict');
+END;
+
 CREATE TABLE active_agent_profiles (
     profile_id TEXT PRIMARY KEY,
     profile_version_id TEXT NOT NULL UNIQUE,
     version INTEGER NOT NULL CHECK (version >= 1),
-    normalized_name TEXT NOT NULL UNIQUE,
-    readiness TEXT NOT NULL CHECK (readiness IN ('ready', 'not_ready')),
-    FOREIGN KEY (profile_id, profile_version_id)
-        REFERENCES agent_profile_versions(profile_id, profile_version_id)
+    normalized_name TEXT NOT NULL UNIQUE CHECK (
+        length(CAST(normalized_name AS BLOB)) BETWEEN 1 AND 256
+        AND instr(normalized_name, char(0)) = 0
+    ),
+    content_digest TEXT NOT NULL CHECK (
+        length(CAST(content_digest AS BLOB)) = 64
+        AND content_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    FOREIGN KEY (profile_id, profile_version_id, content_digest)
+        REFERENCES agent_profile_versions(profile_id, profile_version_id, content_digest)
         DEFERRABLE INITIALLY DEFERRED
 ) STRICT;
 

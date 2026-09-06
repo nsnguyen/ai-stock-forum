@@ -14,8 +14,9 @@ use crate::{
 pub const MODULE_NAME: &str = "app";
 
 pub use command::{
-    ApplicationCommand, AuditLimit, AuditLimitError, CommandEnvelope, DEFAULT_AUDIT_LIMIT,
-    InputRejection, InputRejectionCategory, MAX_AUDIT_LIMIT, MAX_INPUT_BYTES, MAX_SAFE_TOKEN_CHARS,
+    AgentProfileSelector, ApplicationCommand, AuditLimit, AuditLimitError, CommandEnvelope,
+    DEFAULT_AUDIT_LIMIT, InputRejection, InputRejectionCategory, MAX_AGENT_PROFILE_HISTORY_RESULTS,
+    MAX_AGENT_PROFILE_LIST_RESULTS, MAX_AUDIT_LIMIT, MAX_INPUT_BYTES, MAX_SAFE_TOKEN_CHARS,
     SafeToken, SafeTokenError,
 };
 pub(crate) use event::envelope_from_pending;
@@ -25,9 +26,9 @@ pub use event::{
 };
 pub use outcome::{
     AgentProfileCreatedView, AgentProfileHistoryEntry, AgentProfileHistoryView,
-    AgentProfileSummary, AgentProfileVersionActivatedView, AgentProfileView, AgentProfilesView,
-    AuditTailView, CommandOutcome, CommandView, HelpView, InputRejectedView, SetupStatusView,
-    ShutdownDisposition, ShutdownView, StatusView,
+    AgentProfileSummary, AgentProfileVersionActivatedView, AgentProfileVersionView,
+    AgentProfileView, AgentProfilesView, AuditTailView, CommandOutcome, CommandView, HelpView,
+    InputRejectedView, SetupStatusView, ShutdownDisposition, ShutdownView, StatusView,
 };
 pub use service::{
     ApplicationService, ApplicationWorker, AuthorizationDecision, CommandPolicy,
@@ -64,6 +65,10 @@ pub enum AppError {
     ProfileReviewMismatch,
     #[error("the profile edit review digest does not match")]
     ReviewDigestMismatch,
+    #[error("the immutable agent profile history does not match its event history")]
+    AgentProfileHistoryMismatch,
+    #[error("the selected binding reference is unavailable")]
+    BindingReferenceUnavailable,
     #[error("application lifecycle is already finished")]
     LifecycleFinished,
 }
@@ -83,6 +88,8 @@ impl AppError {
             Self::ProfileReviewUnavailable => "profile_review_unavailable",
             Self::ProfileReviewMismatch => "profile_review_mismatch",
             Self::ReviewDigestMismatch => "review_digest_mismatch",
+            Self::AgentProfileHistoryMismatch => "agent_profile_history_mismatch",
+            Self::BindingReferenceUnavailable => "binding_reference_unavailable",
             Self::LifecycleFinished => "lifecycle_finished",
         }
     }

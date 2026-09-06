@@ -24,7 +24,12 @@ pub enum ShutdownReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum ApplicationEvent {
     InstallationInitialized {
         installation_id: InstallationId,
@@ -60,8 +65,9 @@ pub enum ApplicationEvent {
         previous_version_id: AgentProfileVersionId,
     },
     AgentProfilesListed {
-        result_count: u32,
-        active_version_ids: Vec<AgentProfileVersionId>,
+        total_count: u32,
+        returned_count: u32,
+        truncated: bool,
     },
     AgentProfileViewed {
         profile_id: AgentProfileId,
@@ -69,8 +75,16 @@ pub enum ApplicationEvent {
     },
     AgentProfileHistoryViewed {
         profile_id: AgentProfileId,
-        result_count: u32,
+        total_count: u32,
+        returned_count: u32,
+        truncated: bool,
         active_version_id: AgentProfileVersionId,
+    },
+    AgentProfileVersionViewed {
+        profile_id: AgentProfileId,
+        profile_version_id: AgentProfileVersionId,
+        version: crate::domain::ObjectVersion,
+        predecessor_version_id: Option<AgentProfileVersionId>,
     },
 }
 
@@ -93,6 +107,7 @@ impl ApplicationEvent {
             Self::AgentProfilesListed { .. } => "agent_profiles_listed",
             Self::AgentProfileViewed { .. } => "agent_profile_viewed",
             Self::AgentProfileHistoryViewed { .. } => "agent_profile_history_viewed",
+            Self::AgentProfileVersionViewed { .. } => "agent_profile_version_viewed",
         }
     }
 }

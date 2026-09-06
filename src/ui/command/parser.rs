@@ -1,17 +1,17 @@
 use crate::app::{
-    ApplicationCommand, DEFAULT_AUDIT_LIMIT, InputRejection, InputRejectionCategory,
-    MAX_INPUT_BYTES, SafeToken,
+    AgentProfileSelector, ApplicationCommand, DEFAULT_AUDIT_LIMIT, InputRejection,
+    InputRejectionCategory, MAX_INPUT_BYTES, SafeToken,
 };
 use crate::{
     agents::{ProfileTemplateId, builtin_profile_templates},
-    domain::AgentProfileId,
+    domain::ObjectVersion,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentWorkflowCommand {
     SelectCreateTemplate,
     Create { template_id: ProfileTemplateId },
-    Edit { profile_id: AgentProfileId },
+    Edit { selector: AgentProfileSelector },
 }
 
 #[expect(
@@ -32,27 +32,15 @@ pub enum FallbackParsedLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedLine {
     Command(ApplicationCommand),
+    AgentWorkflow(AgentWorkflowCommand),
     Ignored,
 }
 
 pub fn parse_line(input: &[u8]) -> ParsedLine {
-    if input.len() <= MAX_INPUT_BYTES
-        && std::str::from_utf8(input)
-            .ok()
-            .and_then(|line| line.split_whitespace().next())
-            == Some("agent")
-    {
-        let line = std::str::from_utf8(input).expect("agent token requires valid UTF-8");
-        return ParsedLine::Command(reject(
-            InputRejectionCategory::Unknown,
-            safe_token(line),
-            input,
-        ));
-    }
     match parse_fallback_line(input) {
         FallbackParsedLine::Command(command) => ParsedLine::Command(command),
+        FallbackParsedLine::AgentWorkflow(command) => ParsedLine::AgentWorkflow(command),
         FallbackParsedLine::Ignored => ParsedLine::Ignored,
-        FallbackParsedLine::AgentWorkflow(_) => unreachable!("agent input returned above"),
     }
 }
 
@@ -77,23 +65,58 @@ pub fn parse_fallback_line(input: &[u8]) -> FallbackParsedLine {
         return FallbackParsedLine::Ignored;
     }
 
-    let command = match line.split_whitespace().collect::<Vec<_>>().as_slice() {
-        ["agent", "list"] => ApplicationCommand::ListAgentProfiles,
-        ["agent", "show", profile_id] => match profile_id.parse::<AgentProfileId>() {
-            Ok(profile_id) => ApplicationCommand::ShowAgentProfile { profile_id },
-            Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
-        },
-        ["agent", "history", profile_id] => match profile_id.parse::<AgentProfileId>() {
-            Ok(profile_id) => ApplicationCommand::ShowAgentProfileHistory { profile_id },
-            Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
-        },
-        ["agent", "create"] => {
+    let Some(tokens) = tokenize(line) else {
+        return FallbackParsedLine::Command(reject(
+            InputRejectionCategory::Malformed,
+            safe_token(line),
+            input,
+        ));
+    };
+    let tokens = tokens.iter().map(String::as_str).collect::<Vec<_>>();
+
+    let command = match tokens.as_slice() {
+        ["agent" | "/agent", "list"] => ApplicationCommand::ListAgentProfiles,
+        ["agent" | "/agent", "show", selector] => {
+            match AgentProfileSelector::from_input(selector) {
+                Ok(selector) => ApplicationCommand::ShowAgentProfile { selector },
+                Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
+            }
+        }
+        ["agent" | "/agent", "history", selector] => {
+            match AgentProfileSelector::from_input(selector) {
+                Ok(selector) => ApplicationCommand::ShowAgentProfileHistory { selector },
+                Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
+            }
+        }
+        ["agent" | "/agent", "history", selector, version] => {
+            let parsed = AgentProfileSelector::from_input(selector).and_then(|selector| {
+                version
+                    .parse::<u64>()
+                    .ok()
+                    .ok_or(crate::domain::DomainError::InvalidObjectVersion)
+                    .and_then(ObjectVersion::new)
+                    .map(|version| ApplicationCommand::ShowAgentProfileVersion {
+                        selector,
+                        version,
+                    })
+            });
+            parsed.unwrap_or_else(|_| {
+                reject(InputRejectionCategory::Malformed, safe_token(line), input)
+            })
+        }
+        ["agent" | "/agent", "create"] => {
             return FallbackParsedLine::AgentWorkflow(AgentWorkflowCommand::SelectCreateTemplate);
         }
-        ["agent", "create", template_id] => {
+        ["agent" | "/agent", "create", template_id] => {
+            let canonical_id = match *template_id {
+                "bull" | "bear" | "chief" | "engineering" | "custom" => {
+                    format!("builtin.{template_id}")
+                }
+                value => value.to_owned(),
+            };
             let template_id = builtin_profile_templates()
                 .iter()
-                .find(|template| template.id.as_str() == *template_id)
+                .find(|template| template.id.as_str() == canonical_id)
                 .map(|template| template.id.clone());
             return match template_id {
                 Some(template_id) => {
@@ -106,10 +129,10 @@ pub fn parse_fallback_line(input: &[u8]) -> FallbackParsedLine {
                 )),
             };
         }
-        ["agent", "edit", profile_id] => {
-            return match profile_id.parse::<AgentProfileId>() {
-                Ok(profile_id) => {
-                    FallbackParsedLine::AgentWorkflow(AgentWorkflowCommand::Edit { profile_id })
+        ["agent" | "/agent", "edit", selector] => {
+            return match AgentProfileSelector::from_input(selector) {
+                Ok(selector) => {
+                    FallbackParsedLine::AgentWorkflow(AgentWorkflowCommand::Edit { selector })
                 }
                 Err(_) => FallbackParsedLine::Command(reject(
                     InputRejectionCategory::Malformed,
@@ -131,13 +154,46 @@ pub fn parse_fallback_line(input: &[u8]) -> FallbackParsedLine {
         },
         ["/quit"] => ApplicationCommand::RequestShutdown,
         [
-            "agent" | "/help" | "/status" | "/setup" | "/audit" | "/quit",
+            "agent" | "/agent" | "/help" | "/status" | "/setup" | "/audit" | "/quit",
             ..,
         ] => reject(InputRejectionCategory::Malformed, safe_token(line), input),
         _ => reject(InputRejectionCategory::Unknown, safe_token(line), input),
     };
 
     FallbackParsedLine::Command(command)
+}
+
+fn tokenize(line: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quoted = false;
+    let mut token_started = false;
+
+    for character in line.chars() {
+        match character {
+            '"' => {
+                quoted = !quoted;
+                token_started = true;
+            }
+            character if character.is_whitespace() && !quoted => {
+                if token_started {
+                    tokens.push(std::mem::take(&mut token));
+                    token_started = false;
+                }
+            }
+            character => {
+                token.push(character);
+                token_started = true;
+            }
+        }
+    }
+    if quoted {
+        return None;
+    }
+    if token_started {
+        tokens.push(token);
+    }
+    Some(tokens)
 }
 
 fn reject(
