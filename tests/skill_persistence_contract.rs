@@ -132,7 +132,10 @@ fn active_normalized_names_cannot_select_two_logical_skills() {
 fn every_immutable_record_field_is_covered_by_verified_integrity() {
     for mutation in [
         "UPDATE skill_versions SET skill_id = '00000000-0000-0000-0000-000000000099'",
+        "UPDATE skill_versions SET skill_version_id = '00000000-0000-0000-0000-000000000098'",
         "UPDATE skill_versions SET version = 2, predecessor_version_id = skill_version_id",
+        "UPDATE skill_versions SET display_name = 'Altered Evidence Review'",
+        "UPDATE skill_versions SET normalized_name = 'altered evidence review'",
         "UPDATE skill_versions SET created_at_ms = created_at_ms + 1",
         "UPDATE skill_versions SET provenance_json = CAST('{\"user\":null}' AS BLOB)",
         "UPDATE skill_versions SET content_json = CAST('{\"display_name\":\"Altered\",\"description\":\"\",\"use_when\":\"x\",\"tags\":[],\"instructions\":\"x\",\"resources\":[]}' AS BLOB)",
@@ -158,6 +161,65 @@ fn every_immutable_record_field_is_covered_by_verified_integrity() {
             "{mutation}"
         );
     }
+}
+
+#[test]
+fn predecessor_identity_tampering_fails_closed_during_repository_read() {
+    let mut database = database();
+    let first = skill_v1(1, 11, "Evidence Review");
+    let second = SkillVersion::next_version(
+        &first,
+        skill_version_id(12),
+        1_726_000_000_001,
+        skill_draft("Evidence Review", "Require primary-source citations."),
+    )
+    .unwrap();
+    let transaction = database.connection_mut().transaction().unwrap();
+    insert_skill_version(&transaction, &first).unwrap();
+    insert_skill_version(&transaction, &second).unwrap();
+    transaction.commit().unwrap();
+    database
+        .connection()
+        .execute_batch("DROP TRIGGER skill_versions_no_update")
+        .unwrap();
+    database
+        .connection()
+        .execute(
+            "UPDATE skill_versions
+             SET predecessor_version_id = skill_version_id
+             WHERE version = 2",
+            [],
+        )
+        .unwrap();
+
+    let error = load_skill_history(database.connection(), first.skill_id()).unwrap_err();
+    assert_eq!(error, PersistenceError::SkillVersionIntegrityMismatch);
+}
+
+#[test]
+fn predecessor_shape_tampering_is_stopped_by_sqlite_before_repository_read() {
+    let mut database = database();
+    let first = skill_v1(1, 11, "Evidence Review");
+    let transaction = database.connection_mut().transaction().unwrap();
+    insert_skill_version(&transaction, &first).unwrap();
+    transaction.commit().unwrap();
+    database
+        .connection()
+        .execute_batch("DROP TRIGGER skill_versions_no_update")
+        .unwrap();
+
+    let error = database
+        .connection()
+        .execute(
+            "UPDATE skill_versions SET predecessor_version_id = skill_version_id",
+            [],
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if code.code == rusqlite::ErrorCode::ConstraintViolation
+    ));
 }
 
 #[test]

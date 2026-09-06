@@ -16,6 +16,10 @@ fn schema_v2_migrates_to_exactly_v3_without_changing_agent_rows() {
     let temp = tempfile::tempdir().unwrap();
     let paths = AppPaths::for_test(temp.path());
     let expected_profile = legacy_profile();
+    assert!(
+        expected_profile.skill_refs().is_empty(),
+        "valid released-v2 compatibility fixtures cannot contain skill references"
+    );
     create_schema_v2_fixture(&paths, &expected_profile);
     let before = agent_rows(&Connection::open(paths.database_path()).unwrap());
 

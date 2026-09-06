@@ -9,13 +9,13 @@ use uuid::Uuid;
 
 #[derive(Debug, PartialEq, Eq)]
 struct DurableSnapshot {
-    skill_versions: i64,
-    active_skill: Vec<(String, String, i64)>,
-    profile_versions: i64,
-    active_profile: Vec<(String, String, i64)>,
-    events: i64,
-    receipts: i64,
-    event_refs: i64,
+    skill_versions: Vec<String>,
+    active_skills: Vec<String>,
+    agent_profile_versions: Vec<String>,
+    active_agent_profiles: Vec<String>,
+    events: Vec<String>,
+    command_receipts: Vec<String>,
+    command_event_refs: Vec<String>,
 }
 
 #[test]
@@ -113,6 +113,39 @@ fn failed_assignment_transaction_leaves_every_durable_record_unchanged() {
     assert_eq!(snapshot(database.connection()), before);
 }
 
+#[test]
+fn durable_snapshot_detects_a_changed_stored_value() {
+    let mut database = database();
+    let first = skill_v1();
+    let base_profile = profile_v1(Vec::new());
+    let transaction = database.connection_mut().transaction().unwrap();
+    insert_skill_version(&transaction, &first).unwrap();
+    set_active_skill(&transaction, &first).unwrap();
+    insert_expected_version(&transaction, 1, &base_profile).unwrap();
+    transaction
+        .execute(
+            "INSERT INTO active_agent_profiles (
+                profile_id, profile_version_id, version, normalized_name, content_digest
+             ) SELECT profile_id, profile_version_id, version, normalized_name, content_digest
+               FROM agent_profile_versions WHERE profile_version_id = ?1",
+            [base_profile.profile_version_id().to_string()],
+        )
+        .unwrap();
+    seed_event_and_receipt(&transaction);
+    transaction.commit().unwrap();
+    let before = snapshot(database.connection());
+
+    database
+        .connection()
+        .execute_batch(
+            "DROP TRIGGER skill_versions_no_update;
+             UPDATE skill_versions SET created_at_ms = created_at_ms + 1;",
+        )
+        .unwrap();
+
+    assert_ne!(snapshot(database.connection()), before);
+}
+
 fn database() -> Database {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.keep();
@@ -201,42 +234,119 @@ fn seed_event_and_receipt(transaction: &rusqlite::Transaction<'_>) {
 
 fn snapshot(connection: &rusqlite::Connection) -> DurableSnapshot {
     DurableSnapshot {
-        skill_versions: count(connection, "skill_versions"),
-        active_skill: rows(
+        skill_versions: snapshot_rows(
             connection,
-            "active_skills",
-            "skill_id, skill_version_id, version",
+            "SELECT json_object(
+                'skill_id', skill_id,
+                'skill_version_id', skill_version_id,
+                'version', version,
+                'predecessor_version_id', predecessor_version_id,
+                'display_name', display_name,
+                'normalized_name', normalized_name,
+                'content_digest', content_digest,
+                'content_json_hex', hex(content_json),
+                'provenance_json_hex', hex(provenance_json),
+                'created_at_ms', created_at_ms,
+                'record_digest', record_digest,
+                'record_json_hex', hex(record_json)
+             ) FROM skill_versions
+             ORDER BY skill_id, version, skill_version_id",
         ),
-        profile_versions: count(connection, "agent_profile_versions"),
-        active_profile: rows(
+        active_skills: snapshot_rows(
             connection,
-            "active_agent_profiles",
-            "profile_id, profile_version_id, version",
+            "SELECT json_object(
+                'skill_id', skill_id,
+                'skill_version_id', skill_version_id,
+                'version', version,
+                'normalized_name', normalized_name,
+                'content_digest', content_digest,
+                'record_digest', record_digest
+             ) FROM active_skills
+             ORDER BY skill_id, skill_version_id",
         ),
-        events: count(connection, "event_stream"),
-        receipts: count(connection, "command_receipts"),
-        event_refs: count(connection, "command_event_refs"),
+        agent_profile_versions: snapshot_rows(
+            connection,
+            "SELECT json_object(
+                'profile_id', profile_id,
+                'profile_version_id', profile_version_id,
+                'version', version,
+                'supersedes_version_id', supersedes_version_id,
+                'template_id', template_id,
+                'template_version', template_version,
+                'template_digest', template_digest,
+                'role', role,
+                'display_name', display_name,
+                'normalized_name', normalized_name,
+                'memory_namespace_id', memory_namespace_id,
+                'policy_profile_ref', policy_profile_ref,
+                'content_digest', content_digest,
+                'payload_json_hex', hex(payload_json),
+                'source_event_sequence', source_event_sequence,
+                'created_at_ms', created_at_ms
+             ) FROM agent_profile_versions
+             ORDER BY profile_id, version, profile_version_id",
+        ),
+        active_agent_profiles: snapshot_rows(
+            connection,
+            "SELECT json_object(
+                'profile_id', profile_id,
+                'profile_version_id', profile_version_id,
+                'version', version,
+                'normalized_name', normalized_name,
+                'content_digest', content_digest
+             ) FROM active_agent_profiles
+             ORDER BY profile_id, profile_version_id",
+        ),
+        events: snapshot_rows(
+            connection,
+            "SELECT json_object(
+                'sequence', sequence,
+                'event_id', event_id,
+                'event_schema_version', event_schema_version,
+                'event_type', event_type,
+                'actor_kind', actor_kind,
+                'actor_id', actor_id,
+                'occurred_at_ms', occurred_at_ms,
+                'correlation_id', correlation_id,
+                'causation_id', causation_id,
+                'object_kind', object_kind,
+                'object_id', object_id,
+                'object_version', object_version,
+                'object_digest', object_digest,
+                'previous_event_digest', previous_event_digest,
+                'payload_json', payload_json,
+                'event_digest', event_digest
+             ) FROM event_stream
+             ORDER BY sequence, event_id",
+        ),
+        command_receipts: snapshot_rows(
+            connection,
+            "SELECT json_object(
+                'command_id', command_id,
+                'command_fingerprint', command_fingerprint,
+                'request_json', request_json,
+                'capability', capability,
+                'policy_decision', policy_decision,
+                'outcome_json', outcome_json
+             ) FROM command_receipts
+             ORDER BY command_id",
+        ),
+        command_event_refs: snapshot_rows(
+            connection,
+            "SELECT json_object(
+                'command_id', command_id,
+                'event_ordinal', event_ordinal,
+                'event_id', event_id
+             ) FROM command_event_refs
+             ORDER BY command_id, event_ordinal, event_id",
+        ),
     }
 }
 
-fn count(connection: &rusqlite::Connection, table: &str) -> i64 {
-    connection
-        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-            row.get(0)
-        })
-        .unwrap()
-}
-
-fn rows(
-    connection: &rusqlite::Connection,
-    table: &str,
-    columns: &str,
-) -> Vec<(String, String, i64)> {
-    let mut statement = connection
-        .prepare(&format!("SELECT {columns} FROM {table} ORDER BY 1"))
-        .unwrap();
+fn snapshot_rows(connection: &rusqlite::Connection, sql: &str) -> Vec<String> {
+    let mut statement = connection.prepare(sql).unwrap();
     statement
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .query_map([], |row| row.get(0))
         .unwrap()
         .map(Result::unwrap)
         .collect()
