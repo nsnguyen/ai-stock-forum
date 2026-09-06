@@ -116,58 +116,367 @@ fn validate_skill_slash_commands(section: &str) -> Result<(), String> {
         .ok_or_else(|| format!("unsupported or missing Skills slash command: {actual:?}"))
 }
 
-fn validate_control_guidance(document: &str) -> Result<(), String> {
+fn logical_markdown_units(document: &str) -> Vec<String> {
+    fn flush(units: &mut Vec<String>, current: &mut String) {
+        if !current.is_empty() {
+            units.push(std::mem::take(current));
+        }
+    }
+
+    let mut units = Vec::new();
+    let mut current = String::new();
+    let mut in_fence = false;
     for line in document.lines() {
-        let normalized = line.to_ascii_lowercase();
-        for contradiction in [
-            "press `q` to quit",
-            "bare `q` exits",
-            "`q` exits",
-            "`q` quits",
-            "`q` to quit",
-        ] {
-            if normalized.contains(contradiction) {
-                return Err(format!("contradictory quit guidance: {line}"));
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            flush(&mut units, &mut current);
+            in_fence = !in_fence;
+        } else if trimmed.is_empty() {
+            flush(&mut units, &mut current);
+        } else if in_fence || trimmed.starts_with('|') || trimmed.starts_with('#') {
+            flush(&mut units, &mut current);
+            units.push(trimmed.to_owned());
+        } else {
+            let starts_list_item = trimmed.starts_with("- ")
+                || trimmed
+                    .split_once(". ")
+                    .is_some_and(|(prefix, _)| prefix.bytes().all(|byte| byte.is_ascii_digit()));
+            if starts_list_item {
+                flush(&mut units, &mut current);
+            } else if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(trimmed);
+        }
+    }
+    flush(&mut units, &mut current);
+    units
+}
+
+fn normalized_guidance_tokens(unit: &str) -> Vec<String> {
+    let mut normalized = String::with_capacity(unit.len());
+    for character in unit.chars() {
+        if matches!(character, '`' | '\'' | '’') {
+            continue;
+        }
+        for lower in character.to_lowercase() {
+            if lower.is_alphanumeric() || matches!(lower, '/' | ':') {
+                normalized.push(lower);
+            } else {
+                normalized.push(' ');
             }
         }
+    }
+    let mut tokens = Vec::new();
+    for token in normalized.split_whitespace() {
+        if token.starts_with(':') {
+            tokens.push(token.to_owned());
+        } else {
+            tokens.extend(
+                token
+                    .split(':')
+                    .filter(|part| !part.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+    }
+    tokens
+}
 
-        if normalized.contains("`:next`") || normalized.contains("`:create`") {
-            let requires_control = normalized.contains("must use")
-                || normalized.contains("required")
-                || normalized.contains("require ")
-                || normalized.contains("need to use");
-            let explicitly_optional = normalized.contains("never need")
-                || normalized.contains("not required")
-                || normalized.contains("does not require");
-            if requires_control && !explicitly_optional {
-                return Err(format!("colon control is incorrectly required: {line}"));
+fn token_window_is_negated(tokens: &[String], left: usize, right: usize) -> bool {
+    let start = left.saturating_sub(4);
+    let end = right.saturating_add(6).min(tokens.len().saturating_sub(1));
+    let window = &tokens[start..=end];
+    window.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "not"
+                | "never"
+                | "neither"
+                | "no"
+                | "inert"
+                | "ignored"
+                | "unsupported"
+                | "cannot"
+                | "cant"
+                | "wont"
+                | "doesnt"
+                | "isnt"
+                | "optional"
+        )
+    }) || window.windows(2).any(|pair| pair[0] == "no" && pair[1] == "longer")
+}
+
+fn unit_maps_bare_q_to_exit(tokens: &[String]) -> bool {
+    const EXIT_WORDS: [&str; 6] = ["quit", "quits", "exit", "exits", "close", "closes"];
+    for (q_index, _) in tokens.iter().enumerate().filter(|(_, token)| token.as_str() == "q") {
+        for (verb_index, _) in tokens
+            .iter()
+            .enumerate()
+            .filter(|(_, token)| EXIT_WORDS.contains(&token.as_str()))
+        {
+            let distance = q_index.abs_diff(verb_index);
+            if distance > 5 {
+                continue;
             }
+            let left = q_index.min(verb_index);
+            let right = q_index.max(verb_index);
+            let verb_belongs_to_slash_quit = verb_index
+                .checked_sub(1)
+                .and_then(|index| tokens.get(index))
+                .is_some_and(|token| token == "/quit")
+                || tokens[left..=right].iter().any(|token| token == "/quit");
+            if !verb_belongs_to_slash_quit && !token_window_is_negated(tokens, left, right) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn unit_requires_colon_skill_control(tokens: &[String]) -> bool {
+    const OUTCOMES: [&str; 15] = [
+        "continue", "continues", "continuing", "advance", "advances", "advanced", "finish",
+        "finishes", "finished", "create", "creates", "created", "creating", "complete",
+        "completed",
+    ];
+    const REQUIREMENTS: [&str; 11] = [
+        "must", "required", "requires", "mandatory", "need", "needs", "use", "enter", "type",
+        "press", "run",
+    ];
+    for (control_index, _) in tokens.iter().enumerate().filter(|(_, token)| {
+        matches!(token.as_str(), ":next" | ":create")
+    }) {
+        for (outcome_index, _) in tokens
+            .iter()
+            .enumerate()
+            .filter(|(_, token)| OUTCOMES.contains(&token.as_str()))
+        {
+            let left = control_index.min(outcome_index);
+            let right = control_index.max(outcome_index);
+            let start = left.saturating_sub(4);
+            let end = right.saturating_add(4).min(tokens.len().saturating_sub(1));
+            let window = &tokens[start..=end];
+            let requires = window
+                .iter()
+                .any(|token| REQUIREMENTS.contains(&token.as_str()))
+                || window.windows(2).any(|pair| pair[0] == "have" && pair[1] == "to");
+            if requires && !token_window_is_negated(tokens, left, right) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn validate_control_guidance(document: &str) -> Result<(), String> {
+    for unit in logical_markdown_units(document) {
+        let tokens = normalized_guidance_tokens(&unit);
+        if unit_maps_bare_q_to_exit(&tokens) {
+            return Err(format!("bare q is mapped to shutdown: {unit}"));
+        }
+        if unit_requires_colon_skill_control(&tokens) {
+            return Err(format!("colon control is required by Skills guidance: {unit}"));
         }
     }
     Ok(())
 }
 
-fn checked_roadmap_statuses(document: &str) -> Vec<(u8, &str)> {
-    let mut phase = None;
-    let mut in_milestone_status = false;
-    let mut checked = Vec::new();
-    for line in document.lines() {
-        if let Some(rest) = line.strip_prefix("## Phase ") {
-            phase = rest
-                .split_whitespace()
-                .next()
-                .and_then(|number| number.parse::<u8>().ok());
-            in_milestone_status = false;
-        } else if line.starts_with("### ") {
-            in_milestone_status = line == "### Milestone status";
-        } else if in_milestone_status
-            && line.starts_with("- [x] ")
-            && let Some(phase) = phase
-        {
-            checked.push((phase, line));
+#[derive(Debug)]
+struct RoadmapStatusUnit {
+    phase: Option<u8>,
+    in_status_section: bool,
+    text: String,
+}
+
+fn roadmap_status_units(document: &str) -> Vec<RoadmapStatusUnit> {
+    fn flush(
+        units: &mut Vec<RoadmapStatusUnit>,
+        current: &mut String,
+        phase: Option<u8>,
+        in_status_section: bool,
+    ) {
+        if !current.is_empty() {
+            let text = std::mem::take(current);
+            units.extend(
+                text.split(['.', '!', '?'])
+                    .map(str::trim)
+                    .filter(|sentence| !sentence.is_empty())
+                    .map(|sentence| RoadmapStatusUnit {
+                        phase,
+                        in_status_section,
+                        text: sentence.to_owned(),
+                    }),
+            );
         }
     }
-    checked
+
+    let mut units = Vec::new();
+    let mut current = String::new();
+    let mut phase = None;
+    let mut in_status_section = false;
+    for line in document.lines() {
+        let trimmed = line.trim();
+        if let Some(level) = heading_level(trimmed) {
+            flush(&mut units, &mut current, phase, in_status_section);
+            let tokens = normalized_guidance_tokens(trimmed);
+            if level == 2 {
+                phase = tokens
+                    .windows(2)
+                    .find(|pair| pair[0] == "phase")
+                    .and_then(|pair| pair[1].parse::<u8>().ok());
+                in_status_section = false;
+            } else if level == 3 {
+                in_status_section = tokens.iter().any(|token| token == "status");
+            }
+            continue;
+        }
+        if trimmed.is_empty() {
+            flush(&mut units, &mut current, phase, in_status_section);
+            continue;
+        }
+
+        let starts_list_item = trimmed.starts_with("- ")
+            || trimmed.starts_with("* ")
+            || trimmed.starts_with("+ ");
+        if starts_list_item {
+            flush(&mut units, &mut current, phase, in_status_section);
+        } else if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(trimmed);
+    }
+    flush(&mut units, &mut current, phase, in_status_section);
+    units
+}
+
+fn checkbox_status(text: &str) -> Option<bool> {
+    let candidate = text
+        .trim_start()
+        .trim_start_matches(['-', '*', '+'])
+        .trim_start();
+    let marker = candidate.strip_prefix('[')?.split_once(']')?.0.trim();
+    match marker.to_ascii_lowercase().as_str() {
+        "x" => Some(true),
+        "" => Some(false),
+        _ => None,
+    }
+}
+
+fn token_sequence_position(tokens: &[String], first: &str, second: &str) -> Option<usize> {
+    tokens
+        .windows(2)
+        .position(|pair| pair[0] == first && pair[1] == second)
+}
+
+fn phase_three_completion_claim(unit: &RoadmapStatusUnit, tokens: &[String]) -> bool {
+    const COMPLETE: [&str; 4] = ["complete", "completed", "shipped", "done"];
+    let checkbox_complete = checkbox_status(&unit.text) == Some(true);
+    if unit.phase == Some(3) && checkbox_complete {
+        return true;
+    }
+
+    let explicit_phase = token_sequence_position(tokens, "phase", "3");
+    for (completion_index, _) in tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| COMPLETE.contains(&token.as_str()))
+    {
+        if let Some(phase_index) = explicit_phase {
+            let left = phase_index.min(completion_index);
+            let right = phase_index.max(completion_index);
+            if phase_index.abs_diff(completion_index) <= 5
+                && !token_window_is_negated(tokens, left, right)
+            {
+                return true;
+            }
+        }
+
+        let starts_status_claim = tokens.first().is_some_and(|token| token == "status")
+            || tokens
+                .windows(2)
+                .next()
+                .is_some_and(|pair| pair[0] == "this" && pair[1] == "phase");
+        if unit.phase == Some(3)
+            && (unit.in_status_section || starts_status_claim)
+            && !token_window_is_negated(tokens, completion_index, completion_index)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn validate_phase_status_contract(document: &str) -> Result<(), String> {
+    const COMPLETE: [&str; 4] = ["complete", "completed", "shipped", "done"];
+    const PENDING: [&str; 4] = ["pending", "incomplete", "planned", "deferred"];
+    let mut milestone_two_completions = 0;
+
+    for unit in roadmap_status_units(document) {
+        let tokens = normalized_guidance_tokens(&unit.text);
+        if phase_three_completion_claim(&unit, &tokens) {
+            return Err(format!("Phase 3 is documented as complete: {}", unit.text));
+        }
+
+        let Some(milestone_index) = token_sequence_position(&tokens, "milestone", "2") else {
+            continue;
+        };
+        let checkbox = checkbox_status(&unit.text);
+        let nearby_complete = tokens.iter().enumerate().any(|(index, token)| {
+            COMPLETE.contains(&token.as_str())
+                && milestone_index.abs_diff(index) <= 6
+                && !token_window_is_negated(
+                    &tokens,
+                    milestone_index.min(index),
+                    milestone_index.max(index),
+                )
+        });
+        let negated_nearby_complete = tokens.iter().enumerate().any(|(index, token)| {
+            COMPLETE.contains(&token.as_str())
+                && milestone_index.abs_diff(index) <= 6
+                && token_window_is_negated(
+                    &tokens,
+                    milestone_index.min(index),
+                    milestone_index.max(index),
+                )
+        });
+        let nearby_pending = tokens.iter().enumerate().any(|(index, token)| {
+            PENDING.contains(&token.as_str()) && milestone_index.abs_diff(index) <= 6
+        });
+        let completed = checkbox == Some(true) || nearby_complete;
+        let pending = checkbox == Some(false)
+            || nearby_pending
+            || negated_nearby_complete
+            || tokens
+                .windows(2)
+                .enumerate()
+                .any(|(index, pair)| {
+                    pair[0] == "not"
+                        && pair[1] == "started"
+                        && milestone_index.abs_diff(index) <= 6
+                });
+        let status_statement = checkbox.is_some()
+            || completed
+            || pending
+            || unit.in_status_section
+            || tokens.iter().any(|token| token == "status");
+        if !status_statement {
+            continue;
+        }
+        if pending {
+            return Err(format!("Milestone 2 has a pending status claim: {}", unit.text));
+        }
+        if completed {
+            milestone_two_completions += 1;
+        }
+    }
+
+    if milestone_two_completions != 1 {
+        return Err(format!(
+            "expected exactly one Milestone 2 completion status, found {milestone_two_completions}"
+        ));
+    }
+    Ok(())
 }
 
 #[test]
@@ -347,8 +656,37 @@ fn optional_slash_section_contains_only_the_supported_skill_commands() {
 fn slash_and_control_validators_reject_unsupported_or_contradictory_guidance() {
     let unsupported = "```text\n/skill list\n/skills\n/skill add\n/skill show <name-or-id> [version]\n/skill assign <skill> <agent> [version]\n/skill unassign <skill> <agent>\n/skill delete everything\n```";
     assert!(validate_skill_slash_commands(unsupported).is_err());
-    assert!(validate_control_guidance("Press `q` to quit.").is_err());
-    assert!(validate_control_guidance("You must use `:next` to continue.").is_err());
+
+    for contradictory in [
+        "Press `q` to exit.",
+        "Q exits the app!",
+        "| `q` | Close the application. |",
+        "Use q to quit now.",
+        "To close the cockpit, press q.",
+        "You MUST use `:next` to continue.",
+        "| `:create` | Required to finish creating the skill. |",
+        "Enter :next to advance the Skills editor.",
+        "To create the skill, type `:create`.",
+    ] {
+        assert!(
+            validate_control_guidance(contradictory).is_err(),
+            "contradiction was accepted: {contradictory}"
+        );
+    }
+
+    for legitimate in [
+        "Bare `q` is inert; `/quit` exits.",
+        "`q` does not exit or close the app.",
+        "`/quit` exits through normal shutdown.",
+        "You never need `:next` or `:create` for this workflow.",
+        "The historical `:next` control is optional and not required.",
+        "Historical notes may say `q` once quit; that behavior is not supported.",
+    ] {
+        assert!(
+            validate_control_guidance(legitimate).is_ok(),
+            "legitimate guidance was rejected: {legitimate}"
+        );
+    }
 
     let guide = read_repository_document("docs/testing/declarative-skills.md");
     validate_control_guidance(&guide).unwrap();
@@ -411,12 +749,50 @@ fn roadmap_marks_only_declarative_skills_complete() {
     }
     assert_eq!(milestone_status.matches("- [x] ").count(), 2);
     assert_eq!(milestone_status.matches("- [ ] ").count(), 1);
-    assert!(checked_roadmap_statuses(PHASES).iter().all(|(phase, _)| *phase <= 2));
-    assert!(checked_roadmap_statuses(PHASES).iter().all(|(phase, _)| *phase != 3));
+    validate_phase_status_contract(PHASES).unwrap();
 }
 
 #[test]
 fn roadmap_status_parser_detects_a_completed_phase_three_entry() {
-    let incorrect = "## Phase 2 — Skills\n### Milestone status\n- [x] Skills\n## Phase 3 — Chat\n### Milestone status\n- [x] Inference\n";
-    assert!(checked_roadmap_statuses(incorrect).iter().any(|(phase, _)| *phase == 3));
+    let incorrect = "## Phase 2 — Skills\n### Milestone status\n- [x] Milestone 2: Declarative skills.\n## Phase 3 — Chat\n### Milestone status\n- [x] Inference\n";
+    assert!(validate_phase_status_contract(incorrect).is_err());
+}
+
+#[test]
+fn roadmap_status_contract_rejects_conflicting_duplicate_phase_two_sections() {
+    let conflicting = "# Roadmap\n## Phase 2 — Skills\n### Milestone status\n- [x] Milestone 2: Declarative skills. Complete.\n## Phase 2 — Duplicate\nStatus: Milestone 2 remains pending.\n## Phase 3 — Chat\nStatus: deferred.\n";
+    assert!(validate_phase_status_contract(conflicting).is_err());
+
+    let duplicate_complete = "## Phase 2 — Skills\n### Status\nMilestone 2 is complete.\n## Phase 2 — Duplicate\n### Status\nMilestone 2 shipped.\n## Phase 3 — Chat\nNot started.\n";
+    assert!(validate_phase_status_contract(duplicate_complete).is_err());
+}
+
+#[test]
+fn roadmap_status_contract_rejects_phase_three_completion_in_any_status_form() {
+    for completed in [
+        "## Phase 2 — Skills\n### Milestone status\n- [x] Milestone 2: Declarative skills.\n## Phase 3 — Chat\nPhase 3 is complete.\n",
+        "## Phase 2 — Skills\n### Milestone status\n- [x] Milestone 2: Declarative skills.\n## Phase 3 — Chat\n### Delivery\nStatus: SHIPPED!\n",
+        "## Phase 2 — Skills\n### Milestone status\n- [x] Milestone 2: Declarative skills.\n## Phase 3 — Chat\n- [x] Chat delivered\n",
+        "## Phase 2 — Skills\n### Milestone status\n- [x] Milestone 2: Declarative skills.\n## Phase 3 — Chat\nPlanned.\n## Phase 3 — Duplicate\nThis phase is done.\n",
+    ] {
+        assert!(
+            validate_phase_status_contract(completed).is_err(),
+            "Phase 3 completion was accepted: {completed}"
+        );
+    }
+}
+
+#[test]
+fn roadmap_status_contract_allows_valid_phase_three_deferral() {
+    for valid in [
+        "## Phase 2 — Skills\n### Milestone status\n- [x] Milestone 2: Declarative skills.\n- [ ] Milestone 3: Hybrid memory.\nPhase 2 remains in progress. Phase 3 remains pending.\n## Phase 3 — Chat\nStatus: planned.\n",
+        "## Phase 2 — Skills\n### Status\nMilestone 2 is complete.\n## Phase 3 — Chat\nNot started; inference is deferred.\n",
+        "## Phase 2 — Skills\n### Status\nMilestone 2 shipped.\n## Phase 3 — Chat\nPhase 3 completion is deferred.\n",
+    ] {
+        let result = validate_phase_status_contract(valid);
+        assert!(
+            result.is_ok(),
+            "valid deferred roadmap was rejected: {valid}\n{result:?}"
+        );
+    }
 }
