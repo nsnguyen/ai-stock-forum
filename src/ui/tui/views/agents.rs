@@ -7,8 +7,10 @@ use ratatui::{
 
 use crate::{
     agents::{
-        AgentBindings, AgentProfileDraft, AgentReadiness, ProfileDiffField, ProfileFieldDiff,
-        ProfileFieldValue,
+        AgentBindings, AgentProfileDraft, AgentReadiness, DESCRIPTION_MAX_BYTES,
+        DISPLAY_NAME_MAX_BYTES, INSTRUCTIONS_MAX_BYTES, MAX_SPECIALTY_TAGS, PERSONALITY_MAX_BYTES,
+        PRIMARY_SPECIALTY_MAX_BYTES, ProfileDiffField, ProfileFieldDiff, ProfileFieldValue,
+        SPECIALTY_TAG_MAX_BYTES,
     },
     app::ApplicationCommand,
     ui::{
@@ -265,6 +267,19 @@ fn render_history(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
 
 fn history_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
     let Some(history) = &model.agents.history else {
+        if let Some(detail) = &model.agents.version_detail {
+            let mut lines = vec![Line::styled("HISTORICAL VERSION", theme.accent)];
+            lines.extend(profile_version_lines(
+                &detail.profile,
+                detail.readiness,
+                "Historical version",
+                theme,
+            ));
+            lines.push(Line::default());
+            lines.push(Line::styled("PREDECESSOR DIFF", theme.accent));
+            append_diffs(&mut lines, &detail.predecessor_diff, theme);
+            return lines;
+        }
         return vec![
             Line::styled("No history loaded", theme.accent),
             Line::raw("Press h from profile detail to load version history."),
@@ -374,9 +389,16 @@ fn editor_lines(editor: &ProfileEditor, theme: &Theme) -> Vec<Line<'static>> {
             theme,
         ),
         label_value("Current step", step.as_str().replace('_', " "), theme),
-        Line::styled(step_guidance(step), theme.muted),
-        Line::styled("Enter text or a :control in the command bar.", theme.muted),
     ];
+    lines.extend(
+        step_guidance(step)
+            .into_iter()
+            .map(|guidance| Line::styled(guidance, theme.muted)),
+    );
+    lines.push(Line::styled(
+        "Enter text or a :control in the command bar.",
+        theme.muted,
+    ));
     if let Some(message) = editor.local_message() {
         lines.push(Line::default());
         lines.push(Line::styled(editor_message(message.code()), theme.warning));
@@ -761,19 +783,38 @@ fn step_number(step: ProfileEditorStep) -> u8 {
     }
 }
 
-fn step_guidance(step: ProfileEditorStep) -> &'static str {
+fn step_guidance(step: ProfileEditorStep) -> Vec<String> {
     match step {
-        ProfileEditorStep::Template => "Choose a template role with :role <role>, then :next.",
-        ProfileEditorStep::Identity => {
-            "Set display name and description; use :next between fields."
+        ProfileEditorStep::Template => {
+            vec!["Choose a template role with :role <role>, then :next.".to_owned()]
         }
-        ProfileEditorStep::Specialty => "Set specialty; use :tag add <tag> or :tag remove <tag>.",
-        ProfileEditorStep::Personality => "Describe the agent's working style, then use :next.",
-        ProfileEditorStep::Instructions => "Enter operating instructions, then use :next.",
-        ProfileEditorStep::OptionalBindings => {
-            "Use :provider and :model, or leave bindings unconfigured (Not Ready)."
+        ProfileEditorStep::Identity => vec![
+            format!("Display name: {DISPLAY_NAME_MAX_BYTES} UTF-8 bytes."),
+            format!("Description: {DESCRIPTION_MAX_BYTES} UTF-8 bytes. Use :next between fields."),
+        ],
+        ProfileEditorStep::Specialty => vec![
+            format!("Primary specialty: {PRIMARY_SPECIALTY_MAX_BYTES} UTF-8 bytes."),
+            format!(
+                "Add at most {MAX_SPECIALTY_TAGS} tags; {SPECIALTY_TAG_MAX_BYTES} UTF-8 bytes each."
+            ),
+            "Use :tag add <tag> or :tag remove <tag>.".to_owned(),
+        ],
+        ProfileEditorStep::Personality => vec![
+            format!("Limit: {PERSONALITY_MAX_BYTES} UTF-8 bytes."),
+            "Describe the agent's working style, then use :next.".to_owned(),
+        ],
+        ProfileEditorStep::Instructions => vec![
+            format!("Limit: {INSTRUCTIONS_MAX_BYTES} UTF-8 bytes."),
+            "Enter operating instructions, then use :next.".to_owned(),
+        ],
+        ProfileEditorStep::OptionalBindings => vec![
+            "Use catalog binding-reference IDs.".to_owned(),
+            "connection, model, and runtime IDs must reference catalog entries.".to_owned(),
+            "Unavailable references are rejected; unconfigured is Not Ready.".to_owned(),
+        ],
+        ProfileEditorStep::Review => {
+            vec!["Review ordered accepted-field changes before confirmation.".to_owned()]
         }
-        ProfileEditorStep::Review => "Review ordered accepted-field changes before confirmation.",
     }
 }
 

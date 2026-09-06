@@ -9,9 +9,11 @@ use ai_stock_forum::{
     },
     app::{
         ApplicationCommand, ApplicationEvent, ApplicationService, AuthorizationDecision,
-        CommandPolicy, CommandTransactionHook, CommandView,
+        CommandEnvelope, CommandPolicy, CommandTransactionHook, CommandView, ShutdownReason,
     },
+    audit::AuditEntry,
     config::AppPaths,
+    domain::{Actor, CommandId, CorrelationId},
     persistence::PersistenceError,
     policy::Capability,
     ui::command::{ParsedLine, parse_line},
@@ -206,6 +208,127 @@ fn service_derives_role_specific_readiness_from_the_injected_typed_catalog() {
 }
 
 #[test]
+fn create_and_activation_receipts_replay_exactly_after_catalog_change_and_restart() {
+    let inference_a = InferenceBindingRef::new(
+        BindingReferenceId::new("connection.catalog-a").unwrap(),
+        BindingReferenceId::new("model.catalog-a").unwrap(),
+    );
+    let catalog_a = AgentBindingCatalogSnapshot::new(vec![inference_a.clone()], Vec::new());
+    let catalog_b = AgentBindingCatalogSnapshot::new(
+        vec![InferenceBindingRef::new(
+            BindingReferenceId::new("connection.catalog-b").unwrap(),
+            BindingReferenceId::new("model.catalog-b").unwrap(),
+        )],
+        Vec::new(),
+    );
+    let temporary_directory = tempfile::tempdir().unwrap();
+    let paths = AppPaths::for_test(temporary_directory.path());
+    let clock = Arc::new(support::TestClock::new());
+    let ids = Arc::new(support::TestIds::new());
+    let mut first = ApplicationService::bootstrap_with_dependencies_and_binding_catalog(
+        &paths,
+        clock.clone(),
+        ids.clone(),
+        Arc::new(GrantAll),
+        Arc::new(NoopHook),
+        catalog_a,
+    )
+    .unwrap();
+
+    let create_envelope = CommandEnvelope {
+        command_id: CommandId::from_uuid(uuid::Uuid::from_u128(90_000)),
+        correlation_id: CorrelationId::from_uuid(uuid::Uuid::from_u128(90_001)),
+        actor: Actor::Human,
+        command: ApplicationCommand::CreateAgentProfile {
+            draft: draft(
+                "Catalog Stable Analyst",
+                AgentRole::Bull,
+                AgentBindings::new(Some(inference_a), None),
+            ),
+            template_provenance: None,
+        },
+    };
+    let created = first.execute(create_envelope.clone()).unwrap();
+    let CommandView::AgentProfileCreated(created_view) = &created.view else {
+        panic!("create view");
+    };
+    assert_eq!(created_view.readiness, AgentReadiness::Ready);
+
+    let shown = first
+        .execute_user(ApplicationCommand::ShowAgentProfile {
+            selector: ai_stock_forum::app::AgentProfileSelector::Id(created_view.profile_id),
+        })
+        .unwrap();
+    let CommandView::AgentProfile(shown) = shown.view else {
+        panic!("profile detail");
+    };
+    let mut candidate = shown.profile.to_draft();
+    candidate.description = "Catalog-stable activated version.".to_owned();
+    let preview = first
+        .preview_agent_profile_edit(
+            created_view.profile_id,
+            created_view.profile_version_id,
+            candidate.clone(),
+        )
+        .unwrap();
+    let activation_envelope = CommandEnvelope {
+        command_id: CommandId::from_uuid(uuid::Uuid::from_u128(90_010)),
+        correlation_id: CorrelationId::from_uuid(uuid::Uuid::from_u128(90_011)),
+        actor: Actor::Human,
+        command: ApplicationCommand::ActivateAgentProfileVersion {
+            profile_id: created_view.profile_id,
+            expected_active_version_id: created_view.profile_version_id,
+            candidate,
+            review_token: preview.review_token,
+            review_digest: preview.review_digest,
+        },
+    };
+    let activated = first.execute(activation_envelope.clone()).unwrap();
+    assert!(matches!(
+        activated.view,
+        CommandView::AgentProfileVersionActivated(ref view)
+            if view.readiness == AgentReadiness::Ready
+    ));
+    let original_audit = created
+        .committed_events
+        .iter()
+        .chain(&activated.committed_events)
+        .map(AuditEntry::from_event)
+        .collect::<Vec<_>>();
+    assert!(
+        original_audit
+            .iter()
+            .all(|entry| !entry.summary.contains("readiness="))
+    );
+
+    first.finish(ShutdownReason::UserQuit).unwrap();
+    drop(first);
+    let mut second = ApplicationService::bootstrap_with_dependencies_and_binding_catalog(
+        &paths,
+        clock,
+        ids,
+        Arc::new(GrantAll),
+        Arc::new(NoopHook),
+        catalog_b,
+    )
+    .unwrap();
+
+    let replayed_create = second.execute(create_envelope).unwrap();
+    let replayed_activation = second.execute(activation_envelope).unwrap();
+    assert_eq!(replayed_create, created);
+    assert_eq!(replayed_activation, activated);
+    assert_eq!(
+        replayed_create
+            .committed_events
+            .iter()
+            .chain(&replayed_activation.committed_events)
+            .map(AuditEntry::from_event)
+            .collect::<Vec<_>>(),
+        original_audit
+    );
+}
+
+#[test]
 fn name_and_id_selectors_load_exact_historical_content_and_predecessor_diff() {
     let mut harness = Harness::new(AgentBindingCatalogSnapshot::default());
     let created = harness.execute(ApplicationCommand::CreateAgentProfile {
@@ -373,4 +496,18 @@ fn list_and_history_are_bounded_before_events_outcomes_and_receipts() {
     assert_eq!(history_view.versions[0].version.get(), 101);
     assert_eq!(history_view.versions[99].version.get(), 2);
     assert_bounded_receipt(&history_receipt, "versions", 101, 100);
+}
+
+#[test]
+fn bounded_history_selects_from_the_version_index_before_cloning_profiles() {
+    let source = include_str!("../src/agents/projection.rs");
+    let body = source
+        .split("pub fn history_bounded_desc")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(crate) fn reduce").next())
+        .expect("bounded history function source");
+    assert!(body.contains("version_index_by_profile"));
+    let take = body.find(".take(limit)").expect("bounded selection");
+    let clone = body.find(".cloned()").expect("profile cloning");
+    assert!(take < clone, "profiles must be selected before cloning");
 }

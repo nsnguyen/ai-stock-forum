@@ -740,7 +740,6 @@ impl CommandExecutor {
                     &request,
                     &request_json,
                     &command_fingerprint,
-                    self.binding_catalog.as_ref(),
                 )?;
                 replay_transaction.commit()?;
                 return stored.into_result();
@@ -768,7 +767,6 @@ impl CommandExecutor {
                 &request,
                 &request_json,
                 &command_fingerprint,
-                self.binding_catalog.as_ref(),
             )?;
             transaction.commit()?;
             return stored.into_result();
@@ -1218,7 +1216,6 @@ fn validate_receipt(
     request: &CommandRequest,
     request_json: &str,
     command_fingerprint: &Sha256Digest,
-    binding_catalog: &AgentBindingCatalogSnapshot,
 ) -> Result<StoredExecution, AppError> {
     let stored_request: CommandRequest = decode_canonical(&receipt.request_json)?;
     if receipt.command_fingerprint != sha256(receipt.request_json.as_bytes()) {
@@ -1249,15 +1246,16 @@ fn validate_receipt(
             let last = events.last().ok_or_else(invalid_receipt)?;
             let projection =
                 ProjectionRepository::load_at(transaction.transaction(), last.sequence)?;
+            let validation_catalog = AgentBindingCatalogSnapshot::default();
             let expected = materialize_success(
                 transaction,
                 receipt.command_id,
                 &stored_request,
                 &events,
                 &projection,
-                binding_catalog,
+                &validation_catalog,
             )?;
-            if outcome != &expected {
+            if !receipt_outcomes_match(outcome, &expected) {
                 return Err(invalid_receipt());
             }
         }
@@ -1288,6 +1286,41 @@ fn validate_receipt(
         _ => return Err(invalid_receipt()),
     }
     Ok(stored)
+}
+
+fn receipt_outcomes_match(stored: &CommandOutcome, expected: &CommandOutcome) -> bool {
+    let mut stored = stored.clone();
+    let mut expected = expected.clone();
+    normalize_catalog_readiness(&mut stored.view);
+    normalize_catalog_readiness(&mut expected.view);
+    stored == expected
+}
+
+fn normalize_catalog_readiness(view: &mut CommandView) {
+    match view {
+        CommandView::AgentProfileCreated(created) => created.readiness = AgentReadiness::Unbound,
+        CommandView::AgentProfileVersionActivated(activated) => {
+            activated.readiness = AgentReadiness::Unbound;
+        }
+        CommandView::AgentProfiles(profiles) => {
+            for profile in &mut profiles.profiles {
+                profile.readiness = AgentReadiness::Unbound;
+            }
+        }
+        CommandView::AgentProfile(profile) => profile.readiness = AgentReadiness::Unbound,
+        CommandView::AgentProfileHistory(history) => {
+            for version in &mut history.versions {
+                version.readiness = AgentReadiness::Unbound;
+            }
+        }
+        CommandView::AgentProfileVersion(version) => version.readiness = AgentReadiness::Unbound,
+        CommandView::Help(_)
+        | CommandView::Status(_)
+        | CommandView::SetupStatus(_)
+        | CommandView::AuditTail(_)
+        | CommandView::InputRejected(_)
+        | CommandView::Shutdown(_) => {}
+    }
 }
 
 fn materialize_success(

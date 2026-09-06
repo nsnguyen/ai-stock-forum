@@ -1,18 +1,20 @@
 use ai_stock_forum::{
     agents::{AgentProfileVersion, AgentReadiness, builtin_profile_templates},
     app::{
-        AgentProfileHistoryEntry, AgentProfileHistoryView, AgentProfileSummary, AgentProfilesView,
-        DatabaseReadiness, PresentationSnapshot, ProcessGuardOwnership, ShutdownReason,
+        AgentProfileHistoryEntry, AgentProfileHistoryView, AgentProfileSummary,
+        AgentProfileVersionView, AgentProfileView, AgentProfilesView, ApplicationCommand,
+        CommandOutcome, CommandView, DatabaseReadiness, PresentationSnapshot,
+        ProcessGuardOwnership, ShutdownDisposition, ShutdownReason,
     },
     domain::{
-        AgentProfileId, AgentProfileVersionId, InstallationId, MemoryNamespaceId, ObjectVersion,
-        SessionId, sha256,
+        AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, InstallationId,
+        MemoryNamespaceId, ObjectVersion, SessionId, sha256,
     },
     setup::SetupStatus,
     ui::{
         profile_editor::{ProfileEditor, ProfileEditorMode},
         tui::{
-            ControllerEffect, TuiEvent, handle_event,
+            ControllerEffect, TuiEvent, apply_outcome, handle_event,
             layout::view_geometry,
             model::{AgentsPane, AgentsViewState, ProfileConfirmation, TuiModel, View},
         },
@@ -62,9 +64,9 @@ fn edit_editor() -> ProfileEditor {
     )
 }
 
-fn profile_summary(id: u128) -> AgentProfileSummary {
+fn profile_version(id: u128) -> AgentProfileVersion {
     let template = &builtin_profile_templates()[0];
-    let profile = AgentProfileVersion::create(
+    AgentProfileVersion::create(
         AgentProfileId::from_uuid(Uuid::from_u128(id)),
         AgentProfileVersionId::from_uuid(Uuid::from_u128(id + 100)),
         MemoryNamespaceId::from_uuid(Uuid::from_u128(id + 200)),
@@ -72,7 +74,11 @@ fn profile_summary(id: u128) -> AgentProfileSummary {
         template.copy_to_draft().expect("template draft"),
         Some(template.provenance()),
     )
-    .expect("profile");
+    .expect("profile")
+}
+
+fn profile_summary(id: u128) -> AgentProfileSummary {
+    let profile = profile_version(id);
     AgentProfileSummary {
         profile_id: profile.profile_id(),
         profile_version_id: profile.profile_version_id(),
@@ -82,6 +88,23 @@ fn profile_summary(id: u128) -> AgentProfileSummary {
         primary_specialty: profile.primary_specialty().to_owned(),
         readiness: AgentReadiness::Unbound,
         content_digest: profile.content_digest().clone(),
+    }
+}
+
+fn outcome(view: CommandView) -> CommandOutcome {
+    CommandOutcome {
+        command_id: CommandId::from_uuid(Uuid::from_u128(800)),
+        correlation_id: CorrelationId::from_uuid(Uuid::from_u128(801)),
+        committed_events: Vec::new(),
+        view,
+        shutdown: ShutdownDisposition::Continue,
+    }
+}
+
+fn submitted_command(model: &mut TuiModel, line: &str) -> ApplicationCommand {
+    match enter_line(model, line) {
+        ControllerEffect::Submit(command) => command,
+        effect => panic!("expected command submission for {line:?}, received {effect:?}"),
     }
 }
 
@@ -612,6 +635,104 @@ fn command_bar_dispatches_canonical_profile_workflows() {
         ControllerEffect::StartProfileEditBySelector { selector }
             if selector.display_name() == Some("Bull Researcher")
     ));
+}
+
+#[test]
+fn command_bar_applies_every_profile_read_form_to_typed_agents_state() {
+    let profile = profile_version(700);
+    let profile_id = profile.profile_id();
+    let summary = profile_summary(700);
+    let profiles = AgentProfilesView {
+        profiles: vec![summary],
+        total_count: 1,
+        returned_count: 1,
+        truncated: false,
+    };
+    let detail = AgentProfileView {
+        profile: profile.clone(),
+        readiness: AgentReadiness::Unbound,
+    };
+    let history = AgentProfileHistoryView {
+        profile_id,
+        active_version_id: profile.profile_version_id(),
+        versions: vec![AgentProfileHistoryEntry {
+            profile_version_id: profile.profile_version_id(),
+            version: profile.version(),
+            supersedes: profile.supersedes(),
+            created_at_ms: profile.created_at_ms(),
+            readiness: AgentReadiness::Unbound,
+            content_digest: profile.content_digest().clone(),
+        }],
+        total_count: 1,
+        returned_count: 1,
+        truncated: false,
+    };
+    let version = AgentProfileVersionView {
+        profile: profile.clone(),
+        readiness: AgentReadiness::Unbound,
+        predecessor_diff: Vec::new(),
+    };
+
+    let mut listed = model();
+    assert_eq!(
+        submitted_command(&mut listed, "/agent list"),
+        ApplicationCommand::ListAgentProfiles
+    );
+    assert_eq!(
+        apply_outcome(
+            &mut listed,
+            outcome(CommandView::AgentProfiles(profiles.clone()))
+        ),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(listed.active_view, View::Agents);
+    assert_eq!(listed.agents.pane, AgentsPane::List);
+    assert_eq!(listed.agents.profiles, profiles);
+
+    for selector in ["\"Bull Researcher\"".to_owned(), profile_id.to_string()] {
+        let mut shown = model();
+        assert!(matches!(
+            submitted_command(&mut shown, &format!("/agent show {selector}")),
+            ApplicationCommand::ShowAgentProfile { .. }
+        ));
+        apply_outcome(
+            &mut shown,
+            outcome(CommandView::AgentProfile(detail.clone())),
+        );
+        assert_eq!(shown.active_view, View::Agents);
+        assert_eq!(shown.agents.pane, AgentsPane::Detail);
+        assert_eq!(shown.agents.detail.as_ref(), Some(&detail));
+    }
+
+    for selector in ["\"Bull Researcher\"".to_owned(), profile_id.to_string()] {
+        let mut shown = model();
+        assert!(matches!(
+            submitted_command(&mut shown, &format!("/agent history {selector}")),
+            ApplicationCommand::ShowAgentProfileHistory { .. }
+        ));
+        apply_outcome(
+            &mut shown,
+            outcome(CommandView::AgentProfileHistory(history.clone())),
+        );
+        assert_eq!(shown.active_view, View::Agents);
+        assert_eq!(shown.agents.pane, AgentsPane::History);
+        assert_eq!(shown.agents.history.as_ref(), Some(&history));
+    }
+
+    for selector in ["\"Bull Researcher\"".to_owned(), profile_id.to_string()] {
+        let mut shown = model();
+        assert!(matches!(
+            submitted_command(&mut shown, &format!("/agent history {selector} 1")),
+            ApplicationCommand::ShowAgentProfileVersion { version, .. } if version.get() == 1
+        ));
+        apply_outcome(
+            &mut shown,
+            outcome(CommandView::AgentProfileVersion(version.clone())),
+        );
+        assert_eq!(shown.active_view, View::Agents);
+        assert_eq!(shown.agents.pane, AgentsPane::History);
+        assert_eq!(shown.agents.version_detail.as_ref(), Some(&version));
+    }
 }
 
 #[test]

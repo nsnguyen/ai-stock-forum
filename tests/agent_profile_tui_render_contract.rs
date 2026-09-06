@@ -1,8 +1,9 @@
 use ai_stock_forum::{
     agents::{
         AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentReadiness, AgentRole,
-        ProfileDiffField, ProfileEditPreview, ProfileFieldDiff, ProfileFieldValue,
-        builtin_profile_templates,
+        DESCRIPTION_MAX_BYTES, DISPLAY_NAME_MAX_BYTES, INSTRUCTIONS_MAX_BYTES, MAX_SPECIALTY_TAGS,
+        PERSONALITY_MAX_BYTES, PRIMARY_SPECIALTY_MAX_BYTES, ProfileDiffField, ProfileEditPreview,
+        ProfileFieldDiff, ProfileFieldValue, SPECIALTY_TAG_MAX_BYTES, builtin_profile_templates,
     },
     app::{
         AgentProfileHistoryEntry, AgentProfileHistoryView, AgentProfileSummary,
@@ -377,6 +378,58 @@ fn editor_renders_progress_guidance_ordered_review_diffs_and_explicit_confirmati
     create.agents.editor = Some(create_editor);
     let create_review = render_text(&create, 100, 40);
     assert!(create_review.contains("Use :create"));
+}
+
+#[test]
+fn guided_editor_renders_exact_domain_limits_at_narrow_medium_and_wide_sizes() {
+    let cases = [
+        (
+            1,
+            vec![
+                format!("{DISPLAY_NAME_MAX_BYTES} UTF-8 bytes"),
+                format!("{DESCRIPTION_MAX_BYTES} UTF-8 bytes"),
+            ],
+        ),
+        (
+            3,
+            vec![
+                format!("{PRIMARY_SPECIALTY_MAX_BYTES} UTF-8 bytes"),
+                format!("at most {MAX_SPECIALTY_TAGS} tags"),
+                format!("{SPECIALTY_TAG_MAX_BYTES} UTF-8 bytes each"),
+            ],
+        ),
+        (4, vec![format!("{PERSONALITY_MAX_BYTES} UTF-8 bytes")]),
+        (5, vec![format!("{INSTRUCTIONS_MAX_BYTES} UTF-8 bytes")]),
+        (
+            6,
+            vec![
+                "catalog binding-reference IDs".to_owned(),
+                "connection, model, and runtime".to_owned(),
+            ],
+        ),
+    ];
+
+    for (next_count, expected) in cases {
+        let mut editor =
+            ProfileEditor::for_create(&builtin_profile_templates()[0]).expect("valid editor");
+        for _ in 0..next_count {
+            assert_eq!(editor.submit_line(":next"), ProfileEditorEffect::None);
+        }
+        for (width, height) in [(70, 24), (100, 30), (140, 40)] {
+            let mut guided = model(false, AgentsPane::Editor);
+            guided.agents.editor = Some(editor.clone());
+            let text = render_text(&guided, width, height)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            for expected in &expected {
+                assert!(
+                    text.contains(expected),
+                    "missing {expected:?} after {next_count} steps at {width}x{height}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

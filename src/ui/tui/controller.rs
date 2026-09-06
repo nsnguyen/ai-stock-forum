@@ -123,12 +123,37 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
             model.set_runtime_status(RuntimeStatus::Stopping);
             shutdown.disposition
         }
-        CommandView::AgentProfileCreated(_)
-        | CommandView::AgentProfileVersionActivated(_)
-        | CommandView::AgentProfiles(_)
-        | CommandView::AgentProfile(_)
-        | CommandView::AgentProfileHistory(_)
-        | CommandView::AgentProfileVersion(_) => ShutdownDisposition::Continue,
+        CommandView::AgentProfiles(profiles) => {
+            model.agents.replace_profiles(profiles);
+            model.agents.pane = AgentsPane::List;
+            select_workspace_view(model, View::Agents);
+            model.clear_message();
+            ShutdownDisposition::Continue
+        }
+        CommandView::AgentProfile(profile) => {
+            model.agents.replace_detail(profile);
+            model.agents.pane = AgentsPane::Detail;
+            select_workspace_view(model, View::Agents);
+            model.clear_message();
+            ShutdownDisposition::Continue
+        }
+        CommandView::AgentProfileHistory(history) => {
+            model.agents.replace_history(history);
+            model.agents.pane = AgentsPane::History;
+            select_workspace_view(model, View::Agents);
+            model.clear_message();
+            ShutdownDisposition::Continue
+        }
+        CommandView::AgentProfileVersion(version) => {
+            model.agents.replace_version_detail(version);
+            model.agents.pane = AgentsPane::History;
+            select_workspace_view(model, View::Agents);
+            model.clear_message();
+            ShutdownDisposition::Continue
+        }
+        CommandView::AgentProfileCreated(_) | CommandView::AgentProfileVersionActivated(_) => {
+            ShutdownDisposition::Continue
+        }
     };
 
     merge_committed_audit(model, committed_audit);

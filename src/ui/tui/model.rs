@@ -139,6 +139,15 @@ impl AgentsViewState {
     }
 
     pub fn replace_history(&mut self, history: AgentProfileHistoryView) {
+        if let Some(index) = self
+            .profiles
+            .profiles
+            .iter()
+            .position(|summary| summary.profile_id == history.profile_id)
+        {
+            self.selected_profile = index;
+            self.list_scroll = index;
+        }
         self.selected_history_version = 0;
         self.history_scroll = 0;
         self.version_detail = None;
@@ -146,6 +155,21 @@ impl AgentsViewState {
     }
 
     pub fn replace_version_detail(&mut self, version: AgentProfileVersionView) {
+        let profile_id = version.profile.profile_id();
+        if self.history.as_ref().map(|history| history.profile_id) != Some(profile_id) {
+            self.history = None;
+            self.selected_history_version = 0;
+            self.history_scroll = 0;
+        }
+        if let Some(index) = self
+            .profiles
+            .profiles
+            .iter()
+            .position(|summary| summary.profile_id == profile_id)
+        {
+            self.selected_profile = index;
+            self.list_scroll = index;
+        }
         self.version_detail = Some(version);
     }
 

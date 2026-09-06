@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agents::AgentProfileVersion,
     app::{ApplicationEvent, EventEnvelope, InputRejectionCategory, SafeToken},
     domain::{Actor, CorrelationId},
 };
@@ -69,20 +68,18 @@ fn summary(event: &ApplicationEvent) -> String {
         }
         ApplicationEvent::AgentProfileCreated { profile } => {
             format!(
-                "agent profile created: profile={}, version={}, readiness={}",
+                "agent profile created: profile={}, version={}",
                 profile.profile_id(),
                 profile.version().get(),
-                readiness(profile),
             )
         }
         ApplicationEvent::AgentProfileVersionActivated {
             profile,
             previous_version_id,
         } => format!(
-            "agent profile version activated: profile={}, version={}, previous_version={previous_version_id}, readiness={}",
+            "agent profile version activated: profile={}, version={}, previous_version={previous_version_id}",
             profile.profile_id(),
             profile.version().get(),
-            readiness(profile),
         ),
         ApplicationEvent::AgentProfilesListed {
             total_count,
@@ -118,14 +115,6 @@ fn summary(event: &ApplicationEvent) -> String {
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "none".to_owned())
         ),
-    }
-}
-
-fn readiness(profile: &AgentProfileVersion) -> &'static str {
-    match profile.readiness() {
-        crate::agents::AgentReadiness::Unbound => "unbound",
-        crate::agents::AgentReadiness::BindingUnavailable => "binding_unavailable",
-        crate::agents::AgentReadiness::Ready => "ready",
     }
 }
 
