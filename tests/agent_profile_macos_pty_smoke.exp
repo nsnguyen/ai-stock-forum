@@ -321,7 +321,15 @@ expect {
 }
 set timeout $prior_timeout
 send -- "q"
-must_exact {PTY_SHELL> } "unconditional Too Small q quit"
+set prior_timeout $timeout
+set timeout 1
+expect {
+    -exact {PTY_SHELL> } { fail "bare q quit from Too Small" }
+    timeout {}
+}
+set timeout $prior_timeout
+tui_slash "/quit"
+must_exact {PTY_SHELL> } "Too Small /quit"
 
 set terminal_after [exec /bin/stty -g < $tui_tty]
 if {$terminal_before ne $terminal_after} {
@@ -356,6 +364,6 @@ foreach pair {
     }
 }
 puts {PTY_ESCAPE_PAIRS_OK alternate-screen cursor bracketed-paste}
-puts {PTY_TUI_OK resize=70x24,100x30,140x40,40x10 too-small-esc=retained too-small-q=quit}
+puts {PTY_TUI_OK resize=70x24,100x30,140x40,40x10 too-small-esc=retained too-small-q=ignored too-small-/quit=quit}
 puts "PTY_EVIDENCE_DIR=$evidence_dir"
 exit 0

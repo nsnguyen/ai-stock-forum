@@ -36,14 +36,13 @@ fn content(theme: &Theme) -> Vec<Line<'static>> {
         Line::raw("Esc                 Close, cancel, or clear"),
         Line::raw("i                   Toggle or focus the inspector"),
         Line::raw("?                   Open Help"),
-        Line::raw("q                   Request shutdown outside command entry"),
-        Line::raw("Ctrl+C              Request shutdown from any focus"),
+        Line::raw("Ctrl+C              Emergency interrupt from any focus"),
         Line::default(),
         Line::styled("SLASH COMMANDS", theme.accent),
         Line::raw("/help"),
         Line::raw("/status"),
         Line::raw("/setup status"),
         Line::raw("/audit tail [limit: 1-100]"),
-        Line::raw("/quit"),
+        Line::raw("/quit               Request normal shutdown"),
     ]
 }

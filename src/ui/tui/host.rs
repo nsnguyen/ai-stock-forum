@@ -1092,14 +1092,15 @@ mod tests {
     fn host_draws_processes_resize_and_redraws_only_when_dirty() {
         let (runtime, observer, _) = runtime(false, false, false);
         let mut screen = RecordingScreen::new(Rect::new(0, 0, 140, 40));
-        let mut events = FakeEvents::from([
+        let mut steps = vec![
             EventStep::Idle,
             EventStep::Idle,
             EventStep::Event(TuiEvent::Resize(70, 20)),
             key('2'),
             EventStep::Idle,
-            key('q'),
-        ]);
+        ];
+        steps.extend(command_steps("/quit"));
+        let mut events = FakeEvents::from(steps);
 
         let result = execute(runtime, &mut screen, &mut events);
 
@@ -1123,7 +1124,7 @@ mod tests {
                 .iter()
                 .any(|frame| frame.runtime_status == RuntimeStatus::Stopping)
         );
-        assert_eq!(screen.frames().len(), 4);
+        assert_eq!(screen.frames().len(), 9);
         assert!(!events.timeouts().is_empty());
         assert!(
             events
@@ -1151,39 +1152,33 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_requested_while_busy_runs_after_the_current_outcome() {
+    fn quit_command_does_not_bypass_the_pending_command_guard() {
         let (runtime, observer, release) = runtime(true, false, false);
         let mut steps = command_steps("/status");
         steps.push(special_key(KeyCode::Esc));
-        steps.push(key('q'));
-        steps.push(EventStep::Idle);
+        steps.extend(command_steps("/quit"));
+        steps.push(key('x'));
         steps.push(EventStep::Release(release.unwrap()));
+        steps.push(EventStep::Event(TuiEvent::Interrupt));
         let mut screen = RecordingScreen::new(Rect::new(0, 0, 140, 40));
         let mut events = FakeEvents::from(steps);
 
         let result = execute(runtime, &mut screen, &mut events);
 
         assert!(result.is_ok());
-        assert_eq!(
-            observer.commands(),
-            [
-                ApplicationCommand::ShowStatus,
-                ApplicationCommand::RequestShutdown,
-            ]
-        );
-        assert_eq!(observer.finishes(), [ShutdownReason::UserQuit]);
-        assert!(
-            screen
-                .frames()
-                .iter()
-                .any(|frame| frame.runtime_status == RuntimeStatus::Stopping)
-        );
+        assert_eq!(observer.commands(), [ApplicationCommand::ShowStatus]);
+        assert_eq!(observer.finishes(), [ShutdownReason::Interrupted]);
+        assert!(screen.frames().iter().any(|frame| {
+            frame.command_in_flight
+                && frame.history_len == 1
+                && frame.message.as_deref() == Some("A command is already running.")
+        }));
     }
 
     #[test]
-    fn delayed_immediate_shutdown_is_in_flight_and_rejects_history_mutation() {
+    fn delayed_quit_command_is_in_flight_and_rejects_followup_submission() {
         let (runtime, observer, release) = runtime(true, false, false);
-        let mut steps = vec![key('q')];
+        let mut steps = command_steps("/quit");
         steps.extend(command_steps("/help"));
         steps.push(key('x'));
         steps.push(EventStep::Release(release.unwrap()));
@@ -1197,7 +1192,7 @@ mod tests {
         assert!(screen.frames().iter().any(|frame| {
             frame.runtime_status == RuntimeStatus::Stopping
                 && frame.command_in_flight
-                && frame.history_len == 0
+                && frame.history_len == 1
                 && frame.message.as_deref() == Some("A command is already running.")
         }));
     }

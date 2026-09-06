@@ -173,11 +173,7 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
     }
 
     if model.layout_mode == LayoutMode::TooSmall {
-        return if is_plain_char(key, 'q') {
-            ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
-        } else {
-            ControllerEffect::None
-        };
+        return handle_too_small_key(model, key);
     }
 
     if active_confirmation(model) {
@@ -212,9 +208,6 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
             ControllerEffect::Redraw
         }
         KeyCode::Char('i') if no_modifiers(key.modifiers) => toggle_or_focus_inspector(model),
-        KeyCode::Char('q') if no_modifiers(key.modifiers) => {
-            ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
-        }
         KeyCode::Tab if no_modifiers(key.modifiers) => cycle_focus(model, true),
         KeyCode::BackTab if backtab_modifiers(key.modifiers) => cycle_focus(model, false),
         KeyCode::Esc if no_modifiers(key.modifiers) => dismiss(model),
@@ -229,6 +222,21 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         KeyCode::Home if no_modifiers(key.modifiers) => move_to_bound(model, false),
         KeyCode::End if no_modifiers(key.modifiers) => move_to_bound(model, true),
         _ => ControllerEffect::None,
+    }
+}
+
+fn handle_too_small_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
+    if model.focus == Focus::Command {
+        return handle_command_key(model, key);
+    }
+
+    if is_plain_char(key, '/') {
+        model.command.clear();
+        model.command.insert('/');
+        model.set_focus(Focus::Command);
+        ControllerEffect::Redraw
+    } else {
+        ControllerEffect::None
     }
 }
 
@@ -940,7 +948,7 @@ mod tests {
     }
 
     #[test]
-    fn global_keys_switch_views_focus_inspector_command_and_shutdown() {
+    fn global_keys_switch_views_focus_inspector_and_leave_bare_q_inert() {
         let mut model = model();
         assert_redraw_and_view(&mut model, key('2'), View::Setup);
         assert_redraw_and_view(&mut model, key('3'), View::Audit);
@@ -957,10 +965,9 @@ mod tests {
             handle_event(&mut model, key_code(KeyCode::Esc, KeyModifiers::NONE)),
             ControllerEffect::Redraw
         );
-        assert!(matches!(
-            handle_event(&mut model, key('q')),
-            ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
-        ));
+        let before_q = model.clone();
+        assert_eq!(handle_event(&mut model, key('q')), ControllerEffect::None);
+        assert_eq!(model, before_q);
     }
 
     #[test]
@@ -1150,14 +1157,18 @@ mod tests {
     }
 
     #[test]
-    fn too_small_q_quits_even_when_command_text_owns_input() {
+    fn bare_q_never_requests_shutdown_in_normal_or_too_small_layout() {
+        let mut normal = model();
+        let normal_before_q = normal.clone();
+        assert_eq!(handle_event(&mut normal, key('q')), ControllerEffect::None);
+        assert_eq!(normal, normal_before_q);
+
         let mut tiny = model();
         tiny.layout_mode = LayoutMode::TooSmall;
         let before = tiny.clone();
         for event in [
             key('1'),
             key('i'),
-            key('/'),
             key('?'),
             key_code(KeyCode::Tab, KeyModifiers::NONE),
             key_code(KeyCode::Enter, KeyModifiers::NONE),
@@ -1165,18 +1176,16 @@ mod tests {
             assert_eq!(handle_event(&mut tiny, event), ControllerEffect::None);
             assert_eq!(tiny, before);
         }
-        assert_eq!(
-            handle_event(&mut tiny, key('q')),
-            ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
-        );
+        assert_eq!(handle_event(&mut tiny, key('q')), ControllerEffect::None);
+        assert_eq!(tiny, before);
 
         let mut command_tiny = command_model("");
         command_tiny.layout_mode = LayoutMode::TooSmall;
         assert_eq!(
             handle_event(&mut command_tiny, key('q')),
-            ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
+            ControllerEffect::Redraw
         );
-        assert_eq!(command_tiny.command.text(), "");
+        assert_eq!(command_tiny.command.text(), "q");
     }
 
     #[test]
@@ -1369,7 +1378,7 @@ mod tests {
     }
 
     #[test]
-    fn too_small_resize_preserves_command_text_but_q_still_quits() {
+    fn too_small_resize_preserves_command_text_and_accepts_quit_completion() {
         let mut model = model();
         assert_eq!(handle_event(&mut model, key('/')), ControllerEffect::Redraw);
         assert_eq!(model.focus, Focus::Command);
@@ -1378,11 +1387,17 @@ mod tests {
             ControllerEffect::Redraw
         );
 
+        for character in "quit".chars() {
+            assert_eq!(
+                handle_event(&mut model, key(character)),
+                ControllerEffect::Redraw
+            );
+        }
+        assert_eq!(model.command.text(), "/quit");
         assert_eq!(
-            handle_event(&mut model, key('q')),
-            ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
+            handle_event(&mut model, key_code(KeyCode::Enter, KeyModifiers::NONE)),
+            ControllerEffect::Submit(ApplicationCommand::RequestShutdown)
         );
-        assert_eq!(model.command.text(), "/");
     }
 
     #[test]

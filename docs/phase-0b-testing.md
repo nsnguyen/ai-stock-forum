@@ -99,24 +99,28 @@ emit a transcript while navigating them.
 | `Esc` | Dismiss the inspector or message; in command focus, clear and leave command entry. |
 | `/` | Move to command focus with a leading slash. |
 | Text, `Enter`, `Backspace`, `Delete`, editor arrows, editor `Home`/`End`, editor `Up`/`Down` | Edit, submit, and recall the bounded in-memory command history. |
-| `q` | Request an auditable clean user shutdown when outside command entry. |
-| `Ctrl+C` | Request clean interrupted shutdown from any focus. |
+| `/quit` | Request an auditable normal shutdown through the command parser. |
+| `Ctrl+C` | Request emergency interrupted shutdown from any focus. |
 
 Only one application command can be pending. While one is pending, a second
 submission is refused locally and cannot race the existing runtime command.
+Bare `q` has no global shortcut behavior and remains ordinary text in editors.
 
 ## Layout, color, and restoration
 
 The minimum usable terminal is `60x18`. Resizing below either minimum displays
-the TooSmall guidance screen; non-shutdown controls are ignored there. At or
-above the minimum, the layout is Narrow until both `80x24` are met, Medium
-until both `120x30` are met, and Wide thereafter.
+the TooSmall guidance screen. Press `/`, complete `/quit`, and press `Enter` for
+normal shutdown; the compact screen displays the current command buffer. Other
+workspace controls are ignored there, while `Esc` can cancel command entry and
+`Ctrl+C` remains globally available. At or above the minimum, the layout is
+Narrow until both `80x24` are met, Medium until both `120x30` are met, and Wide
+thereafter.
 
 Set `NO_COLOR=1` for the no-color check. The cockpit must use no foreground or
 background colors, while focus remains distinguishable through non-color
 styling. Mouse capture remains disabled.
 
-For `q`, `Ctrl+C`, a forced UI error, and the panic seam, verify that raw mode,
+For `/quit`, `Ctrl+C`, a forced UI error, and the panic seam, verify that raw mode,
 cursor state, and alternate-screen state are restored before control returns to
 the shell. Normal user quit exits successfully and is auditable. Error and
 panic paths print at most one safe summary after restoration; the summary must
@@ -139,7 +143,7 @@ safely without corrupting the first session.
 | Heights 17, 18, 23, 24, 29, 30 | TooSmall below 18; width-dependent Narrow/Medium/Wide above it. |
 | Keys `1`-`4`, Tab, arrows, paging, `/`, Esc, `i`, `?` | Focus and native views update without transcript output. |
 | `/help`, `/status`, `/setup status`, `/audit tail`, `/audit tail N`, invalid input | Existing application command semantics and audit behavior are preserved. Bare `/audit` is rejected as malformed input. |
-| `q` | Auditable clean shutdown, terminal restored, success exit. |
+| `/quit` | Auditable normal shutdown, terminal restored, success exit. |
 | Ctrl+C | Clean external-signal shutdown and terminal restoration. |
 | Forced UI error/panic seam | One safe line after restoration; no payload or path leakage. |
 | `NO_COLOR=1` | No foreground/background colors; focus remains visibly distinct. |

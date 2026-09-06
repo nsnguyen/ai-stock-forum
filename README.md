@@ -57,13 +57,15 @@ thresholds it is Narrow from `60x18`, Medium from `80x24`, and Wide from
 | `i`, `Esc` | Open/focus the inspector; then dismiss the inspector or message. |
 | `/` | Focus the command editor with `/` prefilled. |
 | Command editor: text, `Enter`, arrows, `Home`, `End`, `Backspace`, `Delete`, `Up`, `Down`, `Tab`, `Shift+Tab`, `Esc` | Edit, submit, recall in-memory history, move focus, or cancel command entry. |
-| `q` outside command entry, `Ctrl+C` | Request clean user-quit or interrupted shutdown. |
+| `/quit` | Request the auditable normal shutdown from command entry, including the TooSmall screen. |
+| `Ctrl+C` | Request emergency interrupted shutdown from any focus. |
 
 `NO_COLOR=1` disables foreground and background colors while retaining
 non-color focus distinction. Mouse capture remains disabled. Only one process
 may use a state directory at once; a second process is rejected through the
-existing single-instance guard. `/help`, `/status`, `/setup status`, `/audit tail`,
-`/audit tail N`, and rejected input continue through the existing parser,
+existing single-instance guard. Bare `q` has no global shortcut behavior and is
+ordinary text inside editors. `/help`, `/status`, `/setup status`, `/audit tail`,
+`/audit tail N`, `/quit`, and rejected input continue through the existing parser,
 runtime, application, policy, event, audit, and persistence boundaries. Bare
 `/audit` is rejected as malformed input.
 
