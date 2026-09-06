@@ -4,7 +4,10 @@ use ai_stock_forum::{
         ProfileDiffField, diff_profile,
     },
     app::{AgentProfileView, CommandView},
-    domain::{AgentProfileId, AgentProfileVersionId, MemoryNamespaceId, SkillId, SkillVersionId},
+    domain::{
+        AgentProfileId, AgentProfileVersionId, DomainError, MemoryNamespaceId, SkillId,
+        SkillVersionId,
+    },
     skills::{SkillDraft, SkillProvenance, SkillVersion, SkillVersionRef},
     ui::command::TextRenderer,
 };
@@ -177,6 +180,79 @@ fn skill_assignment_upgrade_and_unassignment_build_exact_candidates() {
     assert_eq!(
         unassigned.unassign_skill(upgraded_ref).unwrap_err().code(),
         "agent_profile_unchanged",
+    );
+}
+
+#[test]
+fn assigning_a_different_version_of_an_assigned_skill_is_a_typed_no_op() {
+    let initial = first_skill_version(10, 11, "Evidence Review");
+    let replacement = SkillVersion::next_version(
+        &initial,
+        skill_version_id(12),
+        1_726_000_000_001,
+        skill_draft("Evidence Review Revised"),
+    )
+    .unwrap()
+    .reference();
+    let assigned = create(valid_draft(Vec::new()))
+        .assign_skill(initial.reference())
+        .unwrap();
+
+    assert_eq!(
+        assigned.assign_skill(replacement).unwrap_err(),
+        DomainError::AgentProfileUnchanged,
+    );
+}
+
+#[test]
+fn upgrading_to_the_same_exact_skill_ref_is_a_typed_no_op() {
+    let reference = first_skill_version(10, 11, "Evidence Review").reference();
+    let assigned = create(valid_draft(Vec::new()))
+        .assign_skill(reference.clone())
+        .unwrap();
+
+    assert_eq!(
+        assigned
+            .upgrade_skill(reference.clone(), reference)
+            .unwrap_err(),
+        DomainError::AgentProfileUnchanged,
+    );
+}
+
+#[test]
+fn unassigning_a_stale_exact_skill_ref_is_a_typed_no_op() {
+    let initial = first_skill_version(10, 11, "Evidence Review");
+    let stale = SkillVersion::next_version(
+        &initial,
+        skill_version_id(12),
+        1_726_000_000_001,
+        skill_draft("Evidence Review Revised"),
+    )
+    .unwrap()
+    .reference();
+    let assigned = create(valid_draft(Vec::new()))
+        .assign_skill(initial.reference())
+        .unwrap();
+
+    assert_eq!(
+        assigned.unassign_skill(stale).unwrap_err(),
+        DomainError::AgentProfileUnchanged,
+    );
+}
+
+#[test]
+fn upgrading_between_different_skill_ids_is_a_typed_no_op() {
+    let assigned_ref = first_skill_version(10, 11, "Evidence Review").reference();
+    let unrelated_ref = first_skill_version(20, 21, "Filing Analysis").reference();
+    let assigned = create(valid_draft(Vec::new()))
+        .assign_skill(assigned_ref.clone())
+        .unwrap();
+
+    assert_eq!(
+        assigned
+            .upgrade_skill(assigned_ref, unrelated_ref)
+            .unwrap_err(),
+        DomainError::AgentProfileUnchanged,
     );
 }
 
