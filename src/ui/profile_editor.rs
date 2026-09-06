@@ -201,6 +201,10 @@ impl ProfileEditor {
     }
 
     pub fn select_template(&mut self, template: &ProfileTemplate) -> bool {
+        if !matches!(self.mode, ProfileEditorMode::Create { .. }) {
+            self.message("template_selection_create_only");
+            return false;
+        }
         if self.step != ProfileEditorStep::Template {
             self.message("editor_field_unavailable");
             return false;

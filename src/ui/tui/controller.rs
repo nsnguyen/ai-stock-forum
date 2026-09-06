@@ -356,7 +356,7 @@ fn active_profile_editor(model: &TuiModel) -> bool {
 
 fn handle_confirmation_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
     match key.code {
-        KeyCode::Enter if key.kind == KeyEventKind::Press => {
+        KeyCode::Enter if key.kind == KeyEventKind::Press && no_modifiers(key.modifiers) => {
             let Some(command) = model
                 .agents
                 .pending_confirmation
@@ -373,28 +373,6 @@ fn handle_confirmation_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEff
             model.command.clear();
             model.agents.pending_confirmation = None;
             model.agents.pane = AgentsPane::Editor;
-            ControllerEffect::Redraw
-        }
-        KeyCode::Backspace if no_modifiers(key.modifiers) => {
-            edit(model, |model| model.command.backspace())
-        }
-        KeyCode::Delete if no_modifiers(key.modifiers) => {
-            edit(model, |model| model.command.delete())
-        }
-        KeyCode::Left if no_modifiers(key.modifiers) => {
-            edit(model, |model| model.command.move_left())
-        }
-        KeyCode::Right if no_modifiers(key.modifiers) => {
-            edit(model, |model| model.command.move_right())
-        }
-        KeyCode::Home if no_modifiers(key.modifiers) => {
-            edit(model, |model| model.command.move_home())
-        }
-        KeyCode::End if no_modifiers(key.modifiers) => {
-            edit(model, |model| model.command.move_end())
-        }
-        KeyCode::Char(character) if text_modifiers(key.modifiers) => {
-            model.command.insert(character);
             ControllerEffect::Redraw
         }
         _ => ControllerEffect::None,
@@ -458,6 +436,9 @@ fn cycle_profile_template(model: &mut TuiModel, forward: bool) -> ControllerEffe
         return ControllerEffect::None;
     };
     if editor.step() != ProfileEditorStep::Template {
+        return ControllerEffect::None;
+    }
+    if !matches!(editor.mode(), ProfileEditorMode::Create { .. }) {
         return ControllerEffect::None;
     }
     let templates = builtin_profile_templates();

@@ -373,6 +373,18 @@ fn editor_renders_progress_guidance_ordered_review_diffs_and_explicit_confirmati
     assert!(create_text.contains("Current field"));
     assert!(create_text.contains("Template"));
 
+    let mut edit_template = model(true, AgentsPane::Editor);
+    edit_template.agents.editor = Some(ProfileEditor::for_edit(
+        profile.profile_id(),
+        profile.profile_version_id(),
+        draft,
+    ));
+    let edit_text = render_text(&edit_template, 100, 30);
+    assert!(!edit_text.contains("Up/Down: choose template"));
+    assert!(!edit_text.contains("Choose the complete starting profile"));
+    assert!(edit_text.contains("Enter: continue"));
+    assert!(edit_text.contains("Advanced: :role <role>"));
+
     for _ in 0..7 {
         assert_eq!(
             create_editor.submit_line(":next"),

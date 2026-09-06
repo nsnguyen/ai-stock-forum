@@ -1,5 +1,8 @@
 use ai_stock_forum::{
-    agents::{AgentProfileVersion, AgentReadiness, ProfileEditPreview, builtin_profile_templates},
+    agents::{
+        AgentProfileVersion, AgentReadiness, AgentRole, ProfileEditPreview,
+        builtin_profile_templates,
+    },
     app::{
         AgentProfileHistoryEntry, AgentProfileHistoryView, AgentProfileSummary,
         AgentProfileVersionView, AgentProfileView, AgentProfilesView, ApplicationCommand,
@@ -494,11 +497,12 @@ fn bare_q_never_requests_shutdown_across_agent_input_owners_or_too_small() {
     confirmation_model.agents.pending_confirmation = Some(ProfileConfirmation {
         command: ai_stock_forum::app::ApplicationCommand::RequestShutdown,
     });
+    let confirmation_before_q = confirmation_model.clone();
     assert_eq!(
         handle_event(&mut confirmation_model, key(KeyCode::Char('q'))),
-        ControllerEffect::Redraw
+        ControllerEffect::None
     );
-    assert_eq!(confirmation_model.command.text(), "q");
+    assert_eq!(confirmation_model, confirmation_before_q);
 
     let mut local_model = model();
     handle_event(&mut local_model, key(KeyCode::Char('a')));
@@ -524,11 +528,12 @@ fn bare_q_never_requests_shutdown_across_agent_input_owners_or_too_small() {
     assert_eq!(command_model.command.text(), "/qq");
 
     handle_event(&mut confirmation_model, TuiEvent::Resize(10, 5));
+    let confirmation_before_small_q = confirmation_model.clone();
     assert_eq!(
         handle_event(&mut confirmation_model, key(KeyCode::Char('q'))),
         ControllerEffect::None
     );
-    assert_eq!(confirmation_model.command.text(), "q");
+    assert_eq!(confirmation_model, confirmation_before_small_q);
     assert!(confirmation_model.agents.pending_confirmation.is_some());
 
     handle_event(&mut local_model, TuiEvent::Resize(10, 5));
@@ -775,10 +780,50 @@ fn keyboard_create_path_cycles_complete_templates_and_uses_enter_only() {
     assert!(matches!(
         handle_event(
             &mut model,
-            key_event(KeyCode::Enter, KeyModifiers::SHIFT, KeyEventKind::Press),
+            key_event(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Press),
         ),
         ControllerEffect::ExecuteProfile(ApplicationCommand::CreateAgentProfile { .. })
     ));
+}
+
+#[test]
+fn edit_template_step_ignores_arrows_but_keeps_enter_and_role_alias() {
+    let mut model = model();
+    model.active_view = View::Agents;
+    model.agents.pane = AgentsPane::Editor;
+    model.agents.editor = Some(edit_editor());
+    let original = model.clone();
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Down)),
+        ControllerEffect::None
+    );
+    assert_eq!(model, original);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Up)),
+        ControllerEffect::None
+    );
+    assert_eq!(model, original);
+
+    assert_eq!(
+        enter_line(&mut model, ":role bear"),
+        ControllerEffect::Redraw
+    );
+    let editor = model.agents.editor.as_ref().unwrap();
+    assert_eq!(editor.draft().role, AgentRole::Bear);
+    assert_eq!(editor.draft().display_name, "Bull Researcher");
+
+    assert_eq!(
+        handle_event(
+            &mut model,
+            key_event(KeyCode::Enter, KeyModifiers::SHIFT, KeyEventKind::Press),
+        ),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(
+        model.agents.editor.as_ref().unwrap().current_field_label(),
+        "Display name"
+    );
 }
 
 #[test]
@@ -1149,7 +1194,7 @@ fn every_enter_modifier_submits_template_controls_and_clears_stale_validation() 
 }
 
 #[test]
-fn every_pressed_enter_modifier_executes_profile_confirmation() {
+fn every_modified_enter_is_inert_during_profile_confirmation() {
     let mut model = model();
     model.active_view = View::Agents;
     model.agents.pane = AgentsPane::Editor;
@@ -1157,14 +1202,45 @@ fn every_pressed_enter_modifier_executes_profile_confirmation() {
     advance_create_editor_to_review(&mut model);
     assert_eq!(enter_line(&mut model, ":create"), ControllerEffect::Redraw);
     assert_eq!(model.agents.pane, AgentsPane::Confirmation);
-    for modifiers in enter_modifier_variants() {
+    for modifiers in enter_modifier_variants()
+        .into_iter()
+        .filter(|modifiers| !modifiers.is_empty())
+    {
         let mut candidate = model.clone();
-        assert!(matches!(
+        assert_eq!(
             handle_event(
                 &mut candidate,
                 key_event(KeyCode::Enter, modifiers, KeyEventKind::Press),
             ),
-            ControllerEffect::ExecuteProfile(ApplicationCommand::CreateAgentProfile { .. })
-        ));
+            ControllerEffect::None
+        );
+        assert_eq!(candidate, model);
+    }
+}
+
+#[test]
+fn confirmation_ignores_character_and_editing_keys_without_hidden_input() {
+    let mut model = model();
+    model.active_view = View::Agents;
+    model.agents.pane = AgentsPane::Editor;
+    model.agents.editor = Some(create_editor());
+    advance_create_editor_to_review(&mut model);
+    assert_eq!(enter_line(&mut model, ":create"), ControllerEffect::Redraw);
+    assert_eq!(model.agents.pane, AgentsPane::Confirmation);
+    let expected = model.clone();
+
+    for code in [
+        KeyCode::Char('x'),
+        KeyCode::Backspace,
+        KeyCode::Delete,
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Home,
+        KeyCode::End,
+        KeyCode::Up,
+        KeyCode::Down,
+    ] {
+        assert_eq!(handle_event(&mut model, key(code)), ControllerEffect::None);
+        assert_eq!(model, expected);
     }
 }

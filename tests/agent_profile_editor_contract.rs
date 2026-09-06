@@ -182,6 +182,28 @@ fn invalid_keyboard_replacement_stays_on_the_current_field() {
 }
 
 #[test]
+fn edit_mode_rejects_complete_template_replacement_and_preserves_provenance() {
+    let profile_id = AgentProfileId::from_uuid(Uuid::from_u128(40));
+    let active_version_id = AgentProfileVersionId::from_uuid(Uuid::from_u128(41));
+    let original = builtin_profile_templates()[0].copy_to_draft().unwrap();
+    let mut editor = ProfileEditor::for_edit(profile_id, active_version_id, original.clone());
+
+    assert!(!editor.select_template(&builtin_profile_templates()[1]));
+    assert_eq!(editor.draft(), &original);
+    assert!(matches!(
+        editor.mode(),
+        ProfileEditorMode::Edit {
+            profile_id: actual_profile_id,
+            expected_active_version_id: actual_version_id,
+        } if *actual_profile_id == profile_id && *actual_version_id == active_version_id
+    ));
+    assert_eq!(
+        editor.local_message().map(|message| message.code()),
+        Some("template_selection_create_only")
+    );
+}
+
+#[test]
 fn editor_keeps_invalid_input_and_supports_back_navigation_without_terminal_state() {
     let mut editor = create_editor();
     editor.submit_line(":next");

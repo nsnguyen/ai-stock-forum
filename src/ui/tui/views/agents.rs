@@ -387,7 +387,7 @@ fn editor_lines(editor: &ProfileEditor, theme: &Theme) -> Vec<Line<'static>> {
         ),
     ];
     lines.extend(
-        step_guidance(step)
+        step_guidance(editor)
             .into_iter()
             .map(|guidance| Line::styled(guidance, theme.muted)),
     );
@@ -765,11 +765,18 @@ fn step_number(step: ProfileEditorStep) -> u8 {
     }
 }
 
-fn step_guidance(step: ProfileEditorStep) -> Vec<String> {
-    match step {
-        ProfileEditorStep::Template => vec![
-            "Choose the complete starting profile; the candidate updates immediately.".to_owned(),
-        ],
+fn step_guidance(editor: &ProfileEditor) -> Vec<String> {
+    match editor.step() {
+        ProfileEditorStep::Template => match editor.mode() {
+            ProfileEditorMode::Create { .. } => vec![
+                "Choose the complete starting profile; the candidate updates immediately."
+                    .to_owned(),
+            ],
+            ProfileEditorMode::Edit { .. } => vec![
+                "The active profile remains the edit baseline.".to_owned(),
+                "Advanced: :role <role>".to_owned(),
+            ],
+        },
         ProfileEditorStep::Identity => vec![
             format!("Display name: {DISPLAY_NAME_MAX_BYTES} UTF-8 bytes."),
             format!("Description: {DESCRIPTION_MAX_BYTES} UTF-8 bytes."),
@@ -800,7 +807,12 @@ fn step_guidance(step: ProfileEditorStep) -> Vec<String> {
 
 fn editor_key_guidance(editor: &ProfileEditor) -> &'static str {
     match editor.step() {
-        ProfileEditorStep::Template => "Up/Down: choose template | Enter: continue | Esc: cancel",
+        ProfileEditorStep::Template => match editor.mode() {
+            ProfileEditorMode::Create { .. } => {
+                "Up/Down: choose template | Enter: continue | Esc: cancel"
+            }
+            ProfileEditorMode::Edit { .. } => "Enter: continue | Esc: cancel",
+        },
         ProfileEditorStep::Identity
         | ProfileEditorStep::Specialty
         | ProfileEditorStep::Personality
@@ -838,6 +850,9 @@ fn editor_message(code: &str) -> &'static str {
         "editor_last_step" => "This is the final editor step.",
         "preview_generation_exhausted" => "Validation: no further previews can be requested.",
         "preview_unavailable" => "Validation: preview is unavailable for this editor mode.",
+        "template_selection_create_only" => {
+            "Validation: complete templates can be selected only while creating a profile."
+        }
         "editor_field_unavailable" => "Validation: text entry is unavailable on this step.",
         "unknown_editor_control" => "Validation: unknown editor control.",
         _ => "Validation: review the current field and try again.",
