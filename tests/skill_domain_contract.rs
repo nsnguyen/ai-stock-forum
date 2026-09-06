@@ -159,6 +159,28 @@ fn canonical_limits_and_forbidden_controls_hold_at_boundaries() {
 }
 
 #[test]
+fn single_resource_body_at_4096_utf8_bytes_is_accepted() {
+    let body = "\u{00e9}".repeat(2_048);
+    assert_eq!(body.len(), 4_096);
+    assert_eq!(body.chars().count(), 2_048);
+
+    let accepted = SkillDraft::new(
+        "Evidence Review".to_owned(),
+        "Check sources.".to_owned(),
+        "Use when evidence quality matters.".to_owned(),
+        vec![],
+        "Compare claims to evidence.".to_owned(),
+        vec![SkillResource {
+            name: "Reference".to_owned(),
+            body,
+        }],
+    )
+    .expect("a 4096-byte UTF-8 resource body is valid");
+
+    assert_eq!(accepted.resources[0].body.len(), 4_096);
+}
+
+#[test]
 fn complete_canonical_payload_limit_accepts_32768_bytes_and_rejects_32769() {
     let escaped_bytes = (0..=16_384)
         .find(|escaped_bytes| canonical_json_bytes(&maximum_payload_draft(*escaped_bytes)).unwrap().len() == 32_768)
