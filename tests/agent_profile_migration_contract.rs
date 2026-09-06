@@ -75,46 +75,101 @@ fn schema_v1_fixture_upgrades_without_changing_legacy_rows() {
 }
 
 #[test]
-fn failed_v2_migration_rolls_back_every_new_schema_object() {
-    let temp = tempfile::tempdir().unwrap();
-    let paths = AppPaths::for_test(temp.path());
-    create_schema_v1_fixture(&paths);
-    let connection = Connection::open(paths.database_path()).unwrap();
-    connection
-        .execute_batch(
-            "CREATE TABLE migration_conflict (value TEXT) STRICT;
-             CREATE INDEX agent_profile_versions_history_idx ON migration_conflict(value);",
-        )
-        .unwrap();
-    drop(connection);
+fn every_ordered_v2_boundary_rolls_back_rows_inventory_and_version_record() {
+    let expected_boundaries = vec![
+        "drop_command_event_refs_no_update",
+        "drop_command_event_refs_no_delete",
+        "drop_command_event_refs_event_idx",
+        "rename_command_event_refs_v1",
+        "drop_command_receipts_no_update",
+        "drop_command_receipts_no_delete",
+        "rename_command_receipts_v1",
+        "create_command_receipts",
+        "rebuild_command_receipts",
+        "create_command_receipts_no_update",
+        "create_command_receipts_no_delete",
+        "create_command_event_refs",
+        "rebuild_command_event_refs",
+        "create_command_event_refs_event_idx",
+        "create_command_event_refs_no_update",
+        "create_command_event_refs_no_delete",
+        "drop_command_event_refs_v1",
+        "drop_command_receipts_v1",
+        "create_agent_profile_versions",
+        "create_agent_profile_versions_history_idx",
+        "create_agent_profile_namespace_insert_guard",
+        "create_active_agent_profiles",
+        "create_active_agent_profiles_normalized_name_idx",
+        "create_agent_profile_versions_no_update",
+        "create_agent_profile_versions_no_delete",
+        "schema_migration_record",
+    ];
+    assert_eq!(Database::v2_migration_boundaries(), expected_boundaries);
 
-    assert!(matches!(Database::open(&paths), Err(error) if error.code() == "database_unavailable"));
+    for boundary in expected_boundaries {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::for_test(temp.path());
+        create_schema_v1_fixture(&paths);
+        let before = {
+            let connection = Connection::open(paths.database_path()).unwrap();
+            (
+                legacy_snapshot(&connection),
+                schema_inventory(&connection),
+                migration_records(&connection),
+                pragma_i64(&connection, "application_id"),
+                pragma_i64(&connection, "user_version"),
+            )
+        };
 
-    let connection = Connection::open(paths.database_path()).unwrap();
-    assert_eq!(pragma_i64(&connection, "user_version"), 1);
-    assert_eq!(
-        connection
-            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-    for object in [
-        "agent_profile_versions",
-        "active_agent_profiles",
-        "active_agent_profiles_normalized_name_idx",
-        "agent_profile_versions_no_update",
-        "agent_profile_versions_no_delete",
-    ] {
-        assert!(
-            !connection
+        assert!(matches!(
+            Database::open_with_migration_fault(&paths, 2, boundary),
+            Err(error) if error.code() == "database_unavailable"
+        ));
+
+        let connection = Connection::open(paths.database_path()).unwrap();
+        assert_eq!(
+            legacy_snapshot(&connection),
+            before.0,
+            "boundary {boundary}"
+        );
+        assert_eq!(
+            schema_inventory(&connection),
+            before.1,
+            "boundary {boundary}"
+        );
+        assert_eq!(
+            migration_records(&connection),
+            before.2,
+            "boundary {boundary}"
+        );
+        assert_eq!(
+            pragma_i64(&connection, "application_id"),
+            before.3,
+            "boundary {boundary}"
+        );
+        assert_eq!(
+            pragma_i64(&connection, "user_version"),
+            before.4,
+            "boundary {boundary}"
+        );
+        assert!(!database_object_exists(
+            &connection,
+            "agent_profile_versions"
+        ));
+        assert!(!database_object_exists(
+            &connection,
+            "active_agent_profiles"
+        ));
+        assert_eq!(
+            connection
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1)",
-                    [object],
-                    |row| row.get::<_, bool>(0),
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = 2",
+                    [],
+                    |row| row.get::<_, i64>(0),
                 )
                 .unwrap(),
-            "unexpected rolled-back object {object}"
+            0,
+            "boundary {boundary}"
         );
     }
 }
@@ -447,6 +502,45 @@ fn legacy_snapshot(connection: &Connection) -> BTreeMap<&'static str, Vec<String
         (table, rows)
     })
     .collect()
+}
+
+fn schema_inventory(connection: &Connection) -> Vec<(String, String, String, Option<String>)> {
+    let mut statement = connection
+        .prepare(
+            "SELECT type, name, tbl_name, sql
+             FROM sqlite_master
+             WHERE name NOT LIKE 'sqlite_%'
+             ORDER BY type, name",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn migration_records(connection: &Connection) -> Vec<(i64, String)> {
+    let mut statement = connection
+        .prepare("SELECT version, checksum FROM schema_migrations ORDER BY version")
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn database_object_exists(connection: &Connection, name: &str) -> bool {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 
 fn insert_version(

@@ -1,11 +1,18 @@
 DROP TRIGGER command_event_refs_no_update;
+-- migration-boundary: drop_command_event_refs_no_update
 DROP TRIGGER command_event_refs_no_delete;
+-- migration-boundary: drop_command_event_refs_no_delete
 DROP INDEX command_event_refs_event_idx;
+-- migration-boundary: drop_command_event_refs_event_idx
 ALTER TABLE command_event_refs RENAME TO command_event_refs_v1;
+-- migration-boundary: rename_command_event_refs_v1
 
 DROP TRIGGER command_receipts_no_update;
+-- migration-boundary: drop_command_receipts_no_update
 DROP TRIGGER command_receipts_no_delete;
+-- migration-boundary: drop_command_receipts_no_delete
 ALTER TABLE command_receipts RENAME TO command_receipts_v1;
+-- migration-boundary: rename_command_receipts_v1
 
 CREATE TABLE command_receipts (
     command_id TEXT PRIMARY KEY,
@@ -27,22 +34,26 @@ CREATE TABLE command_receipts (
     )),
     outcome_json TEXT NOT NULL CHECK (json_valid(outcome_json))
 ) STRICT;
+-- migration-boundary: create_command_receipts
 
 INSERT INTO command_receipts (
     command_id, command_fingerprint, request_json, capability, policy_decision, outcome_json
 )
 SELECT command_id, command_fingerprint, request_json, capability, policy_decision, outcome_json
 FROM command_receipts_v1;
+-- migration-boundary: rebuild_command_receipts
 
 CREATE TRIGGER command_receipts_no_update
 BEFORE UPDATE ON command_receipts BEGIN
     SELECT RAISE(ABORT, 'command receipts are immutable');
 END;
+-- migration-boundary: create_command_receipts_no_update
 
 CREATE TRIGGER command_receipts_no_delete
 BEFORE DELETE ON command_receipts BEGIN
     SELECT RAISE(ABORT, 'command receipts are immutable');
 END;
+-- migration-boundary: create_command_receipts_no_delete
 
 CREATE TABLE command_event_refs (
     command_id TEXT NOT NULL REFERENCES command_receipts(command_id),
@@ -50,24 +61,31 @@ CREATE TABLE command_event_refs (
     event_id TEXT NOT NULL REFERENCES event_stream(event_id),
     PRIMARY KEY (command_id, event_ordinal)
 ) STRICT;
+-- migration-boundary: create_command_event_refs
 
 INSERT INTO command_event_refs (command_id, event_ordinal, event_id)
 SELECT command_id, event_ordinal, event_id FROM command_event_refs_v1;
+-- migration-boundary: rebuild_command_event_refs
 
 CREATE UNIQUE INDEX command_event_refs_event_idx ON command_event_refs(event_id);
+-- migration-boundary: create_command_event_refs_event_idx
 
 CREATE TRIGGER command_event_refs_no_update
 BEFORE UPDATE ON command_event_refs BEGIN
     SELECT RAISE(ABORT, 'command event refs are immutable');
 END;
+-- migration-boundary: create_command_event_refs_no_update
 
 CREATE TRIGGER command_event_refs_no_delete
 BEFORE DELETE ON command_event_refs BEGIN
     SELECT RAISE(ABORT, 'command event refs are immutable');
 END;
+-- migration-boundary: create_command_event_refs_no_delete
 
 DROP TABLE command_event_refs_v1;
+-- migration-boundary: drop_command_event_refs_v1
 DROP TABLE command_receipts_v1;
+-- migration-boundary: drop_command_receipts_v1
 
 CREATE TABLE agent_profile_versions (
     profile_id TEXT NOT NULL,
@@ -125,9 +143,11 @@ CREATE TABLE agent_profile_versions (
         REFERENCES agent_profile_versions(profile_id, profile_version_id)
         DEFERRABLE INITIALLY DEFERRED
 ) STRICT;
+-- migration-boundary: create_agent_profile_versions
 
 CREATE INDEX agent_profile_versions_history_idx
 ON agent_profile_versions(profile_id, version DESC);
+-- migration-boundary: create_agent_profile_versions_history_idx
 
 CREATE TRIGGER agent_profile_namespace_insert_guard
 BEFORE INSERT ON agent_profile_versions
@@ -143,6 +163,7 @@ WHEN EXISTS (
 BEGIN
     SELECT RAISE(ABORT, 'agent_profile_namespace_conflict');
 END;
+-- migration-boundary: create_agent_profile_namespace_insert_guard
 
 CREATE TABLE active_agent_profiles (
     profile_id TEXT PRIMARY KEY,
@@ -160,16 +181,20 @@ CREATE TABLE active_agent_profiles (
         REFERENCES agent_profile_versions(profile_id, profile_version_id, content_digest)
         DEFERRABLE INITIALLY DEFERRED
 ) STRICT;
+-- migration-boundary: create_active_agent_profiles
 
 CREATE INDEX active_agent_profiles_normalized_name_idx
 ON active_agent_profiles(normalized_name);
+-- migration-boundary: create_active_agent_profiles_normalized_name_idx
 
 CREATE TRIGGER agent_profile_versions_no_update
 BEFORE UPDATE ON agent_profile_versions BEGIN
     SELECT RAISE(ABORT, 'agent_profile_versions_immutable');
 END;
+-- migration-boundary: create_agent_profile_versions_no_update
 
 CREATE TRIGGER agent_profile_versions_no_delete
 BEFORE DELETE ON agent_profile_versions BEGIN
     SELECT RAISE(ABORT, 'agent_profile_versions_immutable');
 END;
+-- migration-boundary: create_agent_profile_versions_no_delete

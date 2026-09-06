@@ -137,6 +137,49 @@ fn duplicate_logical_version_with_different_stored_bytes_is_rejected_safely() {
 }
 
 #[test]
+fn namespace_conflict_has_a_dedicated_safe_code_and_rolls_back() {
+    let mut database = database();
+    let first = profile_v1();
+    let conflicting = AgentProfileVersion::create(
+        profile_id(2),
+        version_id(22),
+        first.memory_namespace_id(),
+        1_726_000_000_002,
+        draft("Different Analyst", "Different safe prose."),
+        None,
+    )
+    .unwrap();
+    let before = database
+        .connection()
+        .query_row("SELECT COUNT(*) FROM agent_profile_versions", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+
+    let transaction = database.connection_mut().transaction().unwrap();
+    insert_expected_version(&transaction, 1, &first).unwrap();
+    let error = insert_expected_version(&transaction, 2, &conflicting).unwrap_err();
+    assert_eq!(error, PersistenceError::AgentProfileNamespaceConflict);
+    assert_eq!(error.code(), "agent_profile_namespace_conflict");
+    assert_eq!(
+        AppError::from(error).code(),
+        "agent_profile_namespace_conflict"
+    );
+    assert!(!error.to_string().contains("Different safe prose"));
+    transaction.rollback().unwrap();
+
+    assert_eq!(
+        database
+            .connection()
+            .query_row("SELECT COUNT(*) FROM agent_profile_versions", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        before
+    );
+}
+
+#[test]
 fn malformed_profile_payload_has_a_stable_redacted_repository_error() {
     let mut database = database();
     let profile = profile_v1();

@@ -3,6 +3,7 @@ use crate::domain::{Sha256Digest, sha256};
 pub const LATEST_SCHEMA_VERSION: u32 = 2;
 
 pub(crate) const APPLICATION_ID: i64 = 0x4149_4653;
+pub(crate) const MIGRATION_BOUNDARY_PREFIX: &str = "-- migration-boundary:";
 pub(crate) const SCHEMA_MIGRATIONS_SQL: &str = "
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY CHECK (version > 0),
@@ -54,4 +55,12 @@ pub(crate) fn ordered() -> [Migration; 2] {
             )),
         },
     ]
+}
+
+pub(crate) fn migration_boundary_names(sql: &'static str) -> Vec<&'static str> {
+    sql.lines()
+        .filter_map(|line| line.trim().strip_prefix(MIGRATION_BOUNDARY_PREFIX))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect()
 }

@@ -11,8 +11,8 @@ use crate::{
 };
 
 use super::migrations::{
-    APPLICATION_ID, AppliedMigration, LATEST_SCHEMA_VERSION, Migration, SCHEMA_MIGRATIONS_SQL,
-    ordered,
+    APPLICATION_ID, AppliedMigration, LATEST_SCHEMA_VERSION, MIGRATION_BOUNDARY_PREFIX, Migration,
+    SCHEMA_MIGRATIONS_SQL, migration_boundary_names, ordered,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -41,6 +41,8 @@ pub enum PersistenceError {
     AgentProfileHistoryMismatch,
     #[error("an active agent profile already uses that normalized name")]
     DuplicateAgentProfileName,
+    #[error("agent profile memory namespace conflicts with stable profile identity")]
+    AgentProfileNamespaceConflict,
     #[error("agent profile payload is invalid")]
     InvalidAgentProfilePayload,
     #[error("active agent profile projection rebuild failed")]
@@ -62,6 +64,7 @@ impl PersistenceError {
             Self::ProjectionStateConflict => "projection_state_conflict",
             Self::AgentProfileHistoryMismatch => "database_agent_profile_history_mismatch",
             Self::DuplicateAgentProfileName => "active_name_conflict",
+            Self::AgentProfileNamespaceConflict => "agent_profile_namespace_conflict",
             Self::InvalidAgentProfilePayload => "invalid_agent_profile_payload",
             Self::ActiveAgentProfileRebuildFailed => "active_agent_profile_rebuild_failed",
         }
@@ -104,6 +107,18 @@ impl Database {
     where
         F: FnOnce(),
     {
+        let mut migration_boundary_hook = |_: u32, _: &str| Ok(());
+        Self::open_with_hooks(paths, before_sqlite_open, &mut migration_boundary_hook)
+    }
+
+    fn open_with_hooks<F>(
+        paths: &AppPaths,
+        before_sqlite_open: F,
+        migration_boundary_hook: &mut dyn FnMut(u32, &str) -> Result<(), StartupError>,
+    ) -> Result<Self, StartupError>
+    where
+        F: FnOnce(),
+    {
         paths.ensure()?;
         let database_path = paths.sqlite_open_path();
 
@@ -125,7 +140,12 @@ impl Database {
         }
 
         configure_connection(&connection)?;
-        run_migrations(&mut connection, user_version as u32)?;
+        run_migrations_with_hook(
+            &mut connection,
+            user_version as u32,
+            &ordered(),
+            migration_boundary_hook,
+        )?;
         quick_check(&connection)?;
 
         Ok(Self {
@@ -133,6 +153,34 @@ impl Database {
             schema_version: LATEST_SCHEMA_VERSION,
             state_dir: paths.state_dir().to_path_buf(),
         })
+    }
+
+    #[doc(hidden)]
+    pub fn v2_migration_boundaries() -> Vec<&'static str> {
+        let migrations = ordered();
+        let migration = migrations
+            .iter()
+            .find(|migration| migration.version == 2)
+            .expect("schema v2 migration is registered");
+        let mut boundaries = migration_boundary_names(migration.sql);
+        boundaries.push("schema_migration_record");
+        boundaries
+    }
+
+    #[doc(hidden)]
+    pub fn open_with_migration_fault(
+        paths: &AppPaths,
+        migration_version: u32,
+        fail_after_boundary: &str,
+    ) -> Result<Self, StartupError> {
+        let mut migration_boundary_hook = |version: u32, boundary: &str| {
+            if version == migration_version && boundary == fail_after_boundary {
+                Err(StartupError::DatabaseUnavailable)
+            } else {
+                Ok(())
+            }
+        };
+        Self::open_with_hooks(paths, || {}, &mut migration_boundary_hook)
     }
 
     pub const fn schema_version(&self) -> u32 {
@@ -232,15 +280,26 @@ fn pragma_i64(connection: &Connection, name: &str) -> Result<i64, StartupError> 
         .map_err(startup_error)
 }
 
-fn run_migrations(connection: &mut Connection, user_version: u32) -> Result<(), StartupError> {
-    let migrations = ordered();
-    run_migrations_with(connection, user_version, &migrations)
-}
-
+#[cfg(test)]
 fn run_migrations_with(
     connection: &mut Connection,
     user_version: u32,
     migrations: &[Migration],
+) -> Result<(), StartupError> {
+    let mut migration_boundary_hook = |_: u32, _: &str| Ok(());
+    run_migrations_with_hook(
+        connection,
+        user_version,
+        migrations,
+        &mut migration_boundary_hook,
+    )
+}
+
+fn run_migrations_with_hook(
+    connection: &mut Connection,
+    user_version: u32,
+    migrations: &[Migration],
+    migration_boundary_hook: &mut dyn FnMut(u32, &str) -> Result<(), StartupError>,
 ) -> Result<(), StartupError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -260,15 +319,14 @@ fn run_migrations_with(
         if migration.version <= user_version {
             return Err(StartupError::DatabaseMigrationState);
         }
-        transaction
-            .execute_batch(migration.sql)
-            .map_err(startup_error)?;
+        execute_migration_sql(&transaction, migration, migration_boundary_hook)?;
         transaction
             .execute(
                 "INSERT INTO schema_migrations (version, checksum) VALUES (?1, ?2)",
                 (i64::from(migration.version), checksum.as_str()),
             )
             .map_err(startup_error)?;
+        migration_boundary_hook(migration.version, "schema_migration_record")?;
     }
 
     let target_version = migrations
@@ -285,6 +343,31 @@ fn run_migrations_with(
         .pragma_update(None, "user_version", i64::from(target_version))
         .map_err(startup_error)?;
     transaction.commit().map_err(startup_error)
+}
+
+fn execute_migration_sql(
+    transaction: &Transaction<'_>,
+    migration: &Migration,
+    migration_boundary_hook: &mut dyn FnMut(u32, &str) -> Result<(), StartupError>,
+) -> Result<(), StartupError> {
+    let mut batch = String::new();
+    for line in migration.sql.lines() {
+        if let Some(boundary) = line.trim().strip_prefix(MIGRATION_BOUNDARY_PREFIX) {
+            if batch.trim().is_empty() || boundary.trim().is_empty() {
+                return Err(StartupError::DatabaseMigrationState);
+            }
+            transaction.execute_batch(&batch).map_err(startup_error)?;
+            migration_boundary_hook(migration.version, boundary.trim())?;
+            batch.clear();
+        } else {
+            batch.push_str(line);
+            batch.push('\n');
+        }
+    }
+    if !batch.trim().is_empty() {
+        transaction.execute_batch(&batch).map_err(startup_error)?;
+    }
+    Ok(())
 }
 
 fn read_applied_migrations(

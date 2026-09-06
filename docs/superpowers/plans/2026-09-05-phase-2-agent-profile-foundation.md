@@ -22,7 +22,7 @@
 > unconditional `q` in Too Small, and stepwise `Esc`. Schema v2 independently
 > constrains mirrored fields, pins the active digest, enforces globally unique
 > per-profile memory namespaces across history, reports history divergence with
-> a dedicated error, and is rollback-tested at every migration boundary.
+> a dedicated error, and is rollback-tested after every ordered v2 schema-change/object boundary.
 > Migration 0002 may be amended while Phase 2 is prerelease: exact schema-v1
 > upgrades remain supported, while databases created by intermediate Phase 2
 > builds must be recreated.
@@ -479,7 +479,9 @@ Assert:
 
 - A fresh database reaches schema version 2.
 - A schema-v1 fixture upgrades without changing existing event, receipt, audit, installation, setup, or session rows.
-- A failed v2 migration rolls back every v2 object.
+- Fault injection after every ordered v2 schema-change/object boundary, including both receipt
+  rebuild copies and every table, index, trigger, and migration-version record creation, preserves
+  all schema-v1 rows and the exact schema inventory with no partial v2 object or version record.
 - Foreign keys are effective.
 - agent_profile_versions rejects UPDATE and DELETE.
 - active_agent_profiles allows transactional replacement during recovery.
@@ -507,13 +509,13 @@ to `agent_profile_versions`.
 
 - [ ] **Step 4: Register ordered migration version 2**
 
-Set LATEST_SCHEMA_VERSION to 2 and register 0001 followed by 0002. Preserve the current all-or-nothing migration transaction and required pragma checks.
+Set LATEST_SCHEMA_VERSION to 2 and register 0001 followed by 0002. Preserve the current all-or-nothing migration transaction and required pragma checks. Route test-only post-boundary fault injection through that real transaction runner rather than duplicating migration SQL or execution logic.
 
 - [ ] **Step 5: Rerun GREEN**
 
     cargo test --test agent_profile_migration_contract
 
-Expected: fresh install, upgrade, rollback, immutability, and idempotency tests pass.
+Expected: fresh install, schema-v1 upgrade, boundary-by-boundary rollback, immutability, and idempotency tests pass.
 
 - [ ] **Step 6: Commit**
 
