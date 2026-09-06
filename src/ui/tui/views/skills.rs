@@ -83,7 +83,8 @@ fn render_fixed_panel(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let header_height = u16::try_from(header.len()).unwrap_or(u16::MAX).min(inner.height);
-    let footer_height = u16::try_from(footer.len())
+    let footer = Paragraph::new(footer).wrap(Wrap { trim: false });
+    let footer_height = u16::try_from(footer.line_count(inner.width.max(1)))
         .unwrap_or(u16::MAX)
         .min(inner.height.saturating_sub(header_height));
     let regions = Layout::vertical([
@@ -94,7 +95,7 @@ fn render_fixed_panel(
     .split(inner);
     frame.render_widget(Paragraph::new(header), regions[0]);
     frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), regions[1]);
-    frame.render_widget(Paragraph::new(footer), regions[2]);
+    frame.render_widget(footer, regions[2]);
 }
 
 fn render_library(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
@@ -256,6 +257,7 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
         Line::default(),
         Line::styled("INERT INSTRUCTIONS", theme.accent),
         Line::styled("Text guidance only; it grants no capability.", theme.muted),
+        Line::styled("Long content may be truncated by the visible pane.", theme.muted),
         Line::raw(safe_text(&detail.content.instructions)),
         Line::default(),
         Line::styled("INERT REFERENCE NOTES", theme.accent),
@@ -577,10 +579,13 @@ fn render_assignment_review(frame: &mut Frame<'_>, area: Rect, model: &TuiModel,
             Line::styled("Esc: choose another version", theme.focus),
         ]
     } else {
-        vec![Line::styled(
-            format!("Enter: validate {} | Esc: agent picker", assignment_verb(assignment)),
-            theme.focus,
-        )]
+        vec![
+            Line::styled(
+                format!("Enter: validate {}", assignment_verb(assignment)),
+                theme.focus,
+            ),
+            Line::styled("Esc: agent picker", theme.focus),
+        ]
     };
     render_fixed_panel(
         frame,
@@ -625,7 +630,10 @@ fn render_confirmation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, them
         &format!("Confirm {title}"),
         header,
         body,
-        vec![Line::styled("Enter: confirm | Esc: return", theme.focus)],
+        vec![
+            Line::styled("Enter: confirm", theme.focus),
+            Line::styled("Esc: return", theme.focus),
+        ],
         workspace_focused(model),
         theme,
     );

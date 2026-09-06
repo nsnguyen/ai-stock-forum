@@ -698,7 +698,7 @@ fn create_source_agent_picker_and_result_keep_complete_contextual_keys_compact_a
 }
 
 #[test]
-fn wide_long_content_reaches_end_markers_without_hiding_actions() {
+fn wide_long_content_declares_truncation_without_hiding_actions() {
     let mut long = skill(1_800, "Long Complete", SkillProvenance::User);
     let mut draft = long.content().clone();
     draft.instructions = format!("{} INSTRUCTION-END", "wrapped guidance ".repeat(80));
@@ -718,9 +718,10 @@ fn wide_long_content_reaches_end_markers_without_hiding_actions() {
     model.skills.library = library_for_render(&long);
     model.skills.detail = Some(view(&long));
 
-    let text = render_text(&model, 160, 110);
-    assert!(text.contains("INSTRUCTION-END"));
-    assert!(text.contains("REFERENCE-END"));
+    let text = render_text(&model, 160, 44);
+    assert!(!text.contains("INSTRUCTION-END"));
+    assert!(!text.contains("REFERENCE-END"));
+    assert!(text.contains("Long content may be truncated"));
     assert!(text.contains("Left/Right: choose action"));
     assert!(text.contains("Enter: open"));
     assert!(text.contains("Esc: library"));
@@ -790,6 +791,139 @@ fn agents_multi_skill_panel_shows_position_rows_and_contextual_available_actions
     model.agents.selected_skill_action_index = 2;
     let unassign = render_text(&model, 120, 44);
     assert!(unassign.contains("Enter: Unassign"));
+}
+
+#[test]
+fn skills_navigation_has_exclusive_focus_style_when_opened_from_agents() {
+    for (width, height) in [(60, 24), (80, 28), (120, 44)] {
+        let mut model = skills_model(SkillsPane::List);
+        model.active_view = View::Agents;
+        model.skills.active = true;
+        let terminal = terminal_for(&model, width, height);
+        let buffer = terminal.backend().buffer();
+        let locate = |needle: &str| {
+            (0..height).find_map(|y| {
+                let row = (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>();
+                row.find(needle)
+                    .map(|x| (u16::try_from(x).unwrap(), y))
+            })
+            .unwrap_or_else(|| panic!("missing {needle} navigation label"))
+        };
+        let (agents_x, agents_y) = locate("Agents");
+        let (skills_x, skills_y) = locate("Skills");
+
+        let agents_style = buffer[(agents_x, agents_y)].style();
+        let skills_style = buffer[(skills_x, skills_y)].style();
+        assert!(
+            !agents_style
+                .add_modifier
+                .contains(ratatui::style::Modifier::REVERSED),
+            "{width}x{height} Agents retained focus style"
+        );
+        assert!(
+            skills_style
+                .add_modifier
+                .contains(ratatui::style::Modifier::REVERSED),
+            "{width}x{height} Skills lacked focus style"
+        );
+    }
+}
+
+#[test]
+fn medium_assignment_review_reserves_complete_contextual_controls_and_identity() {
+    let target = builtin(1_500, "Medium Target");
+    let current = builtin(1_501, "Medium Current");
+    let agent = profile_with_skills(vec![current.reference()]);
+
+    for assignment in [
+        AssignmentKind::Add,
+        AssignmentKind::Upgrade {
+            expected: current.reference(),
+        },
+        AssignmentKind::Unassign {
+            expected: current.reference(),
+        },
+    ] {
+        let mut model = skills_model(SkillsPane::AssignmentReview);
+        model.skills.detail = Some(view(&target));
+        model.skills.version_detail = Some(view(&target));
+        model.skills.selected_agent_detail = Some(agent.clone());
+        model.skills.assignment = Some(assignment.clone());
+        let text = render_text(&model, 80, 28);
+
+        for expected in ["Operation", "Target", "Enter: validate", "Esc: agent picker"] {
+            assert!(text.contains(expected), "{:?} missing {expected}", assignment);
+        }
+        let version_id = target.skill_version_id().to_string();
+        assert!(text.contains(&version_id[..8]));
+        assert!(text.contains(&version_id[version_id.len() - 8..]));
+    }
+
+    let mut already = skills_model(SkillsPane::AssignmentReview);
+    already.skills.detail = Some(view(&target));
+    already.skills.version_detail = Some(view(&target));
+    already.skills.selected_agent_detail = Some(agent);
+    already.skills.assignment = Some(AssignmentKind::AlreadyAssigned);
+    let text = render_text(&already, 80, 28);
+    assert!(text.contains("No operation"));
+    assert!(text.contains("Esc: choose another version"));
+    assert!(!text.contains("Enter: validate"));
+}
+
+#[test]
+fn medium_assignment_confirmations_keep_enter_escape_and_exact_identity_visible() {
+    let target = builtin(1_600, "Confirmation Target");
+    let current = builtin(1_601, "Confirmation Current");
+    let agent = profile_with_skills(vec![current.reference()]);
+    let profile_id = agent.profile.profile_id();
+    let profile_version_id = agent.profile.profile_version_id();
+    let review_token = SkillReviewToken::from_uuid(Uuid::from_u128(9_600));
+    let review_digest = sha256(b"medium-confirmation-review");
+    let commands = [
+        ApplicationCommand::AssignAgentSkill {
+            profile_id,
+            expected_active_profile_version_id: profile_version_id,
+            skill: target.reference(),
+            review_token,
+            review_digest: review_digest.clone(),
+        },
+        ApplicationCommand::UpgradeAgentSkill {
+            profile_id,
+            expected_active_profile_version_id: profile_version_id,
+            expected: current.reference(),
+            replacement: target.reference(),
+            review_token,
+            review_digest: review_digest.clone(),
+        },
+        ApplicationCommand::UnassignAgentSkill {
+            profile_id,
+            expected_active_profile_version_id: profile_version_id,
+            expected: current.reference(),
+            review_token,
+            review_digest,
+        },
+    ];
+
+    for command in commands {
+        let mut model = skills_model(SkillsPane::Confirmation);
+        model.skills.pending_confirmation = Some(SkillConfirmation {
+            command,
+            origin: SkillOperationOrigin::Skills(SkillsPane::AssignmentReview),
+        });
+        let text = render_text(&model, 80, 28);
+        assert!(text.contains("Enter: confirm"));
+        assert!(text.contains("Esc: return"));
+        let expected_ref = if text.contains("unassignment") {
+            current.reference()
+        } else {
+            target.reference()
+        };
+        let version_id = expected_ref.skill_version_id().to_string();
+        assert!(text.contains(&version_id[..8]));
+        assert!(text.contains(&version_id[version_id.len() - 8..]));
+    }
 }
 
 fn _agent_summary(profile: &AgentProfileVersion) -> AgentProfileSummary {
