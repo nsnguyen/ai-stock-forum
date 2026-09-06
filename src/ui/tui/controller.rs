@@ -59,7 +59,7 @@ pub enum ControllerEffect {
     CancelProfileReview,
     LoadSkills,
     LoadSkill { selected_skill: usize },
-    LoadSkillHistory { selected_skill: usize },
+    LoadSkillHistory { skill_id: crate::domain::SkillId },
     LoadSkillVersion {
         skill_id: crate::domain::SkillId,
         version: crate::domain::ObjectVersion,
@@ -630,7 +630,7 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
                     ControllerEffect::Redraw
                 }
                 SkillDetailAction::History => ControllerEffect::LoadSkillHistory {
-                    selected_skill: model.skills.selected_skill,
+                    skill_id: model.skills.current_skill_id()?,
                 },
             }
         }

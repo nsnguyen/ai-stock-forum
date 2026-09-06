@@ -175,11 +175,7 @@ impl SkillsViewState {
 
     pub fn replace_detail(&mut self, detail: SkillView) {
         let skill_id = detail.skill_ref.skill_id();
-        if let Some(index) = self.library.skills.iter().position(|summary| {
-            summary.skill_ref.skill_id() == skill_id
-        }) {
-            self.selected_skill = index;
-        }
+        self.synchronize_selected_skill(skill_id);
         if self.history.as_ref().map(|history| history.skill_id) != Some(skill_id) {
             self.history = None;
         }
@@ -196,6 +192,7 @@ impl SkillsViewState {
 
     pub fn replace_version_detail(&mut self, detail: SkillView) {
         let skill_id = detail.skill_ref.skill_id();
+        self.synchronize_selected_skill(skill_id);
         if self.history.as_ref().map(|history| history.skill_id) != Some(skill_id) {
             self.history = None;
             self.selected_history_version = 0;
@@ -209,6 +206,21 @@ impl SkillsViewState {
         self.history = None;
         self.version_detail = None;
         self.selected_history_version = 0;
+    }
+
+    fn synchronize_selected_skill(&mut self, skill_id: crate::domain::SkillId) {
+        if let Some(index) = self
+            .library
+            .skills
+            .iter()
+            .position(|summary| summary.skill_ref.skill_id() == skill_id)
+        {
+            self.selected_skill = index;
+        }
+    }
+
+    pub fn current_skill_id(&self) -> Option<crate::domain::SkillId> {
+        self.selected_skill_ref().map(SkillVersionRef::skill_id)
     }
 
     pub fn selected_summary(&self) -> Option<&crate::app::SkillSummary> {

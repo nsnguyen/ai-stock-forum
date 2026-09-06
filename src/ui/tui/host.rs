@@ -185,16 +185,7 @@ pub fn execute_skill_effect(
                 synchronize_host_skill_input(model);
             }
         }
-        ControllerEffect::LoadSkillHistory { selected_skill } => {
-            let Some(skill_id) = model
-                .skills
-                .library
-                .skills
-                .get(selected_skill)
-                .map(|summary| summary.skill_ref.skill_id())
-            else {
-                return Ok(());
-            };
+        ControllerEffect::LoadSkillHistory { skill_id } => {
             let outcome = submit_agent_command(
                 client,
                 model,

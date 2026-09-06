@@ -7,10 +7,10 @@ use std::{
 
 use ai_stock_forum::{
     app::{
-        AgentProfileView, AgentSkillAssignmentOperation, AgentSkillAssignmentPreview, AppError,
-        ApplicationCommand, CommandOutcome, CommandView, PresentationSnapshot,
-        ShutdownDisposition, ShutdownReason, ShutdownView, SkillsView,
-        SkillHistoryEntry, SkillHistoryView, SkillView,
+        AgentProfileSummary, AgentProfileView, AgentProfilesView, AgentSkillAssignmentOperation,
+        AgentSkillAssignmentPreview, AppError, ApplicationCommand, CommandOutcome, CommandView,
+        PresentationSnapshot, ShutdownDisposition, ShutdownReason, ShutdownView, SkillHistoryEntry,
+        SkillHistoryView, SkillSummary, SkillView, SkillsView,
     },
     domain::{
         AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, InstallationId,
@@ -172,12 +172,42 @@ impl Screen for ContractScreen {
 impl CommandExecutor for RouteRecorder {
     fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError> {
         match command {
-            ApplicationCommand::ListSkills => Ok(outcome(CommandView::Skills(SkillsView {
-                skills: Vec::new(),
-                total_count: 0,
-                returned_count: 0,
+            ApplicationCommand::ListSkills => {
+                let replacement = replacement_skill();
+                Ok(outcome(CommandView::Skills(SkillsView {
+                skills: vec![SkillSummary {
+                    skill_ref: replacement.reference(),
+                    display_name: replacement.content().display_name.clone(),
+                    provenance: replacement.provenance().clone(),
+                }],
+                total_count: 1,
+                returned_count: 1,
                 truncated: false,
-            }))),
+            })))
+            }
+            ApplicationCommand::ShowSkill { .. } => Ok(outcome(CommandView::Skill(
+                host_skill_view(&replacement_skill()),
+            ))),
+            ApplicationCommand::ListAgentProfiles => Ok(outcome(CommandView::AgentProfiles(
+                AgentProfilesView {
+                    profiles: vec![AgentProfileSummary {
+                        profile_id: AgentProfileId::from_uuid(Uuid::from_u128(110)),
+                        profile_version_id: AgentProfileVersionId::from_uuid(Uuid::from_u128(111)),
+                        version: ai_stock_forum::domain::ObjectVersion::new(1).unwrap(),
+                        display_name: "Assigned Agent".to_owned(),
+                        role: ai_stock_forum::agents::builtin_profile_templates()[0].role,
+                        primary_specialty: "Research".to_owned(),
+                        readiness: ai_stock_forum::agents::AgentReadiness::Unbound,
+                        content_digest: sha256(b"assigned-agent"),
+                    }],
+                    total_count: 1,
+                    returned_count: 1,
+                    truncated: false,
+                },
+            ))),
+            ApplicationCommand::ShowAgentProfile { .. } => Ok(outcome(
+                CommandView::AgentProfile(assigned_profile_view()),
+            )),
             ApplicationCommand::RequestShutdown => Ok(CommandOutcome {
                 command_id: CommandId::from_uuid(Uuid::from_u128(701)),
                 correlation_id: CorrelationId::from_uuid(Uuid::from_u128(702)),
@@ -323,6 +353,39 @@ fn assigned_skill() -> SkillVersion {
         draft(),
     )
     .unwrap()
+}
+
+fn replacement_skill() -> SkillVersion {
+    let current = assigned_skill();
+    let mut candidate = draft();
+    candidate.instructions = "Use the explicit upgraded version.".to_owned();
+    SkillVersion::next_version(
+        &current,
+        SkillVersionId::from_uuid(Uuid::from_u128(102)),
+        2,
+        candidate,
+    )
+    .unwrap()
+}
+
+fn assigned_profile_view() -> AgentProfileView {
+    let assigned = assigned_skill().reference();
+    let template = &ai_stock_forum::agents::builtin_profile_templates()[0];
+    let mut profile_draft = template.copy_to_draft().unwrap();
+    profile_draft.skill_refs = vec![assigned];
+    let profile = ai_stock_forum::agents::AgentProfileVersion::create(
+        AgentProfileId::from_uuid(Uuid::from_u128(110)),
+        AgentProfileVersionId::from_uuid(Uuid::from_u128(111)),
+        MemoryNamespaceId::from_uuid(Uuid::from_u128(112)),
+        1,
+        profile_draft,
+        Some(template.provenance()),
+    )
+    .unwrap();
+    AgentProfileView {
+        readiness: profile.readiness(),
+        profile,
+    }
 }
 
 fn host_skill(seed: u128, version: i64, name: &str) -> SkillVersion {
@@ -754,27 +817,46 @@ fn agent_origin_upgrade_preview_builds_an_explicit_exact_upgrade_command() {
     )
     .unwrap();
     let (mut model, expected) = agent_panel_model();
-    model.agents.selected_skill_action_index = 0;
-    handle_event(&mut model, key(KeyCode::Right));
+    handle_event(&mut model, key(KeyCode::Left));
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Enter)),
         ControllerEffect::LoadSkills
     );
-    let replacement = SkillVersion::create(
-        expected.skill_id(),
-        SkillVersionId::from_uuid(Uuid::from_u128(941)),
-        2,
-        SkillProvenance::User,
-        draft(),
+    execute_skill_effect(
+        &runtime.client(),
+        &mut model,
+        ControllerEffect::LoadSkills,
     )
     .unwrap();
-    model.skills.replace_detail(host_skill_view(&replacement));
-    let detail = model.agents.detail.clone().unwrap();
-    model.skills.selected_agent_detail = Some(detail);
-    model.skills.assignment = Some(ai_stock_forum::ui::tui::AssignmentKind::Upgrade {
-        expected: expected.clone(),
-    });
-    model.skills.pane = SkillsPane::AssignmentReview;
+    let replacement = model
+        .skills
+        .library
+        .skills
+        .first()
+        .expect("upgrade replacement in loaded library")
+        .skill_ref
+        .clone();
+
+    let effect = handle_event(&mut model, key(KeyCode::Enter));
+    execute_skill_effect(&runtime.client(), &mut model, effect).unwrap();
+    assert_eq!(model.skills.pane, SkillsPane::Detail);
+    assert_eq!(model.skills.selected_skill_ref(), Some(&replacement));
+
+    let effect = handle_event(&mut model, key(KeyCode::Enter));
+    assert_eq!(effect, ControllerEffect::LoadSkillAgents);
+    execute_skill_effect(&runtime.client(), &mut model, effect).unwrap();
+    assert_eq!(model.skills.pane, SkillsPane::AgentPicker);
+
+    let effect = handle_event(&mut model, key(KeyCode::Enter));
+    assert_eq!(effect, ControllerEffect::LoadSkillAgent { selected_agent: 0 });
+    execute_skill_effect(&runtime.client(), &mut model, effect).unwrap();
+    assert_eq!(model.skills.pane, SkillsPane::AssignmentReview);
+    assert_eq!(
+        model.skills.assignment,
+        Some(ai_stock_forum::ui::tui::AssignmentKind::Upgrade {
+            expected: expected.clone(),
+        })
+    );
 
     let effect = handle_event(&mut model, key(KeyCode::Enter));
     execute_skill_effect(&runtime.client(), &mut model, effect).unwrap();
@@ -788,17 +870,41 @@ fn agent_origin_upgrade_preview_builds_an_explicit_exact_upgrade_command() {
     assert!(matches!(
         command,
         ApplicationCommand::UpgradeAgentSkill {
+            profile_id,
+            expected_active_profile_version_id,
             expected: command_expected,
             replacement: command_replacement,
+            review_token,
             ..
-        } if command_expected == &expected && command_replacement == &replacement.reference()
+        } if *profile_id == AgentProfileId::from_uuid(Uuid::from_u128(110))
+            && *expected_active_profile_version_id
+                == AgentProfileVersionId::from_uuid(Uuid::from_u128(111))
+            && command_expected == &expected
+            && command_replacement == &replacement
+            && *review_token == SkillReviewToken::from_uuid(Uuid::from_u128(93))
     ));
-    execute_skill_effect(
-        &runtime.client(),
-        &mut model,
-        ControllerEffect::CancelSkillReview,
-    )
-    .unwrap();
+    assert!(model.skills.review_registered);
+
+    let cancel = handle_event(&mut model, key(KeyCode::Esc));
+    assert_eq!(cancel, ControllerEffect::CancelSkillReview);
+    execute_skill_effect(&runtime.client(), &mut model, cancel).unwrap();
+    assert_eq!(model.skills.pane, SkillsPane::AssignmentReview);
+    assert!(!model.skills.review_registered);
+    handle_event(&mut model, key(KeyCode::Esc));
+    handle_event(&mut model, key(KeyCode::Esc));
+    handle_event(&mut model, key(KeyCode::Esc));
+    assert!(!model.skills.active);
+    assert_eq!(model.active_view, View::Agents);
+    assert!(model.agents.skill_panel_open);
+    assert_eq!(
+        calls.lock().unwrap().iter().filter(|call| **call == Call::Upgrade).count(),
+        1
+    );
+    assert_eq!(
+        calls.lock().unwrap().iter().filter(|call| **call == Call::Cancel).count(),
+        1
+    );
+    assert!(!calls.lock().unwrap().iter().any(|call| matches!(call, Call::Mutation)));
     runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
 }
 

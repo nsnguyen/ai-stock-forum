@@ -57,10 +57,10 @@ Fresh focused command:
 cargo test --test skill_editor_contract --test skill_tui_controller_contract --test skill_tui_host_contract
 ```
 
-Result: exit 0, 31 passed, 0 failed.
+Result: exit 0, 32 passed, 0 failed.
 
 - `skill_editor_contract`: 5 passed.
-- `skill_tui_controller_contract`: 14 passed.
+- `skill_tui_controller_contract`: 15 passed.
 - `skill_tui_host_contract`: 12 passed.
 
 No full suite was run, per Task 8 instructions.
@@ -112,6 +112,27 @@ cargo test --test skill_editor_contract --test skill_tui_controller_contract --t
 ```
 
 Result: exit 0, 31 passed, 0 failed: 5 editor, 14 controller, and 12 host contracts.
+
+## Independent-review fix round 3
+
+### RED evidence
+
+- The requested B-history regression initially failed to compile because `ControllerEffect::LoadSkillHistory` accepted only `selected_skill: usize`; the typed effect could not express the installed B identity and remained coupled to stale library selection A.
+- After the controller regression was made executable, the full Upgrade contract failed at `upgrade replacement in loaded library`: the prior host fixture returned an empty skill list, confirming the earlier test had bypassed real loading and classification by mutating intermediate model fields.
+
+### GREEN behavior and evidence
+
+1. **Detail-derived history identity:** `SkillsViewState::current_skill_id` derives the history target from the exact scoped selected ref. Installing detail or version detail synchronizes `selected_skill` when that identity exists in the loaded library. `LoadSkillHistory` now carries a typed `SkillId`, and the host submits `ShowSkillHistory` directly for that ID rather than resolving a mutable list index.
+2. **A-to-B history regression:** The controller contract starts with selected library/detail/history/version state for A, opens assigned B v2 from the agent skill panel, selects History with Right/Enter, and asserts the typed history request is B. It applies a B history outcome, opens B v1, drives Assign and agent selection through real controller effects, and verifies explicit downgrade classification targets B v1 against expected B v2; A cannot reappear.
+3. **True agent-origin Upgrade route:** The host contract starts at the agent skill panel and uses real keys/effects for Upgrade selection, skill list loading, replacement detail loading, agent list/detail loading, automatic classification, preview, confirmation cancellation, and Esc return. It asserts profile ID `110`, expected profile version `111`, exact current and replacement refs, `UpgradeAgentSkill`, the preview-owned review token, one cancellation, no mutation dispatch, and restored Agents panel state. No intermediate workflow state is assigned directly after the initial durable fixture.
+
+Fresh focused fix-round-3 command:
+
+```text
+cargo test --test skill_editor_contract --test skill_tui_controller_contract --test skill_tui_host_contract
+```
+
+Result: exit 0, 32 passed, 0 failed: 5 editor, 15 controller, and 12 host contracts.
 
 ## Concerns
 
