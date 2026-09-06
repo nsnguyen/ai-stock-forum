@@ -362,7 +362,7 @@ fn every_view_transition_recomputes_geometry_without_resize_and_preserves_agents
 }
 
 #[test]
-fn escape_and_quit_respect_active_agents_layers() {
+fn escape_respects_active_agents_layers_and_bare_q_never_quits() {
     let mut model = model();
     handle_event(&mut model, key(KeyCode::Char('a')));
     handle_event(&mut model, key(KeyCode::Char('c')));
@@ -396,9 +396,18 @@ fn escape_and_quit_respect_active_agents_layers() {
         ControllerEffect::CancelProfileReview
     );
     assert_eq!(model.agents.pane, AgentsPane::Detail);
+    let before_q = model.clone();
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Char('q'))),
-        ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
+        ControllerEffect::None
+    );
+    assert_eq!(model, before_q);
+    assert_eq!(
+        handle_event(
+            &mut model,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL,)),
+        ),
+        ControllerEffect::RequestShutdown(ShutdownReason::Interrupted)
     );
 }
 
@@ -435,7 +444,7 @@ fn resize_preserves_agents_selection_scroll_and_editor_draft() {
 }
 
 #[test]
-fn too_small_q_is_unconditional_regardless_of_input_owner() {
+fn bare_q_never_requests_shutdown_across_agent_input_owners_or_too_small() {
     let mut editor_model = model();
     handle_event(&mut editor_model, key(KeyCode::Char('a')));
     handle_event(&mut editor_model, key(KeyCode::Char('c')));
@@ -444,19 +453,19 @@ fn too_small_q_is_unconditional_regardless_of_input_owner() {
             .agents
             .start_profile_create(0, builtin_profile_templates())
     );
-    handle_event(&mut editor_model, TuiEvent::Resize(10, 5));
     assert_eq!(
         handle_event(&mut editor_model, key(KeyCode::Char('q'))),
-        ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
+        ControllerEffect::Redraw
     );
+    assert_eq!(editor_model.command.text(), "q");
 
     let mut command_model = model();
     handle_event(&mut command_model, key(KeyCode::Char('/')));
-    handle_event(&mut command_model, TuiEvent::Resize(10, 5));
     assert_eq!(
         handle_event(&mut command_model, key(KeyCode::Char('q'))),
-        ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
+        ControllerEffect::Redraw
     );
+    assert_eq!(command_model.command.text(), "/q");
 
     let mut confirmation_model = model();
     confirmation_model.active_view = View::Agents;
@@ -465,18 +474,51 @@ fn too_small_q_is_unconditional_regardless_of_input_owner() {
     confirmation_model.agents.pending_confirmation = Some(ProfileConfirmation {
         command: ai_stock_forum::app::ApplicationCommand::RequestShutdown,
     });
-    handle_event(&mut confirmation_model, TuiEvent::Resize(10, 5));
     assert_eq!(
         handle_event(&mut confirmation_model, key(KeyCode::Char('q'))),
-        ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
+        ControllerEffect::Redraw
     );
+    assert_eq!(confirmation_model.command.text(), "q");
 
     let mut local_model = model();
     handle_event(&mut local_model, key(KeyCode::Char('a')));
+    let local_before_q = local_model.clone();
+    assert_eq!(
+        handle_event(&mut local_model, key(KeyCode::Char('q'))),
+        ControllerEffect::None
+    );
+    assert_eq!(local_model, local_before_q);
+
+    handle_event(&mut editor_model, TuiEvent::Resize(10, 5));
+    assert_eq!(
+        handle_event(&mut editor_model, key(KeyCode::Char('q'))),
+        ControllerEffect::None
+    );
+    assert_eq!(editor_model.command.text(), "q");
+
+    handle_event(&mut command_model, TuiEvent::Resize(10, 5));
+    assert_eq!(
+        handle_event(&mut command_model, key(KeyCode::Char('q'))),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(command_model.command.text(), "/qq");
+
+    handle_event(&mut confirmation_model, TuiEvent::Resize(10, 5));
+    assert_eq!(
+        handle_event(&mut confirmation_model, key(KeyCode::Char('q'))),
+        ControllerEffect::None
+    );
+    assert_eq!(confirmation_model.command.text(), "q");
+    assert!(confirmation_model.agents.pending_confirmation.is_some());
+
     handle_event(&mut local_model, TuiEvent::Resize(10, 5));
     assert_eq!(
         handle_event(&mut local_model, key(KeyCode::Char('q'))),
-        ControllerEffect::RequestShutdown(ShutdownReason::UserQuit)
+        ControllerEffect::None
+    );
+    assert_eq!(
+        enter_line(&mut local_model, "/quit"),
+        ControllerEffect::Submit(ai_stock_forum::app::ApplicationCommand::RequestShutdown)
     );
 }
 
@@ -826,4 +868,120 @@ fn agents_state_equality_detects_different_editor_drafts() {
         .submit_line("Right Draft");
 
     assert_ne!(left, right);
+}
+
+fn enter_modifier_variants() -> [KeyModifiers; 8] {
+    [
+        KeyModifiers::NONE,
+        KeyModifiers::SHIFT,
+        KeyModifiers::CONTROL,
+        KeyModifiers::ALT,
+        KeyModifiers::SUPER,
+        KeyModifiers::HYPER,
+        KeyModifiers::META,
+        KeyModifiers::SHIFT
+            | KeyModifiers::CONTROL
+            | KeyModifiers::ALT
+            | KeyModifiers::SUPER
+            | KeyModifiers::HYPER
+            | KeyModifiers::META,
+    ]
+}
+
+#[test]
+fn every_enter_modifier_submits_template_controls_and_clears_stale_validation() {
+    for modifiers in enter_modifier_variants() {
+        let mut model = model();
+        model.active_view = View::Agents;
+        model.agents.pane = AgentsPane::Editor;
+        model.agents.editor = Some(create_editor());
+
+        assert_eq!(
+            enter_line(&mut model, "text is unavailable here"),
+            ControllerEffect::Redraw
+        );
+        assert_eq!(
+            model
+                .agents
+                .editor
+                .as_ref()
+                .and_then(ProfileEditor::local_message)
+                .map(|message| message.code()),
+            Some("editor_field_unavailable")
+        );
+
+        for character in ":role bull".chars() {
+            assert_eq!(
+                handle_event(&mut model, key(KeyCode::Char(character))),
+                ControllerEffect::Redraw
+            );
+        }
+        assert_eq!(
+            handle_event(
+                &mut model,
+                TuiEvent::Key(KeyEvent::new(KeyCode::Enter, modifiers)),
+            ),
+            ControllerEffect::Redraw
+        );
+        assert!(model.command.text().is_empty());
+        assert!(
+            model
+                .agents
+                .editor
+                .as_ref()
+                .and_then(ProfileEditor::local_message)
+                .is_none()
+        );
+
+        for character in ":next".chars() {
+            assert_eq!(
+                handle_event(&mut model, key(KeyCode::Char(character))),
+                ControllerEffect::Redraw
+            );
+        }
+        assert_eq!(
+            handle_event(
+                &mut model,
+                TuiEvent::Key(KeyEvent::new(KeyCode::Enter, modifiers)),
+            ),
+            ControllerEffect::Redraw
+        );
+        assert!(model.command.text().is_empty());
+        assert_eq!(
+            model.agents.editor.as_ref().unwrap().step().as_str(),
+            "identity"
+        );
+    }
+}
+
+#[test]
+fn modified_enter_chords_do_not_execute_profile_confirmation() {
+    let mut model = model();
+    model.active_view = View::Agents;
+    model.agents.pane = AgentsPane::Editor;
+    model.agents.editor = Some(create_editor());
+    advance_create_editor_to_review(&mut model);
+    assert_eq!(enter_line(&mut model, ":create"), ControllerEffect::Redraw);
+    assert_eq!(model.agents.pane, AgentsPane::Confirmation);
+    for character in "create".chars() {
+        assert_eq!(
+            handle_event(&mut model, key(KeyCode::Char(character))),
+            ControllerEffect::Redraw
+        );
+    }
+
+    for modifiers in enter_modifier_variants()
+        .into_iter()
+        .filter(|modifiers| !modifiers.is_empty())
+    {
+        let mut candidate = model.clone();
+        assert_eq!(
+            handle_event(
+                &mut candidate,
+                TuiEvent::Key(KeyEvent::new(KeyCode::Enter, modifiers)),
+            ),
+            ControllerEffect::None
+        );
+        assert_eq!(candidate, model);
+    }
 }

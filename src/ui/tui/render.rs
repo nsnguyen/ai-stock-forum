@@ -16,7 +16,7 @@ pub fn render(frame: &mut Frame<'_>, model: &TuiModel, theme: &Theme) {
     let cockpit = view_geometry(frame.area(), model.active_view, model.inspector_open).cockpit;
     frame.render_widget(Clear, cockpit.viewport);
     if cockpit.mode == LayoutMode::TooSmall {
-        render_too_small(frame, cockpit.viewport);
+        render_too_small(frame, cockpit.viewport, model, theme);
         return;
     }
 
@@ -156,7 +156,7 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
         Line::default(),
         Line::styled("/ command", theme.muted),
         Line::styled("? help", theme.muted),
-        Line::styled("q quit", theme.muted),
+        Line::styled("/quit exit", theme.muted),
     ]);
     frame.render_widget(
         Paragraph::new(lines).block(
@@ -238,16 +238,28 @@ fn render_command(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
     }
 }
 
-fn render_too_small(frame: &mut Frame<'_>, area: Rect) {
+fn render_too_small(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    let command = if model.focus == Focus::Command {
+        Line::from(vec![
+            Span::styled("> ", theme.accent),
+            Span::raw(model.command.text().to_owned()),
+        ])
+    } else {
+        Line::styled("Press / to enter a command", theme.muted)
+    };
     let content = vec![
-        Line::raw("Terminal too small"),
-        Line::raw(format!("Minimum: {MIN_WIDTH} x {MIN_HEIGHT}")),
-        Line::raw(format!("Current: {} x {}", area.width, area.height)),
-        Line::raw("q / Ctrl+C to exit"),
+        Line::styled("Terminal too small", theme.warning),
+        Line::raw(format!(
+            "Minimum: {MIN_WIDTH} x {MIN_HEIGHT} | Current: {} x {}",
+            area.width, area.height
+        )),
+        Line::raw("/quit + Enter: normal exit"),
+        Line::raw("Ctrl+C: emergency interrupt"),
+        command,
     ];
     let centered = Layout::vertical([
         Constraint::Fill(1),
-        Constraint::Length(4.min(area.height)),
+        Constraint::Length(5.min(area.height)),
         Constraint::Fill(1),
     ])
     .split(area)[1];
@@ -528,11 +540,20 @@ mod tests {
     }
 
     #[test]
-    fn too_small_screen_contains_only_size_guidance() {
-        let text = render_text(model(View::Audit), 59, 17, false);
+    fn too_small_screen_shows_quit_command_and_current_input() {
+        let mut model = model(View::Audit);
+        model.set_focus(Focus::Command);
+        for character in "/qui".chars() {
+            model.command.insert(character);
+        }
+
+        let text = render_text(model, 59, 17, false);
         assert!(text.contains("Terminal too small"));
         assert!(text.contains("60 x 18"));
-        assert!(text.contains("q / Ctrl+C"));
+        assert!(text.contains("/quit"));
+        assert!(text.contains("Ctrl+C"));
+        assert!(text.contains("/qui"));
+        assert!(!text.contains("q / Ctrl+C"));
         assert!(!text.contains("Installation"));
         assert!(!text.contains("AI STOCK FORUM"));
     }
@@ -568,9 +589,10 @@ mod tests {
         ] {
             assert!(help.contains(command), "missing command: {command}");
         }
-        for key in ["1-4", "Tab", "Enter", "Esc", "Up/Down", "Home/End", "q"] {
+        for key in ["1-4", "Tab", "Enter", "Esc", "Up/Down", "Home/End"] {
             assert!(help.contains(key), "missing key: {key}");
         }
+        assert!(!help.contains("q                   Request shutdown"));
     }
 
     #[test]
