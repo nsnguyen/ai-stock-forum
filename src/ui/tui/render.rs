@@ -173,7 +173,7 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
         Line::styled(
             format!(
                 "{} a Agents",
-                if model.active_view == View::Agents {
+                if !model.skills.active && model.active_view == View::Agents {
                     ">"
                 } else {
                     " "

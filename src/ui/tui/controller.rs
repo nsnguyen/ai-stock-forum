@@ -1066,6 +1066,7 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
 fn handle_agent_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEffect> {
     let effect = match key.code {
         KeyCode::Down if no_modifiers(key.modifiers) => {
+            let previous_action = model.selected_available_agent_skill_action();
             let last = model
                 .agents
                 .detail
@@ -1077,24 +1078,22 @@ fn handle_agent_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<Contro
                 .selected_assigned_skill
                 .saturating_add(1)
                 .min(last);
+            model.select_available_agent_skill_action(previous_action);
             ControllerEffect::Redraw
         }
         KeyCode::Up if no_modifiers(key.modifiers) => {
+            let previous_action = model.selected_available_agent_skill_action();
             model.agents.selected_assigned_skill =
                 model.agents.selected_assigned_skill.saturating_sub(1);
+            model.select_available_agent_skill_action(previous_action);
             ControllerEffect::Redraw
         }
         KeyCode::Right if no_modifiers(key.modifiers) => {
-            model.agents.selected_skill_action_index = model
-                .agents
-                .selected_skill_action_index
-                .saturating_add(1)
-                .min(2);
+            move_agent_skill_action(model, true);
             ControllerEffect::Redraw
         }
         KeyCode::Left if no_modifiers(key.modifiers) => {
-            model.agents.selected_skill_action_index =
-                model.agents.selected_skill_action_index.saturating_sub(1);
+            move_agent_skill_action(model, false);
             ControllerEffect::Redraw
         }
         KeyCode::Enter if no_modifiers(key.modifiers) => {
@@ -1104,7 +1103,7 @@ fn handle_agent_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<Contro
                 .skill_refs()
                 .get(model.agents.selected_assigned_skill)?
                 .clone();
-            match model.agents.selected_skill_action() {
+            match model.selected_available_agent_skill_action() {
                 AgentSkillAction::View => {
                     model.skills.workspace_origin = Some(SkillWorkspaceOrigin::AgentSkills {
                         profile_id: detail.profile.profile_id(),
@@ -1117,12 +1116,21 @@ fn handle_agent_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<Contro
                     }
                 }
                 AgentSkillAction::Upgrade => {
-                    model.skills.workspace_origin = Some(SkillWorkspaceOrigin::AgentSkills {
+                    let super::model::AgentSkillUpgradeAvailability::Available(replacement) =
+                        model.agent_skill_upgrade_availability()
+                    else {
+                        model.select_available_agent_skill_action(AgentSkillAction::View);
+                        return Some(ControllerEffect::Redraw);
+                    };
+                    model.skills.operation_origin = SkillOperationOrigin::AgentSkills {
                         profile_id: detail.profile.profile_id(),
-                    });
-                    model.skills.active = true;
-                    model.skills.pane = SkillsPane::List;
-                    ControllerEffect::LoadSkills
+                    };
+                    ControllerEffect::RequestSkillAssignmentPreview {
+                        profile_id: detail.profile.profile_id(),
+                        expected_active_profile_version_id: detail.profile.profile_version_id(),
+                        target: replacement,
+                        assignment: AssignmentKind::Upgrade { expected: selected },
+                    }
                 }
                 AgentSkillAction::Unassign => {
                     model.skills.operation_origin = SkillOperationOrigin::AgentSkills {
@@ -1144,6 +1152,21 @@ fn handle_agent_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<Contro
         _ => return None,
     };
     Some(effect)
+}
+
+fn move_agent_skill_action(model: &mut TuiModel, forward: bool) {
+    let actions = model.available_agent_skill_actions();
+    let current = model.selected_available_agent_skill_action();
+    let current_index = actions
+        .iter()
+        .position(|action| *action == current)
+        .unwrap_or(0);
+    let next_index = if forward {
+        current_index.saturating_add(1).min(actions.len().saturating_sub(1))
+    } else {
+        current_index.saturating_sub(1)
+    };
+    model.select_available_agent_skill_action(actions[next_index]);
 }
 
 fn unwind_agents(model: &mut TuiModel) -> ControllerEffect {

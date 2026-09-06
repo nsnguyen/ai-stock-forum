@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
 };
@@ -67,6 +67,34 @@ fn render_lines(
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn render_fixed_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    header: Vec<Line<'static>>,
+    body: Vec<Line<'static>>,
+    footer: Vec<Line<'static>>,
+    focused: bool,
+    theme: &Theme,
+) {
+    let block = panel(title, focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let header_height = u16::try_from(header.len()).unwrap_or(u16::MAX).min(inner.height);
+    let footer_height = u16::try_from(footer.len())
+        .unwrap_or(u16::MAX)
+        .min(inner.height.saturating_sub(header_height));
+    let regions = Layout::vertical([
+        Constraint::Length(header_height),
+        Constraint::Min(0),
+        Constraint::Length(footer_height),
+    ])
+    .split(inner);
+    frame.render_widget(Paragraph::new(header), regions[0]);
+    frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), regions[1]);
+    frame.render_widget(Paragraph::new(footer), regions[2]);
 }
 
 fn render_library(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
@@ -153,7 +181,14 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
             Line::raw("Select a library item and press Enter to load its exact active version."),
         ]);
         append_error_guidance(&mut lines, model, theme);
-        render_lines(frame, area, "Skill detail", lines, workspace_focused(model), theme);
+        render_lines(
+            frame,
+            area,
+            "Skill detail",
+            lines,
+            workspace_focused(model) && model.skills.pane == SkillsPane::Detail,
+            theme,
+        );
         return;
     };
 
@@ -164,16 +199,21 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
         .iter()
         .find(|summary| summary.skill_ref.skill_id() == detail.skill_ref.skill_id())
         .map(|summary| &summary.skill_ref);
-    let is_active = active_ref
-        .is_some_and(|active| active.skill_version_id() == detail.skill_ref.skill_version_id());
+    let (status, status_style) = match active_ref {
+        Some(active) if active == &detail.skill_ref => ("ACTIVE", theme.success),
+        Some(active) if active.version() > detail.skill_ref.version() => {
+            ("HISTORICAL", theme.warning)
+        }
+        Some(_) => ("UNKNOWN - loaded active identity is inconsistent", theme.warning),
+        None => ("UNKNOWN - active version not loaded", theme.warning),
+    };
     lines.extend([
         Line::default(),
         Line::styled(safe_text(&detail.content.display_name), theme.accent),
-        label_value(
-            "Status",
-            if is_active { "ACTIVE" } else { "HISTORICAL" }.to_owned(),
-            theme,
-        ),
+        Line::from(vec![
+            Span::styled(format!("{:<14}", "Status"), theme.muted),
+            Span::styled(status, status_style),
+        ]),
         label_value(
             "Exact version",
             format!("v{}", detail.skill_ref.version().get()),
@@ -231,7 +271,14 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
     }
     append_assignment_context(&mut lines, model, &detail.skill_ref, theme);
     append_error_guidance(&mut lines, model, theme);
-    render_lines(frame, area, "Skill detail", lines, workspace_focused(model), theme);
+    render_lines(
+        frame,
+        area,
+        "Skill detail",
+        lines,
+        workspace_focused(model) && model.skills.pane == SkillsPane::Detail,
+        theme,
+    );
 }
 
 fn action_selector(model: &TuiModel, theme: &Theme) -> Line<'static> {
@@ -259,7 +306,8 @@ fn action_selector(model: &TuiModel, theme: &Theme) -> Line<'static> {
 fn render_create_source(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     let mut lines = vec![
         Line::styled("Choose a starting point", theme.accent),
-        Line::styled("Up/Down: select | Enter: continue | Esc: library", theme.focus),
+        Line::styled("Up/Down: select | Enter: continue", theme.focus),
+        Line::styled("Esc: library", theme.focus),
         Line::default(),
         Line::styled(
             format!(
@@ -434,10 +482,11 @@ fn render_editor(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
 }
 
 fn render_agent_picker(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
-    let mut lines = vec![Line::styled(
-        "Up/Down: select agent | Enter: review assignment | Esc: detail",
-        theme.focus,
-    )];
+    let mut lines = vec![
+        Line::styled("Up/Down: select agent", theme.focus),
+        Line::styled("Enter: review assignment", theme.focus),
+        Line::styled("Esc: detail", theme.focus),
+    ];
     if model.agents.profiles.profiles.is_empty() {
         lines.extend([
             Line::default(),
@@ -465,61 +514,84 @@ fn render_agent_picker(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, them
 }
 
 fn render_assignment_review(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
-    let mut lines = vec![Line::styled("ASSIGNMENT REVIEW", theme.warning)];
     let assignment = model.skills.assignment.as_ref();
-    lines.push(label_value(
-        "Operation",
-        assignment_name(assignment).to_owned(),
-        theme,
-    ));
+    let mut header = vec![Line::from(vec![
+        Span::styled("Operation  ", theme.muted),
+        Span::styled(assignment_name(assignment), theme.warning),
+    ])];
+    let mut body = Vec::new();
+    append_error_guidance(&mut body, model, theme);
     if let Some(agent) = model.skills.selected_agent_detail.as_ref() {
-        lines.push(label_value(
+        header.push(Line::styled(
+            format!("Agent  {}", safe_text(agent.profile.display_name())),
+            theme.accent,
+        ));
+        body.push(label_value(
             "Agent",
             safe_text(agent.profile.display_name()),
             theme,
         ));
-        lines.push(label_value(
+        body.push(label_value(
             "Agent version",
             format!("v{} / {}", agent.profile.version().get(), agent.profile.profile_version_id()),
             theme,
         ));
     } else {
-        lines.push(label_value("Agent", "Loading exact profile...".to_owned(), theme));
+        header.push(Line::styled("Agent  Loading exact profile", theme.warning));
     }
     if let Some(target) = model.skills.selected_skill_ref() {
-        append_exact_ref(&mut lines, "Target", target, theme);
+        header.push(Line::raw(format!(
+            "Target  v{}  {}  {}",
+            target.version().get(),
+            compact_identifier(&target.skill_version_id().to_string()),
+            compact_identifier(target.content_digest().as_str())
+        )));
+        append_exact_ref(&mut body, "Target", target, theme);
     }
     match assignment {
         Some(AssignmentKind::Upgrade { expected }) => {
-            append_exact_ref(&mut lines, "Current pin", expected, theme)
+            append_exact_ref(&mut body, "Current pin", expected, theme)
         }
         Some(AssignmentKind::Unassign { expected }) => {
-            append_exact_ref(&mut lines, "Remove pin", expected, theme)
+            append_exact_ref(&mut body, "Remove pin", expected, theme)
         }
         _ => {}
     }
-    lines.extend([
+    body.extend([
         Line::styled("No automatic upgrades.", theme.muted),
         label_value(
             "Review risk",
             "Only the displayed exact pin changes after confirmation.".to_owned(),
             theme,
         ),
-        Line::default(),
     ]);
     if assignment == Some(&AssignmentKind::AlreadyAssigned) {
-        lines.extend([
-            Line::styled("Already assigned at this exact version.", theme.warning),
-            Line::styled("Choose another version or Esc to return.", theme.focus),
-        ]);
-    } else {
-        lines.push(Line::styled(
-            "Enter: validate operation | Esc: agent picker",
-            theme.focus,
-        ));
+        body.insert(
+            0,
+            Line::styled("Choose another version or Esc to return.", theme.warning),
+        );
     }
-    append_error_guidance(&mut lines, model, theme);
-    render_lines(frame, area, "Assignment review", lines, workspace_focused(model), theme);
+    let footer = if assignment == Some(&AssignmentKind::AlreadyAssigned) {
+        vec![
+            Line::styled("No operation: exact version already pinned", theme.warning),
+            Line::styled("Esc: choose another version", theme.focus),
+        ]
+    } else {
+        vec![Line::styled(
+            format!("Enter: validate {} | Esc: agent picker", assignment_verb(assignment)),
+            theme.focus,
+        )]
+    };
+    render_fixed_panel(
+        frame,
+        area,
+        "Assignment review",
+        header,
+        body,
+        footer,
+        workspace_focused(model),
+        theme,
+    );
 }
 
 fn render_confirmation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
@@ -537,52 +609,23 @@ fn render_confirmation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, them
         );
         return;
     };
-    let (title, operation, target, prior, profile_id, review_digest) =
-        confirmation_context(&confirmation.command);
-    let mut lines = vec![
-        Line::styled(format!("Confirm {title}"), theme.warning),
-        label_value("Operation", operation.to_owned(), theme),
-    ];
-    if let Some(profile_id) = profile_id {
-        lines.push(label_value("Agent ID", profile_id.to_string(), theme));
-    }
-    if let Some(target) = target {
-        append_exact_ref(&mut lines, "Exact version", target, theme);
-    }
-    if let Some(prior) = prior {
-        append_exact_ref(&mut lines, "Current pin", prior, theme);
-    }
-    if let Some(detail) = model
-        .skills
-        .version_detail
-        .as_ref()
-        .or(model.skills.detail.as_ref())
-    {
-        lines.push(label_value(
-            "Provenance",
-            provenance_long(&detail.provenance),
-            theme,
-        ));
-    }
-    if let Some(review_digest) = review_digest {
-        lines.push(label_value("Review digest", review_digest, theme));
-    }
-    lines.extend([
+    let (title, header, mut body) = confirmation_lines(model, &confirmation.command, theme);
+    body.extend([
         label_value(
             "Review risk",
             "Commits the displayed immutable version or exact agent pin only.".to_owned(),
             theme,
         ),
         Line::styled("No automatic upgrades or executable capabilities.", theme.muted),
-        Line::default(),
-        Line::styled("Enter: confirm | Esc: return to review", theme.focus),
     ]);
-    append_error_guidance(&mut lines, model, theme);
-    render_lines(
+    append_error_guidance(&mut body, model, theme);
+    render_fixed_panel(
         frame,
         area,
         &format!("Confirm {title}"),
-        lines,
+        header,
+        body,
+        vec![Line::styled("Enter: confirm | Esc: return", theme.focus)],
         workspace_focused(model),
         theme,
     );
@@ -695,40 +738,57 @@ fn append_error_guidance(lines: &mut Vec<Line<'static>>, model: &TuiModel, theme
     }
 }
 
-fn confirmation_context(
+fn confirmation_lines(
+    model: &TuiModel,
     command: &ApplicationCommand,
-) -> (
-    &'static str,
-    &'static str,
-    Option<&SkillVersionRef>,
-    Option<&SkillVersionRef>,
-    Option<crate::domain::AgentProfileId>,
-    Option<String>,
-) {
+    theme: &Theme,
+) -> (&'static str, Vec<Line<'static>>, Vec<Line<'static>>) {
     match command {
-        ApplicationCommand::CreateSkill { review_digest, .. } => {
-            ("creation", "Create", None, None, None, Some(review_digest.to_string()))
-        }
-        ApplicationCommand::ActivateSkillVersion { review_digest, .. } => (
+        ApplicationCommand::CreateSkill {
+            skill_id,
+            candidate,
+            review_digest,
+            ..
+        } => candidate_confirmation_lines(
+            model,
+            "creation",
+            "Create",
+            *skill_id,
+            candidate,
+            None,
+            review_digest.to_string(),
+            theme,
+        ),
+        ApplicationCommand::ActivateSkillVersion {
+            skill_id,
+            expected_active_version_id,
+            candidate,
+            review_digest,
+            ..
+        } => candidate_confirmation_lines(
+            model,
             "new version",
             "Create Version",
-            None,
-            None,
-            None,
-            Some(review_digest.to_string()),
+            *skill_id,
+            candidate,
+            Some(*expected_active_version_id),
+            review_digest.to_string(),
+            theme,
         ),
         ApplicationCommand::AssignAgentSkill {
             profile_id,
             skill,
             review_digest,
             ..
-        } => (
+        } => ref_confirmation_lines(
+            model,
             "assignment",
             "Assign",
-            Some(skill),
+            *profile_id,
+            skill,
             None,
-            Some(*profile_id),
-            Some(review_digest.to_string()),
+            review_digest.to_string(),
+            theme,
         ),
         ApplicationCommand::UpgradeAgentSkill {
             profile_id,
@@ -736,29 +796,132 @@ fn confirmation_context(
             replacement,
             review_digest,
             ..
-        } => (
+        } => ref_confirmation_lines(
+            model,
             "upgrade",
             "Upgrade",
-            Some(replacement),
+            *profile_id,
+            replacement,
             Some(expected),
-            Some(*profile_id),
-            Some(review_digest.to_string()),
+            review_digest.to_string(),
+            theme,
         ),
         ApplicationCommand::UnassignAgentSkill {
             profile_id,
             expected,
             review_digest,
             ..
-        } => (
+        } => ref_confirmation_lines(
+            model,
             "unassignment",
             "Unassign",
+            *profile_id,
+            expected,
             Some(expected),
-            Some(expected),
-            Some(*profile_id),
-            Some(review_digest.to_string()),
+            review_digest.to_string(),
+            theme,
         ),
-        _ => ("skill action", "Unavailable", None, None, None, None),
+        _ => (
+            "skill action",
+            vec![Line::styled("Operation  Unavailable", theme.warning)],
+            vec![Line::raw("Return and rebuild the review.")],
+        ),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn candidate_confirmation_lines(
+    model: &TuiModel,
+    title: &'static str,
+    operation: &'static str,
+    skill_id: crate::domain::SkillId,
+    candidate: &crate::skills::SkillDraft,
+    expected_active_version_id: Option<crate::domain::SkillVersionId>,
+    review_digest: String,
+    theme: &Theme,
+) -> (&'static str, Vec<Line<'static>>, Vec<Line<'static>>) {
+    let candidate_digest = model
+        .skills
+        .editor
+        .as_ref()
+        .and_then(|editor| editor.review())
+        .map(|review| review.preview())
+        .filter(|preview| preview.skill_id == skill_id)
+        .map(|preview| preview.candidate_digest.to_string());
+    let digest_label = candidate_digest
+        .as_deref()
+        .map(compact_identifier)
+        .unwrap_or_else(|| "Pending".to_owned());
+    let header = vec![
+        Line::styled(format!("Operation  {operation}"), theme.warning),
+        Line::styled(
+            format!("Candidate  {}", safe_text(&candidate.display_name)),
+            theme.accent,
+        ),
+        Line::raw(format!(
+            "Skill  {}  Digest  {}",
+            compact_identifier(&skill_id.to_string()),
+            digest_label
+        )),
+        Line::raw("Version Pending | Provenance Pending"),
+    ];
+    let mut body = vec![
+        label_value("Candidate", safe_text(&candidate.display_name), theme),
+        label_value("Skill ID", skill_id.to_string(), theme),
+        label_value(
+            "Candidate digest",
+            candidate_digest.unwrap_or_else(|| "Pending validation".to_owned()),
+            theme,
+        ),
+        label_value("Version", "Pending authoritative commit".to_owned(), theme),
+        label_value("Provenance", "Pending authoritative commit".to_owned(), theme),
+    ];
+    if let Some(expected) = expected_active_version_id {
+        body.push(label_value("Reviewed base", expected.to_string(), theme));
+    }
+    body.push(label_value("Review digest", review_digest, theme));
+    (title, header, body)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ref_confirmation_lines(
+    model: &TuiModel,
+    title: &'static str,
+    operation: &'static str,
+    profile_id: crate::domain::AgentProfileId,
+    target: &SkillVersionRef,
+    prior: Option<&SkillVersionRef>,
+    review_digest: String,
+    theme: &Theme,
+) -> (&'static str, Vec<Line<'static>>, Vec<Line<'static>>) {
+    let header = vec![
+        Line::styled(format!("Operation  {operation}"), theme.warning),
+        Line::raw(format!(
+            "Exact  v{}  {}",
+            target.version().get(),
+            compact_identifier(&target.skill_version_id().to_string())
+        )),
+        Line::raw(format!(
+            "Digest  {}",
+            compact_identifier(target.content_digest().as_str())
+        )),
+    ];
+    let mut body = vec![label_value("Agent ID", profile_id.to_string(), theme)];
+    append_exact_ref(&mut body, "Exact version", target, theme);
+    if let Some(prior) = prior {
+        append_exact_ref(&mut body, "Current pin", prior, theme);
+    }
+    let provenance = model
+        .skills
+        .version_detail
+        .as_ref()
+        .or(model.skills.detail.as_ref())
+        .filter(|detail| detail.skill_ref == *target)
+        .map(|detail| provenance_long(&detail.provenance))
+        .unwrap_or_else(|| "Not loaded for this exact version".to_owned());
+    body.push(label_value("Provenance", provenance, theme));
+    body.push(label_value("Review digest", review_digest, theme));
+    (title, header, body)
 }
 
 fn provenance_short(provenance: &SkillProvenance) -> &'static str {
@@ -798,15 +961,9 @@ fn editor_operation(editor: &SkillEditor) -> &'static str {
     }
 }
 
-fn editor_target_version(model: &TuiModel, editor: &SkillEditor) -> String {
+fn editor_target_version(_model: &TuiModel, editor: &SkillEditor) -> String {
     match editor.mode() {
-        SkillEditorMode::Create => "v1".to_owned(),
-        SkillEditorMode::Version { .. } => model
-            .skills
-            .detail
-            .as_ref()
-            .map(|detail| format!("v{}", detail.skill_ref.version().get().saturating_add(1)))
-            .unwrap_or_else(|| "Next immutable version".to_owned()),
+        SkillEditorMode::Create | SkillEditorMode::Version { .. } => "Pending".to_owned(),
     }
 }
 
@@ -879,7 +1036,8 @@ fn validation_message(code: &str, field: SkillEditorField) -> String {
             .to_owned();
     }
     if code.contains("not_assigned") {
-        return "Skill is not assigned. Reload the agent and choose a current pin.".to_owned();
+        return "Skill is not assigned. Review current state, then retry with a loaded current pin."
+            .to_owned();
     }
     format!(
         "{} is invalid. Revise the focused value, then press Enter again.",
@@ -919,8 +1077,28 @@ fn next_action(model: &TuiModel) -> &'static str {
         SkillsPane::History => "Up/Down select; Enter exact version; Esc detail",
         SkillsPane::Editor => "Type focused value; Enter continue; Esc back",
         SkillsPane::AgentPicker => "Up/Down agent; Enter review; Esc detail",
+        SkillsPane::AssignmentReview
+            if model.skills.assignment == Some(AssignmentKind::AlreadyAssigned) => {
+                "Esc choose another version"
+            }
         SkillsPane::AssignmentReview => "Enter validate; Esc agent picker",
         SkillsPane::Confirmation => "Enter confirm; Esc return to review",
         SkillsPane::Result => "Enter or Esc return to detail",
     }
+}
+
+fn assignment_verb(assignment: Option<&AssignmentKind>) -> &'static str {
+    match assignment {
+        Some(AssignmentKind::Add) => "assignment",
+        Some(AssignmentKind::Upgrade { .. }) => "upgrade",
+        Some(AssignmentKind::Unassign { .. }) => "unassignment",
+        Some(AssignmentKind::AlreadyAssigned) | None => "operation",
+    }
+}
+
+fn compact_identifier(value: &str) -> String {
+    if value.len() <= 19 {
+        return value.to_owned();
+    }
+    format!("{}..{}", &value[..8], &value[value.len() - 8..])
 }

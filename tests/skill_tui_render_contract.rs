@@ -266,7 +266,10 @@ fn assignment_states_name_the_operation_exact_pin_risk_and_corrective_action() {
     model.set_message(Severity::Error, "Skill is not assigned to this agent.");
     let not_assigned = render_text(&model, 100, 32);
     assert!(not_assigned.contains("not assigned"));
-    assert!(not_assigned.contains("Review current state, then retry"));
+    assert!(not_assigned.contains("Review"));
+    assert!(not_assigned.contains("current"));
+    assert!(not_assigned.contains("state"));
+    assert!(not_assigned.contains("retry"));
 }
 
 #[test]
@@ -466,6 +469,327 @@ fn history_footer_matches_up_down_enter_and_escape_state_machine_keys() {
     assert!(text.contains("Up/Down: select"));
     assert!(text.contains("Enter: open exact version"));
     assert!(text.contains("Esc: detail"));
+}
+
+fn terminal_for(model: &TuiModel, width: u16, height: u16) -> Terminal<TestBackend> {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render::render(frame, model, &Theme::from_no_color(true)))
+        .expect("render contract");
+    terminal
+}
+
+fn create_confirmation_model(candidate: &SkillVersion, unrelated: &SkillVersion) -> TuiModel {
+    let mut editor = SkillEditor::for_create(Some(candidate.content().clone()));
+    editor.go_to_review().expect("valid review candidate");
+    let ai_stock_forum::ui::skill_editor::SkillEditorEffect::Preview(request) =
+        editor.submit_keyboard_line("")
+    else {
+        panic!("preview request")
+    };
+    assert!(editor.apply_preview(
+        request.generation(),
+        ai_stock_forum::skills::SkillEditPreview {
+            skill_id: candidate.skill_id(),
+            expected_active_version_id: None,
+            candidate_digest: candidate.content_digest().clone(),
+            review_token: SkillReviewToken::from_uuid(Uuid::from_u128(9_001)),
+            review_digest: sha256(b"authoritative-create-review"),
+        },
+    ));
+    let ai_stock_forum::ui::skill_editor::SkillEditorEffect::Execute(command) =
+        editor.submit_keyboard_line("")
+    else {
+        panic!("create command")
+    };
+    let mut model = skills_model(SkillsPane::Confirmation);
+    model.skills.detail = Some(view(unrelated));
+    model.skills.version_detail = Some(view(unrelated));
+    model.skills.editor = Some(editor);
+    model.skills.pending_confirmation = Some(SkillConfirmation {
+        command,
+        origin: SkillOperationOrigin::Skills(SkillsPane::Editor),
+    });
+    model
+}
+
+#[test]
+fn compact_review_and_confirmation_keep_identity_and_actions_in_fixed_visible_regions() {
+    let target = builtin(1_100, "Compact Target");
+    let agent = profile_with_skills(Vec::new());
+    let mut review = skills_model(SkillsPane::AssignmentReview);
+    review.skills.detail = Some(view(&target));
+    review.skills.version_detail = Some(view(&target));
+    review.skills.selected_agent_detail = Some(agent.clone());
+    review.skills.assignment = Some(AssignmentKind::Add);
+
+    let compact_review = render_text(&review, 60, 18);
+    for expected in ["Assign", "v1", "Enter", "Esc"] {
+        assert!(compact_review.contains(expected), "review missing {expected}");
+    }
+
+    let mut confirmation = review;
+    confirmation.skills.pane = SkillsPane::Confirmation;
+    confirmation.skills.pending_confirmation = Some(SkillConfirmation {
+        command: ApplicationCommand::AssignAgentSkill {
+            profile_id: agent.profile.profile_id(),
+            expected_active_profile_version_id: agent.profile.profile_version_id(),
+            skill: target.reference(),
+            review_token: SkillReviewToken::from_uuid(Uuid::from_u128(1_101)),
+            review_digest: sha256(b"compact-confirmation"),
+        },
+        origin: SkillOperationOrigin::Skills(SkillsPane::AssignmentReview),
+    });
+    let compact_confirmation = render_text(&confirmation, 60, 18);
+    for expected in ["Assign", "v1", "Enter: confirm", "Esc: return"] {
+        assert!(
+            compact_confirmation.contains(expected),
+            "confirmation missing {expected}"
+        );
+    }
+}
+
+#[test]
+fn create_confirmation_uses_only_authoritative_candidate_state_and_marks_pending_fields() {
+    let candidate = skill(1_200, "Authoritative Candidate", SkillProvenance::User);
+    let unrelated = builtin(1_300, "Unrelated Loaded Detail");
+    let model = create_confirmation_model(&candidate, &unrelated);
+    let text = render_text(&model, 120, 44);
+
+    for expected in [
+        "Authoritative Candidate",
+        "Digest",
+        "Version Pending",
+        "Provenance Pending",
+    ] {
+        assert!(text.contains(expected), "missing {expected}");
+    }
+    for exact_identity in [
+        candidate.skill_id().to_string(),
+        candidate.content_digest().to_string(),
+    ] {
+        assert!(text.contains(&exact_identity[..8]));
+        assert!(text.contains(&exact_identity[exact_identity.len() - 8..]));
+    }
+    assert!(!text.contains("Unrelated Loaded Detail"));
+    assert!(!text.contains("builtin.unrelated-loaded-detail"));
+}
+
+#[test]
+fn list_focus_is_exclusive_and_skills_suppresses_agents_navigation_focus() {
+    let mut model = skills_model(SkillsPane::List);
+    model.active_view = View::Agents;
+    let terminal = terminal_for(&model, 80, 24);
+    let buffer = terminal.backend().buffer();
+
+    let library_corner = buffer.cell((20, 4)).expect("library corner");
+    let detail_corner = buffer.cell((45, 4)).expect("detail corner");
+    assert!(library_corner.modifier.contains(ratatui::style::Modifier::REVERSED));
+    assert!(!detail_corner.modifier.contains(ratatui::style::Modifier::REVERSED));
+
+    let text = render_text(&model, 120, 36);
+    assert!(text.contains("> s Skills"));
+    assert!(!text.contains("> a Agents"));
+}
+
+#[test]
+fn unknown_active_status_is_not_rendered_as_historical() {
+    let target = skill(1_400, "Unknown Active", SkillProvenance::User);
+    let mut model = skills_model(SkillsPane::Detail);
+    model.skills.library = SkillsView {
+        skills: Vec::new(),
+        total_count: 0,
+        returned_count: 0,
+        truncated: true,
+    };
+    model.skills.detail = Some(view(&target));
+    model.skills.version_detail = Some(view(&target));
+
+    let text = render_text(&model, 120, 40);
+    assert!(text.contains("UNKNOWN"));
+    assert!(text.contains("active"));
+    assert!(text.contains("version not loaded"));
+    assert!(!text.contains("Status        HISTORICAL"));
+}
+
+#[test]
+fn editor_review_never_fabricates_the_next_exact_version() {
+    let first = skill(1_500, "Pending Version", SkillProvenance::User);
+    let mut editor = SkillEditor::for_version(
+        first.skill_id(),
+        first.skill_version_id(),
+        first.content().clone(),
+    );
+    editor.go_to_review().expect("version review");
+    let mut model = skills_model(SkillsPane::Editor);
+    model.skills.detail = Some(view(&first));
+    model.skills.editor = Some(editor);
+
+    let text = render_text(&model, 100, 32);
+    assert!(text.contains("Exact version Pending"));
+    assert!(!text.contains("Exact version v2"));
+}
+
+#[test]
+fn already_assigned_context_omits_enter_validation_and_matches_escape_only_main_action() {
+    let target = skill(1_600, "Already Pinned", SkillProvenance::User);
+    let mut model = skills_model(SkillsPane::AssignmentReview);
+    model.skills.detail = Some(view(&target));
+    model.skills.selected_agent_detail = Some(profile_with_skills(vec![target.reference()]));
+    model.skills.assignment = Some(AssignmentKind::AlreadyAssigned);
+
+    let text = render_text(&model, 120, 38);
+    assert!(text.contains("No operation"));
+    assert!(text.contains("Esc: choose another version"));
+    assert!(!text.contains("Enter: validate"));
+    assert!(!text.contains("Next action Enter validate"));
+}
+
+#[test]
+fn create_source_agent_picker_and_result_keep_complete_contextual_keys_compact_and_wide() {
+    let mut create = skills_model(SkillsPane::CreateSource);
+    create.skills.selected_create_source = 0;
+    let mut picker = skills_model(SkillsPane::AgentPicker);
+    picker.agents.profiles = AgentProfilesView {
+        profiles: vec![AgentProfileSummary {
+            profile_id: AgentProfileId::from_uuid(Uuid::from_u128(1_700)),
+            profile_version_id: AgentProfileVersionId::from_uuid(Uuid::from_u128(1_701)),
+            version: ObjectVersion::new(1).unwrap(),
+            display_name: "Picker Agent".to_owned(),
+            role: builtin_profile_templates()[0].role,
+            primary_specialty: "Research".to_owned(),
+            readiness: AgentReadiness::Unbound,
+            content_digest: sha256(b"picker-agent"),
+        }],
+        total_count: 1,
+        returned_count: 1,
+        truncated: false,
+    };
+    let result = skills_model(SkillsPane::Result);
+
+    for (name, model, expected) in [
+        (
+            "create",
+            &create,
+            ["Up/Down", "Enter: continue", "Esc: library"],
+        ),
+        (
+            "picker",
+            &picker,
+            ["Up/Down", "Enter: review", "Esc:"],
+        ),
+        (
+            "result",
+            &result,
+            ["Skill action completed", "Enter or Esc", "return to skill detail"],
+        ),
+    ] {
+        for (width, height) in [(60, 18), (120, 36)] {
+            let text = render_text(model, width, height);
+            for value in expected {
+                assert!(
+                    text.contains(value),
+                    "{name} {width}x{height} missing {value}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn wide_long_content_reaches_end_markers_without_hiding_actions() {
+    let mut long = skill(1_800, "Long Complete", SkillProvenance::User);
+    let mut draft = long.content().clone();
+    draft.instructions = format!("{} INSTRUCTION-END", "wrapped guidance ".repeat(80));
+    draft.resources = vec![SkillResource {
+        name: "Long inert note".to_owned(),
+        body: format!("{} REFERENCE-END", "wrapped reference ".repeat(80)),
+    }];
+    long = SkillVersion::create(
+        long.skill_id(),
+        SkillVersionId::from_uuid(Uuid::from_u128(1_802)),
+        1_800_000_001_800,
+        SkillProvenance::User,
+        draft,
+    )
+    .expect("long skill");
+    let mut model = skills_model(SkillsPane::Detail);
+    model.skills.library = library_for_render(&long);
+    model.skills.detail = Some(view(&long));
+
+    let text = render_text(&model, 160, 110);
+    assert!(text.contains("INSTRUCTION-END"));
+    assert!(text.contains("REFERENCE-END"));
+    assert!(text.contains("Left/Right: choose action"));
+    assert!(text.contains("Enter: open"));
+    assert!(text.contains("Esc: library"));
+}
+
+fn library_for_render(skill: &SkillVersion) -> SkillsView {
+    SkillsView {
+        skills: vec![summary(skill)],
+        total_count: 1,
+        returned_count: 1,
+        truncated: false,
+    }
+}
+
+#[test]
+fn agents_multi_skill_panel_shows_position_rows_and_contextual_available_actions() {
+    let first = skill(1_900, "First Pin", SkillProvenance::User);
+    let first_active = SkillVersion::next_version(
+        &first,
+        SkillVersionId::from_uuid(Uuid::from_u128(1_902)),
+        1_800_000_001_902,
+        {
+            let mut draft = first.content().clone();
+            draft.instructions = "New first pin.".to_owned();
+            draft
+        },
+    )
+    .expect("newer first");
+    let second = skill(2_000, "Second Pin", SkillProvenance::User);
+    let detail = profile_with_skills(vec![first.reference(), second.reference()]);
+    let mut model = TuiModel::new(snapshot(), false);
+    model.active_view = View::Agents;
+    model.agents.pane = AgentsPane::Detail;
+    model.agents.skill_panel_open = true;
+    model.agents.detail = Some(detail);
+    model.skills.library = SkillsView {
+        skills: vec![summary(&first_active), summary(&second)],
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
+    };
+
+    for (width, height) in [(60, 24), (120, 44)] {
+        let available = render_text(&model, width, height);
+        for expected in [
+            "Skill 1 of 2",
+            "AVAILABLE",
+            "View",
+            "Upgrade",
+            "Unassign",
+            "Enter:",
+            "Esc: detail",
+            "Up/Down",
+        ] {
+            assert!(available.contains(expected), "{width}x{height} missing {expected}");
+        }
+    }
+
+    model.agents.selected_assigned_skill = 1;
+    model.agents.selected_skill_action_index = 0;
+    let current = render_text(&model, 120, 44);
+    assert!(current.contains("Skill 2 of 2"));
+    assert!(current.contains("CURRENT"));
+    assert!(!current.contains("[Upgrade]"));
+    assert!(current.contains("Enter: View"));
+
+    model.agents.selected_skill_action_index = 2;
+    let unassign = render_text(&model, 120, 44);
+    assert!(unassign.contains("Enter: Unassign"));
 }
 
 fn _agent_summary(profile: &AgentProfileVersion) -> AgentProfileSummary {

@@ -353,3 +353,176 @@ fn keyboard_workflow_creates_versions_pins_upgrades_unassigns_and_restores_exact
     assert!(restarted_text.contains("v2"));
     assert!(restarted_text.contains("No automatic upgrades"));
 }
+
+fn agent_action_model(
+    pins: Vec<ai_stock_forum::skills::SkillVersionRef>,
+    active: Vec<&SkillVersion>,
+    truncated: bool,
+) -> TuiModel {
+    let detail = profile(1_000 + pins.len() as u128 * 10, pins);
+    let mut model = TuiModel::new(snapshot(Some(detail.clone())), false);
+    model.active_view = View::Agents;
+    model.agents.pane = AgentsPane::Detail;
+    model.agents.detail = Some(detail);
+    model.agents.skill_panel_open = true;
+    model.skills.library = library(&active);
+    model.skills.library.truncated = truncated;
+    model
+}
+
+fn divergent_equal_version(previous: &SkillVersion, seed: u128) -> SkillVersion {
+    let mut draft = previous.content().clone();
+    draft.instructions = "Divergent equal-version content.".to_owned();
+    SkillVersion::create(
+        previous.skill_id(),
+        SkillVersionId::from_uuid(Uuid::from_u128(seed)),
+        1_800_000_000_900,
+        SkillProvenance::User,
+        draft,
+    )
+    .expect("divergent equal object version")
+}
+
+fn availability_text(model: &TuiModel) -> String {
+    render_text(model, 120, 44)
+}
+
+#[test]
+fn upgrade_availability_derivation_rejects_unknown_and_inconsistent_library_states() {
+    let pinned_v1 = skill(400, None);
+    let active_v2 = skill(400, Some(&pinned_v1));
+    let unrelated = skill(500, None);
+    let divergent = divergent_equal_version(&pinned_v1, 499);
+
+    let cases = [
+        (
+            "absent",
+            agent_action_model(vec![pinned_v1.reference()], Vec::new(), false),
+            "UNKNOWN",
+        ),
+        (
+            "truncated missing match",
+            agent_action_model(vec![pinned_v1.reference()], vec![&unrelated], true),
+            "UNKNOWN",
+        ),
+        (
+            "unrelated",
+            agent_action_model(vec![pinned_v1.reference()], vec![&unrelated], false),
+            "UNKNOWN",
+        ),
+        (
+            "exact current",
+            agent_action_model(vec![pinned_v1.reference()], vec![&pinned_v1], false),
+            "CURRENT",
+        ),
+        (
+            "higher same skill",
+            agent_action_model(vec![pinned_v1.reference()], vec![&active_v2], false),
+            "AVAILABLE",
+        ),
+        (
+            "lower same skill",
+            agent_action_model(vec![active_v2.reference()], vec![&pinned_v1], false),
+            "INCONSISTENT",
+        ),
+        (
+            "equal divergent ref",
+            agent_action_model(vec![pinned_v1.reference()], vec![&divergent], false),
+            "INCONSISTENT",
+        ),
+        (
+            "truncated exact match",
+            agent_action_model(vec![pinned_v1.reference()], vec![&active_v2], true),
+            "AVAILABLE",
+        ),
+    ];
+
+    for (case, model, expected) in cases {
+        let text = availability_text(&model);
+        assert!(text.contains(expected), "case={case}, expected={expected}");
+        if expected != "AVAILABLE" {
+            assert!(!text.contains("[Upgrade]"), "case={case}");
+        }
+    }
+}
+
+#[test]
+fn unknown_and_current_agent_actions_traverse_and_dispatch_only_view_or_unassign() {
+    let pinned = skill(600, None);
+    for (case, active) in [("unknown", Vec::new()), ("current", vec![&pinned])] {
+        let mut model = agent_action_model(vec![pinned.reference()], active, false);
+
+        assert_eq!(model.agents.selected_skill_action(), ai_stock_forum::ui::tui::AgentSkillAction::View);
+        assert_eq!(
+            handle_event(&mut model, key(KeyCode::Enter)),
+            ControllerEffect::LoadSkillVersion {
+                skill_id: pinned.skill_id(),
+                version: pinned.version(),
+            },
+            "case={case}"
+        );
+
+        model.skills.active = false;
+        model.active_view = View::Agents;
+        model.agents.skill_panel_open = true;
+        assert_eq!(handle_event(&mut model, key(KeyCode::Right)), ControllerEffect::Redraw);
+        assert_eq!(
+            model.agents.selected_skill_action(),
+            ai_stock_forum::ui::tui::AgentSkillAction::Unassign,
+            "case={case}"
+        );
+        assert!(matches!(
+            handle_event(&mut model, key(KeyCode::Enter)),
+            ControllerEffect::RequestSkillAssignmentPreview {
+                target,
+                assignment: AssignmentKind::Unassign { expected },
+                ..
+            } if target == pinned.reference() && expected == pinned.reference()
+        ));
+    }
+}
+
+#[test]
+fn available_agent_actions_dispatch_the_exact_derived_replacement_ref() {
+    let pinned = skill(700, None);
+    let active = skill(700, Some(&pinned));
+    let mut model = agent_action_model(vec![pinned.reference()], vec![&active], false);
+
+    assert_eq!(handle_event(&mut model, key(KeyCode::Right)), ControllerEffect::Redraw);
+    assert_eq!(
+        model.agents.selected_skill_action(),
+        ai_stock_forum::ui::tui::AgentSkillAction::Upgrade
+    );
+    assert!(matches!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::RequestSkillAssignmentPreview {
+            target,
+            assignment: AssignmentKind::Upgrade { expected },
+            ..
+        } if target == active.reference() && expected == pinned.reference()
+    ));
+}
+
+#[test]
+fn changing_assigned_skill_rows_recomputes_availability_and_normalizes_upgrade() {
+    let first_v1 = skill(800, None);
+    let first_v2 = skill(800, Some(&first_v1));
+    let second = skill(900, None);
+    let mut model = agent_action_model(
+        vec![first_v1.reference(), second.reference()],
+        vec![&first_v2, &second],
+        false,
+    );
+
+    handle_event(&mut model, key(KeyCode::Right));
+    assert_eq!(
+        model.agents.selected_skill_action(),
+        ai_stock_forum::ui::tui::AgentSkillAction::Upgrade
+    );
+    handle_event(&mut model, key(KeyCode::Down));
+    assert_eq!(model.agents.selected_assigned_skill, 1);
+    assert_eq!(
+        model.agents.selected_skill_action(),
+        ai_stock_forum::ui::tui::AgentSkillAction::View
+    );
+}

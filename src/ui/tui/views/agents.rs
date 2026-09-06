@@ -17,7 +17,7 @@ use crate::{
         profile_editor::{ProfileEditor, ProfileEditorMode, ProfileEditorStep},
         tui::{
             layout::{agent_layout_mode, agent_workspace},
-            model::{AgentsPane, TuiModel},
+            model::{AgentSkillAction, AgentSkillUpgradeAvailability, AgentsPane, TuiModel},
             theme::Theme,
         },
     },
@@ -171,59 +171,98 @@ fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
             Line::styled("Esc: agent detail", theme.focus),
         ];
     };
-    let selected_action = model.agents.selected_skill_action();
+    let selected_action = model.selected_available_agent_skill_action();
     let mut action_spans = vec![Span::styled("Actions  ", theme.accent)];
-    for (index, (action, label)) in [
-        (crate::ui::tui::model::AgentSkillAction::View, "View"),
-        (crate::ui::tui::model::AgentSkillAction::Upgrade, "Upgrade"),
-        (crate::ui::tui::model::AgentSkillAction::Unassign, "Unassign"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (index, action) in model.available_agent_skill_actions().iter().copied().enumerate() {
         if index > 0 {
             action_spans.push(Span::raw("  "));
         }
+        let label = match action {
+            AgentSkillAction::View => "View",
+            AgentSkillAction::Upgrade => "Upgrade",
+            AgentSkillAction::Unassign => "Unassign",
+        };
         action_spans.push(Span::styled(
             format!("[{label}]"),
             if action == selected_action { theme.focus } else { theme.muted },
         ));
     }
-    let active = model
-        .skills
-        .library
-        .skills
-        .iter()
-        .find(|summary| summary.skill_ref.skill_id() == reference.skill_id())
-        .map(|summary| &summary.skill_ref);
-    let upgrade = match active {
-        Some(active) if active.version() > reference.version() => format!(
-            "Upgrade available: active v{} (explicit action required)",
+    let availability = model.agent_skill_upgrade_availability();
+    let availability_text = match &availability {
+        AgentSkillUpgradeAvailability::Unknown => {
+            "UNKNOWN - press s to load/reload active library data".to_owned()
+        }
+        AgentSkillUpgradeAvailability::Current => {
+            "CURRENT - exact pin equals the loaded active reference".to_owned()
+        }
+        AgentSkillUpgradeAvailability::Available(active) => format!(
+            "AVAILABLE - Upgrade available: active v{}; explicit review required",
             active.version().get()
         ),
-        Some(active) if active == reference => "Pinned version is active; no upgrade available".to_owned(),
-        Some(active) => format!(
-            "Library active v{} differs; choose Upgrade to review",
-            active.version().get()
-        ),
-        None => "Open Upgrade to load and compare the active library version".to_owned(),
+        AgentSkillUpgradeAvailability::Inconsistent => {
+            "INCONSISTENT - press s to reload; Upgrade is hidden".to_owned()
+        }
     };
-    vec![
-        Line::from(action_spans),
+    let enter_guidance = match selected_action {
+        AgentSkillAction::View => "Enter: View",
+        AgentSkillAction::Upgrade => "Enter: Upgrade",
+        AgentSkillAction::Unassign => "Enter: Unassign",
+    };
+    let skill_refs = detail.profile.skill_refs();
+    let mut lines = vec![
         Line::styled(
-            "Left/Right: choose | Enter: open review | Up/Down: skill | Esc: detail",
-            theme.focus,
+            format!(
+                "Skill {} of {}",
+                model.agents.selected_assigned_skill.saturating_add(1),
+                skill_refs.len()
+            ),
+            theme.accent,
         ),
+        Line::from(action_spans),
+        Line::styled(enter_guidance, theme.focus),
+        Line::styled("Esc: detail", theme.focus),
+        Line::styled("Left/Right: action | Up/Down: assigned skill", theme.muted),
+        Line::styled(
+            availability_text,
+            match availability {
+                AgentSkillUpgradeAvailability::Available(_) => theme.success,
+                AgentSkillUpgradeAvailability::Current => theme.accent,
+                AgentSkillUpgradeAvailability::Unknown
+                | AgentSkillUpgradeAvailability::Inconsistent => theme.warning,
+            },
+        ),
+        Line::default(),
+        Line::styled("ASSIGNED ROWS", theme.accent),
+    ];
+    for (index, assigned) in skill_refs.iter().enumerate() {
+        lines.push(Line::styled(
+            format!(
+                "{} {}  v{}  {}",
+                if index == model.agents.selected_assigned_skill { ">" } else { " " },
+                index + 1,
+                assigned.version().get(),
+                compact_identifier(&assigned.skill_id().to_string())
+            ),
+            if index == model.agents.selected_assigned_skill { theme.focus } else { theme.muted },
+        ));
+    }
+    lines.extend([
         Line::default(),
         Line::styled("PINNED EXACT VERSION", theme.accent),
         label_value("Version", format!("v{}", reference.version().get()), theme),
         label_value("Skill ID", reference.skill_id().to_string(), theme),
         label_value("Version ID", reference.skill_version_id().to_string(), theme),
         label_value("Digest", reference.content_digest().to_string(), theme),
-        Line::default(),
-        Line::styled(upgrade, theme.warning),
         Line::styled("No automatic upgrades. Skill text grants no capability.", theme.muted),
-    ]
+    ]);
+    lines
+}
+
+fn compact_identifier(value: &str) -> String {
+    if value.len() <= 19 {
+        return value.to_owned();
+    }
+    format!("{}..{}", &value[..8], &value[value.len() - 8..])
 }
 
 fn detail_lines(detail: &crate::app::AgentProfileView, theme: &Theme) -> Vec<Line<'static>> {

@@ -42,6 +42,14 @@ pub enum AgentSkillAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentSkillUpgradeAvailability {
+    Unknown,
+    Current,
+    Available(SkillVersionRef),
+    Inconsistent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileConfirmation {
     pub command: ApplicationCommand,
 }
@@ -857,6 +865,69 @@ impl TuiModel {
 
     pub fn set_runtime_status(&mut self, runtime_status: RuntimeStatus) {
         self.runtime_status = runtime_status;
+    }
+
+    pub fn agent_skill_upgrade_availability(&self) -> AgentSkillUpgradeAvailability {
+        let Some(pinned) = self.agents.selected_assigned_skill_ref() else {
+            return AgentSkillUpgradeAvailability::Unknown;
+        };
+        let Some(active) = self
+            .skills
+            .library
+            .skills
+            .iter()
+            .find(|summary| summary.skill_ref.skill_id() == pinned.skill_id())
+            .map(|summary| &summary.skill_ref)
+        else {
+            return AgentSkillUpgradeAvailability::Unknown;
+        };
+        if active == pinned {
+            AgentSkillUpgradeAvailability::Current
+        } else if active.version() > pinned.version() {
+            AgentSkillUpgradeAvailability::Available(active.clone())
+        } else {
+            AgentSkillUpgradeAvailability::Inconsistent
+        }
+    }
+
+    pub fn available_agent_skill_actions(&self) -> &'static [AgentSkillAction] {
+        const STANDARD: &[AgentSkillAction] =
+            &[AgentSkillAction::View, AgentSkillAction::Unassign];
+        const UPGRADEABLE: &[AgentSkillAction] = &[
+            AgentSkillAction::View,
+            AgentSkillAction::Upgrade,
+            AgentSkillAction::Unassign,
+        ];
+        if matches!(
+            self.agent_skill_upgrade_availability(),
+            AgentSkillUpgradeAvailability::Available(_)
+        ) {
+            UPGRADEABLE
+        } else {
+            STANDARD
+        }
+    }
+
+    pub fn selected_available_agent_skill_action(&self) -> AgentSkillAction {
+        let selected = self.agents.selected_skill_action();
+        if self.available_agent_skill_actions().contains(&selected) {
+            selected
+        } else {
+            AgentSkillAction::View
+        }
+    }
+
+    pub fn select_available_agent_skill_action(&mut self, action: AgentSkillAction) {
+        let action = if self.available_agent_skill_actions().contains(&action) {
+            action
+        } else {
+            AgentSkillAction::View
+        };
+        self.agents.selected_skill_action_index = match action {
+            AgentSkillAction::View => 0,
+            AgentSkillAction::Upgrade => 1,
+            AgentSkillAction::Unassign => 2,
+        };
     }
 
     fn audit_last_index(&self) -> Option<usize> {
