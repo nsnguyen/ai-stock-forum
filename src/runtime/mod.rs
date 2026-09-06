@@ -18,7 +18,7 @@ use crate::app::{
     AgentSkillAssignmentPreview, AppError, ApplicationCommand, ApplicationService,
     ApplicationWorker, CommandOutcome, ShutdownReason,
 };
-use crate::domain::{AgentProfileId, AgentProfileVersionId};
+use crate::domain::{AgentProfileId, AgentProfileVersionId, SkillId, SkillVersionId};
 use crate::panic_boundary::catch_sensitive_unwind;
 use crate::skills::{SkillDraft, SkillEditPreview, SkillVersionRef};
 
@@ -47,6 +47,15 @@ pub trait CommandExecutor: Send + 'static {
 
     fn preview_skill_creation(
         &mut self,
+        _candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, AppError> {
+        Err(AppError::SkillReviewUnavailable)
+    }
+
+    fn preview_skill_version(
+        &mut self,
+        _skill_id: SkillId,
+        _expected_active_version_id: SkillVersionId,
         _candidate: SkillDraft,
     ) -> Result<SkillEditPreview, AppError> {
         Err(AppError::SkillReviewUnavailable)
@@ -105,6 +114,15 @@ impl CommandExecutor for ApplicationService {
         candidate: SkillDraft,
     ) -> Result<SkillEditPreview, AppError> {
         Self::preview_skill_creation(self, candidate)
+    }
+
+    fn preview_skill_version(
+        &mut self,
+        skill_id: SkillId,
+        expected_active_version_id: SkillVersionId,
+        candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, AppError> {
+        Self::preview_skill_version(self, skill_id, expected_active_version_id, candidate)
     }
 
     fn preview_agent_skill_assignment(
@@ -215,6 +233,12 @@ enum Request {
         response: Sender<Result<(), RuntimeError>>,
     },
     PreviewSkillCreation {
+        candidate: SkillDraft,
+        response: Sender<Result<SkillEditPreview, RuntimeError>>,
+    },
+    PreviewSkillVersion {
+        skill_id: SkillId,
+        expected_active_version_id: SkillVersionId,
         candidate: SkillDraft,
         response: Sender<Result<SkillEditPreview, RuntimeError>>,
     },
@@ -567,6 +591,20 @@ impl RuntimeClient {
         candidate: SkillDraft,
     ) -> Result<SkillEditPreview, RuntimeError> {
         self.request_reply(|response| Request::PreviewSkillCreation { candidate, response })
+    }
+
+    pub fn preview_skill_version(
+        &self,
+        skill_id: SkillId,
+        expected_active_version_id: SkillVersionId,
+        candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, RuntimeError> {
+        self.request_reply(|response| Request::PreviewSkillVersion {
+            skill_id,
+            expected_active_version_id,
+            candidate,
+            response,
+        })
     }
 
     pub fn preview_agent_skill_assignment(
@@ -926,6 +964,16 @@ impl CommandExecutor for ServiceWorker {
         self.service.preview_skill_creation(candidate)
     }
 
+    fn preview_skill_version(
+        &mut self,
+        skill_id: SkillId,
+        expected_active_version_id: SkillVersionId,
+        candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, AppError> {
+        self.service
+            .preview_skill_version(skill_id, expected_active_version_id, candidate)
+    }
+
     fn preview_agent_skill_assignment(
         &mut self,
         profile_id: AgentProfileId,
@@ -1113,6 +1161,16 @@ fn execute_request(executor: &mut dyn CommandExecutor, request: Request, shared:
         Request::PreviewSkillCreation { candidate, response } => {
             send_runtime_reply(executor, shared, response, |executor| {
                 executor.preview_skill_creation(candidate)
+            });
+        }
+        Request::PreviewSkillVersion {
+            skill_id,
+            expected_active_version_id,
+            candidate,
+            response,
+        } => {
+            send_runtime_reply(executor, shared, response, |executor| {
+                executor.preview_skill_version(skill_id, expected_active_version_id, candidate)
             });
         }
         Request::PreviewAgentSkillAssignment {

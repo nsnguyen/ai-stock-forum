@@ -5,12 +5,13 @@ use crate::{
     app::{
         AgentProfileHistoryView, AgentProfileVersionView, AgentProfileView, AgentProfilesView,
         ApplicationCommand, DatabaseReadiness, MAX_INPUT_BYTES, PresentationSnapshot,
-        ProcessGuardOwnership,
+        ProcessGuardOwnership, SkillHistoryView, SkillView, SkillsView,
     },
     audit::AuditEntry,
     domain::{InstallationId, SessionId},
     setup::SetupStatus,
-    ui::profile_editor::ProfileEditor,
+    skills::{SkillDraft, SkillVersionRef},
+    ui::{profile_editor::ProfileEditor, skill_editor::SkillEditor},
 };
 
 pub const COMMAND_HISTORY_CAPACITY: usize = 100;
@@ -33,9 +34,195 @@ pub enum AgentsPane {
     Confirmation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentSkillAction {
+    View,
+    Upgrade,
+    Unassign,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileConfirmation {
     pub command: ApplicationCommand,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillsPane {
+    List,
+    CreateSource,
+    Detail,
+    History,
+    Editor,
+    AgentPicker,
+    AssignmentReview,
+    Confirmation,
+    Result,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillDetailAction {
+    Assign,
+    CreateVersion,
+    History,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignmentKind {
+    Add,
+    Upgrade { expected: SkillVersionRef },
+    AlreadyAssigned,
+    Unassign { expected: SkillVersionRef },
+}
+
+impl AssignmentKind {
+    pub fn classify(target: &SkillVersionRef, current: Option<&SkillVersionRef>) -> Self {
+        match current {
+            None => Self::Add,
+            Some(current) if current == target => Self::AlreadyAssigned,
+            Some(current) => Self::Upgrade {
+                expected: current.clone(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillConfirmation {
+    pub command: ApplicationCommand,
+    pub return_pane: SkillsPane,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillsViewState {
+    pub active: bool,
+    pub pane: SkillsPane,
+    pub selected_skill: usize,
+    pub selected_action_index: usize,
+    pub selected_create_source: usize,
+    pub selected_history_version: usize,
+    pub selected_agent: usize,
+    pub library: SkillsView,
+    pub detail: Option<SkillView>,
+    pub history: Option<SkillHistoryView>,
+    pub version_detail: Option<SkillView>,
+    pub selected_agent_detail: Option<AgentProfileView>,
+    pub assignment: Option<AssignmentKind>,
+    pub editor: Option<SkillEditor>,
+    pub pending_confirmation: Option<SkillConfirmation>,
+    pub review_registered: bool,
+}
+
+impl Default for SkillsViewState {
+    fn default() -> Self {
+        Self {
+            active: false,
+            pane: SkillsPane::List,
+            selected_skill: 0,
+            selected_action_index: 0,
+            selected_create_source: 0,
+            selected_history_version: 0,
+            selected_agent: 0,
+            library: SkillsView {
+                skills: Vec::new(),
+                total_count: 0,
+                returned_count: 0,
+                truncated: false,
+            },
+            detail: None,
+            history: None,
+            version_detail: None,
+            selected_agent_detail: None,
+            assignment: None,
+            editor: None,
+            pending_confirmation: None,
+            review_registered: false,
+        }
+    }
+}
+
+impl SkillsViewState {
+    pub fn replace_skills(&mut self, library: SkillsView) {
+        let selected_id = self.selected_summary().map(|summary| summary.skill_ref.skill_id());
+        self.library = library;
+        self.selected_skill = selected_id
+            .and_then(|id| {
+                self.library
+                    .skills
+                    .iter()
+                    .position(|summary| summary.skill_ref.skill_id() == id)
+            })
+            .unwrap_or_else(|| {
+                self.selected_skill
+                    .min(self.library.skills.len().saturating_sub(1))
+            });
+    }
+
+    pub fn replace_detail(&mut self, detail: SkillView) {
+        if let Some(index) = self.library.skills.iter().position(|summary| {
+            summary.skill_ref.skill_id() == detail.skill_ref.skill_id()
+        }) {
+            self.selected_skill = index;
+        }
+        self.detail = Some(detail);
+        self.pane = SkillsPane::Detail;
+    }
+
+    pub fn replace_history(&mut self, history: SkillHistoryView) {
+        self.selected_history_version = 0;
+        self.version_detail = None;
+        self.history = Some(history);
+    }
+
+    pub fn replace_version_detail(&mut self, detail: SkillView) {
+        self.version_detail = Some(detail);
+    }
+
+    pub fn selected_summary(&self) -> Option<&crate::app::SkillSummary> {
+        self.library.skills.get(self.selected_skill)
+    }
+
+    pub fn selected_action(&self) -> SkillDetailAction {
+        match self.selected_action_index.min(2) {
+            0 => SkillDetailAction::Assign,
+            1 => SkillDetailAction::CreateVersion,
+            _ => SkillDetailAction::History,
+        }
+    }
+
+    pub fn selected_skill_ref(&self) -> Option<&SkillVersionRef> {
+        if self.pane == SkillsPane::History {
+            self.history
+                .as_ref()
+                .and_then(|history| history.versions.get(self.selected_history_version))
+                .map(|entry| &entry.skill_ref)
+        } else {
+            self.version_detail
+                .as_ref()
+                .map(|detail| &detail.skill_ref)
+                .or_else(|| self.detail.as_ref().map(|detail| &detail.skill_ref))
+                .or_else(|| self.selected_summary().map(|summary| &summary.skill_ref))
+        }
+    }
+
+    pub fn start_create(&mut self, seed: Option<SkillDraft>) {
+        self.editor = Some(SkillEditor::for_create(seed));
+        self.pane = SkillsPane::Editor;
+        self.pending_confirmation = None;
+    }
+
+    pub fn start_version(&mut self) -> bool {
+        let Some(detail) = self.detail.as_ref() else {
+            return false;
+        };
+        self.editor = Some(SkillEditor::for_version(
+            detail.skill_ref.skill_id(),
+            detail.skill_ref.skill_version_id(),
+            detail.content.clone(),
+        ));
+        self.pane = SkillsPane::Editor;
+        self.pending_confirmation = None;
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +234,9 @@ pub struct AgentsViewState {
     pub detail_scroll: usize,
     pub history_scroll: usize,
     pub selected_history_version: usize,
+    pub skill_panel_open: bool,
+    pub selected_assigned_skill: usize,
+    pub selected_skill_action_index: usize,
     pub editor: Option<ProfileEditor>,
     pub pending_confirmation: Option<ProfileConfirmation>,
     pub profiles: AgentProfilesView,
@@ -65,6 +255,9 @@ impl Default for AgentsViewState {
             detail_scroll: 0,
             history_scroll: 0,
             selected_history_version: 0,
+            skill_panel_open: false,
+            selected_assigned_skill: 0,
+            selected_skill_action_index: 0,
             editor: None,
             pending_confirmation: None,
             profiles: AgentProfilesView {
@@ -81,6 +274,20 @@ impl Default for AgentsViewState {
 }
 
 impl AgentsViewState {
+    pub fn selected_skill_action(&self) -> AgentSkillAction {
+        match self.selected_skill_action_index.min(2) {
+            0 => AgentSkillAction::View,
+            1 => AgentSkillAction::Upgrade,
+            _ => AgentSkillAction::Unassign,
+        }
+    }
+
+    pub fn selected_assigned_skill_ref(&self) -> Option<&SkillVersionRef> {
+        self.detail
+            .as_ref()
+            .and_then(|detail| detail.profile.skill_refs().get(self.selected_assigned_skill))
+    }
+
     pub fn selected_summary(&self) -> Option<&crate::app::AgentProfileSummary> {
         self.profiles.profiles.get(self.selected_profile)
     }
@@ -94,6 +301,7 @@ impl AgentsViewState {
             self.detail = None;
             self.history = None;
             self.version_detail = None;
+            self.skill_panel_open = false;
             return;
         }
         self.selected_profile = selected_id
@@ -136,6 +344,9 @@ impl AgentsViewState {
             self.version_detail = None;
         }
         self.detail = Some(detail);
+        self.selected_assigned_skill = self
+            .selected_assigned_skill
+            .min(self.detail.as_ref().map(|detail| detail.profile.skill_refs().len().saturating_sub(1)).unwrap_or(0));
     }
 
     pub fn replace_history(&mut self, history: AgentProfileHistoryView) {
@@ -393,6 +604,7 @@ fn bounded_safe_prefix(input: &str, byte_limit: usize) -> String {
 pub struct TuiModel {
     pub active_view: View,
     pub agents: AgentsViewState,
+    pub skills: SkillsViewState,
     pub focus: Focus,
     pub layout_mode: LayoutMode,
     pub inspector_open: bool,
@@ -437,6 +649,7 @@ impl TuiModel {
         let mut model = Self {
             active_view: View::Overview,
             agents,
+            skills: SkillsViewState::default(),
             focus: Focus::Workspace,
             layout_mode: LayoutMode::Wide,
             inspector_open: false,

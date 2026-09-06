@@ -1,7 +1,8 @@
 use super::{
     TuiEvent,
     model::{
-        AgentsPane, Focus, LayoutMode, ProfileConfirmation, RuntimeStatus, Severity, TuiModel, View,
+        AgentSkillAction, AgentsPane, AssignmentKind, Focus, LayoutMode, ProfileConfirmation,
+        RuntimeStatus, Severity, SkillConfirmation, SkillDetailAction, SkillsPane, TuiModel, View,
     },
     views,
 };
@@ -17,6 +18,7 @@ use crate::{
     ui::profile_editor::{
         PreviewEditRequest, ProfileEditorEffect, ProfileEditorMode, ProfileEditorStep,
     },
+    ui::skill_editor::{SkillEditorEffect, SkillPreviewRequest},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -54,6 +56,25 @@ pub enum ControllerEffect {
     RequestProfilePreview(PreviewEditRequest),
     ExecuteProfile(ApplicationCommand),
     CancelProfileReview,
+    LoadSkills,
+    LoadSkill { selected_skill: usize },
+    LoadSkillHistory { selected_skill: usize },
+    LoadSkillVersion {
+        skill_id: crate::domain::SkillId,
+        version: crate::domain::ObjectVersion,
+    },
+    LoadSkillStarter { selected_skill: usize },
+    LoadSkillAgents,
+    LoadSkillAgent { selected_agent: usize },
+    RequestSkillPreview(SkillPreviewRequest),
+    RequestSkillAssignmentPreview {
+        profile_id: crate::domain::AgentProfileId,
+        expected_active_profile_version_id: crate::domain::AgentProfileVersionId,
+        target: crate::skills::SkillVersionRef,
+        assignment: AssignmentKind,
+    },
+    ExecuteSkill(ApplicationCommand),
+    CancelSkillReview,
 }
 
 pub fn handle_event(model: &mut TuiModel, event: TuiEvent) -> ControllerEffect {
@@ -126,15 +147,31 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
         }
         CommandView::AgentProfiles(profiles) => {
             model.agents.replace_profiles(profiles);
-            model.agents.pane = AgentsPane::List;
-            select_workspace_view(model, View::Agents);
+            if !model.skills.active {
+                model.agents.pane = AgentsPane::List;
+                select_workspace_view(model, View::Agents);
+            }
             model.clear_message();
             ShutdownDisposition::Continue
         }
         CommandView::AgentProfile(profile) => {
-            model.agents.replace_detail(profile);
-            model.agents.pane = AgentsPane::Detail;
-            select_workspace_view(model, View::Agents);
+            if model.skills.active {
+                let target = model.skills.selected_skill_ref().cloned();
+                let current = target.as_ref().and_then(|target| {
+                    profile.profile.skill_refs().iter().find(|current| {
+                        current.skill_id() == target.skill_id()
+                    })
+                });
+                model.skills.assignment = target
+                    .as_ref()
+                    .map(|target| AssignmentKind::classify(target, current));
+                model.skills.selected_agent_detail = Some(profile);
+                model.skills.pane = SkillsPane::AssignmentReview;
+            } else {
+                model.agents.replace_detail(profile);
+                model.agents.pane = AgentsPane::Detail;
+                select_workspace_view(model, View::Agents);
+            }
             model.clear_message();
             ShutdownDisposition::Continue
         }
@@ -155,12 +192,35 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
         CommandView::AgentProfileCreated(_) | CommandView::AgentProfileVersionActivated(_) => {
             ShutdownDisposition::Continue
         }
+        CommandView::Skills(skills) => {
+            model.skills.replace_skills(skills);
+            model.skills.active = true;
+            model.skills.pane = SkillsPane::List;
+            model.clear_message();
+            ShutdownDisposition::Continue
+        }
+        CommandView::Skill(skill) => {
+            model.skills.replace_detail(skill);
+            model.skills.active = true;
+            model.clear_message();
+            ShutdownDisposition::Continue
+        }
+        CommandView::SkillHistory(history) => {
+            model.skills.replace_history(history);
+            model.skills.active = true;
+            model.skills.pane = SkillsPane::History;
+            model.clear_message();
+            ShutdownDisposition::Continue
+        }
+        CommandView::SkillVersion(version) => {
+            model.skills.replace_version_detail(version);
+            model.skills.active = true;
+            model.skills.pane = SkillsPane::History;
+            model.clear_message();
+            ShutdownDisposition::Continue
+        }
         CommandView::SkillCreated(_)
         | CommandView::SkillVersionActivated(_)
-        | CommandView::Skills(_)
-        | CommandView::Skill(_)
-        | CommandView::SkillHistory(_)
-        | CommandView::SkillVersion(_)
         | CommandView::AgentSkillAssigned(_)
         | CommandView::AgentSkillUpgraded(_)
         | CommandView::AgentSkillUnassigned(_) => {
@@ -193,6 +253,14 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         return handle_confirmation_key(model, key);
     }
 
+    if active_skill_confirmation(model) {
+        return handle_skill_confirmation_key(model, key);
+    }
+
+    if active_skill_editor(model) {
+        return handle_skill_editor_key(model, key);
+    }
+
     if active_profile_editor(model) {
         return handle_profile_editor_key(model, key);
     }
@@ -207,12 +275,20 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         return effect;
     }
 
+
+    if model.skills.active
+        && let Some(effect) = handle_skills_key(model, key)
+    {
+        return effect;
+    }
+
     match key.code {
         KeyCode::Char('1') if no_modifiers(key.modifiers) => select_view(model, View::Overview),
         KeyCode::Char('2') if no_modifiers(key.modifiers) => select_view(model, View::Setup),
         KeyCode::Char('3') if no_modifiers(key.modifiers) => select_view(model, View::Audit),
         KeyCode::Char('4') if no_modifiers(key.modifiers) => select_view(model, View::Help),
         KeyCode::Char('a') if no_modifiers(key.modifiers) => open_agents(model),
+        KeyCode::Char('s') if no_modifiers(key.modifiers) => open_skills(model),
         KeyCode::Char('?') if text_modifiers(key.modifiers) => select_view(model, View::Help),
         KeyCode::Char('/') if no_modifiers(key.modifiers) => {
             model.command.clear();
@@ -335,7 +411,7 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
 }
 
 fn handle_paste(model: &mut TuiModel, text: &str) -> ControllerEffect {
-    if !active_profile_editor(model) && model.focus != Focus::Command {
+    if !active_profile_editor(model) && !active_skill_editor(model) && model.focus != Focus::Command {
         return ControllerEffect::None;
     }
     let before = model.command.text().len();
@@ -348,10 +424,246 @@ fn handle_paste(model: &mut TuiModel, text: &str) -> ControllerEffect {
 }
 
 fn open_agents(model: &mut TuiModel) -> ControllerEffect {
+    model.skills.active = false;
     model.select_view(View::Agents);
     model.set_focus(Focus::Workspace);
     model.agents.pane = AgentsPane::List;
     ControllerEffect::LoadAgentProfiles
+}
+
+fn open_skills(model: &mut TuiModel) -> ControllerEffect {
+    model.skills.active = true;
+    model.skills.pane = SkillsPane::List;
+    model.set_focus(Focus::Workspace);
+    ControllerEffect::LoadSkills
+}
+
+fn active_skill_confirmation(model: &TuiModel) -> bool {
+    model.skills.pane == SkillsPane::Confirmation
+        && model.skills.pending_confirmation.is_some()
+}
+
+fn active_skill_editor(model: &TuiModel) -> bool {
+    model.skills.active
+        && model.skills.pane == SkillsPane::Editor
+        && model.skills.editor.is_some()
+}
+
+fn handle_skill_confirmation_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
+    match key.code {
+        KeyCode::Enter if key.kind == KeyEventKind::Press && no_modifiers(key.modifiers) => model
+            .skills
+            .pending_confirmation
+            .as_ref()
+            .map(|confirmation| ControllerEffect::ExecuteSkill(confirmation.command.clone()))
+            .unwrap_or(ControllerEffect::None),
+        KeyCode::Esc if no_modifiers(key.modifiers) => {
+            let return_pane = model
+                .skills
+                .pending_confirmation
+                .take()
+                .map(|confirmation| confirmation.return_pane)
+                .unwrap_or(SkillsPane::Detail);
+            model.skills.pane = return_pane;
+            ControllerEffect::CancelSkillReview
+        }
+        _ => ControllerEffect::None,
+    }
+}
+
+fn handle_skill_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
+    match key.code {
+        KeyCode::Esc if no_modifiers(key.modifiers) => {
+            model.command.clear();
+            let effect = model
+                .skills
+                .editor
+                .as_mut()
+                .map(|editor| editor.back())
+                .unwrap_or(SkillEditorEffect::Cancelled);
+            apply_skill_editor_effect(model, effect)
+        }
+        KeyCode::Enter if no_modifiers(key.modifiers) => {
+            let input = model.command.take_text();
+            let effect = model
+                .skills
+                .editor
+                .as_mut()
+                .map(|editor| editor.submit_keyboard_line(&input))
+                .unwrap_or(SkillEditorEffect::None);
+            apply_skill_editor_effect(model, effect)
+        }
+        KeyCode::Char(character) if text_modifiers(key.modifiers) => {
+            model.command.insert(character);
+            ControllerEffect::Redraw
+        }
+        KeyCode::Backspace if no_modifiers(key.modifiers) => edit(model, |model| model.command.backspace()),
+        KeyCode::Delete if no_modifiers(key.modifiers) => edit(model, |model| model.command.delete()),
+        KeyCode::Left if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_left()),
+        KeyCode::Right if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_right()),
+        KeyCode::Home if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_home()),
+        KeyCode::End if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_end()),
+        _ => ControllerEffect::None,
+    }
+}
+
+fn apply_skill_editor_effect(model: &mut TuiModel, effect: SkillEditorEffect) -> ControllerEffect {
+    match effect {
+        SkillEditorEffect::None => ControllerEffect::Redraw,
+        SkillEditorEffect::Preview(request) => ControllerEffect::RequestSkillPreview(request),
+        SkillEditorEffect::Execute(command) => {
+            model.skills.pending_confirmation = Some(SkillConfirmation {
+                command,
+                return_pane: SkillsPane::Editor,
+            });
+            model.skills.pane = SkillsPane::Confirmation;
+            ControllerEffect::Redraw
+        }
+        SkillEditorEffect::CancelReview => ControllerEffect::CancelSkillReview,
+        SkillEditorEffect::Cancelled => {
+            model.skills.editor = None;
+            model.skills.pane = SkillsPane::CreateSource;
+            ControllerEffect::Redraw
+        }
+    }
+}
+
+fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEffect> {
+    let effect = match (model.skills.pane, key.code) {
+        (SkillsPane::List, KeyCode::Down) if no_modifiers(key.modifiers) => {
+            let last = model.skills.library.skills.len().saturating_sub(1);
+            model.skills.selected_skill = model.skills.selected_skill.saturating_add(1).min(last);
+            ControllerEffect::Redraw
+        }
+        (SkillsPane::List, KeyCode::Up) if no_modifiers(key.modifiers) => {
+            model.skills.selected_skill = model.skills.selected_skill.saturating_sub(1);
+            ControllerEffect::Redraw
+        }
+        (SkillsPane::List, KeyCode::Enter) if no_modifiers(key.modifiers) => {
+            ControllerEffect::LoadSkill { selected_skill: model.skills.selected_skill }
+        }
+        (SkillsPane::List, KeyCode::Char('c')) if no_modifiers(key.modifiers) => {
+            model.skills.pane = SkillsPane::CreateSource;
+            ControllerEffect::Redraw
+        }
+        (SkillsPane::CreateSource, KeyCode::Down) if no_modifiers(key.modifiers) => {
+            model.skills.selected_create_source = model
+                .skills
+                .selected_create_source
+                .saturating_add(1)
+                .min(model.skills.library.skills.len());
+            ControllerEffect::Redraw
+        }
+        (SkillsPane::CreateSource, KeyCode::Up) if no_modifiers(key.modifiers) => {
+            model.skills.selected_create_source = model.skills.selected_create_source.saturating_sub(1);
+            ControllerEffect::Redraw
+        }
+        (SkillsPane::CreateSource, KeyCode::Enter) if no_modifiers(key.modifiers) => {
+            if model.skills.selected_create_source == 0 {
+                model.skills.start_create(None);
+                model.command.clear();
+                ControllerEffect::Redraw
+            } else {
+                ControllerEffect::LoadSkillStarter {
+                    selected_skill: model.skills.selected_create_source - 1,
+                }
+            }
+        }
+        (SkillsPane::Detail, KeyCode::Down | KeyCode::Right) if no_modifiers(key.modifiers) => {
+            model.skills.selected_action_index = model.skills.selected_action_index.saturating_add(1).min(2);
+            ControllerEffect::Redraw
+        }
+        (SkillsPane::Detail, KeyCode::Up | KeyCode::Left) if no_modifiers(key.modifiers) => {
+            model.skills.selected_action_index = model.skills.selected_action_index.saturating_sub(1);
+            ControllerEffect::Redraw
+        }
+        (SkillsPane::Detail, KeyCode::Enter) if no_modifiers(key.modifiers) => {
+            match model.skills.selected_action() {
+                SkillDetailAction::Assign => {
+                    model.skills.pane = SkillsPane::AgentPicker;
+                    ControllerEffect::LoadSkillAgents
+                }
+                SkillDetailAction::CreateVersion => {
+                    model.skills.start_version();
+                    model.command.clear();
+                    ControllerEffect::Redraw
+                }
+                SkillDetailAction::History => ControllerEffect::LoadSkillHistory {
+                    selected_skill: model.skills.selected_skill,
+                },
+            }
+        }
+        (SkillsPane::History, KeyCode::Down) if no_modifiers(key.modifiers) => {
+            let last = model.skills.history.as_ref().map(|history| history.versions.len().saturating_sub(1)).unwrap_or(0);
+            model.skills.selected_history_version = model.skills.selected_history_version.saturating_add(1).min(last);
+            ControllerEffect::Redraw
+        }
+        (SkillsPane::History, KeyCode::Up) if no_modifiers(key.modifiers) => {
+            model.skills.selected_history_version = model.skills.selected_history_version.saturating_sub(1);
+            ControllerEffect::Redraw
+        }
+        (SkillsPane::History, KeyCode::Enter) if no_modifiers(key.modifiers) => {
+            let Some(history) = model.skills.history.as_ref() else { return Some(ControllerEffect::Redraw); };
+            let Some(entry) = history.versions.get(model.skills.selected_history_version) else { return Some(ControllerEffect::Redraw); };
+            ControllerEffect::LoadSkillVersion {
+                skill_id: history.skill_id,
+                version: entry.skill_ref.version(),
+            }
+        }
+        (SkillsPane::AgentPicker, KeyCode::Down) if no_modifiers(key.modifiers) => {
+            let last = model.agents.profiles.profiles.len().saturating_sub(1);
+            model.skills.selected_agent = model.skills.selected_agent.saturating_add(1).min(last);
+            ControllerEffect::Redraw
+        }
+        (SkillsPane::AgentPicker, KeyCode::Up) if no_modifiers(key.modifiers) => {
+            model.skills.selected_agent = model.skills.selected_agent.saturating_sub(1);
+            ControllerEffect::Redraw
+        }
+        (SkillsPane::AgentPicker, KeyCode::Enter) if no_modifiers(key.modifiers) => {
+            ControllerEffect::LoadSkillAgent { selected_agent: model.skills.selected_agent }
+        }
+        (SkillsPane::AssignmentReview, KeyCode::Enter) if no_modifiers(key.modifiers) => {
+            let detail = model.skills.selected_agent_detail.as_ref()?;
+            let target = model.skills.selected_skill_ref()?.clone();
+            let assignment = model.skills.assignment.clone()?;
+            if assignment == AssignmentKind::AlreadyAssigned {
+                model.set_message(Severity::Warning, "Agent already has this exact skill version.");
+                ControllerEffect::Redraw
+            } else {
+                ControllerEffect::RequestSkillAssignmentPreview {
+                    profile_id: detail.profile.profile_id(),
+                    expected_active_profile_version_id: detail.profile.profile_version_id(),
+                    target,
+                    assignment,
+                }
+            }
+        }
+        (SkillsPane::Result, KeyCode::Enter | KeyCode::Esc) if no_modifiers(key.modifiers) => {
+            model.skills.pane = SkillsPane::Detail;
+            ControllerEffect::Redraw
+        }
+        (_, KeyCode::Esc) if no_modifiers(key.modifiers) => return Some(unwind_skills(model)),
+        _ => return None,
+    };
+    Some(effect)
+}
+
+fn unwind_skills(model: &mut TuiModel) -> ControllerEffect {
+    match model.skills.pane {
+        SkillsPane::List => model.skills.active = false,
+        SkillsPane::CreateSource | SkillsPane::Detail => model.skills.pane = SkillsPane::List,
+        SkillsPane::History | SkillsPane::AgentPicker | SkillsPane::Result => model.skills.pane = SkillsPane::Detail,
+        SkillsPane::AssignmentReview => model.skills.pane = SkillsPane::AgentPicker,
+        SkillsPane::Editor => {
+            model.skills.editor = None;
+            model.skills.pane = SkillsPane::Detail;
+        }
+        SkillsPane::Confirmation => {
+            model.skills.pending_confirmation = None;
+            model.skills.pane = SkillsPane::Detail;
+        }
+    }
+    ControllerEffect::Redraw
 }
 
 fn active_confirmation(model: &TuiModel) -> bool {
@@ -527,6 +839,9 @@ fn apply_profile_editor_effect(
 }
 
 fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEffect> {
+    if model.agents.pane == AgentsPane::Detail && model.agents.skill_panel_open {
+        return handle_agent_skills_key(model, key);
+    }
     let effect = match (model.agents.pane, key.code) {
         (AgentsPane::List, KeyCode::Down) if no_modifiers(key.modifiers) => {
             let last = model.agents.profiles.profiles.len().saturating_sub(1);
@@ -563,6 +878,19 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             ControllerEffect::LoadAgentProfileHistory {
                 selected_profile: model.agents.selected_profile,
             }
+        }
+        (AgentsPane::Detail, KeyCode::Enter) if no_modifiers(key.modifiers) => {
+            if model
+                .agents
+                .detail
+                .as_ref()
+                .is_some_and(|detail| !detail.profile.skill_refs().is_empty())
+            {
+                model.agents.skill_panel_open = true;
+                model.agents.selected_assigned_skill = 0;
+                model.agents.selected_skill_action_index = 0;
+            }
+            ControllerEffect::Redraw
         }
         (AgentsPane::Detail, KeyCode::Down) if no_modifiers(key.modifiers) => {
             model.agents.detail_scroll = model.agents.detail_scroll.saturating_add(1);
@@ -620,6 +948,77 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
     Some(effect)
 }
 
+fn handle_agent_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEffect> {
+    let effect = match key.code {
+        KeyCode::Down if no_modifiers(key.modifiers) => {
+            let last = model
+                .agents
+                .detail
+                .as_ref()
+                .map(|detail| detail.profile.skill_refs().len().saturating_sub(1))
+                .unwrap_or(0);
+            model.agents.selected_assigned_skill = model
+                .agents
+                .selected_assigned_skill
+                .saturating_add(1)
+                .min(last);
+            ControllerEffect::Redraw
+        }
+        KeyCode::Up if no_modifiers(key.modifiers) => {
+            model.agents.selected_assigned_skill =
+                model.agents.selected_assigned_skill.saturating_sub(1);
+            ControllerEffect::Redraw
+        }
+        KeyCode::Right if no_modifiers(key.modifiers) => {
+            model.agents.selected_skill_action_index = model
+                .agents
+                .selected_skill_action_index
+                .saturating_add(1)
+                .min(2);
+            ControllerEffect::Redraw
+        }
+        KeyCode::Left if no_modifiers(key.modifiers) => {
+            model.agents.selected_skill_action_index =
+                model.agents.selected_skill_action_index.saturating_sub(1);
+            ControllerEffect::Redraw
+        }
+        KeyCode::Enter if no_modifiers(key.modifiers) => {
+            let detail = model.agents.detail.as_ref()?;
+            let selected = detail
+                .profile
+                .skill_refs()
+                .get(model.agents.selected_assigned_skill)?
+                .clone();
+            match model.agents.selected_skill_action() {
+                AgentSkillAction::View => {
+                    model.skills.active = true;
+                    ControllerEffect::LoadSkillVersion {
+                        skill_id: selected.skill_id(),
+                        version: selected.version(),
+                    }
+                }
+                AgentSkillAction::Upgrade => {
+                    model.skills.active = true;
+                    model.skills.pane = SkillsPane::List;
+                    ControllerEffect::LoadSkills
+                }
+                AgentSkillAction::Unassign => ControllerEffect::RequestSkillAssignmentPreview {
+                    profile_id: detail.profile.profile_id(),
+                    expected_active_profile_version_id: detail.profile.profile_version_id(),
+                    target: selected.clone(),
+                    assignment: AssignmentKind::Unassign { expected: selected },
+                },
+            }
+        }
+        KeyCode::Esc if no_modifiers(key.modifiers) => {
+            model.agents.skill_panel_open = false;
+            ControllerEffect::Redraw
+        }
+        _ => return None,
+    };
+    Some(effect)
+}
+
 fn unwind_agents(model: &mut TuiModel) -> ControllerEffect {
     match model.agents.pane {
         AgentsPane::List => {
@@ -627,6 +1026,7 @@ fn unwind_agents(model: &mut TuiModel) -> ControllerEffect {
             ControllerEffect::Redraw
         }
         AgentsPane::Detail => {
+            model.agents.skill_panel_open = false;
             model.agents.pane = AgentsPane::List;
             ControllerEffect::Redraw
         }
@@ -652,6 +1052,7 @@ fn select_view(model: &mut TuiModel, view: View) -> ControllerEffect {
 }
 
 fn select_workspace_view(model: &mut TuiModel, view: View) {
+    model.skills.active = false;
     model.select_view(view);
     model.set_focus(Focus::Workspace);
     model.scroll_home();
