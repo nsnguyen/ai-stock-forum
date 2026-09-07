@@ -47,21 +47,21 @@ fn model() -> TuiModel {
 }
 
 #[test]
-fn opening_skills_from_agent_panel_tracks_and_restores_workspace_origin() {
+fn global_skills_tab_switch_from_agent_panel_restores_the_agents_tab() {
     let mut model = model();
     model.active_view = View::Agents;
     model.agents.skill_panel_open = true;
     model.agents.detail = Some(profile_with_skills(10, Vec::new()));
 
     assert_eq!(
-        handle_event(&mut model, key(KeyCode::Char('s'))),
+        handle_event(&mut model, alt_tab('6')),
         ControllerEffect::LoadSkills
     );
     assert_eq!(
         model.skills.workspace_origin,
-        Some(ai_stock_forum::ui::tui::SkillWorkspaceOrigin::AgentSkills {
-            profile_id: AgentProfileId::from_uuid(Uuid::from_u128(10)),
-        })
+        Some(ai_stock_forum::ui::tui::SkillWorkspaceOrigin::Cockpit(
+            View::Agents
+        ))
     );
 
     assert_eq!(
@@ -74,8 +74,420 @@ fn opening_skills_from_agent_panel_tracks_and_restores_workspace_origin() {
     assert!(model.agents.skill_panel_open);
 }
 
+#[test]
+fn hidden_skill_editor_blocks_agent_skill_actions_without_losing_its_draft() {
+    let assigned = skill(20, "Protected editor skill");
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.library_loaded = true;
+    model.skills.start_create(None);
+    model.command.ingest("unfinished protected draft");
+
+    assert_eq!(
+        handle_event(&mut model, alt_tab('5')),
+        ControllerEffect::Redraw
+    );
+    model.agents.pane = AgentsPane::Detail;
+    model.agents.detail = Some(profile_with_skills(30, vec![assigned.reference()]));
+    model.agents.skill_panel_open = true;
+    model.agents.selected_skill_action_index = 0;
+    let protected_skills = model.skills.clone();
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.active_view, View::Agents);
+    assert!(!model.skills.active);
+    assert_eq!(model.skills, protected_skills);
+    assert_eq!(
+        model.message.as_ref().map(|message| message.text.as_str()),
+        Some("Finish the protected Skills workflow first with Option/Alt+6.")
+    );
+
+    assert_eq!(
+        handle_event(&mut model, alt_tab('6')),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.skills.pane, SkillsPane::Editor);
+    assert_eq!(model.command.text(), "unfinished protected draft");
+}
+
+#[test]
+fn hidden_skill_confirmation_blocks_agent_mutations_without_replacing_its_review() {
+    let assigned = skill(40, "Protected confirmation skill");
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.library_loaded = true;
+    model.skills.pane = SkillsPane::Confirmation;
+    model.skills.pending_confirmation = Some(SkillConfirmation {
+        command: ApplicationCommand::ShowHelp,
+        origin: SkillOperationOrigin::Skills(SkillsPane::Detail),
+    });
+    model.skills.review_registered = true;
+
+    assert_eq!(
+        handle_event(&mut model, alt_tab('5')),
+        ControllerEffect::Redraw
+    );
+    model.agents.pane = AgentsPane::Detail;
+    model.agents.detail = Some(profile_with_skills(50, vec![assigned.reference()]));
+    model.agents.skill_panel_open = true;
+    model.agents.selected_skill_action_index = 2;
+    let protected_skills = model.skills.clone();
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.active_view, View::Agents);
+    assert!(!model.skills.active);
+    assert_eq!(model.skills, protected_skills);
+    assert_eq!(
+        model.message.as_ref().map(|message| message.text.as_str()),
+        Some("Finish the protected Skills workflow first with Option/Alt+6.")
+    );
+}
+
+#[test]
+fn conflicting_slash_workflows_keep_protected_tabs_and_command_drafts_intact() {
+    let mut skill_model = model();
+    skill_model.skills.active = true;
+    skill_model.skills.library_loaded = true;
+    skill_model.skills.start_create(None);
+    assert_eq!(
+        handle_event(&mut skill_model, alt_tab('1')),
+        ControllerEffect::Redraw
+    );
+    let protected_skills = skill_model.skills.clone();
+
+    assert_eq!(
+        submit_command(&mut skill_model, "/skill add"),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(skill_model.command.text(), "/skill add");
+    assert!(!skill_model.command_in_flight);
+    assert_eq!(skill_model.skills, protected_skills);
+
+    let mut agent_model = model();
+    agent_model.skills.library_loaded = true;
+    agent_model.select_view(View::Agents);
+    assert!(agent_model.agents.start_profile_create(
+        0,
+        ai_stock_forum::agents::builtin_profile_templates(),
+    ));
+    assert_eq!(
+        handle_event(&mut agent_model, alt_tab('1')),
+        ControllerEffect::Redraw
+    );
+    let protected_agents = agent_model.agents.clone();
+
+    assert_eq!(
+        submit_command(&mut agent_model, "/agent create"),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(agent_model.command.text(), "/agent create");
+    assert!(!agent_model.command_in_flight);
+    assert_eq!(agent_model.agents, protected_agents);
+}
+
+#[test]
+fn delayed_read_results_hydrate_without_displacing_protected_workflows() {
+    let listed_skill = skill(60, "Hydrated skill");
+    let mut skill_model = model();
+    skill_model.skills.active = true;
+    skill_model.skills.library_loaded = true;
+    skill_model.skills.pane = SkillsPane::Confirmation;
+    skill_model.skills.pending_confirmation = Some(SkillConfirmation {
+        command: ApplicationCommand::ShowHelp,
+        origin: SkillOperationOrigin::Skills(SkillsPane::Detail),
+    });
+    skill_model.skills.review_registered = true;
+    let protected_confirmation = skill_model.skills.pending_confirmation.clone();
+
+    assert_eq!(
+        handle_event(&mut skill_model, alt_tab('1')),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(
+        submit_command(&mut skill_model, "/skills"),
+        ControllerEffect::Submit(ApplicationCommand::ListSkills)
+    );
+    assert_eq!(
+        handle_event(&mut skill_model, alt_tab('6')),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(
+        apply_outcome(
+            &mut skill_model,
+            command_outcome(CommandView::Skills(SkillsView {
+                skills: vec![summary(&listed_skill)],
+                total_count: 1,
+                returned_count: 1,
+                truncated: false,
+            })),
+        ),
+        ControllerEffect::Redraw
+    );
+    assert!(skill_model.skills.active);
+    assert_eq!(skill_model.skills.pane, SkillsPane::Confirmation);
+    assert_eq!(
+        skill_model.skills.pending_confirmation,
+        protected_confirmation
+    );
+    assert!(skill_model.skills.review_registered);
+    assert_eq!(skill_model.skills.library.skills.len(), 1);
+
+    let mut agent_model = model();
+    agent_model.skills.library_loaded = true;
+    agent_model.select_view(View::Agents);
+    assert!(agent_model.agents.start_profile_create(
+        0,
+        ai_stock_forum::agents::builtin_profile_templates(),
+    ));
+    let protected_editor = agent_model.agents.editor.clone();
+    assert_eq!(
+        handle_event(&mut agent_model, alt_tab('1')),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(
+        submit_command(&mut agent_model, "/agent list"),
+        ControllerEffect::Submit(ApplicationCommand::ListAgentProfiles)
+    );
+    assert_eq!(
+        handle_event(&mut agent_model, alt_tab('5')),
+        ControllerEffect::Redraw
+    );
+    let listed_agent = agent(70, "Hydrated agent");
+    assert_eq!(
+        apply_outcome(
+            &mut agent_model,
+            command_outcome(CommandView::AgentProfiles(AgentProfilesView {
+                profiles: vec![listed_agent.clone()],
+                total_count: 1,
+                returned_count: 1,
+                truncated: false,
+            })),
+        ),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(agent_model.active_view, View::Agents);
+    assert_eq!(agent_model.agents.pane, AgentsPane::Editor);
+    assert_eq!(agent_model.agents.editor, protected_editor);
+    assert_eq!(agent_model.agents.profiles.profiles, vec![listed_agent]);
+}
+
+#[test]
+fn delayed_agent_detail_does_not_replace_a_newer_selection_or_context_after_returning() {
+    let agent_a = agent(72, "Agent A");
+    let agent_b = agent(76, "Agent B");
+    let detail_a = profile_with_skills(72, Vec::new());
+    let detail_b = profile_with_skills(76, Vec::new());
+    let mut model = model();
+    model.skills.library_loaded = true;
+    model.select_view(View::Agents);
+    model.agents.replace_profiles(AgentProfilesView {
+        profiles: vec![agent_a.clone(), agent_b.clone()],
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
+    });
+    model.agents.selected_profile = 1;
+    model.agents.list_scroll = 1;
+    model.agents.detail = Some(detail_b);
+    model.agents.pane = AgentsPane::List;
+
+    assert!(matches!(
+        submit_command(
+            &mut model,
+            &format!("/agent show {}", agent_a.profile_id)
+        ),
+        ControllerEffect::Submit(ApplicationCommand::ShowAgentProfile { .. })
+    ));
+    assert_eq!(
+        handle_event(&mut model, alt_tab('4')),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(
+        handle_event(&mut model, alt_tab('5')),
+        ControllerEffect::Redraw
+    );
+    model.set_focus(Focus::Workspace);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Up)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Down)),
+        ControllerEffect::Redraw
+    );
+    model.agents.detail_scroll = 4;
+    let expected_agents = model.agents.clone();
+
+    assert_eq!(
+        apply_outcome(
+            &mut model,
+            command_outcome(CommandView::AgentProfile(detail_a))
+        ),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.active_view, View::Agents);
+    assert_eq!(model.agents, expected_agents);
+}
+
+#[test]
+fn delayed_skill_detail_does_not_replace_a_newer_selection_or_context_after_returning() {
+    let skill_a = skill(82, "Skill A");
+    let skill_b = skill(86, "Skill B");
+    let detail_a = skill_view(&skill_a);
+    let detail_b = skill_view(&skill_b);
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.library_loaded = true;
+    model.skills.library = SkillsView {
+        skills: vec![summary(&skill_a), summary(&skill_b)],
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
+    };
+    model.skills.selected_skill = 1;
+    model.skills.detail = Some(detail_b);
+    model.skills.pane = SkillsPane::List;
+
+    assert!(matches!(
+        submit_command(
+            &mut model,
+            &format!("/skill show {}", skill_a.skill_id())
+        ),
+        ControllerEffect::Submit(ApplicationCommand::ShowSkill { .. })
+    ));
+    assert_eq!(
+        handle_event(&mut model, alt_tab('4')),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(
+        handle_event(&mut model, alt_tab('6')),
+        ControllerEffect::Redraw
+    );
+    model.set_focus(Focus::Workspace);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Up)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Down)),
+        ControllerEffect::Redraw
+    );
+    let expected_skills = model.skills.clone();
+
+    assert_eq!(
+        apply_outcome(
+            &mut model,
+            command_outcome(CommandView::Skill(detail_a))
+        ),
+        ControllerEffect::Redraw
+    );
+    assert!(model.skills.active);
+    assert_eq!(model.skills, expected_skills);
+}
+
+#[test]
+fn skill_read_outcome_replaces_a_stale_cockpit_escape_origin() {
+    let mut model = model();
+    model.skills.library_loaded = true;
+
+    assert_eq!(
+        handle_event(&mut model, alt_tab('6')),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(
+        model.skills.workspace_origin,
+        Some(SkillWorkspaceOrigin::Cockpit(View::Overview))
+    );
+    assert_eq!(
+        handle_event(&mut model, alt_tab('2')),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(
+        submit_command(&mut model, "/skills"),
+        ControllerEffect::Submit(ApplicationCommand::ListSkills)
+    );
+    apply_outcome(
+        &mut model,
+        command_outcome(CommandView::Skills(SkillsView {
+            skills: Vec::new(),
+            total_count: 0,
+            returned_count: 0,
+            truncated: false,
+        })),
+    );
+
+    assert!(model.skills.active);
+    assert_eq!(
+        model.skills.workspace_origin,
+        Some(SkillWorkspaceOrigin::Cockpit(View::Setup))
+    );
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Esc)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.active_view, View::Setup);
+}
+
+#[test]
+fn cancelled_agent_skill_origin_cannot_capture_a_later_cockpit_open() {
+    let profile_id = AgentProfileId::from_uuid(Uuid::from_u128(80));
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.library_loaded = true;
+    model.skills.workspace_origin = Some(SkillWorkspaceOrigin::AgentSkills { profile_id });
+    model.skills.operation_origin = SkillOperationOrigin::AgentSkills { profile_id };
+    model.skills.pane = SkillsPane::Confirmation;
+    model.skills.pending_confirmation = Some(SkillConfirmation {
+        command: ApplicationCommand::ShowHelp,
+        origin: SkillOperationOrigin::AgentSkills { profile_id },
+    });
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Esc)),
+        ControllerEffect::CancelSkillReview
+    );
+    assert_eq!(model.active_view, View::Agents);
+    assert!(!model.skills.active);
+    assert_eq!(model.skills.workspace_origin, None);
+
+    assert_eq!(
+        handle_event(&mut model, alt_tab('2')),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(
+        handle_event(&mut model, alt_tab('6')),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(
+        model.skills.workspace_origin,
+        Some(SkillWorkspaceOrigin::Cockpit(View::Setup))
+    );
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Esc)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Esc)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.active_view, View::Setup);
+}
+
 fn key(code: KeyCode) -> TuiEvent {
     TuiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+fn alt_tab(number: char) -> TuiEvent {
+    TuiEvent::Key(KeyEvent::new(
+        KeyCode::Char(number),
+        KeyModifiers::ALT,
+    ))
 }
 
 fn submit_command(model: &mut TuiModel, command: &str) -> ControllerEffect {
@@ -505,7 +917,7 @@ fn opened_historical_version_assigns_its_exact_ref_and_classifies_historical_rea
 }
 
 #[test]
-fn s_opens_skills_without_mutating_library_and_bare_q_is_inert() {
+fn alt_six_opens_skills_without_mutating_library_and_bare_q_is_inert() {
     let first = skill(10, "First");
     let mut model = model();
     model.skills.replace_skills(SkillsView {
@@ -517,8 +929,8 @@ fn s_opens_skills_without_mutating_library_and_bare_q_is_inert() {
     let before = model.skills.library.clone();
 
     assert_eq!(
-        handle_event(&mut model, key(KeyCode::Char('s'))),
-        ControllerEffect::LoadSkills
+        handle_event(&mut model, alt_tab('6')),
+        ControllerEffect::Redraw
     );
     assert!(model.skills.active);
     assert_eq!(model.skills.library, before);

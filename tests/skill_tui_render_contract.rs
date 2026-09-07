@@ -15,7 +15,7 @@ use ai_stock_forum::{
         skill_editor::SkillEditor,
         tui::{
             AssignmentKind, SkillConfirmation, SkillOperationOrigin,
-            model::{AgentsPane, Severity, SkillsPane, TuiModel, View},
+            model::{AgentsPane, Focus, Severity, SkillsPane, TuiModel, View},
             render,
             theme::Theme,
         },
@@ -187,6 +187,21 @@ fn skills_workspace_uses_one_two_and_three_panes_at_adaptive_breakpoints() {
     assert!(narrow_list.contains("Enter"));
     assert!(narrow_list.contains("c Create"));
     assert!(narrow_list.contains("Esc"));
+}
+
+#[test]
+fn open_skills_inspector_is_rendered_at_medium_and_narrow_breakpoints() {
+    let mut detail = skills_model(SkillsPane::Detail);
+    detail.inspector_open = true;
+    detail.focus = Focus::Inspector;
+
+    for (width, height) in [(80, 24), (70, 20)] {
+        let text = render_text(&detail, width, height);
+        assert!(
+            text.contains("Skill context"),
+            "missing Skills inspector at {width}x{height}"
+        );
+    }
 }
 
 #[test]
@@ -419,13 +434,15 @@ fn confirmation_and_help_advertise_only_real_keyboard_and_quit_behavior() {
     let mut help = TuiModel::new(snapshot(), false);
     help.active_view = View::Help;
     let help_text = render_text(&help, 100, 36);
-    assert!(help_text.contains("s                   Open Skills"));
+    assert!(help_text.contains("Option/Alt+1-6"));
+    assert!(help_text.contains("Open any tab from anywhere"));
+    assert!(!help_text.contains("s                   Open Skills"));
     assert!(help_text.contains("q                   Inert"));
     assert!(help_text.contains("/quit"));
     assert!(!help_text.contains("q                   Request shutdown"));
 
     let navigation = render_text(&help, 120, 36);
-    assert!(navigation.contains("s Skills"));
+    assert!(navigation.contains("Alt+6 Skills"));
     assert!(navigation.contains("q inert"));
     assert!(navigation.contains("/quit exit"));
 }
@@ -589,8 +606,8 @@ fn list_focus_is_exclusive_and_skills_suppresses_agents_navigation_focus() {
     assert!(!detail_corner.modifier.contains(ratatui::style::Modifier::REVERSED));
 
     let text = render_text(&model, 120, 36);
-    assert!(text.contains("> s Skills"));
-    assert!(!text.contains("> a Agents"));
+    assert!(text.contains("> Alt+6 Skills"));
+    assert!(!text.contains("> Alt+5 Agents"));
 }
 
 #[test]

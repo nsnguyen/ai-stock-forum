@@ -87,12 +87,13 @@ Remove-Item -LiteralPath $stateRoot -Recurse -Confirm
 
 ## Interactive controls
 
-The cockpit has native Overview, Setup, Audit, and Help views; it must never
-emit a transcript while navigating them.
+The cockpit has native Overview, Setup, Audit, Help, Agents, and Skills tabs; it
+must never emit a transcript while navigating them.
 
 | Control | Expected result |
 | --- | --- |
-| `1`-`4`, `?` | Select Overview, Setup, Audit, or Help. |
+| `Option+1`-`Option+6` on macOS; `Alt+1`-`Alt+6` on Windows and Linux | Select Overview, Setup, Audit, Help, Agents, or Skills from any pane, editor, or confirmation while preserving each tab's state. |
+| `?` | Select Help. |
 | `Tab`, `Shift+Tab` | Cycle visible focus forward or backward. |
 | `Up`, `Down`, `Left`, `Right`, `PageUp`, `PageDown`, `Home`, `End` | Navigate the focused region, including Audit selection. |
 | `i` | Open or focus the inspector. |
@@ -141,7 +142,7 @@ safely without corrupting the first session.
 | Redirected stdout | Command mode is selected automatically. |
 | Widths 59, 60, 79, 80, 119, 120 | TooSmall, Narrow, Narrow, Medium, Medium, Wide when the matching height threshold is met. |
 | Heights 17, 18, 23, 24, 29, 30 | TooSmall below 18; width-dependent Narrow/Medium/Wide above it. |
-| Keys `1`-`4`, Tab, arrows, paging, `/`, Esc, `i`, `?` | Focus and native views update without transcript output. |
+| Keys `Option/Alt+1`-`Option/Alt+6`, Tab, arrows, paging, `/`, Esc, `i`, `?` | Focus and native views update without transcript output. |
 | `/help`, `/status`, `/setup status`, `/audit tail`, `/audit tail N`, invalid input | Existing application command semantics and audit behavior are preserved. Bare `/audit` is rejected as malformed input. |
 | `/quit` | Auditable normal shutdown, terminal restored, success exit. |
 | Ctrl+C | Clean external-signal shutdown and terminal restoration. |

@@ -25,9 +25,9 @@ pub(super) fn content_height(width: u16) -> u16 {
 fn content(theme: &Theme) -> Vec<Line<'static>> {
     vec![
         Line::styled("KEYS", theme.accent),
-        Line::raw("1-4                 Open Overview / Setup / Audit / Help"),
-        Line::raw("a                   Open Agents"),
-        Line::raw("s                   Open Skills"),
+        Line::raw("Option/Alt+1-6      Open any tab from anywhere"),
+        Line::raw("                    1 Overview / 2 Setup / 3 Audit / 4 Help"),
+        Line::raw("                    5 Agents / 6 Skills"),
         Line::raw("q                   Inert; does not quit"),
         Line::raw("Tab / Shift+Tab     Move focus forward / backward"),
         Line::raw("Arrow keys          Move within the focused list or field"),

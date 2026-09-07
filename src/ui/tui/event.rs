@@ -21,6 +21,9 @@ pub enum SkillKey {
 impl SkillKey {
     pub fn from_key(key: crossterm::event::KeyEvent) -> Option<Self> {
         use crossterm::event::{KeyCode, KeyModifiers};
+        if key.code == KeyCode::Char('6') && key.modifiers == KeyModifiers::ALT {
+            return Some(Self::Open);
+        }
         if key.modifiers != KeyModifiers::NONE {
             return None;
         }
@@ -31,7 +34,6 @@ impl SkillKey {
             KeyCode::Right => Some(Self::Right),
             KeyCode::Enter => Some(Self::Enter),
             KeyCode::Esc => Some(Self::Escape),
-            KeyCode::Char('s') => Some(Self::Open),
             KeyCode::Char('c') => Some(Self::Create),
             _ => None,
         }
@@ -104,7 +106,23 @@ mod tests {
     use crossbeam_channel::bounded;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-    use super::{CrosstermEventSource, EventSource, TuiEvent, translate};
+    use super::{CrosstermEventSource, EventSource, SkillKey, TuiEvent, translate};
+
+    #[test]
+    fn skill_open_uses_only_the_global_alt_six_chord() {
+        assert_eq!(
+            SkillKey::from_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::ALT)),
+            Some(SkillKey::Open)
+        );
+        assert_eq!(
+            SkillKey::from_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            SkillKey::from_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
+            None
+        );
+    }
 
     #[test]
     fn key_press_resize_and_interrupt_become_typed_events() {

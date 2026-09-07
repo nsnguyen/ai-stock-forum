@@ -54,9 +54,8 @@ thresholds it is Narrow from `60x18`, Medium from `80x24`, and Wide from
 
 | Control | Result |
 | --- | --- |
-| `1`, `2`, `3`, `4`, `?` | Select Overview, Setup, Audit, or Help. |
-| `a` outside command entry | Open the Agents workspace. Inside command entry, `a` remains text. |
-| `s` outside command entry | Open the Skills workspace. Inside command entry, `s` remains text. |
+| `Option+1` through `Option+6` on macOS; `Alt+1` through `Alt+6` on Windows and Linux | Open Overview, Setup, Audit, Help, Agents, or Skills from any pane, editor, or confirmation. |
+| `?` | Open Help. |
 | `Tab`, `Shift+Tab` | Move focus forward or backward among visible regions. |
 | Arrow keys, `PageUp`, `PageDown`, `Home`, `End` | Navigate the focused view or Audit selection. |
 | `i`, `Esc` | Open/focus the inspector; then dismiss the inspector or message. |
@@ -74,6 +73,10 @@ ordinary text inside editors. `/help`, `/status`, `/setup status`, `/audit tail`
 `/audit tail N`, `/quit`, and rejected input continue through the existing parser,
 runtime, application, policy, event, audit, and persistence boundaries. Bare
 `/audit` is rejected as malformed input.
+
+Each tab retains its own focus, scroll position, unfinished input, selected
+pane, editor draft, and pending confirmation while another tab is visible.
+Switching tabs never submits or cancels the retained action.
 
 See [the Phase 0B testing guide](docs/phase-0b-testing.md) for the manual
 acceptance procedure, fallback behavior, restoration checks, and host-specific
@@ -103,7 +106,8 @@ restart.
 
 ### Keyboard-first profile editor
 
-In the Adaptive Cockpit, press `a` to open Agents and `c` to create a profile.
+In the Adaptive Cockpit, press `Option+5` on macOS or `Alt+5` on Windows and
+Linux to open Agents, then press `c` to create a profile.
 Use `Up` and `Down` to choose a complete built-in template. Press `Enter` to
 accept it, then press `Enter` on each prefilled field to keep its current value
 and continue. Typing a replacement before `Enter` saves that replacement and
@@ -146,8 +150,8 @@ unassign reviews, schema version 3 persistence, recovery, and compact-to-wide
 Adaptive Cockpit views. Skills are inert accepted context: they cannot execute
 or grant shell, filesystem, Git, MCP, provider, browser, or network access.
 
-Normal use is keyboard-first: press `s`, navigate with arrows, and use `Enter`
-and `Esc` through visible review and confirmation steps. Optional `/skill`
+Normal use is keyboard-first: press `Option+6` on macOS or `Alt+6` on Windows
+and Linux, navigate with arrows, and use `Enter` and `Esc` through visible review and confirmation steps. Optional `/skill`
 commands open the same typed workflows; mutation shortcuts stage review rather
 than writing directly. Bare `q` remains inert and `/quit` remains normal
 shutdown. Inference and chat remain deferred to Phase 3. See the

@@ -57,6 +57,14 @@ fn key_event(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> TuiE
     TuiEvent::Key(KeyEvent::new_with_kind(code, modifiers, kind))
 }
 
+fn alt_tab(number: char) -> TuiEvent {
+    key_event(
+        KeyCode::Char(number),
+        KeyModifiers::ALT,
+        KeyEventKind::Press,
+    )
+}
+
 fn create_editor() -> ProfileEditor {
     ProfileEditor::for_create(&builtin_profile_templates()[0]).expect("builtin template is valid")
 }
@@ -150,11 +158,11 @@ fn advance_editor_to_review_with_enter(model: &mut TuiModel) {
 }
 
 #[test]
-fn a_opens_agents_but_remains_text_when_command_entry_owns_input() {
+fn alt_five_opens_agents_and_bare_a_remains_text_when_command_entry_owns_input() {
     let mut model = model();
 
     assert_eq!(
-        handle_event(&mut model, key(KeyCode::Char('a'))),
+        handle_event(&mut model, alt_tab('5')),
         ControllerEffect::LoadAgentProfiles
     );
     assert_eq!(model.active_view, View::Agents);
@@ -169,17 +177,22 @@ fn a_opens_agents_but_remains_text_when_command_entry_owns_input() {
 }
 
 #[test]
-fn existing_numeric_navigation_remains_stable() {
+fn option_alt_numeric_navigation_selects_each_non_skill_tab() {
     let mut model = model();
-    for (key_code, expected) in [
-        (KeyCode::Char('1'), View::Overview),
-        (KeyCode::Char('2'), View::Setup),
-        (KeyCode::Char('3'), View::Audit),
-        (KeyCode::Char('4'), View::Help),
+    for (number, expected) in [
+        ('1', View::Overview),
+        ('2', View::Setup),
+        ('3', View::Audit),
+        ('4', View::Help),
+        ('5', View::Agents),
     ] {
         assert_eq!(
-            handle_event(&mut model, key(key_code)),
-            ControllerEffect::Redraw
+            handle_event(&mut model, alt_tab(number)),
+            if number == '5' {
+                ControllerEffect::LoadAgentProfiles
+            } else {
+                ControllerEffect::Redraw
+            }
         );
         assert_eq!(model.active_view, expected);
     }
@@ -188,7 +201,7 @@ fn existing_numeric_navigation_remains_stable() {
 #[test]
 fn agents_local_navigation_tracks_panes_selection_and_effects() {
     let mut model = model();
-    handle_event(&mut model, key(KeyCode::Char('a')));
+    handle_event(&mut model, alt_tab('5'));
     model.agents.replace_profiles(AgentProfilesView {
         profiles: vec![profile_summary(10), profile_summary(11)],
         total_count: 2,
@@ -362,14 +375,17 @@ fn every_view_transition_recomputes_geometry_without_resize_and_preserves_agents
             (KeyCode::Char('4'), View::Help),
         ] {
             assert_eq!(
-                handle_event(&mut model, key(KeyCode::Char('a'))),
+                handle_event(&mut model, alt_tab('5')),
                 ControllerEffect::LoadAgentProfiles
             );
             assert_cached_geometry(&model, width, height, View::Agents);
             assert_eq!(model.agents, expected_agents_state);
 
             assert_eq!(
-                handle_event(&mut model, key(code)),
+                handle_event(
+                    &mut model,
+                    key_event(code, KeyModifiers::ALT, KeyEventKind::Press),
+                ),
                 ControllerEffect::Redraw
             );
             assert_cached_geometry(&model, width, height, view);
@@ -387,7 +403,7 @@ fn every_view_transition_recomputes_geometry_without_resize_and_preserves_agents
 #[test]
 fn escape_respects_active_agents_layers_and_bare_q_never_quits() {
     let mut model = model();
-    handle_event(&mut model, key(KeyCode::Char('a')));
+    handle_event(&mut model, alt_tab('5'));
     handle_event(&mut model, key(KeyCode::Char('c')));
     assert!(
         model
@@ -437,7 +453,7 @@ fn escape_respects_active_agents_layers_and_bare_q_never_quits() {
 #[test]
 fn resize_preserves_agents_selection_scroll_and_editor_draft() {
     let mut model = model();
-    handle_event(&mut model, key(KeyCode::Char('a')));
+    handle_event(&mut model, alt_tab('5'));
     handle_event(&mut model, key(KeyCode::Char('c')));
     assert!(
         model
@@ -469,7 +485,7 @@ fn resize_preserves_agents_selection_scroll_and_editor_draft() {
 #[test]
 fn bare_q_never_requests_shutdown_across_agent_input_owners_or_too_small() {
     let mut editor_model = model();
-    handle_event(&mut editor_model, key(KeyCode::Char('a')));
+    handle_event(&mut editor_model, alt_tab('5'));
     handle_event(&mut editor_model, key(KeyCode::Char('c')));
     assert!(
         editor_model
@@ -505,7 +521,7 @@ fn bare_q_never_requests_shutdown_across_agent_input_owners_or_too_small() {
     assert_eq!(confirmation_model, confirmation_before_q);
 
     let mut local_model = model();
-    handle_event(&mut local_model, key(KeyCode::Char('a')));
+    handle_event(&mut local_model, alt_tab('5'));
     let local_before_q = local_model.clone();
     assert_eq!(
         handle_event(&mut local_model, key(KeyCode::Char('q'))),
@@ -550,7 +566,7 @@ fn bare_q_never_requests_shutdown_across_agent_input_owners_or_too_small() {
 #[test]
 fn agents_edit_detail_and_history_navigation_keep_independent_scroll_state() {
     let mut model = model();
-    handle_event(&mut model, key(KeyCode::Char('a')));
+    handle_event(&mut model, alt_tab('5'));
     model.agents.replace_profiles(AgentProfilesView {
         profiles: vec![profile_summary(40), profile_summary(41)],
         total_count: 2,
