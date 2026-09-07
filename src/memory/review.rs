@@ -532,11 +532,20 @@ impl MemoryResolutionReviewBinding {
         plaintext_acknowledgement: MemoryPlaintextAcknowledgement,
         review_digest: Digest,
     ) -> Result<Self, DomainError> {
-        let expected = match action {
-            MemoryResolutionAction::Approve => ApprovalStatus::Accepted,
-            MemoryResolutionAction::Reject => ApprovalStatus::Rejected,
-        };
-        if actor != Actor::Human || expected_approval_status != expected {
+        if actor != Actor::Human || expected_approval_status != ApprovalStatus::Pending {
+            return Err(DomainError::MemoryProposalReviewUnavailable);
+        }
+        if review_digest
+            != resolution_review_digest(
+                &actor,
+                action,
+                &proposal,
+                approval_id,
+                expected_approval_status,
+                &expected_entry,
+                &plaintext_acknowledgement,
+            )?
+        {
             return Err(DomainError::MemoryProposalReviewUnavailable);
         }
         Ok(Self {
@@ -550,6 +559,39 @@ impl MemoryResolutionReviewBinding {
             review_digest,
         })
     }
+}
+
+fn resolution_review_digest(
+    actor: &Actor,
+    action: MemoryResolutionAction,
+    proposal: &MemoryProposalRef,
+    approval_id: ApprovalId,
+    expected_approval_status: ApprovalStatus,
+    expected_entry: &ExpectedMemoryEntryState,
+    plaintext_acknowledgement: &MemoryPlaintextAcknowledgement,
+) -> Result<Digest, DomainError> {
+    Ok(sha256(&canonical_json_bytes(
+        &MemoryResolutionReviewDigestMaterial {
+            actor,
+            action,
+            proposal,
+            approval_id,
+            expected_approval_status,
+            expected_entry,
+            plaintext_acknowledgement,
+        },
+    )?))
+}
+
+#[derive(Serialize)]
+struct MemoryResolutionReviewDigestMaterial<'a> {
+    actor: &'a Actor,
+    action: MemoryResolutionAction,
+    proposal: &'a MemoryProposalRef,
+    approval_id: ApprovalId,
+    expected_approval_status: ApprovalStatus,
+    expected_entry: &'a ExpectedMemoryEntryState,
+    plaintext_acknowledgement: &'a MemoryPlaintextAcknowledgement,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1178,5 +1220,102 @@ mod tests {
                 .reserve_direct(command(95), token(94), &direct)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn resolution_binding_requires_pending_and_keeps_actions_and_digests_disjoint() {
+        let proposal = MemoryProposalRef::new(
+            crate::domain::MemoryProposalId::from_uuid(uuid(100)),
+            ObjectVersion::new(1).unwrap(),
+            sha256(b"proposal"),
+        )
+        .unwrap();
+        let approval = ApprovalId::from_uuid(uuid(101));
+        let acknowledgement = MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1;
+        let approve_digest = resolution_review_digest(
+            &Actor::Human,
+            MemoryResolutionAction::Approve,
+            &proposal,
+            approval,
+            ApprovalStatus::Pending,
+            &ExpectedMemoryEntryState::Absent,
+            &acknowledgement,
+        )
+        .unwrap();
+        let reject_digest = resolution_review_digest(
+            &Actor::Human,
+            MemoryResolutionAction::Reject,
+            &proposal,
+            approval,
+            ApprovalStatus::Pending,
+            &ExpectedMemoryEntryState::Absent,
+            &acknowledgement,
+        )
+        .unwrap();
+        assert_ne!(approve_digest, reject_digest);
+        let approve = MemoryResolutionReviewBinding::new(
+            Actor::Human,
+            MemoryResolutionAction::Approve,
+            proposal.clone(),
+            approval,
+            ApprovalStatus::Pending,
+            ExpectedMemoryEntryState::Absent,
+            acknowledgement,
+            approve_digest,
+        )
+        .unwrap();
+        let reject = MemoryResolutionReviewBinding::new(
+            Actor::Human,
+            MemoryResolutionAction::Reject,
+            proposal,
+            approval,
+            ApprovalStatus::Pending,
+            ExpectedMemoryEntryState::Absent,
+            acknowledgement,
+            reject_digest,
+        )
+        .unwrap();
+        let accepted_digest = resolution_review_digest(
+            &Actor::Human,
+            MemoryResolutionAction::Approve,
+            &reject.proposal,
+            approval,
+            ApprovalStatus::Accepted,
+            &reject.expected_entry,
+            &acknowledgement,
+        )
+        .unwrap();
+        assert!(
+            MemoryResolutionReviewBinding::new(
+                Actor::Human,
+                MemoryResolutionAction::Approve,
+                reject.proposal.clone(),
+                approval,
+                ApprovalStatus::Accepted,
+                reject.expected_entry.clone(),
+                acknowledgement,
+                accepted_digest,
+            )
+            .is_err()
+        );
+        let registry = MemoryReviewRegistry::default();
+        registry.replace_resolution(token(102), approve.clone());
+        assert!(
+            registry
+                .reserve_resolution(command(103), token(102), &reject)
+                .is_err()
+        );
+        let mut wrong_approval = approve.clone();
+        wrong_approval.approval_id = ApprovalId::from_uuid(uuid(105));
+        assert!(
+            registry
+                .reserve_resolution(command(103), token(102), &wrong_approval)
+                .is_err()
+        );
+        registry
+            .reserve_resolution(command(104), token(102), &approve)
+            .unwrap()
+            .consume()
+            .unwrap();
     }
 }

@@ -9,6 +9,7 @@ use crate::{
     memory::normalization::{PLAINTEXT_VALIDATION_VERSION_V1, PlaintextField, validate_plaintext},
 };
 
+use super::entry::canonicalize_memory_multiline;
 use super::{ExpectedMemoryEntryState, MemoryEntryDraft, MemoryEntryState, NormalizedMemoryKey};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -268,6 +269,7 @@ impl MemoryProposal {
             (MemoryProposalOperation::Set { candidate }, _) => {
                 if candidate.display_key() != self.display_key
                     || candidate.normalized_key() != self.normalized_key
+                    || matches!(&self.expected, ExpectedMemoryEntryState::Present(reference) if set_content_digest(candidate)? == *reference.content_digest())
                 {
                     return Err(DomainError::InvalidMemoryProposal);
                 }
@@ -387,14 +389,8 @@ fn canonical_display_key(value: &str) -> Result<String, DomainError> {
 }
 
 fn canonical_rationale(value: &str) -> Result<String, DomainError> {
-    let value = value.replace("\r\n", "\n").replace('\r', "\n");
-    if value.is_empty()
-        || value != value.trim()
-        || value.len() > 512
-        || value
-            .chars()
-            .any(|character| character.is_control() && character != '\n' && character != '\t')
-    {
+    let value = canonicalize_memory_multiline("proposal_rationale", value, 1, 512)?;
+    if value != value.trim() {
         return Err(DomainError::InvalidMemoryProposal);
     }
     validate_plaintext(
@@ -403,6 +399,30 @@ fn canonical_rationale(value: &str) -> Result<String, DomainError> {
         &value,
     )?;
     Ok(value)
+}
+
+fn set_content_digest(candidate: &MemoryEntryDraft) -> Result<Digest, DomainError> {
+    let normalized_key = candidate.normalized_key();
+    Ok(sha256(&canonical_json_bytes(
+        &MemoryEntryContentDigestMaterial {
+            display_key: candidate.display_key(),
+            normalized_key: &normalized_key,
+            state: MemoryEntryState::Present,
+            value: candidate.value(),
+            purpose_tags: candidate.purpose_tags(),
+            plaintext_validation_version: PLAINTEXT_VALIDATION_VERSION_V1,
+        },
+    )?))
+}
+
+#[derive(Serialize)]
+struct MemoryEntryContentDigestMaterial<'a> {
+    display_key: &'a str,
+    normalized_key: &'a NormalizedMemoryKey,
+    state: MemoryEntryState,
+    value: &'a str,
+    purpose_tags: &'a [String],
+    plaintext_validation_version: u16,
 }
 
 #[derive(Serialize)]

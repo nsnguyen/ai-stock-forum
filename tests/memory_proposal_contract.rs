@@ -160,6 +160,39 @@ fn proposal_enforces_operation_expected_state_and_plaintext_rationale() {
         )
         .is_err()
     );
+    assert!(
+        MemoryProposal::new(
+            MemoryProposalId::from_uuid(uuid(27)),
+            &profile,
+            &Actor::Agent(profile.profile_id()),
+            MemoryProposalOperation::Set { candidate: draft() },
+            "Portfolio Thesis".to_owned(),
+            ExpectedMemoryEntryState::Present(present.reference()),
+            "Identical candidates must not consume a proposal.".to_owned(),
+            20,
+            EventId::from_uuid(uuid(28)),
+            ApprovalId::from_uuid(uuid(29)),
+        )
+        .is_err()
+    );
+    for unsafe_rationale in ["Tabs\tare deceptive", "Bidi \u{202e}review"] {
+        assert!(
+            MemoryProposal::new(
+                MemoryProposalId::from_uuid(uuid(30)),
+                &profile,
+                &Actor::Agent(profile.profile_id()),
+                MemoryProposalOperation::Set { candidate: draft() },
+                "Portfolio Thesis".to_owned(),
+                ExpectedMemoryEntryState::Absent,
+                unsafe_rationale.to_owned(),
+                20,
+                EventId::from_uuid(uuid(31)),
+                ApprovalId::from_uuid(uuid(32)),
+            )
+            .is_err(),
+            "{unsafe_rationale:?} must be rejected"
+        );
+    }
 }
 
 #[test]
@@ -218,4 +251,32 @@ fn terminal_memory_resolution_requires_human_and_matching_terminal_status() {
             .resolve(ApprovalStatus::Rejected, Actor::Human, 31)
             .is_err()
     );
+}
+
+#[test]
+fn proposal_and_resolution_serde_reject_tampered_or_nonterminal_records() {
+    let proposal = pending_proposal();
+    let mut encoded = serde_json::to_value(&proposal).unwrap();
+    encoded["rationale"] = serde_json::json!("Tampered rationale.");
+    assert!(serde_json::from_value::<MemoryProposal>(encoded).is_err());
+
+    let resolution = MemoryProposalResolution::new(
+        proposal.reference(),
+        MemoryProposalStatus::Rejected,
+        proposal.approval_id(),
+        Actor::Human,
+        30,
+        EventId::from_uuid(uuid(40)),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::from_value::<MemoryProposalResolution>(
+            serde_json::to_value(&resolution).unwrap()
+        )
+        .unwrap(),
+        resolution
+    );
+    let mut invalid = serde_json::to_value(resolution).unwrap();
+    invalid["status"] = serde_json::json!("Pending");
+    assert!(serde_json::from_value::<MemoryProposalResolution>(invalid).is_err());
 }

@@ -7,14 +7,17 @@ use std::{
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::domain::{ApprovalId, DomainError, EventId, MemoryNamespaceId, MemoryProposalId};
+use crate::domain::{
+    ApprovalId, DomainError, EventId, MemoryEntryId, MemoryEntryVersionId, MemoryNamespaceId,
+    MemoryProposalId,
+};
 
 use super::{
     ExpectedMemoryEntryState, MemoryEntryRef, MemoryEntryVersion, MemoryProposal,
     MemoryProposalRef, MemoryProposalResolution, MemoryProposalStatus, NormalizedMemoryKey,
 };
 
-pub const MAX_PENDING_MEMORY_PROPOSALS: usize = 64;
+pub const MAX_PENDING_MEMORY_PROPOSALS: usize = 256;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MemoryProjection {
@@ -95,6 +98,13 @@ impl MemoryProjection {
     pub(crate) fn apply_entry(&mut self, entry: &MemoryEntryVersion) -> Result<(), DomainError> {
         let reference = entry.reference();
         let key = (reference.namespace_id(), reference.normalized_key().clone());
+        if self.current_entries.iter().any(|(existing_key, existing)| {
+            existing_key != &key
+                && (existing.entry_id() == reference.entry_id()
+                    || existing.entry_version_id() == reference.entry_version_id())
+        }) {
+            return Err(DomainError::InvalidMemoryProjection);
+        }
         match self.current_entries.get(&key) {
             None if reference.version().get() == 1 && entry.predecessor_version_id().is_none() => {}
             Some(current)
@@ -104,10 +114,14 @@ impl MemoryProjection {
                         .get()
                         .checked_add(1)
                         .ok_or(DomainError::InvalidMemoryProjection)?
-                    && entry.predecessor_version_id() == Some(current.entry_version_id()) => {}
+                    && entry.predecessor_version_id() == Some(current.entry_version_id())
+                    && current.entry_id() == reference.entry_id() => {}
             _ => return Err(DomainError::InvalidMemoryProjection),
         }
-        self.current_entries.insert(key, reference);
+        let mut staged = self.clone();
+        staged.current_entries.insert(key, reference);
+        staged.validate_structure()?;
+        *self = staged;
         Ok(())
     }
 
@@ -121,7 +135,10 @@ impl MemoryProjection {
         if self
             .proposals
             .values()
-            .filter(|proposal| proposal.status == MemoryProposalStatus::Pending)
+            .filter(|projected| {
+                projected.namespace_id == proposal.namespace_id()
+                    && projected.status == MemoryProposalStatus::Pending
+            })
             .count()
             >= MAX_PENDING_MEMORY_PROPOSALS
         {
@@ -162,11 +179,13 @@ impl MemoryProjection {
     }
 
     fn validate_structure(&self) -> Result<(), DomainError> {
-        let mut entry_versions = BTreeSet::new();
+        let mut entry_versions = BTreeSet::<MemoryEntryVersionId>::new();
+        let mut entry_ids = BTreeSet::<MemoryEntryId>::new();
         for ((namespace, key), reference) in &self.current_entries {
             if *namespace != reference.namespace_id()
                 || key != reference.normalized_key()
                 || !entry_versions.insert(reference.entry_version_id())
+                || !entry_ids.insert(reference.entry_id())
             {
                 return Err(DomainError::InvalidMemoryProjection);
             }
@@ -184,6 +203,22 @@ impl MemoryProjection {
             {
                 return Err(DomainError::InvalidMemoryProjection);
             }
+        }
+        if self
+            .proposals
+            .values()
+            .filter(|projected| projected.status == MemoryProposalStatus::Pending)
+            .fold(
+                BTreeMap::<MemoryNamespaceId, usize>::new(),
+                |mut counts, projected| {
+                    *counts.entry(projected.namespace_id).or_default() += 1;
+                    counts
+                },
+            )
+            .values()
+            .any(|&count| count > MAX_PENDING_MEMORY_PROPOSALS)
+        {
+            return Err(DomainError::MemoryProposalCapacityReached);
         }
         Ok(())
     }
@@ -290,4 +325,186 @@ fn parse_entry_key(value: &str) -> Result<(MemoryNamespaceId, NormalizedMemoryKe
         MemoryNamespaceId::from_str(namespace).map_err(|_| DomainError::InvalidMemoryProjection)?,
         normalized_key,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        agents::{AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentRole},
+        domain::{
+            Actor, AgentProfileId, AgentProfileVersionId, EventId, MemoryEntryId,
+            MemoryEntryVersionId,
+        },
+        memory::{MemoryEntryDraft, MemoryEntryState, MemoryProposalOperation},
+    };
+    use uuid::Uuid;
+
+    fn uuid(value: u128) -> Uuid {
+        Uuid::from_u128(value)
+    }
+
+    fn profile(seed: u128, namespace: MemoryNamespaceId) -> AgentProfileVersion {
+        AgentProfileVersion::create(
+            AgentProfileId::from_uuid(uuid(seed)),
+            AgentProfileVersionId::from_uuid(uuid(seed + 1)),
+            namespace,
+            1,
+            AgentProfileDraft::new(
+                format!("Profile {seed}"),
+                "Profile.".to_owned(),
+                AgentRole::Custom,
+                "research".to_owned(),
+                vec![],
+                "Careful.".to_owned(),
+                "Review.".to_owned(),
+                AgentBindings::default(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap(),
+            None,
+        )
+        .unwrap()
+    }
+
+    fn proposal(profile: &AgentProfileVersion, seed: u128, key: &str) -> MemoryProposal {
+        let candidate =
+            MemoryEntryDraft::new(key.to_owned(), format!("Value {seed}"), vec![]).unwrap();
+        MemoryProposal::new(
+            MemoryProposalId::from_uuid(uuid(seed)),
+            profile,
+            &Actor::Agent(profile.profile_id()),
+            MemoryProposalOperation::Set { candidate },
+            key.to_owned(),
+            ExpectedMemoryEntryState::Absent,
+            format!("Reason {seed}"),
+            1,
+            EventId::from_uuid(uuid(seed + 1_000)),
+            ApprovalId::from_uuid(uuid(seed + 2_000)),
+        )
+        .unwrap()
+    }
+
+    fn entry(
+        namespace: MemoryNamespaceId,
+        entry_id: u128,
+        version_id: u128,
+        key: &str,
+    ) -> MemoryEntryVersion {
+        MemoryEntryVersion::create_present(
+            namespace,
+            MemoryEntryId::from_uuid(uuid(entry_id)),
+            MemoryEntryVersionId::from_uuid(uuid(version_id)),
+            MemoryEntryDraft::new(key.to_owned(), "Value".to_owned(), vec![]).unwrap(),
+            Actor::Human,
+            1,
+            None,
+            EventId::from_uuid(uuid(version_id + 10_000)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn proposals_are_capped_per_namespace_in_creation_and_from_parts() {
+        let first_namespace = MemoryNamespaceId::from_uuid(uuid(1));
+        let first = profile(10, first_namespace);
+        let second = profile(20, MemoryNamespaceId::from_uuid(uuid(2)));
+        let mut projection = MemoryProjection::default();
+        for index in 0..256 {
+            projection
+                .create_proposal(&proposal(&first, 100 + index, &format!("first {index}")))
+                .unwrap();
+        }
+        assert!(
+            projection
+                .create_proposal(&proposal(&second, 1_000, "second"))
+                .is_ok()
+        );
+        assert!(
+            projection
+                .create_proposal(&proposal(&first, 2_000, "over cap"))
+                .is_err()
+        );
+
+        let mut oversized = BTreeMap::new();
+        for index in 0..257 {
+            let proposal = proposal(&first, 3_000 + index, &format!("wire {index}"));
+            oversized.insert(
+                proposal.reference().proposal_id(),
+                ProjectedMemoryProposal {
+                    proposal: proposal.reference(),
+                    namespace_id: proposal.namespace_id(),
+                    normalized_key: proposal.normalized_key().clone(),
+                    expected: proposal.expected().clone(),
+                    approval_id: proposal.approval_id(),
+                    status: MemoryProposalStatus::Pending,
+                    resolution_event_id: None,
+                },
+            );
+        }
+        assert!(MemoryProjection::from_parts(BTreeMap::new(), oversized).is_err());
+    }
+
+    #[test]
+    fn projection_retains_tombstones_rejects_identity_reuse_and_allows_one_resolution() {
+        let namespace = MemoryNamespaceId::from_uuid(uuid(30));
+        let first = entry(namespace, 31, 32, "First");
+        let tombstone = first
+            .next_deleted(
+                MemoryEntryVersionId::from_uuid(uuid(33)),
+                Actor::Human,
+                2,
+                None,
+                EventId::from_uuid(uuid(34)),
+            )
+            .unwrap();
+        let duplicate_identity = entry(namespace, 31, 35, "Second");
+        let mut projection = MemoryProjection::default();
+        projection.apply_entry(&first).unwrap();
+        projection.apply_entry(&tombstone).unwrap();
+        assert_eq!(
+            projection
+                .current_entry(namespace, first.reference().normalized_key())
+                .unwrap()
+                .state(),
+            MemoryEntryState::Deleted
+        );
+        assert!(projection.apply_entry(&duplicate_identity).is_err());
+        assert!(
+            projection
+                .current_entry(namespace, duplicate_identity.reference().normalized_key())
+                .is_none()
+        );
+
+        let profile = profile(40, namespace);
+        let proposal = proposal(&profile, 41, "Proposal");
+        projection.create_proposal(&proposal).unwrap();
+        let resolution = MemoryProposalResolution::new(
+            proposal.reference(),
+            MemoryProposalStatus::Rejected,
+            proposal.approval_id(),
+            Actor::Human,
+            3,
+            EventId::from_uuid(uuid(42)),
+        )
+        .unwrap();
+        projection.resolve_proposal(&resolution).unwrap();
+        assert!(projection.resolve_proposal(&resolution).is_err());
+    }
+
+    #[test]
+    fn from_parts_rejects_malformed_entry_map_identity_deterministically() {
+        let namespace = MemoryNamespaceId::from_uuid(uuid(50));
+        let entry = entry(namespace, 51, 52, "Correct");
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            (namespace, NormalizedMemoryKey::new("wrong").unwrap()),
+            entry.reference(),
+        );
+        assert_eq!(
+            MemoryProjection::from_parts(entries, BTreeMap::new()),
+            Err(DomainError::InvalidMemoryProjection)
+        );
+    }
 }

@@ -199,7 +199,7 @@ impl TryFrom<ApprovalRecordWire> for ApprovalRecord {
     type Error = ApprovalError;
 
     fn try_from(wire: ApprovalRecordWire) -> Result<Self, Self::Error> {
-        validate_persisted_state(wire.status, wire.resolution.as_ref())?;
+        validate_persisted_state(wire.action, wire.status, wire.resolution.as_ref())?;
         validate_expiry(wire.created_at_millis, wire.expires_at_millis)?;
 
         Ok(Self {
@@ -313,6 +313,7 @@ fn validate_pending_creation(
 }
 
 fn validate_persisted_state(
+    action: ApprovalAction,
     status: ApprovalStatus,
     resolution: Option<&ApprovalResolution>,
 ) -> Result<(), ApprovalError> {
@@ -322,7 +323,18 @@ fn validate_persisted_state(
         (_, None) => Err(ApprovalError::TerminalRecordMissingResolution),
         (status, Some(resolution)) if status == resolution.status() => Ok(()),
         (_, Some(_)) => Err(ApprovalError::ResolutionStatusMismatch),
+    }?;
+    if action == ApprovalAction::MemoryMutation
+        && resolution.is_some_and(|resolution| {
+            !matches!(
+                status,
+                ApprovalStatus::Accepted | ApprovalStatus::Rejected | ApprovalStatus::Expired
+            ) || resolution.actor() != &Actor::Human
+        })
+    {
+        return Err(ApprovalError::InvalidMemoryResolution);
     }
+    Ok(())
 }
 
 fn validate_expiry(
