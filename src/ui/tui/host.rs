@@ -1695,10 +1695,10 @@ mod tests {
         )))
     }
 
-    fn alt_tab(number: char) -> EventStep {
+    fn navigation_key(character: char) -> EventStep {
         EventStep::Event(TuiEvent::Key(KeyEvent::new(
-            KeyCode::Char(number),
-            KeyModifiers::ALT,
+            KeyCode::Char(character),
+            KeyModifiers::NONE,
         )))
     }
 
@@ -1733,7 +1733,7 @@ mod tests {
             EventStep::Idle,
             EventStep::Idle,
             EventStep::Event(TuiEvent::Resize(70, 20)),
-            alt_tab('2'),
+            navigation_key('2'),
             EventStep::Idle,
         ];
         steps.extend(command_steps("/quit"));
@@ -1804,8 +1804,8 @@ mod tests {
         let effect = handle_event(
             &mut runner.model,
             TuiEvent::Key(KeyEvent::new(
-                KeyCode::Char('6'),
-                KeyModifiers::ALT,
+                KeyCode::Char('s'),
+                KeyModifiers::NONE,
             )),
         );
         assert_eq!(effect, ControllerEffect::LoadSkills);
@@ -1900,8 +1900,8 @@ mod tests {
             handle_event(
                 &mut runner.model,
                 TuiEvent::Key(KeyEvent::new(
-                    KeyCode::Char('6'),
-                    KeyModifiers::ALT,
+                    KeyCode::Char('s'),
+                    KeyModifiers::NONE,
                 )),
             ),
             ControllerEffect::Redraw
@@ -1990,8 +1990,8 @@ mod tests {
             handle_event(
                 &mut runner.model,
                 TuiEvent::Key(KeyEvent::new(
-                    KeyCode::Char('6'),
-                    KeyModifiers::ALT,
+                    KeyCode::Char('s'),
+                    KeyModifiers::NONE,
                 )),
             ),
             ControllerEffect::Redraw

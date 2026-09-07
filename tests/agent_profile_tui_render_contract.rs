@@ -227,7 +227,7 @@ fn narrow_header_rows_are_complete_at_sixty_and_seventy_columns() {
         assert_eq!(rows[1].trim_end(), "Active 1  Ready 0  Not Ready 1");
         assert_eq!(
             rows[2].trim_end(),
-            "Alt 1 Overview 2 Setup 3 Audit 4 Help 5 Agents 6 Skills"
+            "1 Overview 2 Setup 3 Audit 4 Help a Agents s Skills"
         );
         assert_eq!(rows[3], "-".repeat(usize::from(width)));
     }

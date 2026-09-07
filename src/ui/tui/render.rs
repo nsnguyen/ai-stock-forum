@@ -112,20 +112,20 @@ fn render_header(
 
 fn numbered_tabs(model: &TuiModel, theme: &Theme) -> Line<'static> {
     let tabs = [
-        (1, "Overview", !model.skills.active && model.active_view == View::Overview),
-        (2, "Setup", !model.skills.active && model.active_view == View::Setup),
-        (3, "Audit", !model.skills.active && model.active_view == View::Audit),
-        (4, "Help", !model.skills.active && model.active_view == View::Help),
-        (5, "Agents", !model.skills.active && model.active_view == View::Agents),
-        (6, "Skills", model.skills.active),
+        ("1", "Overview", !model.skills.active && model.active_view == View::Overview),
+        ("2", "Setup", !model.skills.active && model.active_view == View::Setup),
+        ("3", "Audit", !model.skills.active && model.active_view == View::Audit),
+        ("4", "Help", !model.skills.active && model.active_view == View::Help),
+        ("a", "Agents", !model.skills.active && model.active_view == View::Agents),
+        ("s", "Skills", model.skills.active),
     ];
-    let mut spans = vec![Span::styled("Alt ", theme.muted)];
-    for (index, (number, name, selected)) in tabs.into_iter().enumerate() {
+    let mut spans = Vec::new();
+    for (index, (key, name, selected)) in tabs.into_iter().enumerate() {
         if index > 0 {
             spans.push(Span::raw(" "));
         }
         spans.push(Span::styled(
-            format!("{number} {name}"),
+            format!("{key} {name}"),
             if selected { theme.focus } else { theme.muted },
         ));
     }
@@ -139,22 +139,17 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
         theme.muted
     };
     let tabs = [
-        (1, "Overview", !model.skills.active && model.active_view == View::Overview),
-        (2, "Setup", !model.skills.active && model.active_view == View::Setup),
-        (3, "Audit", !model.skills.active && model.active_view == View::Audit),
-        (4, "Help", !model.skills.active && model.active_view == View::Help),
-        (5, "Agents", !model.skills.active && model.active_view == View::Agents),
-        (6, "Skills", model.skills.active),
+        ("1", "Overview", !model.skills.active && model.active_view == View::Overview),
+        ("2", "Setup", !model.skills.active && model.active_view == View::Setup),
+        ("3", "Audit", !model.skills.active && model.active_view == View::Audit),
+        ("4", "Help", !model.skills.active && model.active_view == View::Help),
+        ("a", "Agents", !model.skills.active && model.active_view == View::Agents),
+        ("s", "Skills", model.skills.active),
     ];
     let mut lines = vec![Line::styled("VIEWS", theme.accent), Line::default()];
-    for (number, name, selected) in tabs {
+    for (key, name, selected) in tabs {
         lines.push(Line::styled(
-            format!(
-                "{} Alt+{} {}",
-                if selected { ">" } else { " " },
-                number,
-                name,
-            ),
+            format!("{} {} {}", if selected { ">" } else { " " }, key, name),
             if selected { theme.focus } else { theme.muted },
         ));
     }
@@ -601,14 +596,14 @@ mod tests {
         ] {
             assert!(help.contains(command), "missing command: {command}");
         }
-        for key in ["Option/Alt+1-6", "Tab", "Enter", "Esc", "Up/Down", "Home/End"] {
+        for key in ["1-4 / a / s", "Tab", "Enter", "Esc", "Up/Down", "Home/End"] {
             assert!(help.contains(key), "missing key: {key}");
         }
         assert!(!help.contains("q                   Request shutdown"));
     }
 
     #[test]
-    fn narrow_mode_uses_numbered_tabs_and_message_severity_is_typed() {
+    fn narrow_mode_uses_bare_navigation_keys_and_message_severity_is_typed() {
         let mut model = model(View::Audit);
         model.set_message(Severity::Warning, "Setup needs attention");
         let text = render_text(model, 70, 20, true);
@@ -616,6 +611,9 @@ mod tests {
         assert!(text.contains("2 Setup"));
         assert!(text.contains("3 Audit"));
         assert!(text.contains("4 Help"));
+        assert!(text.contains("a Agents"));
+        assert!(text.contains("s Skills"));
+        assert!(!text.contains("Alt"));
         assert!(text.contains("WARNING"));
         assert!(text.contains("Setup needs attention"));
     }

@@ -57,8 +57,8 @@ fn key(code: KeyCode) -> TuiEvent {
     TuiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
 }
 
-fn alt_key(code: KeyCode) -> TuiEvent {
-    TuiEvent::Key(KeyEvent::new(code, KeyModifiers::ALT))
+fn navigation_key(code: KeyCode) -> TuiEvent {
+    TuiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
 }
 
 fn type_line(model: &mut TuiModel, value: &str) -> ControllerEffect {
@@ -179,7 +179,7 @@ fn keyboard_workflow_creates_versions_pins_upgrades_unassigns_and_restores_exact
     let mut model = TuiModel::new(snapshot(Some(empty_agent.clone())), false);
 
     assert_eq!(
-        handle_event(&mut model, alt_key(KeyCode::Char('6'))),
+        handle_event(&mut model, navigation_key(KeyCode::Char('s'))),
         ControllerEffect::LoadSkills
     );
     apply_outcome(&mut model, outcome(CommandView::Skills(library(&[&first]))));
@@ -464,7 +464,10 @@ fn upgrade_availability_derivation_rejects_unknown_and_inconsistent_library_stat
 
     let before = inconsistent.clone();
     assert_eq!(
-        handle_event(&mut inconsistent, key(KeyCode::Char('s'))),
+        handle_event(
+            &mut inconsistent,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT)),
+        ),
         ControllerEffect::None
     );
     assert_eq!(inconsistent, before);

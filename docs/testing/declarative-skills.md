@@ -31,14 +31,15 @@ profile version; it does not remove any skill history.
 
 ## Keyboard-first workflow
 
-Launch the Adaptive Cockpit and Press `Option+6` on macOS or `Alt+6` on Windows and Linux to open Skills. Controls are pane-specific: `Up` and `Down` select
+Launch the Adaptive Cockpit and press bare `s` to open Skills. Controls are pane-specific: `Up` and `Down` select
 vertical rows or items, while `Left` and `Right` select horizontal actions.
 `Enter` opens or accepts the visible action, and `Esc` returns or cancels. The
 footer shows the controls available in the current state. You never need `:next` or `:create`
 for this workflow.
 
-`Option/Alt+1` through `Option/Alt+6` remain available in every Skills pane,
-including editors and confirmations. Returning to Skills restores the exact
+Bare `1`-`4`, `a`, and `s` navigate from non-text browsing panes and
+confirmations. While command, profile, or skill text entry owns input, those
+characters remain text. Returning to Skills restores the exact
 pane, selection, draft input, and pending confirmation; switching alone never
 submits or cancels an action.
 
@@ -83,8 +84,7 @@ submits or cancels an action.
 2. Choose an agent with `Up` and `Down`; `Enter` opens a review naming the
    agent, operation, and exact version. A second `Enter` opens confirmation and
    confirmation `Enter` commits the new immutable agent profile version.
-3. To upgrade, open Agents with `Option+5` on macOS or `Alt+5` on Windows and
-   Linux. In assigned skills, use `Up` and `Down` to
+3. To upgrade, open Agents with bare `a`. In assigned skills, use `Up` and `Down` to
    select the pinned skill row and `Left` and `Right` to choose Upgrade, then
    review and confirm the exact replacement version. A newer active skill alone
    never changes the pin.
@@ -173,8 +173,8 @@ manual TUI evidence for this milestone.
 
 ## Manual acceptance checklist
 
-- Press `Option+6` on macOS or `Alt+6` on Windows and Linux; inspect all four
-  built-ins and their version 1 provenance.
+- Press bare `s` to open Skills; inspect all four built-ins and their version 1
+  provenance.
 - Create a custom skill using typing, arrows, `Enter`, and `Esc` only.
 - Assign custom version 1 to an agent and confirm the displayed exact pin.
 - Create version 2 and confirm the existing assignment remains on version 1.
