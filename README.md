@@ -163,23 +163,25 @@ acceptance checklist.
 
 ```bash
 cargo build --workspace --locked
+make dev
 cargo run --locked
 cargo run --locked -- --command-mode
 printf '/status\n/quit\n' | cargo run --quiet --locked
 cargo test --all-targets --all-features
 ```
 
-The second launch form always selects the fallback command host. The piped form
-demonstrates its automatic redirected-stdin fallback. The fallback host reads
-one command per line. `/quit` ends the session cleanly; end of input and an
-interrupt also end the foreground session with an explicit shutdown reason.
-The default test suite is deterministic and does not require network access.
+`make dev` is a shorthand for `cargo run --locked`. The `--command-mode` launch
+form always selects the fallback command host. The piped form demonstrates its
+automatic redirected-stdin fallback. The fallback host reads one command per
+line. `/quit` ends the session cleanly; end of input and an interrupt also end
+the foreground session with an explicit shutdown reason. The default test suite
+is deterministic and does not require network access.
 
-`cargo run --locked` is the normal application launch and uses the user's
-standard persistent app-state directory described below. It is appropriate for
-normal use, but must not be used for destructive acceptance experiments; use
-the isolated-state procedures in [the Phase 0B testing guide](docs/phase-0b-testing.md)
-for those checks.
+`make dev` and `cargo run --locked` are normal application launches and use the
+user's standard persistent app-state directory described below. They are
+appropriate for normal use, but must not be used for destructive acceptance
+experiments; use the isolated-state procedures in
+[the Phase 0B testing guide](docs/phase-0b-testing.md) for those checks.
 
 ## Supported commands
 
