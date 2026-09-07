@@ -9,7 +9,9 @@ use crate::{
     memory::normalization::{PLAINTEXT_VALIDATION_VERSION_V1, PlaintextField, validate_plaintext},
 };
 
-use super::entry::canonicalize_memory_multiline;
+use super::entry::{
+    DISPLAY_KEY_MAX_BYTES, canonicalize_memory_multiline, canonicalize_memory_single_line,
+};
 use super::{ExpectedMemoryEntryState, MemoryEntryDraft, MemoryEntryState, NormalizedMemoryKey};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -127,7 +129,8 @@ impl MemoryProposal {
         if *actor != Actor::Agent(proposer.profile_id()) {
             return Err(DomainError::MemoryProposalActorMismatch);
         }
-        let display_key = canonical_display_key(&display_key)?;
+        let display_key =
+            canonicalize_memory_single_line("display_key", &display_key, 1, DISPLAY_KEY_MAX_BYTES)?;
         let normalized_key = NormalizedMemoryKey::new(&display_key)?;
         let rationale = canonical_rationale(&rationale)?;
         let mut proposal = Self {
@@ -259,7 +262,12 @@ impl MemoryProposal {
         {
             return Err(DomainError::InvalidMemoryProposal);
         }
-        if canonical_display_key(&self.display_key)? != self.display_key
+        if canonicalize_memory_single_line(
+            "display_key",
+            &self.display_key,
+            1,
+            DISPLAY_KEY_MAX_BYTES,
+        )? != self.display_key
             || NormalizedMemoryKey::new(&self.display_key)? != self.normalized_key
             || canonical_rationale(&self.rationale)? != self.rationale
         {
@@ -375,19 +383,6 @@ fn expected_state_is_well_formed(expected: &ExpectedMemoryEntryState) -> bool {
     }
 }
 
-fn canonical_display_key(value: &str) -> Result<String, DomainError> {
-    let value = value.replace("\r\n", "\n").replace('\r', "\n");
-    if value.is_empty()
-        || value != value.trim()
-        || value.contains('\n')
-        || value.len() > 96
-        || value.chars().any(|character| character.is_control())
-    {
-        return Err(DomainError::InvalidMemoryProposal);
-    }
-    Ok(value)
-}
-
 fn canonical_rationale(value: &str) -> Result<String, DomainError> {
     let value = canonicalize_memory_multiline("proposal_rationale", value, 1, 512)?;
     if value != value.trim() {
@@ -452,4 +447,100 @@ struct MemoryProposalRecordDigestMaterial<'a> {
     creation_event_id: EventId,
     approval_id: ApprovalId,
     content_digest: &'a Digest,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        agents::{AgentBindings, AgentProfileDraft, AgentRole},
+        domain::{AgentProfileId, AgentProfileVersionId, MemoryEntryId, MemoryEntryVersionId},
+        memory::MemoryEntryVersion,
+    };
+    use uuid::Uuid;
+
+    fn uuid(value: u128) -> Uuid {
+        Uuid::from_u128(value)
+    }
+
+    fn profile() -> AgentProfileVersion {
+        AgentProfileVersion::create(
+            AgentProfileId::from_uuid(uuid(1)),
+            AgentProfileVersionId::from_uuid(uuid(2)),
+            MemoryNamespaceId::from_uuid(uuid(3)),
+            1,
+            AgentProfileDraft::new(
+                "Research Analyst".to_owned(),
+                "Profile.".to_owned(),
+                AgentRole::Custom,
+                "research".to_owned(),
+                vec![],
+                "Careful.".to_owned(),
+                "Review.".to_owned(),
+                AgentBindings::default(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap(),
+            None,
+        )
+        .unwrap()
+    }
+
+    fn present(profile: &AgentProfileVersion) -> MemoryEntryVersion {
+        MemoryEntryVersion::create_present(
+            profile.memory_namespace_id(),
+            MemoryEntryId::from_uuid(uuid(4)),
+            MemoryEntryVersionId::from_uuid(uuid(5)),
+            MemoryEntryDraft::new(
+                "Portfolio Thesis".to_owned(),
+                "Own durable companies.".to_owned(),
+                vec![],
+            )
+            .unwrap(),
+            Actor::Human,
+            1,
+            None,
+            EventId::from_uuid(uuid(6)),
+        )
+        .unwrap()
+    }
+
+    fn delete_proposal(display_key: &str) -> MemoryProposal {
+        let profile = profile();
+        let entry = present(&profile);
+        MemoryProposal::new(
+            MemoryProposalId::from_uuid(uuid(7)),
+            &profile,
+            &Actor::Agent(profile.profile_id()),
+            MemoryProposalOperation::Delete,
+            display_key.to_owned(),
+            ExpectedMemoryEntryState::Present(entry.reference()),
+            "Remove stale thesis.".to_owned(),
+            2,
+            EventId::from_uuid(uuid(8)),
+            ApprovalId::from_uuid(uuid(9)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn delete_creation_canonicalizes_foldable_display_key_whitespace() {
+        assert_eq!(
+            delete_proposal("Portfolio  Thesis").display_key(),
+            "Portfolio Thesis"
+        );
+    }
+
+    #[test]
+    fn delete_deserialization_rejects_digest_consistent_noncanonical_display_key() {
+        let mut proposal = delete_proposal("Portfolio Thesis");
+        proposal.display_key = "Portfolio  Thesis".to_owned();
+        proposal.content_digest = proposal.compute_content_digest().unwrap();
+        proposal.record_digest = proposal.compute_record_digest().unwrap();
+        assert!(
+            serde_json::from_value::<MemoryProposal>(serde_json::to_value(proposal).unwrap())
+                .is_err()
+        );
+    }
 }
