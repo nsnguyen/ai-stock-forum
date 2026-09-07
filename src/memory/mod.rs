@@ -3,6 +3,7 @@ pub const MODULE_NAME: &str = "memory";
 
 mod entry;
 mod normalization;
+mod projection;
 mod proposal;
 mod review;
 
@@ -13,14 +14,16 @@ pub use entry::{
 pub use normalization::{
     CredentialPatternSetV1, PLAINTEXT_VALIDATION_VERSION_V1, PlaintextField, validate_plaintext,
 };
-pub use proposal::MemoryProposalRef;
+pub use projection::MemoryProjection;
+pub use proposal::{MemoryProposal, MemoryProposalOperation, MemoryProposalRef};
 pub use review::{
     ExpectedMemoryEntryState, MEMORY_PLAINTEXT_WARNING, MemoryEditReview, MemoryField,
     MemoryFieldDiff, MemoryFieldValue, MemoryMutationKind, MemoryNoChange,
-    MemoryPlaintextAcknowledgement, MemoryReviewRegistry,
+    MemoryPlaintextAcknowledgement, MemoryProposalFilter, MemoryProposalOperationKind,
+    MemoryProposalResolution, MemoryProposalStatus, MemoryResolutionAction, MemoryReviewRegistry,
 };
 #[allow(unused_imports)]
 pub(crate) use review::{
-    MemoryEditPreviewOutcome, MemoryEditReviewBinding, PreparedMemoryEdit, ReservedMemoryReview,
-    prepare_direct_memory_edit,
+    MemoryEditPreviewOutcome, MemoryEditReviewBinding, MemoryResolutionReviewBinding,
+    PreparedMemoryEdit, ReservedMemoryReview, prepare_direct_memory_edit,
 };

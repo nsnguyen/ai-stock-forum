@@ -7,14 +7,130 @@ use serde::{Deserialize, Serialize};
 use crate::{
     agents::AgentProfileVersionRef,
     domain::{
-        Actor, CommandId, Digest, DomainError, MemoryNamespaceId, MemoryReviewToken,
-        canonical_json_bytes, sha256,
+        Actor, ApprovalId, CommandId, Digest, DomainError, EventId, MemoryNamespaceId,
+        MemoryReviewToken, canonical_json_bytes, sha256,
     },
 };
 
-use super::{MemoryEntryDraft, MemoryEntryRef, MemoryEntryState, MemoryEntryVersion};
+use crate::policy::ApprovalStatus;
+
+use super::{
+    MemoryEntryDraft, MemoryEntryRef, MemoryEntryState, MemoryEntryVersion, MemoryProposalRef,
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum MemoryProposalStatus {
+    Pending,
+    Accepted,
+    Rejected,
+    Expired,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum MemoryResolutionAction {
+    Approve,
+    Reject,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum MemoryProposalFilter {
+    Pending,
+    All,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum MemoryProposalOperationKind {
+    Set,
+    Delete,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct MemoryProposalResolution {
+    proposal: MemoryProposalRef,
+    status: MemoryProposalStatus,
+    approval_id: ApprovalId,
+    resolved_by: Actor,
+    resolved_at_ms: i64,
+    resolution_event_id: EventId,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryProposalResolutionWire {
+    proposal: MemoryProposalRef,
+    status: MemoryProposalStatus,
+    approval_id: ApprovalId,
+    resolved_by: Actor,
+    resolved_at_ms: i64,
+    resolution_event_id: EventId,
+}
+
+impl MemoryProposalResolution {
+    pub fn new(
+        proposal: MemoryProposalRef,
+        status: MemoryProposalStatus,
+        approval_id: ApprovalId,
+        resolved_by: Actor,
+        resolved_at_ms: i64,
+        resolution_event_id: EventId,
+    ) -> Result<Self, DomainError> {
+        if !matches!(
+            status,
+            MemoryProposalStatus::Accepted
+                | MemoryProposalStatus::Rejected
+                | MemoryProposalStatus::Expired
+        ) || resolved_by != Actor::Human
+        {
+            return Err(DomainError::InvalidMemoryProposalResolution);
+        }
+        Ok(Self {
+            proposal,
+            status,
+            approval_id,
+            resolved_by,
+            resolved_at_ms,
+            resolution_event_id,
+        })
+    }
+    pub fn proposal(&self) -> &MemoryProposalRef {
+        &self.proposal
+    }
+    pub fn status(&self) -> MemoryProposalStatus {
+        self.status
+    }
+    pub fn approval_id(&self) -> ApprovalId {
+        self.approval_id
+    }
+    pub fn resolved_by(&self) -> &Actor {
+        &self.resolved_by
+    }
+    pub fn resolved_at_ms(&self) -> i64 {
+        self.resolved_at_ms
+    }
+    pub fn resolution_event_id(&self) -> EventId {
+        self.resolution_event_id
+    }
+}
+
+impl<'de> Deserialize<'de> for MemoryProposalResolution {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = MemoryProposalResolutionWire::deserialize(deserializer)?;
+        Self::new(
+            wire.proposal,
+            wire.status,
+            wire.approval_id,
+            wire.resolved_by,
+            wire.resolved_at_ms,
+            wire.resolution_event_id,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ExpectedMemoryEntryState {
     Absent,
     Present(MemoryEntryRef),
@@ -340,8 +456,14 @@ pub struct MemoryReviewRegistry {
 
 struct MemoryReviewRegistration {
     token: MemoryReviewToken,
-    binding: MemoryEditReviewBinding,
+    binding: MemoryReviewBinding,
     state: MemoryReviewState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum MemoryReviewBinding {
+    Direct(MemoryEditReviewBinding),
+    Resolution(MemoryResolutionReviewBinding),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -386,6 +508,50 @@ impl MemoryEditReviewBinding {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MemoryResolutionReviewBinding {
+    actor: Actor,
+    action: MemoryResolutionAction,
+    proposal: MemoryProposalRef,
+    approval_id: ApprovalId,
+    expected_approval_status: ApprovalStatus,
+    expected_entry: ExpectedMemoryEntryState,
+    plaintext_acknowledgement: MemoryPlaintextAcknowledgement,
+    review_digest: Digest,
+}
+
+impl MemoryResolutionReviewBinding {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        actor: Actor,
+        action: MemoryResolutionAction,
+        proposal: MemoryProposalRef,
+        approval_id: ApprovalId,
+        expected_approval_status: ApprovalStatus,
+        expected_entry: ExpectedMemoryEntryState,
+        plaintext_acknowledgement: MemoryPlaintextAcknowledgement,
+        review_digest: Digest,
+    ) -> Result<Self, DomainError> {
+        let expected = match action {
+            MemoryResolutionAction::Approve => ApprovalStatus::Accepted,
+            MemoryResolutionAction::Reject => ApprovalStatus::Rejected,
+        };
+        if actor != Actor::Human || expected_approval_status != expected {
+            return Err(DomainError::MemoryProposalReviewUnavailable);
+        }
+        Ok(Self {
+            actor,
+            action,
+            proposal,
+            approval_id,
+            expected_approval_status,
+            expected_entry,
+            plaintext_acknowledgement,
+            review_digest,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MemoryReviewState {
     Available,
@@ -422,7 +588,7 @@ impl MemoryReviewRegistry {
         *self.state.lock().unwrap_or_else(PoisonError::into_inner) =
             Some(MemoryReviewRegistration {
                 token,
-                binding,
+                binding: MemoryReviewBinding::Direct(binding),
                 state: MemoryReviewState::Available,
             });
     }
@@ -441,9 +607,57 @@ impl MemoryReviewRegistry {
         let registration = slot.as_mut().ok_or(DomainError::MemoryReviewUnavailable)?;
         if registration.token != token
             || registration.state != MemoryReviewState::Available
-            || &registration.binding != supplied
+            || registration.binding != MemoryReviewBinding::Direct(supplied.clone())
         {
             return Err(DomainError::MemoryReviewUnavailable);
+        }
+        registration.state = MemoryReviewState::Reserved(command_id);
+        drop(slot);
+        Ok(ReservedMemoryReview {
+            registry: self,
+            token,
+            command_id,
+            _ownership: ownership,
+            finished: false,
+        })
+    }
+
+    pub(crate) fn replace_resolution(
+        &self,
+        token: MemoryReviewToken,
+        binding: MemoryResolutionReviewBinding,
+    ) {
+        let _operation = self
+            .operation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *self.state.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(MemoryReviewRegistration {
+                token,
+                binding: MemoryReviewBinding::Resolution(binding),
+                state: MemoryReviewState::Available,
+            });
+    }
+
+    pub(crate) fn reserve_resolution(
+        &self,
+        command_id: CommandId,
+        token: MemoryReviewToken,
+        supplied: &MemoryResolutionReviewBinding,
+    ) -> Result<ReservedMemoryReview<'_>, DomainError> {
+        let ownership = self
+            .operation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut slot = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let registration = slot
+            .as_mut()
+            .ok_or(DomainError::MemoryProposalReviewUnavailable)?;
+        if registration.token != token
+            || registration.state != MemoryReviewState::Available
+            || registration.binding != MemoryReviewBinding::Resolution(supplied.clone())
+        {
+            return Err(DomainError::MemoryProposalReviewUnavailable);
         }
         registration.state = MemoryReviewState::Reserved(command_id);
         drop(slot);

@@ -62,6 +62,18 @@ pub enum DomainError {
     MemoryReviewUnavailable,
     #[error("memory expected state does not match the authoritative entry")]
     MemoryExpectedStateMismatch,
+    #[error("memory proposal is structurally invalid")]
+    InvalidMemoryProposal,
+    #[error("memory proposal actor does not match its proposer profile")]
+    MemoryProposalActorMismatch,
+    #[error("memory proposal resolution is invalid")]
+    InvalidMemoryProposalResolution,
+    #[error("memory proposal review is unavailable")]
+    MemoryProposalReviewUnavailable,
+    #[error("memory proposal capacity has been reached")]
+    MemoryProposalCapacityReached,
+    #[error("memory projection is structurally invalid")]
+    InvalidMemoryProjection,
 }
 
 impl DomainError {
@@ -97,6 +109,12 @@ impl DomainError {
             Self::InvalidMemoryEntry => "invalid_memory_entry",
             Self::MemoryReviewUnavailable => "memory_review_unavailable",
             Self::MemoryExpectedStateMismatch => "memory_expected_state_mismatch",
+            Self::InvalidMemoryProposal => "invalid_memory_proposal",
+            Self::MemoryProposalActorMismatch => "memory_proposal_actor_mismatch",
+            Self::InvalidMemoryProposalResolution => "invalid_memory_proposal_resolution",
+            Self::MemoryProposalReviewUnavailable => "memory_proposal_review_unavailable",
+            Self::MemoryProposalCapacityReached => "memory_proposal_capacity_reached",
+            Self::InvalidMemoryProjection => "invalid_memory_projection",
         }
     }
 }
