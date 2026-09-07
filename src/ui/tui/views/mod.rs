@@ -44,6 +44,10 @@ pub(super) fn workspace_content_height(model: &TuiModel, width: u16) -> u16 {
     }
 }
 
+pub(super) fn agent_list_scroll_offset(model: &TuiModel) -> usize {
+    agents::list_scroll_offset(model)
+}
+
 pub(super) fn wrapped_height(lines: Vec<Line<'static>>, width: u16) -> u16 {
     let count = Paragraph::new(lines)
         .wrap(Wrap { trim: false })

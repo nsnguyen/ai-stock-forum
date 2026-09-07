@@ -213,7 +213,7 @@ fn agents_local_navigation_tracks_panes_selection_and_effects() {
         ControllerEffect::Redraw
     );
     assert_eq!(model.agents.selected_profile, 1);
-    assert_eq!(model.agents.list_scroll, 1);
+    assert_eq!(model.agents.list_scroll, 0);
 
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Enter)),
@@ -287,7 +287,7 @@ fn list_navigation_clamps_empty_one_last_and_refresh_shrink_states() {
     }
     assert_eq!(
         (empty.agents.selected_profile, empty.agents.list_scroll),
-        (2, 2)
+        (2, 0)
     );
 
     empty.agents.replace_profiles(AgentProfilesView {
@@ -299,6 +299,109 @@ fn list_navigation_clamps_empty_one_last_and_refresh_shrink_states() {
     assert_eq!(
         (empty.agents.selected_profile, empty.agents.list_scroll),
         (0, 0)
+    );
+}
+
+#[test]
+fn agent_list_scrolls_only_when_selection_leaves_the_visible_cards() {
+    let mut model = model();
+    model.select_view(View::Agents);
+    model.set_terminal_size(60, 18);
+    model.agents.replace_profiles(AgentProfilesView {
+        profiles: vec![
+            profile_summary(23),
+            profile_summary(24),
+            profile_summary(25),
+        ],
+        total_count: 3,
+        returned_count: 3,
+        truncated: false,
+    });
+
+    handle_event(&mut model, key(KeyCode::Down));
+    assert_eq!(
+        (model.agents.selected_profile, model.agents.list_scroll),
+        (1, 0)
+    );
+
+    handle_event(&mut model, key(KeyCode::Down));
+    assert_eq!(
+        (model.agents.selected_profile, model.agents.list_scroll),
+        (2, 1)
+    );
+
+    handle_event(&mut model, key(KeyCode::Up));
+    assert_eq!(
+        (model.agents.selected_profile, model.agents.list_scroll),
+        (1, 1)
+    );
+
+    handle_event(&mut model, key(KeyCode::Up));
+    assert_eq!(
+        (model.agents.selected_profile, model.agents.list_scroll),
+        (0, 0)
+    );
+}
+
+#[test]
+fn agent_list_scroll_accounts_for_wrapped_cards_without_repinning_each_selection() {
+    let mut model = model();
+    model.select_view(View::Agents);
+    model.set_terminal_size(80, 23);
+    let mut wrapped = profile_summary(26);
+    wrapped.display_name = "W".repeat(64);
+    wrapped.primary_specialty = "S".repeat(64);
+    let mut second = profile_summary(27);
+    second.display_name = "Second".to_owned();
+    second.primary_specialty = "short".to_owned();
+    let mut third = profile_summary(28);
+    third.display_name = "Third".to_owned();
+    third.primary_specialty = "short".to_owned();
+    model.agents.replace_profiles(AgentProfilesView {
+        profiles: vec![wrapped, second, third],
+        total_count: 3,
+        returned_count: 3,
+        truncated: false,
+    });
+
+    handle_event(&mut model, key(KeyCode::Down));
+    assert_eq!(
+        (model.agents.selected_profile, model.agents.list_scroll),
+        (1, 1),
+        "the wrapped first card must not hide the selected second card"
+    );
+
+    handle_event(&mut model, key(KeyCode::Down));
+    assert_eq!(
+        (model.agents.selected_profile, model.agents.list_scroll),
+        (2, 1),
+        "the viewport must stay put when the next short card already fits"
+    );
+}
+
+#[test]
+fn profile_refresh_preserves_a_visible_agent_list_offset() {
+    let mut model = model();
+    let profiles = vec![profile_summary(29), profile_summary(30)];
+    model.agents.replace_profiles(AgentProfilesView {
+        profiles: profiles.clone(),
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
+    });
+    model.agents.selected_profile = 1;
+    model.agents.list_scroll = 0;
+
+    model.agents.replace_profiles(AgentProfilesView {
+        profiles,
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
+    });
+
+    assert_eq!(
+        (model.agents.selected_profile, model.agents.list_scroll),
+        (1, 0)
     );
 }
 

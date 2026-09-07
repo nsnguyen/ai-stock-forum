@@ -383,8 +383,7 @@ impl AgentsViewState {
             .iter()
             .position(|summary| summary.profile_id == profile_id)
         {
-            self.selected_profile = index;
-            self.list_scroll = index;
+            self.select_profile_index(index);
         }
     }
 
@@ -406,6 +405,11 @@ impl AgentsViewState {
         self.profiles.profiles.get(self.selected_profile)
     }
 
+    fn select_profile_index(&mut self, index: usize) {
+        self.selected_profile = index.min(self.profiles.profiles.len().saturating_sub(1));
+        self.list_scroll = self.list_scroll.min(self.selected_profile);
+    }
+
     pub fn replace_profiles(&mut self, profiles: AgentProfilesView) {
         let selected_id = self.selected_summary().map(|summary| summary.profile_id);
         self.profiles = profiles;
@@ -418,7 +422,7 @@ impl AgentsViewState {
             self.skill_panel_open = false;
             return;
         }
-        self.selected_profile = selected_id
+        let selected_profile = selected_id
             .and_then(|profile_id| {
                 self.profiles
                     .profiles
@@ -429,7 +433,7 @@ impl AgentsViewState {
                 self.selected_profile
                     .min(self.profiles.profiles.len().saturating_sub(1))
             });
-        self.list_scroll = self.selected_profile;
+        self.select_profile_index(selected_profile);
         let selected_id = self.selected_summary().map(|summary| summary.profile_id);
         if self
             .detail
@@ -451,7 +455,7 @@ impl AgentsViewState {
             .iter()
             .position(|summary| summary.profile_id == profile_id)
         {
-            self.selected_profile = index;
+            self.select_profile_index(index);
         }
         if self.history.as_ref().map(|history| history.profile_id) != Some(profile_id) {
             self.history = None;
@@ -470,8 +474,7 @@ impl AgentsViewState {
             .iter()
             .position(|summary| summary.profile_id == history.profile_id)
         {
-            self.selected_profile = index;
-            self.list_scroll = index;
+            self.select_profile_index(index);
         }
         self.selected_history_version = 0;
         self.history_scroll = 0;
@@ -492,8 +495,7 @@ impl AgentsViewState {
             .iter()
             .position(|summary| summary.profile_id == profile_id)
         {
-            self.selected_profile = index;
-            self.list_scroll = index;
+            self.select_profile_index(index);
         }
         self.version_detail = Some(version);
     }
