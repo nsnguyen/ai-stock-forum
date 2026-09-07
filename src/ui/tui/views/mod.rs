@@ -73,11 +73,13 @@ pub(super) fn render_inspector(frame: &mut Frame<'_>, area: Rect, model: &TuiMod
         skills::inspector_lines(model, theme)
     } else {
         match model.active_view {
-        View::Audit => audit::inspector_lines(model, theme),
-        View::Overview => contextual_lines("Overview", "Runtime and installation health", theme),
-        View::Setup => contextual_lines("Setup", "State is read-only in Phase 0B", theme),
-        View::Help => contextual_lines("Help", "Approved keyboard and slash grammar", theme),
-        View::Agents => agents::inspector_lines(model, theme),
+            View::Audit => audit::inspector_lines(model, theme),
+            View::Overview => {
+                contextual_lines("Overview", "Runtime and installation health", theme)
+            }
+            View::Setup => contextual_lines("Setup", "State is read-only in Phase 0B", theme),
+            View::Help => contextual_lines("Help", "Approved keyboard and slash grammar", theme),
+            View::Agents => agents::inspector_lines(model, theme),
         }
     };
     let scroll = if !model.skills.active && model.active_view == View::Agents {

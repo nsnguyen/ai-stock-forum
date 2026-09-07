@@ -65,15 +65,23 @@ pub enum ControllerEffect {
     ExecuteProfile(ApplicationCommand),
     CancelProfileReview,
     LoadSkills,
-    LoadSkill { selected_skill: usize },
-    LoadSkillHistory { skill_id: crate::domain::SkillId },
+    LoadSkill {
+        selected_skill: usize,
+    },
+    LoadSkillHistory {
+        skill_id: crate::domain::SkillId,
+    },
     LoadSkillVersion {
         skill_id: crate::domain::SkillId,
         version: crate::domain::ObjectVersion,
     },
-    LoadSkillStarter { selected_skill: usize },
+    LoadSkillStarter {
+        selected_skill: usize,
+    },
     LoadSkillAgents,
-    LoadSkillAgent { profile_id: crate::domain::AgentProfileId },
+    LoadSkillAgent {
+        profile_id: crate::domain::AgentProfileId,
+    },
     RequestSkillPreview(SkillPreviewRequest),
     RequestSkillAssignmentPreview {
         profile_id: crate::domain::AgentProfileId,
@@ -96,10 +104,7 @@ impl ControllerEffect {
     pub(super) fn blocked_while_command_in_flight(&self) -> bool {
         !matches!(self, Self::None | Self::Redraw | Self::RequestShutdown(_))
             && !self.is_navigation_refresh()
-            && !matches!(
-                self,
-                Self::Submit(ApplicationCommand::RequestShutdown)
-            )
+            && !matches!(self, Self::Submit(ApplicationCommand::RequestShutdown))
     }
 }
 
@@ -238,9 +243,11 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
                 AgentOutcomeIntent::SkillAssignment if present_outcome => {
                     let target = model.skills.selected_skill_ref().cloned();
                     let current = target.as_ref().and_then(|target| {
-                        profile.profile.skill_refs().iter().find(|current| {
-                            current.skill_id() == target.skill_id()
-                        })
+                        profile
+                            .profile
+                            .skill_refs()
+                            .iter()
+                            .find(|current| current.skill_id() == target.skill_id())
                     });
                     model.skills.assignment = target
                         .as_ref()
@@ -499,9 +506,8 @@ fn handle_global_navigation_shortcut(
     key: KeyEvent,
 ) -> Option<ControllerEffect> {
     let confirmation_active = active_confirmation(model) || active_skill_confirmation(model);
-    let text_entry_active = active_profile_editor(model)
-        || active_skill_editor(model)
-        || model.focus == Focus::Command;
+    let text_entry_active =
+        active_profile_editor(model) || active_skill_editor(model) || model.focus == Focus::Command;
     if key.modifiers != KeyModifiers::NONE || (text_entry_active && !confirmation_active) {
         return None;
     }
@@ -578,9 +584,7 @@ fn handle_navigation_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffec
         KeyCode::Down | KeyCode::Right | KeyCode::PageDown if no_modifiers(key.modifiers) => {
             move_navigation_selection(model, true)
         }
-        KeyCode::Home if no_modifiers(key.modifiers) => {
-            select_navigation_bound(model, false)
-        }
+        KeyCode::Home if no_modifiers(key.modifiers) => select_navigation_bound(model, false),
         KeyCode::End if no_modifiers(key.modifiers) => select_navigation_bound(model, true),
         _ => ControllerEffect::None,
     }
@@ -666,8 +670,7 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
             model.set_command_in_flight(true);
             if matches!(
                 command,
-                ApplicationCommand::ListAgentProfiles
-                    | ApplicationCommand::ShowAgentProfile { .. }
+                ApplicationCommand::ListAgentProfiles | ApplicationCommand::ShowAgentProfile { .. }
             ) {
                 model.pending_agent_outcome = Some(AgentOutcomeIntent::AgentsWorkspace);
             }
@@ -696,7 +699,8 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
             model.command.remember(input);
             model.clear_message();
             if !model.skills.active {
-                model.skills.workspace_origin = Some(SkillWorkspaceOrigin::Cockpit(model.active_view));
+                model.skills.workspace_origin =
+                    Some(SkillWorkspaceOrigin::Cockpit(model.active_view));
             }
             model.skills.clear_skill_context();
             model.switch_tab(NavigationTab::Skills);
@@ -708,7 +712,8 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
 }
 
 fn handle_paste(model: &mut TuiModel, text: &str) -> ControllerEffect {
-    if !active_profile_editor(model) && !active_skill_editor(model) && model.focus != Focus::Command {
+    if !active_profile_editor(model) && !active_skill_editor(model) && model.focus != Focus::Command
+    {
         return ControllerEffect::None;
     }
     let before = model.command.text().len();
@@ -727,9 +732,7 @@ fn active_skill_confirmation(model: &TuiModel) -> bool {
 }
 
 fn active_skill_editor(model: &TuiModel) -> bool {
-    model.skills.active
-        && model.skills.pane == SkillsPane::Editor
-        && model.skills.editor.is_some()
+    model.skills.active && model.skills.pane == SkillsPane::Editor && model.skills.editor.is_some()
 }
 
 fn handle_skill_confirmation_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
@@ -818,14 +821,10 @@ fn handle_skill_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEff
             controller_effect
         }
         KeyCode::Up | KeyCode::Down if no_modifiers(key.modifiers) => {
-            let reference_picker = model
-                .skills
-                .editor
-                .as_ref()
-                .is_some_and(|editor| {
-                    editor.field() == crate::ui::skill_editor::SkillEditorField::ReferenceName
-                        && model.command.text().is_empty()
-                });
+            let reference_picker = model.skills.editor.as_ref().is_some_and(|editor| {
+                editor.field() == crate::ui::skill_editor::SkillEditorField::ReferenceName
+                    && model.command.text().is_empty()
+            });
             if !reference_picker {
                 return ControllerEffect::None;
             }
@@ -841,7 +840,9 @@ fn handle_skill_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEff
             model.command.insert(character);
             ControllerEffect::Redraw
         }
-        KeyCode::Backspace if no_modifiers(key.modifiers) => edit(model, |model| model.command.backspace()),
+        KeyCode::Backspace if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.backspace())
+        }
         KeyCode::Delete if no_modifiers(key.modifiers) => {
             if model
                 .skills
@@ -855,10 +856,18 @@ fn handle_skill_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEff
                 edit(model, |model| model.command.delete())
             }
         }
-        KeyCode::Left if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_left()),
-        KeyCode::Right if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_right()),
-        KeyCode::Home if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_home()),
-        KeyCode::End if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_end()),
+        KeyCode::Left if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_left())
+        }
+        KeyCode::Right if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_right())
+        }
+        KeyCode::Home if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_home())
+        }
+        KeyCode::End if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_end())
+        }
         _ => ControllerEffect::None,
     }
 }
@@ -905,7 +914,9 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             ControllerEffect::Redraw
         }
         (SkillsPane::List, KeyCode::Enter) if no_modifiers(key.modifiers) => {
-            ControllerEffect::LoadSkill { selected_skill: model.skills.selected_skill }
+            ControllerEffect::LoadSkill {
+                selected_skill: model.skills.selected_skill,
+            }
         }
         (SkillsPane::List, KeyCode::Char('c')) if no_modifiers(key.modifiers) => {
             model.skills.pane = SkillsPane::CreateSource;
@@ -920,7 +931,8 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             ControllerEffect::Redraw
         }
         (SkillsPane::CreateSource, KeyCode::Up) if no_modifiers(key.modifiers) => {
-            model.skills.selected_create_source = model.skills.selected_create_source.saturating_sub(1);
+            model.skills.selected_create_source =
+                model.skills.selected_create_source.saturating_sub(1);
             ControllerEffect::Redraw
         }
         (SkillsPane::CreateSource, KeyCode::Enter) if no_modifiers(key.modifiers) => {
@@ -935,12 +947,21 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             }
         }
         (SkillsPane::Detail, KeyCode::Down | KeyCode::Right) if no_modifiers(key.modifiers) => {
-            let last = model.skills.available_detail_actions().len().saturating_sub(1);
-            model.skills.selected_action_index = model.skills.selected_action_index.saturating_add(1).min(last);
+            let last = model
+                .skills
+                .available_detail_actions()
+                .len()
+                .saturating_sub(1);
+            model.skills.selected_action_index = model
+                .skills
+                .selected_action_index
+                .saturating_add(1)
+                .min(last);
             ControllerEffect::Redraw
         }
         (SkillsPane::Detail, KeyCode::Up | KeyCode::Left) if no_modifiers(key.modifiers) => {
-            model.skills.selected_action_index = model.skills.selected_action_index.saturating_sub(1);
+            model.skills.selected_action_index =
+                model.skills.selected_action_index.saturating_sub(1);
             ControllerEffect::Redraw
         }
         (SkillsPane::Detail, KeyCode::Enter) if no_modifiers(key.modifiers) => {
@@ -964,17 +985,31 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             }
         }
         (SkillsPane::History, KeyCode::Down) if no_modifiers(key.modifiers) => {
-            let last = model.skills.history.as_ref().map(|history| history.versions.len().saturating_sub(1)).unwrap_or(0);
-            model.skills.selected_history_version = model.skills.selected_history_version.saturating_add(1).min(last);
+            let last = model
+                .skills
+                .history
+                .as_ref()
+                .map(|history| history.versions.len().saturating_sub(1))
+                .unwrap_or(0);
+            model.skills.selected_history_version = model
+                .skills
+                .selected_history_version
+                .saturating_add(1)
+                .min(last);
             ControllerEffect::Redraw
         }
         (SkillsPane::History, KeyCode::Up) if no_modifiers(key.modifiers) => {
-            model.skills.selected_history_version = model.skills.selected_history_version.saturating_sub(1);
+            model.skills.selected_history_version =
+                model.skills.selected_history_version.saturating_sub(1);
             ControllerEffect::Redraw
         }
         (SkillsPane::History, KeyCode::Enter) if no_modifiers(key.modifiers) => {
-            let Some(history) = model.skills.history.as_ref() else { return Some(ControllerEffect::Redraw); };
-            let Some(entry) = history.versions.get(model.skills.selected_history_version) else { return Some(ControllerEffect::Redraw); };
+            let Some(history) = model.skills.history.as_ref() else {
+                return Some(ControllerEffect::Redraw);
+            };
+            let Some(entry) = history.versions.get(model.skills.selected_history_version) else {
+                return Some(ControllerEffect::Redraw);
+            };
             ControllerEffect::LoadSkillVersion {
                 skill_id: history.skill_id,
                 version: entry.skill_ref.version(),
@@ -1004,7 +1039,10 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             let target = model.skills.selected_skill_ref()?.clone();
             let assignment = model.skills.assignment.clone()?;
             if assignment == AssignmentKind::AlreadyAssigned {
-                model.set_message(Severity::Warning, "Agent already has this exact skill version.");
+                model.set_message(
+                    Severity::Warning,
+                    "Agent already has this exact skill version.",
+                );
                 ControllerEffect::Redraw
             } else {
                 model.skills.operation_origin = model
@@ -1063,17 +1101,15 @@ fn restore_skill_origin(model: &mut TuiModel, origin: SkillOperationOrigin) {
 
 fn unwind_skills(model: &mut TuiModel) -> ControllerEffect {
     match model.skills.pane {
-        SkillsPane::List => {
-            match model.skills.workspace_origin.take() {
-                Some(SkillWorkspaceOrigin::Cockpit(view)) => model.select_view(view),
-                Some(SkillWorkspaceOrigin::AgentSkills { profile_id }) => {
-                    model.select_view(View::Agents);
-                    model.agents.select_profile_id(profile_id);
-                    model.agents.skill_panel_open = true;
-                }
-                None => model.select_view(model.active_view),
+        SkillsPane::List => match model.skills.workspace_origin.take() {
+            Some(SkillWorkspaceOrigin::Cockpit(view)) => model.select_view(view),
+            Some(SkillWorkspaceOrigin::AgentSkills { profile_id }) => {
+                model.select_view(View::Agents);
+                model.agents.select_profile_id(profile_id);
+                model.agents.skill_panel_open = true;
             }
-        }
+            None => model.select_view(model.active_view),
+        },
         SkillsPane::Detail
             if matches!(
                 model.skills.workspace_origin,
@@ -1089,7 +1125,9 @@ fn unwind_skills(model: &mut TuiModel) -> ControllerEffect {
             model.agents.skill_panel_open = true;
         }
         SkillsPane::CreateSource | SkillsPane::Detail => model.skills.pane = SkillsPane::List,
-        SkillsPane::History | SkillsPane::AgentPicker | SkillsPane::Result => model.skills.pane = SkillsPane::Detail,
+        SkillsPane::History | SkillsPane::AgentPicker | SkillsPane::Result => {
+            model.skills.pane = SkillsPane::Detail
+        }
         SkillsPane::AssignmentReview => model.skills.pane = SkillsPane::AgentPicker,
         SkillsPane::Editor => {
             model.skills.editor = None;
@@ -1503,7 +1541,9 @@ fn move_agent_skill_action(model: &mut TuiModel, forward: bool) {
         .position(|action| *action == current)
         .unwrap_or(0);
     let next_index = if forward {
-        current_index.saturating_add(1).min(actions.len().saturating_sub(1))
+        current_index
+            .saturating_add(1)
+            .min(actions.len().saturating_sub(1))
     } else {
         current_index.saturating_sub(1)
     };
@@ -1903,21 +1943,9 @@ mod tests {
     #[test]
     fn global_keys_switch_views_focus_inspector_and_leave_bare_q_inert() {
         let mut model = model();
-        assert_redraw_and_view(
-            &mut model,
-            key('2'),
-            View::Setup,
-        );
-        assert_redraw_and_view(
-            &mut model,
-            key('3'),
-            View::Audit,
-        );
-        assert_redraw_and_view(
-            &mut model,
-            key('4'),
-            View::Help,
-        );
+        assert_redraw_and_view(&mut model, key('2'), View::Setup);
+        assert_redraw_and_view(&mut model, key('3'), View::Audit);
+        assert_redraw_and_view(&mut model, key('4'), View::Help);
         assert_eq!(handle_event(&mut model, key('i')), ControllerEffect::Redraw);
         assert!(model.inspector_open);
         assert_eq!(model.focus, Focus::Inspector);
@@ -2347,10 +2375,7 @@ mod tests {
         let mut model = model();
         model.replace_audit((1..=100).map(audit_entry).collect());
         model.set_command_in_flight(true);
-        assert_eq!(
-            handle_event(&mut model, key('3')),
-            ControllerEffect::Redraw
-        );
+        assert_eq!(handle_event(&mut model, key('3')), ControllerEffect::Redraw);
         model.audit_selection = Some(75);
 
         apply_outcome(

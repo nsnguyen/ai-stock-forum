@@ -289,7 +289,11 @@ impl AgentProfileDraft {
         if expected == replacement || expected.skill_id() != replacement.skill_id() {
             return Err(DomainError::AgentProfileUnchanged);
         }
-        let Some(index) = self.skill_refs.iter().position(|current| current == &expected) else {
+        let Some(index) = self
+            .skill_refs
+            .iter()
+            .position(|current| current == &expected)
+        else {
             return Err(DomainError::AgentProfileUnchanged);
         };
         let mut candidate = self.clone();
@@ -298,7 +302,11 @@ impl AgentProfileDraft {
     }
 
     pub fn unassign_skill(&self, expected: SkillVersionRef) -> Result<Self, DomainError> {
-        let Some(index) = self.skill_refs.iter().position(|current| current == &expected) else {
+        let Some(index) = self
+            .skill_refs
+            .iter()
+            .position(|current| current == &expected)
+        else {
             return Err(DomainError::AgentProfileUnchanged);
         };
         let mut candidate = self.clone();
@@ -515,7 +523,10 @@ impl AgentProfileVersion {
         &self.skill_refs
     }
 
-    pub fn assign_skill(&self, skill_ref: SkillVersionRef) -> Result<AgentProfileDraft, DomainError> {
+    pub fn assign_skill(
+        &self,
+        skill_ref: SkillVersionRef,
+    ) -> Result<AgentProfileDraft, DomainError> {
         self.to_draft().assign_skill(skill_ref)
     }
 

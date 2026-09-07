@@ -167,10 +167,7 @@ fn option_alt_shortcuts_are_not_navigation_fallbacks() {
         let before = model.clone();
 
         assert_eq!(
-            handle_event(
-                &mut model,
-                modified_character(character, KeyModifiers::ALT),
-            ),
+            handle_event(&mut model, modified_character(character, KeyModifiers::ALT),),
             ControllerEffect::None,
             "character={character}"
         );
@@ -702,10 +699,7 @@ fn delayed_command_outcome_does_not_steal_a_newer_tab_or_reset_either_tabs_state
     let next_session = SessionId::from_uuid(Uuid::from_u128(31));
 
     assert_eq!(
-        apply_outcome(
-            &mut model,
-            status_outcome(next_installation, next_session)
-        ),
+        apply_outcome(&mut model, status_outcome(next_installation, next_session)),
         ControllerEffect::Redraw
     );
     assert_eq!(model.active_view, View::Help);
@@ -880,10 +874,7 @@ fn restoring_a_tab_after_resize_normalizes_hidden_focus_and_uses_skills_geometry
     );
     assert_eq!(model.focus, Focus::Workspace);
 
-    for (width, expected_mode) in [
-        (80, LayoutMode::Medium),
-        (120, LayoutMode::Wide),
-    ] {
+    for (width, expected_mode) in [(80, LayoutMode::Medium), (120, LayoutMode::Wide)] {
         assert_eq!(
             handle_event(&mut model, TuiEvent::Resize(width, 18)),
             ControllerEffect::Redraw

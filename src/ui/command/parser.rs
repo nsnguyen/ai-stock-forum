@@ -165,10 +165,8 @@ pub fn parse_fallback_line(input: &[u8]) -> FallbackParsedLine {
         },
         ["/skill", "show", selector, version] => {
             let parsed = SkillSelector::from_input(selector).and_then(|selector| {
-                positive_version(version).map(|version| ApplicationCommand::ShowSkillVersion {
-                    selector,
-                    version,
-                })
+                positive_version(version)
+                    .map(|version| ApplicationCommand::ShowSkillVersion { selector, version })
             });
             parsed.unwrap_or_else(|_| {
                 reject(InputRejectionCategory::Malformed, safe_token(line), input)
@@ -246,7 +244,8 @@ pub fn parse_fallback_line(input: &[u8]) -> FallbackParsedLine {
         },
         ["/quit"] => ApplicationCommand::RequestShutdown,
         [
-            "agent" | "/agent" | "/skill" | "/skills" | "/help" | "/status" | "/setup" | "/audit" | "/quit",
+            "agent" | "/agent" | "/skill" | "/skills" | "/help" | "/status" | "/setup" | "/audit"
+            | "/quit",
             ..,
         ] => reject(InputRejectionCategory::Malformed, safe_token(line), input),
         _ => reject(InputRejectionCategory::Unknown, safe_token(line), input),

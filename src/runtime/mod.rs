@@ -590,7 +590,10 @@ impl RuntimeClient {
         &self,
         candidate: SkillDraft,
     ) -> Result<SkillEditPreview, RuntimeError> {
-        self.request_reply(|response| Request::PreviewSkillCreation { candidate, response })
+        self.request_reply(|response| Request::PreviewSkillCreation {
+            candidate,
+            response,
+        })
     }
 
     pub fn preview_skill_version(
@@ -1158,7 +1161,10 @@ fn execute_request(executor: &mut dyn CommandExecutor, request: Request, shared:
                 }
             }
         }
-        Request::PreviewSkillCreation { candidate, response } => {
+        Request::PreviewSkillCreation {
+            candidate,
+            response,
+        } => {
             send_runtime_reply(executor, shared, response, |executor| {
                 executor.preview_skill_creation(candidate)
             });

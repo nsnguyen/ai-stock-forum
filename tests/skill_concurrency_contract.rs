@@ -22,7 +22,10 @@ mod fix_round_one_agent_skill_races {
     use super::support;
     use ai_stock_forum::{
         agents::{AgentBindings, AgentProfileDraft, AgentRole},
-        app::{AppError, ApplicationCommand, CommandEnvelope, CommandOutcome, CommandView, SkillSelector},
+        app::{
+            AppError, ApplicationCommand, CommandEnvelope, CommandOutcome, CommandView,
+            SkillSelector,
+        },
         domain::{Actor, AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId},
         skills::{SkillDraft, SkillResource, SkillVersionRef},
     };

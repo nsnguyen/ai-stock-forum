@@ -1,4 +1,7 @@
-use std::{collections::{BTreeMap, BTreeSet}, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    str::FromStr,
+};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -16,8 +19,8 @@ use crate::{
 use super::{
     EventRepository, ImmediateTransaction, PersistenceError, RecoveryError,
     agent_profile_repository::{active_profiles_match, reconcile_expected_versions},
-    load_all_skill_versions, load_all_versions, reconcile_skill_versions,
-    replace_active_profiles, replace_active_skills,
+    load_all_skill_versions, load_all_versions, reconcile_skill_versions, replace_active_profiles,
+    replace_active_skills,
 };
 
 pub struct ProjectionRepository;
@@ -132,8 +135,8 @@ impl ProjectionRepository {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| StartupError::Persistence(PersistenceError::QueryFailed))?;
-        let state = prepare_rebuild(&transaction, events)
-            .map_err(StartupError::EventStreamRecovery)?;
+        let state =
+            prepare_rebuild(&transaction, events).map_err(StartupError::EventStreamRecovery)?;
         reconcile_skill_projection(&transaction, &state.skills)
             .map_err(StartupError::Persistence)?;
         let profile_events = profile_recovery_events(events);
@@ -142,13 +145,9 @@ impl ProjectionRepository {
         load_all_versions(&transaction).map_err(startup_from_profile_persistence)?;
         replace_active_profiles(&transaction, &state.agent_profiles)
             .map_err(startup_from_profile_persistence)?;
-        transaction
-            .commit()
-            .map_err(|_| {
-                StartupError::EventStreamRecovery(
-                    RecoveryError::ActiveAgentProfileRebuildFailed,
-                )
-            })
+        transaction.commit().map_err(|_| {
+            StartupError::EventStreamRecovery(RecoveryError::ActiveAgentProfileRebuildFailed)
+        })
     }
 
     /// Clears rebuildable projection rows after proving that `events` is the current,
@@ -385,10 +384,9 @@ where
         })
         .transpose()?
         .unwrap_or_default();
-    let persisted_state =
-        reduce_events(&persisted_prefix).map_err(persistence_from_recovery)?;
-    if let Some(persisted) = read_projection_rows(transaction, &persisted_state)
-        .map_err(persistence_from_recovery)?
+    let persisted_state = reduce_events(&persisted_prefix).map_err(persistence_from_recovery)?;
+    if let Some(persisted) =
+        read_projection_rows(transaction, &persisted_state).map_err(persistence_from_recovery)?
     {
         if reduce_events(&persisted_prefix).map_err(persistence_from_recovery)? != persisted {
             return Err(PersistenceError::ProjectionStateConflict);

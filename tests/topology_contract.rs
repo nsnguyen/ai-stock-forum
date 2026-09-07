@@ -25,23 +25,53 @@ fn phase_two_profiles_and_declarative_skills_preserve_the_approved_module_bounda
     assert_eq!(
         module_declarations(LIB_RS, true),
         [
-            "agents", "app", "audit", "cli", "config", "domain", "domains", "jobs", "mcp",
-            "memory", "persistence", "policy", "providers", "recovery", "rooms", "runtime",
-            "runtimes", "setup", "skills", "ui",
+            "agents",
+            "app",
+            "audit",
+            "cli",
+            "config",
+            "domain",
+            "domains",
+            "jobs",
+            "mcp",
+            "memory",
+            "persistence",
+            "policy",
+            "providers",
+            "recovery",
+            "rooms",
+            "runtime",
+            "runtimes",
+            "setup",
+            "skills",
+            "ui",
         ],
     );
     assert_eq!(
         module_declarations(SKILLS_MOD_RS, false),
-        ["builtin", "normalization", "projection", "retrieval", "review", "skill"]
+        [
+            "builtin",
+            "normalization",
+            "projection",
+            "retrieval",
+            "review",
+            "skill"
+        ]
     );
     assert!(module_declarations(SKILLS_MOD_RS, true).is_empty());
 
-    assert_eq!(type_name::<skills::SkillDraft>(), "ai_stock_forum::skills::skill::SkillDraft");
+    assert_eq!(
+        type_name::<skills::SkillDraft>(),
+        "ai_stock_forum::skills::skill::SkillDraft"
+    );
     assert_eq!(
         type_name::<skills::SkillVersionRef>(),
         "ai_stock_forum::skills::skill::SkillVersionRef"
     );
-    assert_ne!(TypeId::of::<skills::SkillDraft>(), TypeId::of::<agents::AgentProfileDraft>());
+    assert_ne!(
+        TypeId::of::<skills::SkillDraft>(),
+        TypeId::of::<agents::AgentProfileDraft>()
+    );
     assert_ne!(
         TypeId::of::<skills::SkillVersionRef>(),
         TypeId::of::<domain::AgentProfileVersionId>()
@@ -50,7 +80,8 @@ fn phase_two_profiles_and_declarative_skills_preserve_the_approved_module_bounda
 
 #[test]
 fn module_parser_ignores_comments_reexports_and_non_declarations() {
-    let fixture = "// pub mod commented;\npub use nested::Thing;\nmod private;\npub mod real_boundary;\n";
+    let fixture =
+        "// pub mod commented;\npub use nested::Thing;\nmod private;\npub mod real_boundary;\n";
     assert_eq!(module_declarations(fixture, true), ["real_boundary"]);
     assert_eq!(module_declarations(fixture, false), ["private"]);
 }

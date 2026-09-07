@@ -122,7 +122,9 @@ fn skills_model(pane: SkillsPane) -> TuiModel {
     model
 }
 
-fn profile_with_skills(skill_refs: Vec<ai_stock_forum::skills::SkillVersionRef>) -> AgentProfileView {
+fn profile_with_skills(
+    skill_refs: Vec<ai_stock_forum::skills::SkillVersionRef>,
+) -> AgentProfileView {
     let template = &builtin_profile_templates()[0];
     let mut draft = template.copy_to_draft().expect("profile draft");
     draft.display_name = "Evidence Agent".to_owned();
@@ -294,7 +296,10 @@ fn detail_and_history_make_active_historical_and_inert_content_unambiguous() {
     candidate.instructions = format!("{} END-INSTRUCTIONS", "Long inert instruction. ".repeat(80));
     candidate.resources = vec![SkillResource {
         name: "Very long reference note name for deterministic wrapping".to_owned(),
-        body: format!("{} END-REFERENCE", "Reference body remains inert text. ".repeat(80)),
+        body: format!(
+            "{} END-REFERENCE",
+            "Reference body remains inert text. ".repeat(80)
+        ),
     }];
     let second = SkillVersion::next_version(
         &first,
@@ -349,7 +354,10 @@ fn detail_and_history_make_active_historical_and_inert_content_unambiguous() {
     for (width, height) in [(60, 18), (79, 24), (80, 24), (120, 30)] {
         let rows = render_rows(&model, width, height);
         assert_eq!(rows.len(), usize::from(height));
-        assert!(rows.iter().all(|row| row.chars().count() == usize::from(width)));
+        assert!(
+            rows.iter()
+                .all(|row| row.chars().count() == usize::from(width))
+        );
         assert!(rows.iter().all(|row| !row.contains('\u{1b}')));
     }
 }
@@ -395,7 +403,13 @@ fn agent_skill_panel_shows_exact_pin_upgrade_availability_and_explicit_actions()
     ] {
         assert!(text.contains(expected), "missing {expected}");
     }
-    for chunk in first.reference().skill_version_id().to_string().as_bytes().chunks(8) {
+    for chunk in first
+        .reference()
+        .skill_version_id()
+        .to_string()
+        .as_bytes()
+        .chunks(8)
+    {
         assert!(text.contains(std::str::from_utf8(chunk).unwrap()));
     }
 }
@@ -546,7 +560,10 @@ fn compact_review_and_confirmation_keep_identity_and_actions_in_fixed_visible_re
 
     let compact_review = render_text(&review, 60, 18);
     for expected in ["Assign", "v1", "Enter", "Esc"] {
-        assert!(compact_review.contains(expected), "review missing {expected}");
+        assert!(
+            compact_review.contains(expected),
+            "review missing {expected}"
+        );
     }
 
     let mut confirmation = review;
@@ -577,11 +594,7 @@ fn create_confirmation_uses_authoritative_candidate_state_and_names_version_one(
     let model = create_confirmation_model(&candidate, &unrelated);
     let text = render_text(&model, 120, 44);
 
-    for expected in [
-        "Authoritative Candidate",
-        "Digest",
-        "Version v1",
-    ] {
+    for expected in ["Authoritative Candidate", "Digest", "Version v1"] {
         assert!(text.contains(expected), "missing {expected}");
     }
     for exact_identity in [
@@ -605,8 +618,16 @@ fn list_focus_is_exclusive_and_skills_suppresses_agents_navigation_focus() {
 
     let library_corner = buffer.cell((20, 4)).expect("library corner");
     let detail_corner = buffer.cell((45, 4)).expect("detail corner");
-    assert!(library_corner.modifier.contains(ratatui::style::Modifier::REVERSED));
-    assert!(!detail_corner.modifier.contains(ratatui::style::Modifier::REVERSED));
+    assert!(
+        library_corner
+            .modifier
+            .contains(ratatui::style::Modifier::REVERSED)
+    );
+    assert!(
+        !detail_corner
+            .modifier
+            .contains(ratatui::style::Modifier::REVERSED)
+    );
 
     let text = render_text(&model, 120, 36);
     assert!(text.contains("> s Skills"));
@@ -738,15 +759,15 @@ fn create_source_agent_picker_and_result_keep_complete_contextual_keys_compact_a
             &create,
             ["Up/Down", "Enter: continue", "Esc: library"],
         ),
-        (
-            "picker",
-            &picker,
-            ["Up/Down", "Enter: review", "Esc:"],
-        ),
+        ("picker", &picker, ["Up/Down", "Enter: review", "Esc:"]),
         (
             "result",
             &result,
-            ["Skill action completed", "Enter or Esc", "return to skill detail"],
+            [
+                "Skill action completed",
+                "Enter or Esc",
+                "return to skill detail",
+            ],
         ),
     ] {
         for (width, height) in [(60, 18), (120, 36)] {
@@ -840,7 +861,10 @@ fn agents_multi_skill_panel_shows_position_rows_and_contextual_available_actions
             "Esc: detail",
             "Up/Down",
         ] {
-            assert!(available.contains(expected), "{width}x{height} missing {expected}");
+            assert!(
+                available.contains(expected),
+                "{width}x{height} missing {expected}"
+            );
         }
     }
 
@@ -866,14 +890,14 @@ fn skills_navigation_has_exclusive_focus_style_when_opened_from_agents() {
         let terminal = terminal_for(&model, width, height);
         let buffer = terminal.backend().buffer();
         let locate = |needle: &str| {
-            (0..height).find_map(|y| {
-                let row = (0..width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>();
-                row.find(needle)
-                    .map(|x| (u16::try_from(x).unwrap(), y))
-            })
-            .unwrap_or_else(|| panic!("missing {needle} navigation label"))
+            (0..height)
+                .find_map(|y| {
+                    let row = (0..width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>();
+                    row.find(needle).map(|x| (u16::try_from(x).unwrap(), y))
+                })
+                .unwrap_or_else(|| panic!("missing {needle} navigation label"))
         };
         let (agents_x, agents_y) = locate("Agents");
         let (skills_x, skills_y) = locate("Skills");
@@ -917,8 +941,17 @@ fn medium_assignment_review_reserves_complete_contextual_controls_and_identity()
         model.skills.assignment = Some(assignment.clone());
         let text = render_text(&model, 80, 28);
 
-        for expected in ["Operation", "Target", "Enter: validate", "Esc: agent picker"] {
-            assert!(text.contains(expected), "{:?} missing {expected}", assignment);
+        for expected in [
+            "Operation",
+            "Target",
+            "Enter: validate",
+            "Esc: agent picker",
+        ] {
+            assert!(
+                text.contains(expected),
+                "{:?} missing {expected}",
+                assignment
+            );
         }
         let version_id = target.skill_version_id().to_string();
         assert!(text.contains(&version_id[..8]));

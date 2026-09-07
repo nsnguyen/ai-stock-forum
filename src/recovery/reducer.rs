@@ -6,8 +6,8 @@ use crate::{
     agents::AgentProfilesProjection,
     app::{ApplicationEvent, EVENT_SCHEMA_VERSION, EventEnvelope, ShutdownReason},
     domain::{
-        EventId, InstallationId, ObjectVersion, SessionId, Sha256Digest, SkillId,
-        SkillVersionId, canonical_json_bytes, sha256,
+        EventId, InstallationId, ObjectVersion, SessionId, Sha256Digest, SkillId, SkillVersionId,
+        canonical_json_bytes, sha256,
     },
     persistence::RecoveryError,
     setup::SetupStatus,
@@ -229,10 +229,8 @@ impl SkillsProjection {
     }
 
     fn validate(&self) -> Result<(), RecoveryError> {
-        let mut by_skill = BTreeMap::<
-            SkillId,
-            BTreeMap<ObjectVersion, &ProjectedSkillVersion>,
-        >::new();
+        let mut by_skill =
+            BTreeMap::<SkillId, BTreeMap<ObjectVersion, &ProjectedSkillVersion>>::new();
         for (version_id, version) in &self.versions_by_id {
             if version_id != &version.skill.skill_version_id()
                 || by_skill
@@ -253,8 +251,7 @@ impl SkillsProjection {
                 if let Some(previous) = previous {
                     if previous.skill.version().get().checked_add(1)
                         != Some(version.skill.version().get())
-                        || version.predecessor_version_id
-                            != Some(previous.skill.skill_version_id())
+                        || version.predecessor_version_id != Some(previous.skill.skill_version_id())
                         || version.provenance != previous.provenance
                     {
                         return Err(RecoveryError::InvalidEventRecord);

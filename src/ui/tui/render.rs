@@ -65,7 +65,12 @@ fn render_header(
             .library
             .skills
             .iter()
-            .filter(|skill| matches!(skill.provenance, crate::skills::SkillProvenance::BuiltIn { .. }))
+            .filter(|skill| {
+                matches!(
+                    skill.provenance,
+                    crate::skills::SkillProvenance::BuiltIn { .. }
+                )
+            })
             .count();
         let custom = model.skills.library.skills.len().saturating_sub(built_in);
         lines.push(Line::from(vec![
@@ -112,11 +117,31 @@ fn render_header(
 
 fn numbered_tabs(model: &TuiModel, theme: &Theme) -> Line<'static> {
     let tabs = [
-        ("1", "Overview", !model.skills.active && model.active_view == View::Overview),
-        ("2", "Setup", !model.skills.active && model.active_view == View::Setup),
-        ("3", "Audit", !model.skills.active && model.active_view == View::Audit),
-        ("4", "Help", !model.skills.active && model.active_view == View::Help),
-        ("a", "Agents", !model.skills.active && model.active_view == View::Agents),
+        (
+            "1",
+            "Overview",
+            !model.skills.active && model.active_view == View::Overview,
+        ),
+        (
+            "2",
+            "Setup",
+            !model.skills.active && model.active_view == View::Setup,
+        ),
+        (
+            "3",
+            "Audit",
+            !model.skills.active && model.active_view == View::Audit,
+        ),
+        (
+            "4",
+            "Help",
+            !model.skills.active && model.active_view == View::Help,
+        ),
+        (
+            "a",
+            "Agents",
+            !model.skills.active && model.active_view == View::Agents,
+        ),
         ("s", "Skills", model.skills.active),
     ];
     let mut spans = Vec::new();
@@ -139,11 +164,31 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
         theme.muted
     };
     let tabs = [
-        ("1", "Overview", !model.skills.active && model.active_view == View::Overview),
-        ("2", "Setup", !model.skills.active && model.active_view == View::Setup),
-        ("3", "Audit", !model.skills.active && model.active_view == View::Audit),
-        ("4", "Help", !model.skills.active && model.active_view == View::Help),
-        ("a", "Agents", !model.skills.active && model.active_view == View::Agents),
+        (
+            "1",
+            "Overview",
+            !model.skills.active && model.active_view == View::Overview,
+        ),
+        (
+            "2",
+            "Setup",
+            !model.skills.active && model.active_view == View::Setup,
+        ),
+        (
+            "3",
+            "Audit",
+            !model.skills.active && model.active_view == View::Audit,
+        ),
+        (
+            "4",
+            "Help",
+            !model.skills.active && model.active_view == View::Help,
+        ),
+        (
+            "a",
+            "Agents",
+            !model.skills.active && model.active_view == View::Agents,
+        ),
         ("s", "Skills", model.skills.active),
     ];
     let mut lines = vec![Line::styled("VIEWS", theme.accent), Line::default()];
@@ -194,20 +239,19 @@ fn render_message(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
 
 fn render_command(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     let focused = model.focus == Focus::Command;
-    let title = if model.skills.active
-        && model.skills.pane == crate::ui::tui::model::SkillsPane::Editor
-    {
-        " Skill input "
-    } else if !model.skills.active
-        && model.active_view == View::Agents
-        && model.agents.pane == crate::ui::tui::model::AgentsPane::Editor
-    {
-        " Profile input "
-    } else if model.command_in_flight {
-        " Command - working "
-    } else {
-        " Command "
-    };
+    let title =
+        if model.skills.active && model.skills.pane == crate::ui::tui::model::SkillsPane::Editor {
+            " Skill input "
+        } else if !model.skills.active
+            && model.active_view == View::Agents
+            && model.agents.pane == crate::ui::tui::model::AgentsPane::Editor
+        {
+            " Profile input "
+        } else if model.command_in_flight {
+            " Command - working "
+        } else {
+            " Command "
+        };
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)

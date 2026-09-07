@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, sync::{Arc, RwLock, RwLockReadGuard}};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, RwLock, RwLockReadGuard},
+};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -12,36 +15,38 @@ use crate::{
     app::{
         AgentProfileCreatedView, AgentProfileHistoryEntry, AgentProfileHistoryView,
         AgentProfileSelector, AgentProfileSummary, AgentProfileVersionActivatedView,
-        AgentProfileVersionView, AgentProfileView, AgentProfilesView, AppError, ApplicationCommand,
-        ApplicationEvent, AgentSkillAssignmentOperation, AgentSkillAssignmentPreview,
-        AgentSkillMutationView, AuditTailView, CommandEnvelope, CommandOutcome, CommandView,
-        EVENT_SCHEMA_VERSION, HelpView, InputRejectedView, MAX_AGENT_PROFILE_HISTORY_RESULTS,
-        MAX_AGENT_PROFILE_LIST_RESULTS, MAX_SKILL_HISTORY_RESULTS, MAX_SKILL_LIST_RESULTS,
-        PendingEvent, SetupStatusView, ShutdownDisposition, ShutdownReason, ShutdownView,
-        SkillCreatedView, SkillEventSummary, SkillHistoryEntry, SkillHistoryEventEntry,
-        SkillHistoryView, SkillSelector, SkillSummary, SkillVersionActivatedView, SkillView,
-        SkillsView, StatusView,
+        AgentProfileVersionView, AgentProfileView, AgentProfilesView,
+        AgentSkillAssignmentOperation, AgentSkillAssignmentPreview, AgentSkillMutationView,
+        AppError, ApplicationCommand, ApplicationEvent, AuditTailView, CommandEnvelope,
+        CommandOutcome, CommandView, EVENT_SCHEMA_VERSION, HelpView, InputRejectedView,
+        MAX_AGENT_PROFILE_HISTORY_RESULTS, MAX_AGENT_PROFILE_LIST_RESULTS,
+        MAX_SKILL_HISTORY_RESULTS, MAX_SKILL_LIST_RESULTS, PendingEvent, SetupStatusView,
+        ShutdownDisposition, ShutdownReason, ShutdownView, SkillCreatedView, SkillEventSummary,
+        SkillHistoryEntry, SkillHistoryEventEntry, SkillHistoryView, SkillSelector, SkillSummary,
+        SkillVersionActivatedView, SkillView, SkillsView, StatusView,
     },
     audit::AuditEntry,
     config::{AppPaths, StartupError},
     domain::{
         Actor, AgentProfileId, AgentProfileVersionId, CausationId, Clock, CommandId, CorrelationId,
-        EventId, IdGenerator, InstallationId, MemoryNamespaceId, ObjectVersion,
-        ProfileReviewToken, SessionId, Sha256Digest, SkillId, SkillReviewToken, SkillVersionId,
-        canonical_json_bytes, sha256,
+        EventId, IdGenerator, InstallationId, MemoryNamespaceId, ObjectVersion, ProfileReviewToken,
+        SessionId, Sha256Digest, SkillId, SkillReviewToken, SkillVersionId, canonical_json_bytes,
+        sha256,
     },
     persistence::{
         CommandReceiptRecord, CommandReceiptRepository, Database, EventRepository,
         ImmediateTransaction, PersistenceError, ProjectionRepository, RecoveryError,
         insert_expected_version, insert_skill_version, load_active_skill,
-        load_active_skill_by_name, load_all_skill_versions, load_skill_history,
-        load_skill_version, set_active_skill,
+        load_active_skill_by_name, load_all_skill_versions, load_skill_history, load_skill_version,
+        set_active_skill,
     },
     policy::{Capability, Effect, PolicyDecision, PolicyRule, evaluate},
     recovery::{BootstrapState, ProjectionState, RecoveryCoordinator, reduce},
     setup::SetupStatus,
-    skills::{SkillDraft, SkillEditPreview, SkillProvenance, SkillReviewRegistry, SkillVersion,
-        SkillVersionRef},
+    skills::{
+        SkillDraft, SkillEditPreview, SkillProvenance, SkillReviewRegistry, SkillVersion,
+        SkillVersionRef,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -503,7 +508,10 @@ impl ApplicationService {
         Ok(())
     }
 
-    pub fn preview_skill_creation(&self, candidate: SkillDraft) -> Result<SkillEditPreview, AppError> {
+    pub fn preview_skill_creation(
+        &self,
+        candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, AppError> {
         self.executor.preview_skill_creation(candidate)
     }
 
@@ -513,7 +521,8 @@ impl ApplicationService {
         expected_active_version_id: SkillVersionId,
         candidate: SkillDraft,
     ) -> Result<SkillEditPreview, AppError> {
-        self.executor.preview_skill_version(skill_id, expected_active_version_id, candidate)
+        self.executor
+            .preview_skill_version(skill_id, expected_active_version_id, candidate)
     }
 
     pub fn preview_agent_skill_assignment(
@@ -539,7 +548,10 @@ impl ApplicationService {
         self.executor.preview_agent_skill_operation(
             profile_id,
             expected_active_profile_version_id,
-            AgentSkillAssignmentOperation::Upgrade { expected, replacement },
+            AgentSkillAssignmentOperation::Upgrade {
+                expected,
+                replacement,
+            },
         )
     }
 
@@ -673,7 +685,10 @@ impl IndependentApplicationService {
             .preview_agent_profile_edit(profile_id, expected_active_version_id, candidate)
     }
 
-    pub fn preview_skill_creation(&self, candidate: SkillDraft) -> Result<SkillEditPreview, AppError> {
+    pub fn preview_skill_creation(
+        &self,
+        candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, AppError> {
         self.executor.preview_skill_creation(candidate)
     }
 
@@ -683,7 +698,8 @@ impl IndependentApplicationService {
         expected_active_version_id: SkillVersionId,
         candidate: SkillDraft,
     ) -> Result<SkillEditPreview, AppError> {
-        self.executor.preview_skill_version(skill_id, expected_active_version_id, candidate)
+        self.executor
+            .preview_skill_version(skill_id, expected_active_version_id, candidate)
     }
 
     pub fn preview_agent_skill_assignment(
@@ -750,7 +766,10 @@ impl ApplicationWorker {
         self.executor.execute(envelope)
     }
 
-    pub fn preview_skill_creation(&self, candidate: SkillDraft) -> Result<SkillEditPreview, AppError> {
+    pub fn preview_skill_creation(
+        &self,
+        candidate: SkillDraft,
+    ) -> Result<SkillEditPreview, AppError> {
         self.executor.preview_skill_creation(candidate)
     }
 
@@ -760,7 +779,8 @@ impl ApplicationWorker {
         expected_active_version_id: SkillVersionId,
         candidate: SkillDraft,
     ) -> Result<SkillEditPreview, AppError> {
-        self.executor.preview_skill_version(skill_id, expected_active_version_id, candidate)
+        self.executor
+            .preview_skill_version(skill_id, expected_active_version_id, candidate)
     }
 }
 
@@ -772,13 +792,16 @@ impl CommandExecutor {
         if load_active_skill_by_name(self.database.connection(), &normalized)?.is_some() {
             return Err(AppError::DuplicateSkillName);
         }
-        self.skill_reviews.operation().issue_edit(
-            SkillReviewToken::from_uuid(self.ids.next_uuid()),
-            Actor::Human,
-            SkillId::from_uuid(self.ids.next_uuid()),
-            None,
-            &candidate,
-        ).map_err(AppError::from)
+        self.skill_reviews
+            .operation()
+            .issue_edit(
+                SkillReviewToken::from_uuid(self.ids.next_uuid()),
+                Actor::Human,
+                SkillId::from_uuid(self.ids.next_uuid()),
+                None,
+                &candidate,
+            )
+            .map_err(AppError::from)
     }
 
     fn preview_skill_version(
@@ -798,13 +821,16 @@ impl CommandExecutor {
             return Err(crate::domain::DomainError::SkillUnchanged.into());
         }
         ensure_skill_name_available(self.database.connection(), Some(skill_id), &candidate)?;
-        self.skill_reviews.operation().issue_edit(
-            SkillReviewToken::from_uuid(self.ids.next_uuid()),
-            Actor::Human,
-            skill_id,
-            Some(expected_active_version_id),
-            &candidate,
-        ).map_err(AppError::from)
+        self.skill_reviews
+            .operation()
+            .issue_edit(
+                SkillReviewToken::from_uuid(self.ids.next_uuid()),
+                Actor::Human,
+                skill_id,
+                Some(expected_active_version_id),
+                &candidate,
+            )
+            .map_err(AppError::from)
     }
 
     fn preview_agent_skill_operation(
@@ -820,23 +846,32 @@ impl CommandExecutor {
         };
         self.ensure_passive_open(capability)?;
         let projection = ProjectionRepository::load(self.database.connection())?;
-        let current = projection.agent_profiles.active_profile(profile_id)
+        let current = projection
+            .agent_profiles
+            .active_profile(profile_id)
             .ok_or(AppError::AgentProfileNotFound)?;
         if current.profile_version_id() != expected_active_profile_version_id {
             return Err(AppError::StaleAgentProfileVersion);
         }
         validate_assignment_operation(self.database.connection(), current, &operation)?;
-        self.skill_reviews.operation().issue_assignment(
-            SkillReviewToken::from_uuid(self.ids.next_uuid()),
-            Actor::Human,
-            profile_id,
-            expected_active_profile_version_id,
-            operation,
-        ).map_err(AppError::from)
+        self.skill_reviews
+            .operation()
+            .issue_assignment(
+                SkillReviewToken::from_uuid(self.ids.next_uuid()),
+                Actor::Human,
+                profile_id,
+                expected_active_profile_version_id,
+                operation,
+            )
+            .map_err(AppError::from)
     }
 
     fn ensure_passive_open(&self, capability: Capability) -> Result<(), AppError> {
-        let phase = self.lifecycle.phase.read().map_err(|_| AppError::LifecycleFinished)?;
+        let phase = self
+            .lifecycle
+            .phase
+            .read()
+            .map_err(|_| AppError::LifecycleFinished)?;
         if *phase == LifecyclePhase::Closed {
             return Err(AppError::LifecycleFinished);
         }
@@ -986,7 +1021,8 @@ impl CommandExecutor {
                 return stored.into_result();
             }
             replay_transaction.commit()?;
-            self.hook.before_profile_review_operation(envelope.command_id);
+            self.hook
+                .before_profile_review_operation(envelope.command_id);
         }
         let profile_review_operation = matches!(
             &request.command,
@@ -1392,7 +1428,8 @@ impl CommandExecutor {
                             .map_err(|_| PersistenceError::InvalidAgentProfilePayload)?,
                         profile,
                     )?;
-                    self.hook.after_profile_mirror_insert(transaction.transaction())?;
+                    self.hook
+                        .after_profile_mirror_insert(transaction.transaction())?;
                 }
                 ProjectionRepository::store_with_after_active_profiles(
                     &transaction,
@@ -1618,7 +1655,10 @@ fn prepare_event(
         ApplicationCommand::ListSkills => {
             let skills = active_skills(transaction)?;
             let total_count = skills.len();
-            let returned = skills.into_iter().take(MAX_SKILL_LIST_RESULTS).collect::<Vec<_>>();
+            let returned = skills
+                .into_iter()
+                .take(MAX_SKILL_LIST_RESULTS)
+                .collect::<Vec<_>>();
             Ok(ApplicationEvent::SkillsListed {
                 skills: returned.iter().map(skill_event_summary).collect(),
                 total_count: u32::try_from(total_count)
@@ -1768,15 +1808,16 @@ fn resolve_projected_active_skill<'a>(
         SkillSelector::Name(_) => {
             let normalized_name = selector.normalized_name()?;
             projection.skills.active_refs().find(|active| {
-                projection.skills.version_metadata().any(
-                    |(version, display_name, _, _, _)| {
+                projection
+                    .skills
+                    .version_metadata()
+                    .any(|(version, display_name, _, _, _)| {
                         version == *active
                             && SkillSelector::Name(display_name.to_owned())
                                 .normalized_name()
                                 .as_ref()
                                 == Some(&normalized_name)
-                    },
-                )
+                    })
             })
         }
     }
@@ -1810,7 +1851,10 @@ fn validate_assignment_operation(
             }
             current.assign_skill(skill.clone()).map_err(AppError::from)
         }
-        AgentSkillAssignmentOperation::Upgrade { expected, replacement } => {
+        AgentSkillAssignmentOperation::Upgrade {
+            expected,
+            replacement,
+        } => {
             load_skill_version(connection, expected)?.ok_or(AppError::SkillNotFound)?;
             load_skill_version(connection, replacement)?.ok_or(AppError::SkillNotFound)?;
             if !current.skill_refs().contains(expected) {
@@ -1825,7 +1869,9 @@ fn validate_assignment_operation(
             if !current.skill_refs().contains(expected) {
                 return Err(AppError::SkillNotAssigned);
             }
-            current.unassign_skill(expected.clone()).map_err(AppError::from)
+            current
+                .unassign_skill(expected.clone())
+                .map_err(AppError::from)
         }
     }
 }
@@ -1860,14 +1906,15 @@ fn prepare_agent_skill_event(
             previous_profile_version_id: expected_active_profile_version_id,
             skill,
         },
-        AgentSkillAssignmentOperation::Upgrade { expected, replacement } => {
-            ApplicationEvent::AgentSkillUpgraded {
-                profile,
-                previous_profile_version_id: expected_active_profile_version_id,
-                expected,
-                replacement,
-            }
-        }
+        AgentSkillAssignmentOperation::Upgrade {
+            expected,
+            replacement,
+        } => ApplicationEvent::AgentSkillUpgraded {
+            profile,
+            previous_profile_version_id: expected_active_profile_version_id,
+            expected,
+            replacement,
+        },
         AgentSkillAssignmentOperation::Unassign { expected } => {
             ApplicationEvent::AgentSkillUnassigned {
                 profile,
@@ -2376,7 +2423,9 @@ fn materialize_success(
         }
         (
             ApplicationCommand::CreateSkill {
-                skill_id, candidate, ..
+                skill_id,
+                candidate,
+                ..
             },
             ApplicationEvent::SkillCreated {
                 skill,
@@ -2530,7 +2579,8 @@ fn materialize_success(
         ) => {
             let accepted = load_skill_version(transaction.transaction(), skill)?
                 .ok_or_else(invalid_receipt)?;
-            let selected_skill_matches = match resolve_projected_active_skill(projection, selector) {
+            let selected_skill_matches = match resolve_projected_active_skill(projection, selector)
+            {
                 Some(active) => active.skill_id() == accepted.skill_id(),
                 None => {
                     matches!(provenance, SkillProvenance::BuiltIn { .. })
@@ -2552,7 +2602,10 @@ fn materialize_success(
                 provenance: provenance.clone(),
                 predecessor_version_id: accepted.predecessor(),
             };
-            (CommandView::SkillVersion(view), ShutdownDisposition::Continue)
+            (
+                CommandView::SkillVersion(view),
+                ShutdownDisposition::Continue,
+            )
         }
         (
             ApplicationCommand::ShowSkillHistory { selector },
@@ -2583,13 +2636,20 @@ fn materialize_success(
                 if *selected != *active
                     || active.skill_id() != *skill_id
                     || usize::try_from(*total_count).ok()
-                        != Some(projection.skills.version_metadata().filter(
-                            |(version, _, _, _, _)| version.skill_id() == *skill_id,
-                        ).count())
-                    || versions.iter().zip(&expected_versions).any(|(version, expected)| {
-                        version.skill != expected.0
-                            || version.predecessor_version_id != expected.1
-                    })
+                        != Some(
+                            projection
+                                .skills
+                                .version_metadata()
+                                .filter(|(version, _, _, _, _)| version.skill_id() == *skill_id)
+                                .count(),
+                        )
+                    || versions
+                        .iter()
+                        .zip(&expected_versions)
+                        .any(|(version, expected)| {
+                            version.skill != expected.0
+                                || version.predecessor_version_id != expected.1
+                        })
                     || usize::try_from(*returned_count).ok() != Some(versions.len())
                     || versions.len() != expected_versions.len()
                     || *returned_count > *total_count
@@ -2600,15 +2660,16 @@ fn materialize_success(
             } else {
                 let persisted_active = load_active_skill(transaction.transaction(), *skill_id)?
                     .ok_or_else(invalid_receipt)?;
-                let persisted_history =
-                    load_skill_history(transaction.transaction(), *skill_id)?;
+                let persisted_history = load_skill_history(transaction.transaction(), *skill_id)?;
                 let expected_versions = persisted_history
                     .iter()
                     .rev()
                     .take(MAX_SKILL_HISTORY_RESULTS)
                     .collect::<Vec<_>>();
-                if !matches!(persisted_active.provenance(), SkillProvenance::BuiltIn { .. })
-                    || persisted_active.reference() != *active
+                if !matches!(
+                    persisted_active.provenance(),
+                    SkillProvenance::BuiltIn { .. }
+                ) || persisted_active.reference() != *active
                     || active.skill_id() != *skill_id
                     || !seeded_skill_selector_matches(
                         selector,
@@ -2619,11 +2680,14 @@ fn materialize_success(
                         .iter()
                         .any(|skill| !matches!(skill.provenance(), SkillProvenance::BuiltIn { .. }))
                     || usize::try_from(*total_count).ok() != Some(persisted_history.len())
-                    || versions.iter().zip(&expected_versions).any(|(version, expected)| {
-                        version.skill != expected.reference()
-                            || version.created_at_ms != expected.created_at_ms()
-                            || version.predecessor_version_id != expected.predecessor()
-                    })
+                    || versions
+                        .iter()
+                        .zip(&expected_versions)
+                        .any(|(version, expected)| {
+                            version.skill != expected.reference()
+                                || version.created_at_ms != expected.created_at_ms()
+                                || version.predecessor_version_id != expected.predecessor()
+                        })
                     || usize::try_from(*returned_count).ok() != Some(versions.len())
                     || versions.len() != expected_versions.len()
                     || *returned_count > *total_count
@@ -2664,13 +2728,16 @@ fn materialize_success(
                 skill: committed_skill,
             },
         ) if skill == committed_skill
-            && expected_active_profile_version_id == previous_profile_version_id => materialize_agent_skill_mutation(
-            projection,
-            *profile_id,
-            *previous_profile_version_id,
-            profile,
-            CommandView::AgentSkillAssigned,
-        )?,
+            && expected_active_profile_version_id == previous_profile_version_id =>
+        {
+            materialize_agent_skill_mutation(
+                projection,
+                *profile_id,
+                *previous_profile_version_id,
+                profile,
+                CommandView::AgentSkillAssigned,
+            )?
+        }
         (
             ApplicationCommand::UpgradeAgentSkill {
                 profile_id,
@@ -2687,7 +2754,8 @@ fn materialize_success(
             },
         ) if expected == committed_expected
             && replacement == committed_replacement
-            && expected_active_profile_version_id == previous_profile_version_id => {
+            && expected_active_profile_version_id == previous_profile_version_id =>
+        {
             materialize_agent_skill_mutation(
                 projection,
                 *profile_id,
@@ -2709,13 +2777,16 @@ fn materialize_success(
                 expected: committed_expected,
             },
         ) if expected == committed_expected
-            && expected_active_profile_version_id == previous_profile_version_id => materialize_agent_skill_mutation(
-            projection,
-            *profile_id,
-            *previous_profile_version_id,
-            profile,
-            CommandView::AgentSkillUnassigned,
-        )?,
+            && expected_active_profile_version_id == previous_profile_version_id =>
+        {
+            materialize_agent_skill_mutation(
+                projection,
+                *profile_id,
+                *previous_profile_version_id,
+                profile,
+                CommandView::AgentSkillUnassigned,
+            )?
+        }
         _ => return Err(invalid_receipt()),
     };
     Ok(CommandOutcome {

@@ -17,26 +17,27 @@ use ai_stock_forum::{
         AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, InstallationId,
         MemoryNamespaceId, SessionId, SkillId, SkillReviewToken, SkillVersionId, sha256,
     },
-    runtime::{ApplicationRuntime, CommandExecutor},
     policy::{Capability, PolicyDecision},
+    runtime::{ApplicationRuntime, CommandExecutor},
     setup::SetupStatus,
     skills::{SkillDraft, SkillEditPreview, SkillProvenance, SkillResource, SkillVersion},
     ui::{
         skill_editor::{SkillEditor, SkillEditorEffect, SkillPreviewRequest},
         tui::{
-            ControllerEffect, EventSource, Screen, TuiError, TuiEvent,
-            execute_agent_effect, execute_skill_effect, handle_event, run_tui_with_screen,
+            ControllerEffect, EventSource, Screen, TuiError, TuiEvent, execute_agent_effect,
+            execute_skill_effect, handle_event,
             model::{
-                AgentSkillAction, AgentSkillUpgradeAvailability, AgentsPane, AssignmentKind,
-                Focus, ProfileConfirmation, SkillConfirmation, SkillOperationOrigin,
-                SkillWorkspaceOrigin, SkillsPane, TuiModel, View,
+                AgentSkillAction, AgentSkillUpgradeAvailability, AgentsPane, AssignmentKind, Focus,
+                ProfileConfirmation, SkillConfirmation, SkillOperationOrigin, SkillWorkspaceOrigin,
+                SkillsPane, TuiModel, View,
             },
+            run_tui_with_screen,
             theme::Theme,
         },
     },
 };
-use uuid::Uuid;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Call {
@@ -277,7 +278,10 @@ struct ScriptedEvents {
 
 impl EventSource for ScriptedEvents {
     fn next_event(&mut self, _timeout: Duration) -> Result<Option<TuiEvent>, TuiError> {
-        let event = self.events.pop_front().unwrap_or(Err(TuiError::TerminalInput));
+        let event = self
+            .events
+            .pop_front()
+            .unwrap_or(Err(TuiError::TerminalInput));
         if matches!(event, Ok(None)) {
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -287,7 +291,21 @@ impl EventSource for ScriptedEvents {
 
 struct ContractScreen {
     fail_on_review: bool,
-    frames: Option<Arc<Mutex<Vec<(SkillsPane, usize, Option<ai_stock_forum::skills::SkillVersionRef>)>>>>,
+    #[expect(
+        clippy::type_complexity,
+        reason = "the contract spy records complete rendered-frame state without hiding it behind a helper"
+    )]
+    frames: Option<
+        Arc<
+            Mutex<
+                Vec<(
+                    SkillsPane,
+                    usize,
+                    Option<ai_stock_forum::skills::SkillVersionRef>,
+                )>,
+            >,
+        >,
+    >,
 }
 
 impl Screen for ContractScreen {
@@ -303,7 +321,11 @@ impl Screen for ContractScreen {
             frames.lock().unwrap().push((
                 model.skills.pane,
                 model.skills.library.skills.len(),
-                model.skills.detail.as_ref().map(|detail| detail.skill_ref.clone()),
+                model
+                    .skills
+                    .detail
+                    .as_ref()
+                    .map(|detail| detail.skill_ref.clone()),
             ));
         }
         Ok(())
@@ -320,21 +342,21 @@ impl CommandExecutor for RouteRecorder {
             ApplicationCommand::ListSkills => {
                 let replacement = replacement_skill();
                 Ok(outcome(CommandView::Skills(SkillsView {
-                skills: vec![SkillSummary {
-                    skill_ref: replacement.reference(),
-                    display_name: replacement.content().display_name.clone(),
-                    provenance: replacement.provenance().clone(),
-                }],
-                total_count: 1,
-                returned_count: 1,
-                truncated: false,
-            })))
+                    skills: vec![SkillSummary {
+                        skill_ref: replacement.reference(),
+                        display_name: replacement.content().display_name.clone(),
+                        provenance: replacement.provenance().clone(),
+                    }],
+                    total_count: 1,
+                    returned_count: 1,
+                    truncated: false,
+                })))
             }
             ApplicationCommand::ShowSkill { .. } => Ok(outcome(CommandView::Skill(
                 host_skill_view(&replacement_skill()),
             ))),
-            ApplicationCommand::ListAgentProfiles => Ok(outcome(CommandView::AgentProfiles(
-                AgentProfilesView {
+            ApplicationCommand::ListAgentProfiles => {
+                Ok(outcome(CommandView::AgentProfiles(AgentProfilesView {
                     profiles: vec![AgentProfileSummary {
                         profile_id: AgentProfileId::from_uuid(Uuid::from_u128(110)),
                         profile_version_id: AgentProfileVersionId::from_uuid(Uuid::from_u128(111)),
@@ -348,8 +370,8 @@ impl CommandExecutor for RouteRecorder {
                     total_count: 1,
                     returned_count: 1,
                     truncated: false,
-                },
-            ))),
+                })))
+            }
             ApplicationCommand::ShowAgentProfile { selector } => {
                 if let AgentProfileSelector::Id(profile_id) = selector {
                     self.calls.lock().unwrap().push(Call::ShowAgent(profile_id));
@@ -365,18 +387,24 @@ impl CommandExecutor for RouteRecorder {
                 }),
                 shutdown: ShutdownDisposition::Requested,
             }),
-            ApplicationCommand::ShowSkillVersion { .. } => Ok(outcome(
-                CommandView::SkillVersion(host_skill_view(&assigned_skill())),
-            )),
+            ApplicationCommand::ShowSkillVersion { .. } => Ok(outcome(CommandView::SkillVersion(
+                host_skill_view(&assigned_skill()),
+            ))),
             ApplicationCommand::CreateSkill { .. }
             | ApplicationCommand::ActivateSkillVersion { .. }
             | ApplicationCommand::AssignAgentSkill { .. }
             | ApplicationCommand::UpgradeAgentSkill { .. }
             | ApplicationCommand::UnassignAgentSkill { .. } => {
                 self.calls.lock().unwrap().push(Call::Mutation);
-                Err(self.execute_error.take().unwrap_or(AppError::LifecycleFinished))
+                Err(self
+                    .execute_error
+                    .take()
+                    .unwrap_or(AppError::LifecycleFinished))
             }
-            _ => Err(self.execute_error.take().unwrap_or(AppError::LifecycleFinished)),
+            _ => Err(self
+                .execute_error
+                .take()
+                .unwrap_or(AppError::LifecycleFinished)),
         }
     }
 
@@ -582,21 +610,21 @@ fn outcome(view: CommandView) -> CommandOutcome {
 
 fn snapshot() -> PresentationSnapshot {
     PresentationSnapshot {
-            installation_id: InstallationId::from_uuid(Uuid::from_u128(1)),
-            session_id: SessionId::from_uuid(Uuid::from_u128(2)),
-            database_readiness: ai_stock_forum::app::DatabaseReadiness::Ready,
-            process_guard_ownership: ai_stock_forum::app::ProcessGuardOwnership::Held,
-            setup_status: SetupStatus::NotStarted,
-            recent_audit: Vec::new(),
-            agent_profiles: ai_stock_forum::app::AgentProfilesView {
-                profiles: Vec::new(),
-                total_count: 0,
-                returned_count: 0,
-                truncated: false,
-            },
-            selected_agent_profile: None,
-            selected_agent_profile_history: None,
-        }
+        installation_id: InstallationId::from_uuid(Uuid::from_u128(1)),
+        session_id: SessionId::from_uuid(Uuid::from_u128(2)),
+        database_readiness: ai_stock_forum::app::DatabaseReadiness::Ready,
+        process_guard_ownership: ai_stock_forum::app::ProcessGuardOwnership::Held,
+        setup_status: SetupStatus::NotStarted,
+        recent_audit: Vec::new(),
+        agent_profiles: ai_stock_forum::app::AgentProfilesView {
+            profiles: Vec::new(),
+            total_count: 0,
+            returned_count: 0,
+            truncated: false,
+        },
+        selected_agent_profile: None,
+        selected_agent_profile_history: None,
+    }
 }
 
 fn model() -> TuiModel {
@@ -612,7 +640,11 @@ fn navigation_key(code: KeyCode) -> TuiEvent {
 }
 
 fn push_text(events: &mut VecDeque<Result<Option<TuiEvent>, TuiError>>, value: &str) {
-    events.extend(value.chars().map(|value| Ok(Some(key(KeyCode::Char(value))))));
+    events.extend(
+        value
+            .chars()
+            .map(|value| Ok(Some(key(KeyCode::Char(value))))),
+    );
     events.push_back(Ok(Some(key(KeyCode::Enter))));
 }
 
@@ -648,7 +680,10 @@ fn run_review_host(
     let mut events = review_events();
     events.extend(tail);
     let mut events = ScriptedEvents { events };
-    let mut screen = ContractScreen { fail_on_review, frames: None };
+    let mut screen = ContractScreen {
+        fail_on_review,
+        frames: None,
+    };
     let result = run_tui_with_screen(
         runtime,
         snapshot(),
@@ -782,11 +817,20 @@ fn agent_origin_unassign_cancel_returns_to_the_agent_skill_panel() {
     assert_eq!(model.active_view, View::Agents);
     assert_eq!(model.command.text(), "preserved agent draft");
     assert_eq!(
-        model.agents.detail.as_ref().map(|detail| detail.profile.profile_id()),
+        model
+            .agents
+            .detail
+            .as_ref()
+            .map(|detail| detail.profile.profile_id()),
         Some(AgentProfileId::from_uuid(Uuid::from_u128(110)))
     );
     assert_eq!(
-        calls.lock().unwrap().iter().filter(|call| **call == Call::Cancel).count(),
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| **call == Call::Cancel)
+            .count(),
         1
     );
     runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
@@ -808,24 +852,19 @@ fn cancellation_failure_consumes_registration_before_cleanup_can_retry() {
     model.skills.review_registered = true;
 
     assert!(
-        execute_skill_effect(
-            &client,
-            &mut model,
-            ControllerEffect::CancelSkillReview,
-        )
-        .is_err()
+        execute_skill_effect(&client, &mut model, ControllerEffect::CancelSkillReview,).is_err()
     );
     assert!(!model.skills.review_registered);
     assert!(
-        execute_skill_effect(
-            &client,
-            &mut model,
-            ControllerEffect::CancelSkillReview,
-        )
-        .is_ok()
+        execute_skill_effect(&client, &mut model, ControllerEffect::CancelSkillReview,).is_ok()
     );
     assert_eq!(
-        calls.lock().unwrap().iter().filter(|call| **call == Call::Cancel).count(),
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| **call == Call::Cancel)
+            .count(),
         1
     );
     runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
@@ -874,7 +913,12 @@ fn agent_origin_terminal_review_failures_restore_the_agent_panel_without_orphans
         assert!(!model.skills.review_registered);
         assert!(model.skills.pending_confirmation.is_none());
         assert_eq!(
-            calls.lock().unwrap().iter().filter(|call| **call == Call::Cancel).count(),
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| **call == Call::Cancel)
+                .count(),
             1
         );
         runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
@@ -916,7 +960,11 @@ fn agent_view_exact_version_route_replaces_stale_context_and_returns_to_agents()
     assert_eq!(model.skills.pane, SkillsPane::Detail);
     assert_eq!(model.skills.selected_skill_ref(), Some(&target));
     assert_eq!(
-        model.skills.detail.as_ref().map(|detail| detail.skill_ref.clone()),
+        model
+            .skills
+            .detail
+            .as_ref()
+            .map(|detail| detail.skill_ref.clone()),
         Some(target.clone())
     );
     assert!(model.skills.history.is_none());
@@ -941,7 +989,9 @@ fn historical_assign_preview_builds_a_command_for_the_exact_opened_version() {
     let historical = host_skill(920, 1, "Historical");
     let mut model = model();
     model.skills.active = true;
-    model.skills.replace_version_detail(host_skill_view(&historical));
+    model
+        .skills
+        .replace_version_detail(host_skill_view(&historical));
     model.skills.pane = SkillsPane::AssignmentReview;
     model.skills.selected_agent_detail = Some(agent_panel_model().0.agents.detail.unwrap());
     model.skills.assignment = Some(ai_stock_forum::ui::tui::AssignmentKind::Add);
@@ -1026,9 +1076,9 @@ fn agent_origin_upgrade_preview_builds_an_explicit_exact_upgrade_command() {
         effect,
         ControllerEffect::RequestSkillAssignmentPreview {
             profile_id: AgentProfileId::from_uuid(Uuid::from_u128(110)),
-            expected_active_profile_version_id: AgentProfileVersionId::from_uuid(
-                Uuid::from_u128(111),
-            ),
+            expected_active_profile_version_id: AgentProfileVersionId::from_uuid(Uuid::from_u128(
+                111
+            ),),
             target: replacement.clone(),
             assignment: ai_stock_forum::ui::tui::AssignmentKind::Upgrade {
                 expected: expected.clone(),
@@ -1067,9 +1117,14 @@ fn agent_origin_upgrade_preview_builds_an_explicit_exact_upgrade_command() {
             && *review_token == SkillReviewToken::from_uuid(Uuid::from_u128(93))
     ));
     assert!(model.skills.review_registered);
-    assert!(!calls.lock().unwrap().contains(&Call::ShowAgent(
-        AgentProfileId::from_uuid(Uuid::from_u128(120)),
-    )));
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .contains(&Call::ShowAgent(AgentProfileId::from_uuid(
+                Uuid::from_u128(120)
+            ),))
+    );
 
     let cancel = handle_event(&mut model, key(KeyCode::Esc));
     assert_eq!(cancel, ControllerEffect::CancelSkillReview);
@@ -1079,18 +1134,38 @@ fn agent_origin_upgrade_preview_builds_an_explicit_exact_upgrade_command() {
     assert_eq!(model.active_view, View::Agents);
     assert!(model.agents.skill_panel_open);
     assert_eq!(
-        model.agents.detail.as_ref().map(|detail| detail.profile.profile_id()),
+        model
+            .agents
+            .detail
+            .as_ref()
+            .map(|detail| detail.profile.profile_id()),
         Some(AgentProfileId::from_uuid(Uuid::from_u128(110)))
     );
     assert_eq!(
-        calls.lock().unwrap().iter().filter(|call| **call == Call::Upgrade).count(),
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| **call == Call::Upgrade)
+            .count(),
         1
     );
     assert_eq!(
-        calls.lock().unwrap().iter().filter(|call| **call == Call::Cancel).count(),
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| **call == Call::Cancel)
+            .count(),
         1
     );
-    assert!(!calls.lock().unwrap().iter().any(|call| matches!(call, Call::Mutation)));
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| matches!(call, Call::Mutation))
+    );
     runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
 }
 
@@ -1247,9 +1322,15 @@ fn async_post_create_refresh_completion_draws_populated_exact_detail() {
 
     assert!(result.is_ok());
     let frames = frames.lock().unwrap();
-    assert!(frames.iter().any(|(pane, library_len, detail)| {
-        *pane == SkillsPane::Detail && *library_len == 1 && detail.as_ref() == Some(&expected_ref)
-    }), "worker calls: {:?}; drawn frames: {frames:?}", calls.lock().unwrap());
+    assert!(
+        frames.iter().any(|(pane, library_len, detail)| {
+            *pane == SkillsPane::Detail
+                && *library_len == 1
+                && detail.as_ref() == Some(&expected_ref)
+        }),
+        "worker calls: {:?}; drawn frames: {frames:?}",
+        calls.lock().unwrap()
+    );
 }
 
 #[test]
@@ -1315,7 +1396,13 @@ fn typed_backpressure_keeps_protected_confirmation_retryable_without_token_loss(
     assert_eq!(model.skills.pending_confirmation, Some(confirmation));
     assert!(model.skills.review_registered);
     assert!(!model.command_in_flight);
-    assert!(!calls.lock().unwrap().iter().any(|call| matches!(call, Call::Mutation | Call::Cancel)));
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| matches!(call, Call::Mutation | Call::Cancel))
+    );
 
     release_tx.send(()).unwrap();
     handle.join().unwrap();
@@ -1327,9 +1414,18 @@ fn registered_review_is_cancelled_on_actual_host_interruption() {
     let (succeeded, calls) = run_review_host([Ok(Some(TuiEvent::Interrupt))], false);
 
     assert!(succeeded, "host calls: {calls:?}");
-    assert_eq!(calls.iter().filter(|call| **call == Call::Create).count(), 1);
-    assert_eq!(calls.iter().filter(|call| **call == Call::Cancel).count(), 1);
-    assert_eq!(calls.iter().filter(|call| **call == Call::Finish).count(), 1);
+    assert_eq!(
+        calls.iter().filter(|call| **call == Call::Create).count(),
+        1
+    );
+    assert_eq!(
+        calls.iter().filter(|call| **call == Call::Cancel).count(),
+        1
+    );
+    assert_eq!(
+        calls.iter().filter(|call| **call == Call::Finish).count(),
+        1
+    );
     assert!(!calls.iter().any(|call| matches!(call, Call::Mutation)));
 }
 
@@ -1337,14 +1433,24 @@ fn registered_review_is_cancelled_on_actual_host_interruption() {
 fn registered_review_is_cancelled_on_quit_only_host_exit() {
     let mut tail = Vec::new();
     tail.push(Ok(Some(key(KeyCode::Char('/')))));
-    tail.extend("quit".chars().map(|value| Ok(Some(key(KeyCode::Char(value))))));
+    tail.extend(
+        "quit"
+            .chars()
+            .map(|value| Ok(Some(key(KeyCode::Char(value))))),
+    );
     tail.push(Ok(Some(key(KeyCode::Enter))));
     tail.extend((0..4).map(|_| Ok(None)));
     let (succeeded, calls) = run_review_host(tail, false);
 
     assert!(succeeded, "host calls: {calls:?}");
-    assert_eq!(calls.iter().filter(|call| **call == Call::Cancel).count(), 1);
-    assert_eq!(calls.iter().filter(|call| **call == Call::Finish).count(), 1);
+    assert_eq!(
+        calls.iter().filter(|call| **call == Call::Cancel).count(),
+        1
+    );
+    assert_eq!(
+        calls.iter().filter(|call| **call == Call::Finish).count(),
+        1
+    );
     assert!(!calls.iter().any(|call| matches!(call, Call::Mutation)));
 }
 
@@ -1353,8 +1459,14 @@ fn registered_review_is_cancelled_on_terminal_input_eof_or_io_failure() {
     let (succeeded, calls) = run_review_host([Err(TuiError::TerminalInput)], false);
 
     assert!(!succeeded);
-    assert_eq!(calls.iter().filter(|call| **call == Call::Cancel).count(), 1);
-    assert_eq!(calls.iter().filter(|call| **call == Call::Finish).count(), 1);
+    assert_eq!(
+        calls.iter().filter(|call| **call == Call::Cancel).count(),
+        1
+    );
+    assert_eq!(
+        calls.iter().filter(|call| **call == Call::Finish).count(),
+        1
+    );
     assert!(!calls.iter().any(|call| matches!(call, Call::Mutation)));
 }
 
@@ -1363,8 +1475,14 @@ fn registered_review_is_cancelled_on_terminal_output_failure() {
     let (succeeded, calls) = run_review_host(std::iter::empty(), true);
 
     assert!(!succeeded);
-    assert_eq!(calls.iter().filter(|call| **call == Call::Cancel).count(), 1);
-    assert_eq!(calls.iter().filter(|call| **call == Call::Finish).count(), 1);
+    assert_eq!(
+        calls.iter().filter(|call| **call == Call::Cancel).count(),
+        1
+    );
+    assert_eq!(
+        calls.iter().filter(|call| **call == Call::Finish).count(),
+        1
+    );
     assert!(!calls.iter().any(|call| matches!(call, Call::Mutation)));
 }
 
@@ -1417,12 +1535,18 @@ fn review_regression_cockpit_skill_workflows_reuse_guided_states() {
     let mut assign = model();
     run(&mut assign, "/skill assign Replacement Assigned-Agent");
     assert_eq!(assign.skills.pane, SkillsPane::AssignmentReview);
-    assert!(matches!(assign.skills.assignment, Some(AssignmentKind::Upgrade { .. })));
+    assert!(matches!(
+        assign.skills.assignment,
+        Some(AssignmentKind::Upgrade { .. })
+    ));
 
     let mut unassign = model();
     run(&mut unassign, "/skill unassign Replacement Assigned-Agent");
     assert_eq!(unassign.skills.pane, SkillsPane::AssignmentReview);
-    assert!(matches!(unassign.skills.assignment, Some(AssignmentKind::Unassign { .. })));
+    assert!(matches!(
+        unassign.skills.assignment,
+        Some(AssignmentKind::Unassign { .. })
+    ));
 
     runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
 }
@@ -1431,8 +1555,14 @@ fn review_regression_cockpit_skill_workflows_reuse_guided_states() {
 fn review_regression_reference_notes_are_keyboard_editable_and_removable() {
     let mut seed = draft();
     seed.resources = vec![
-        SkillResource { name: "First".to_owned(), body: "Old body".to_owned() },
-        SkillResource { name: "Second".to_owned(), body: "Remove me".to_owned() },
+        SkillResource {
+            name: "First".to_owned(),
+            body: "Old body".to_owned(),
+        },
+        SkillResource {
+            name: "Second".to_owned(),
+            body: "Remove me".to_owned(),
+        },
     ];
     let skill = host_skill(980, 2, "Editable");
     let mut model = model();
@@ -1454,11 +1584,20 @@ fn review_regression_reference_notes_are_keyboard_editable_and_removable() {
     ] {
         model.command.clear();
         model.command.ingest(value);
-        assert_eq!(handle_event(&mut model, key(KeyCode::Enter)), ControllerEffect::Redraw);
+        assert_eq!(
+            handle_event(&mut model, key(KeyCode::Enter)),
+            ControllerEffect::Redraw
+        );
     }
 
-    assert_eq!(handle_event(&mut model, key(KeyCode::Down)), ControllerEffect::Redraw);
-    assert_eq!(handle_event(&mut model, key(KeyCode::Enter)), ControllerEffect::Redraw);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Down)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::Redraw
+    );
     assert_eq!(model.command.text(), "First");
     model.command.clear();
     model.command.ingest("Edited");
@@ -1468,12 +1607,24 @@ fn review_regression_reference_notes_are_keyboard_editable_and_removable() {
     model.command.ingest("New body");
     handle_event(&mut model, key(KeyCode::Enter));
 
-    assert_eq!(handle_event(&mut model, key(KeyCode::Down)), ControllerEffect::Redraw);
-    assert_eq!(handle_event(&mut model, key(KeyCode::Down)), ControllerEffect::Redraw);
-    assert_eq!(handle_event(&mut model, key(KeyCode::Delete)), ControllerEffect::Redraw);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Down)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Down)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Delete)),
+        ControllerEffect::Redraw
+    );
     assert_eq!(
         model.skills.editor.as_ref().unwrap().draft().resources,
-        vec![SkillResource { name: "Edited".to_owned(), body: "New body".to_owned() }]
+        vec![SkillResource {
+            name: "Edited".to_owned(),
+            body: "New body".to_owned()
+        }]
     );
 }
 
@@ -1496,7 +1647,11 @@ fn review_regression_agents_load_upgrade_truth_on_first_open() {
     execute_agent_effect(&runtime.client(), &mut model, detail).unwrap();
     handle_event(&mut model, key(KeyCode::Enter));
 
-    assert!(model.available_agent_skill_actions().contains(&AgentSkillAction::Upgrade));
+    assert!(
+        model
+            .available_agent_skill_actions()
+            .contains(&AgentSkillAction::Upgrade)
+    );
     runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
 }
 
@@ -1693,11 +1848,16 @@ fn review_regression_historical_detail_cannot_create_a_version_but_active_detail
     });
     model.skills.replace_detail(host_skill_view(&active));
     model.skills.selected_action_index = 1;
-    assert_eq!(handle_event(&mut model, key(KeyCode::Enter)), ControllerEffect::Redraw);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::Redraw
+    );
     assert_eq!(model.skills.pane, SkillsPane::Editor);
 
     model.skills.editor = None;
-    model.skills.replace_version_detail(host_skill_view(&historical));
+    model
+        .skills
+        .replace_version_detail(host_skill_view(&historical));
     model.skills.pane = SkillsPane::Detail;
     model.skills.selected_action_index = 1;
     assert!(matches!(
@@ -1838,7 +1998,10 @@ fn skill_picker_profile_load_uses_picker_intent_instead_of_ambient_workspace_sta
 
     assert!(model.skills.active);
     assert_eq!(model.skills.pane, SkillsPane::AssignmentReview);
-    assert_eq!(model.skills.assignment, Some(AssignmentKind::AlreadyAssigned));
+    assert_eq!(
+        model.skills.assignment,
+        Some(AssignmentKind::AlreadyAssigned)
+    );
     assert!(model.skills.selected_agent_detail.is_some());
     runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
 }
@@ -1912,7 +2075,8 @@ fn successful_assignment_mutations_refresh_both_origin_views_before_result_dismi
             let mut model = model();
             model.skills.active = matches!(origin, SkillOperationOrigin::Skills(_));
             model.active_view = View::Agents;
-            model.agents.skill_panel_open = matches!(origin, SkillOperationOrigin::AgentSkills { .. });
+            model.agents.skill_panel_open =
+                matches!(origin, SkillOperationOrigin::AgentSkills { .. });
             model.agents.replace_detail(initial.clone());
             model.skills.selected_agent_detail = Some(initial.clone());
             model.skills.replace_skills(SkillsView {

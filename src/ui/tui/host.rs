@@ -166,8 +166,7 @@ fn refresh_agent_navigation_data(
     let result = (|| {
         let skills = submit_agent_command(client, model, ApplicationCommand::ListSkills)?;
         let _ = apply_outcome(model, skills);
-        let outcome =
-            submit_agent_command(client, model, ApplicationCommand::ListAgentProfiles)?;
+        let outcome = submit_agent_command(client, model, ApplicationCommand::ListAgentProfiles)?;
         apply_agent_outcome(model, outcome);
         Ok(())
     })();
@@ -205,10 +204,11 @@ pub fn execute_skill_effect(
         }
         ControllerEffect::LoadSkills => {
             let navigation = model.navigation_state_snapshot();
-            let result = submit_agent_command(client, model, ApplicationCommand::ListSkills)
-                .map(|outcome| {
+            let result = submit_agent_command(client, model, ApplicationCommand::ListSkills).map(
+                |outcome| {
                     let _ = apply_outcome(model, outcome);
-                });
+                },
+            );
             model.restore_navigation_state(navigation);
             result?;
         }
@@ -234,7 +234,11 @@ pub fn execute_skill_effect(
             )?;
             let _ = apply_outcome(model, outcome);
             if starter {
-                let seed = model.skills.detail.as_ref().map(|detail| detail.content.clone());
+                let seed = model
+                    .skills
+                    .detail
+                    .as_ref()
+                    .map(|detail| detail.content.clone());
                 model.skills.start_create(seed);
                 synchronize_host_skill_input(model);
             }
@@ -371,7 +375,11 @@ fn execute_typed_skill_workflow(
             synchronize_host_skill_input(model);
             model.clear_message();
         }
-        SkillWorkflowCommand::Assign { skill, agent, version } => {
+        SkillWorkflowCommand::Assign {
+            skill,
+            agent,
+            version,
+        } => {
             let command = match version {
                 None => ApplicationCommand::ShowSkill { selector: skill },
                 Some(version) => ApplicationCommand::ShowSkillVersion {
@@ -433,9 +441,7 @@ fn execute_typed_skill_workflow(
             )?;
             let _ = apply_outcome(model, exact);
             model.skills.selected_agent_detail = Some(agent_detail);
-            model.skills.assignment = Some(super::model::AssignmentKind::Unassign {
-                expected,
-            });
+            model.skills.assignment = Some(super::model::AssignmentKind::Unassign { expected });
             model.skills.pane = super::model::SkillsPane::AssignmentReview;
         }
     }
@@ -499,23 +505,26 @@ fn install_assignment_preview(model: &mut TuiModel, preview: AgentSkillAssignmen
             review_token: preview.review_token,
             review_digest: preview.review_digest,
         },
-        AgentSkillAssignmentOperation::Upgrade { expected, replacement } => {
-            ApplicationCommand::UpgradeAgentSkill {
+        AgentSkillAssignmentOperation::Upgrade {
+            expected,
+            replacement,
+        } => ApplicationCommand::UpgradeAgentSkill {
+            profile_id: preview.profile_id,
+            expected_active_profile_version_id: preview.expected_active_profile_version_id,
+            expected,
+            replacement,
+            review_token: preview.review_token,
+            review_digest: preview.review_digest,
+        },
+        AgentSkillAssignmentOperation::Unassign { expected } => {
+            ApplicationCommand::UnassignAgentSkill {
                 profile_id: preview.profile_id,
                 expected_active_profile_version_id: preview.expected_active_profile_version_id,
                 expected,
-                replacement,
                 review_token: preview.review_token,
                 review_digest: preview.review_digest,
             }
         }
-        AgentSkillAssignmentOperation::Unassign { expected } => ApplicationCommand::UnassignAgentSkill {
-            profile_id: preview.profile_id,
-            expected_active_profile_version_id: preview.expected_active_profile_version_id,
-            expected,
-            review_token: preview.review_token,
-            review_digest: preview.review_digest,
-        },
     };
     model.skills.review_registered = true;
     if let SkillOperationOrigin::AgentSkills { profile_id } = model.skills.operation_origin {
@@ -560,7 +569,10 @@ fn recover_skill_error(
         model.agents.skill_panel_open = true;
     }
     model.set_command_in_flight(false);
-    model.set_message(super::model::Severity::Error, "Skill action failed; review cleared.");
+    model.set_message(
+        super::model::Severity::Error,
+        "Skill action failed; review cleared.",
+    );
     Ok(())
 }
 
@@ -597,7 +609,9 @@ fn submit_protected_skill_command(
     command: ApplicationCommand,
 ) -> Result<CommandOutcome, RuntimeError> {
     model.set_command_in_flight(true);
-    let result = client.try_submit(command).and_then(|pending| pending.recv());
+    let result = client
+        .try_submit(command)
+        .and_then(|pending| pending.recv());
     if result.is_err() {
         model.set_command_in_flight(false);
     }
@@ -616,9 +630,7 @@ fn apply_agent_outcome(model: &mut TuiModel, outcome: CommandOutcome) {
     }
 }
 
-fn assignment_profile_id(
-    command: &ApplicationCommand,
-) -> Option<crate::domain::AgentProfileId> {
+fn assignment_profile_id(command: &ApplicationCommand) -> Option<crate::domain::AgentProfileId> {
     match command {
         ApplicationCommand::AssignAgentSkill { profile_id, .. }
         | ApplicationCommand::UpgradeAgentSkill { profile_id, .. }
@@ -641,9 +653,10 @@ fn load_agent_skill_library(
     model: &mut TuiModel,
 ) -> Result<(), RuntimeError> {
     let navigation = model.navigation_state_snapshot();
-    let result = submit_agent_command(client, model, ApplicationCommand::ListSkills).map(|outcome| {
-        let _ = apply_outcome(model, outcome);
-    });
+    let result =
+        submit_agent_command(client, model, ApplicationCommand::ListSkills).map(|outcome| {
+            let _ = apply_outcome(model, outcome);
+        });
     model.restore_navigation_state(navigation);
     result
 }
@@ -1121,10 +1134,8 @@ impl TuiRunner {
                 return Ok(LoopControl::Continue { redraw: true });
             }
             if effect.blocked_while_command_in_flight() {
-                self.model.set_message(
-                    super::model::Severity::Warning,
-                    PENDING_INTERACTION_MESSAGE,
-                );
+                self.model
+                    .set_message(super::model::Severity::Warning, PENDING_INTERACTION_MESSAGE);
                 return Ok(LoopControl::Continue { redraw: true });
             }
         }
@@ -1322,12 +1333,17 @@ fn run_with_screen(
     let cancellation = runner
         .cancel_active_profile_review()
         .map_err(TuiError::Runtime);
-    let skill_cancellation = runner.cancel_active_skill_review().map_err(TuiError::Runtime);
+    let skill_cancellation = runner
+        .cancel_active_skill_review()
+        .map_err(TuiError::Runtime);
     let restoration = screen.restore();
     let finish = runner.finish(finish_reason).map_err(TuiError::Runtime);
     match primary {
         Err(error) => Err(error),
-        Ok(_) => cancellation.and(skill_cancellation).and(restoration).and(finish),
+        Ok(_) => cancellation
+            .and(skill_cancellation)
+            .and(restoration)
+            .and(finish),
     }
 }
 
@@ -1803,10 +1819,7 @@ mod tests {
 
         let effect = handle_event(
             &mut runner.model,
-            TuiEvent::Key(KeyEvent::new(
-                KeyCode::Char('s'),
-                KeyModifiers::NONE,
-            )),
+            TuiEvent::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
         );
         assert_eq!(effect, ControllerEffect::LoadSkills);
         assert!(runner.model.skills.active);
@@ -1838,7 +1851,10 @@ mod tests {
 
         assert_eq!(
             observer.commands(),
-            [ApplicationCommand::ShowStatus, ApplicationCommand::ListSkills]
+            [
+                ApplicationCommand::ShowStatus,
+                ApplicationCommand::ListSkills
+            ]
         );
         assert!(runner.model.skills.active);
         runner.finish(ShutdownReason::Interrupted).unwrap();
@@ -1899,10 +1915,7 @@ mod tests {
         assert_eq!(
             handle_event(
                 &mut runner.model,
-                TuiEvent::Key(KeyEvent::new(
-                    KeyCode::Char('s'),
-                    KeyModifiers::NONE,
-                )),
+                TuiEvent::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE,)),
             ),
             ControllerEffect::Redraw
         );
@@ -1917,11 +1930,18 @@ mod tests {
         };
 
         assert!(redraw);
-        assert_eq!(runner.model.skills.pending_confirmation, expected_confirmation);
+        assert_eq!(
+            runner.model.skills.pending_confirmation,
+            expected_confirmation
+        );
         assert!(runner.model.skills.review_registered);
         assert_eq!(observer.commands(), [ApplicationCommand::ShowStatus]);
         assert_eq!(
-            runner.model.message.as_ref().map(|message| message.text.as_str()),
+            runner
+                .model
+                .message
+                .as_ref()
+                .map(|message| message.text.as_str()),
             Some("A command is already running.")
         );
 
@@ -1935,7 +1955,10 @@ mod tests {
         );
         assert!(runner.model.skills.active);
         assert_eq!(runner.model.skills.pane, SkillsPane::Confirmation);
-        assert_eq!(runner.model.skills.pending_confirmation, expected_confirmation);
+        assert_eq!(
+            runner.model.skills.pending_confirmation,
+            expected_confirmation
+        );
         assert!(runner.model.skills.review_registered);
 
         release.unwrap().send(()).unwrap();
@@ -1989,10 +2012,7 @@ mod tests {
         assert_eq!(
             handle_event(
                 &mut runner.model,
-                TuiEvent::Key(KeyEvent::new(
-                    KeyCode::Char('s'),
-                    KeyModifiers::NONE,
-                )),
+                TuiEvent::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE,)),
             ),
             ControllerEffect::Redraw
         );
@@ -2009,7 +2029,11 @@ mod tests {
         assert_eq!(runner.model.skills.pane, SkillsPane::Result);
         assert_eq!(observer.commands(), [ApplicationCommand::ShowStatus]);
         assert_eq!(
-            runner.model.message.as_ref().map(|message| message.text.as_str()),
+            runner
+                .model
+                .message
+                .as_ref()
+                .map(|message| message.text.as_str()),
             Some("A command is already running.")
         );
 

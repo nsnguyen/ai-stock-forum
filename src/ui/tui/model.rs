@@ -92,13 +92,17 @@ pub enum AgentOutcomeIntent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillOperationOrigin {
     Skills(SkillsPane),
-    AgentSkills { profile_id: crate::domain::AgentProfileId },
+    AgentSkills {
+        profile_id: crate::domain::AgentProfileId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillWorkspaceOrigin {
     Cockpit(View),
-    AgentSkills { profile_id: crate::domain::AgentProfileId },
+    AgentSkills {
+        profile_id: crate::domain::AgentProfileId,
+    },
 }
 
 impl AssignmentKind {
@@ -182,7 +186,9 @@ impl Default for SkillsViewState {
 
 impl SkillsViewState {
     pub fn replace_skills(&mut self, library: SkillsView) {
-        let selected_id = self.selected_summary().map(|summary| summary.skill_ref.skill_id());
+        let selected_id = self
+            .selected_summary()
+            .map(|summary| summary.skill_ref.skill_id());
         self.library = library;
         self.library_loaded = true;
         self.selected_skill = selected_id
@@ -262,7 +268,9 @@ impl SkillsViewState {
 
     pub fn selected_action(&self) -> SkillDetailAction {
         let actions = self.available_detail_actions();
-        actions[self.selected_action_index.min(actions.len().saturating_sub(1))]
+        actions[self
+            .selected_action_index
+            .min(actions.len().saturating_sub(1))]
     }
 
     pub fn available_detail_actions(&self) -> &'static [SkillDetailAction] {
@@ -290,14 +298,18 @@ impl SkillsViewState {
             self.version_detail
                 .as_ref()
                 .filter(|version| {
-                    self.detail.as_ref().map(|detail| detail.skill_ref.skill_id())
+                    self.detail
+                        .as_ref()
+                        .map(|detail| detail.skill_ref.skill_id())
                         == Some(version.skill_ref.skill_id())
                 })
                 .map(|version| &version.skill_ref)
-                .or_else(|| self.detail
-                .as_ref()
-                .map(|detail| &detail.skill_ref)
-                .or_else(|| self.selected_summary().map(|summary| &summary.skill_ref)))
+                .or_else(|| {
+                    self.detail
+                        .as_ref()
+                        .map(|detail| &detail.skill_ref)
+                        .or_else(|| self.selected_summary().map(|summary| &summary.skill_ref))
+                })
         }
     }
 
@@ -396,9 +408,12 @@ impl AgentsViewState {
     }
 
     pub fn selected_assigned_skill_ref(&self) -> Option<&SkillVersionRef> {
-        self.detail
-            .as_ref()
-            .and_then(|detail| detail.profile.skill_refs().get(self.selected_assigned_skill))
+        self.detail.as_ref().and_then(|detail| {
+            detail
+                .profile
+                .skill_refs()
+                .get(self.selected_assigned_skill)
+        })
     }
 
     pub fn selected_summary(&self) -> Option<&crate::app::AgentProfileSummary> {
@@ -462,9 +477,12 @@ impl AgentsViewState {
             self.version_detail = None;
         }
         self.detail = Some(detail);
-        self.selected_assigned_skill = self
-            .selected_assigned_skill
-            .min(self.detail.as_ref().map(|detail| detail.profile.skill_refs().len().saturating_sub(1)).unwrap_or(0));
+        self.selected_assigned_skill = self.selected_assigned_skill.min(
+            self.detail
+                .as_ref()
+                .map(|detail| detail.profile.skill_refs().len().saturating_sub(1))
+                .unwrap_or(0),
+        );
     }
 
     pub fn replace_history(&mut self, history: AgentProfileHistoryView) {
@@ -747,10 +765,7 @@ pub(super) enum NavigationTab {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingOutcomeNavigation {
-    SelectIfUnchanged {
-        tab: NavigationTab,
-        generation: u64,
-    },
+    SelectIfUnchanged { tab: NavigationTab, generation: u64 },
     PreserveCurrent,
 }
 
@@ -1045,12 +1060,7 @@ impl TuiModel {
     }
 
     pub fn synchronize_geometry(&mut self) {
-        let area = ratatui::layout::Rect::new(
-            0,
-            0,
-            self.terminal_width,
-            self.terminal_height,
-        );
+        let area = ratatui::layout::Rect::new(0, 0, self.terminal_width, self.terminal_height);
         let geometry = if self.skills.active {
             super::layout::skill_geometry(area, self.inspector_open)
         } else {
@@ -1144,12 +1154,10 @@ impl TuiModel {
 
     pub fn set_command_in_flight(&mut self, command_in_flight: bool) {
         if command_in_flight && !self.command_in_flight {
-            self.pending_outcome_navigation = Some(
-                PendingOutcomeNavigation::SelectIfUnchanged {
-                    tab: self.active_navigation_tab(),
-                    generation: self.navigation_generation,
-                },
-            );
+            self.pending_outcome_navigation = Some(PendingOutcomeNavigation::SelectIfUnchanged {
+                tab: self.active_navigation_tab(),
+                generation: self.navigation_generation,
+            });
         } else if !command_in_flight {
             self.pending_outcome_navigation = None;
         }
@@ -1164,8 +1172,7 @@ impl TuiModel {
     pub(super) fn should_present_pending_outcome(&self) -> bool {
         match self.pending_outcome_navigation {
             Some(PendingOutcomeNavigation::SelectIfUnchanged { tab, generation }) => {
-                tab == self.active_navigation_tab()
-                    && generation == self.navigation_generation
+                tab == self.active_navigation_tab() && generation == self.navigation_generation
             }
             Some(PendingOutcomeNavigation::PreserveCurrent) => false,
             None => true,
@@ -1200,8 +1207,7 @@ impl TuiModel {
     }
 
     pub fn available_agent_skill_actions(&self) -> &'static [AgentSkillAction] {
-        const STANDARD: &[AgentSkillAction] =
-            &[AgentSkillAction::View, AgentSkillAction::Unassign];
+        const STANDARD: &[AgentSkillAction] = &[AgentSkillAction::View, AgentSkillAction::Unassign];
         const UPGRADEABLE: &[AgentSkillAction] = &[
             AgentSkillAction::View,
             AgentSkillAction::Upgrade,

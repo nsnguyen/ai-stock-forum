@@ -236,13 +236,7 @@ mod fix_round_one_review_and_exact_refs {
         reused.command_id = CommandId::from_uuid(Uuid::from_u128(10_000_202));
         reused.correlation_id = CorrelationId::from_uuid(Uuid::from_u128(11_000_202));
         assert_eq!(app.execute(reused), Err(AppError::SkillReviewUnavailable));
-        assert_rejected_unchanged(
-            &mut app,
-            before,
-            Some(created_view.skill_id),
-            None,
-            2_100,
-        );
+        assert_rejected_unchanged(&mut app, before, Some(created_view.skill_id), None, 2_100);
 
         let version_candidate = skill("Bound Skill", "accepted version two");
         let version_preview = app
@@ -266,13 +260,7 @@ mod fix_round_one_review_and_exact_refs {
             )),
             Err(AppError::SkillReviewMismatch)
         );
-        assert_rejected_unchanged(
-            &mut app,
-            before,
-            Some(created_view.skill_id),
-            None,
-            2_200,
-        );
+        assert_rejected_unchanged(&mut app, before, Some(created_view.skill_id), None, 2_200);
         let versioned = app
             .execute(envelope(
                 204,
@@ -802,7 +790,10 @@ fn reviewed_create_version_reads_and_exact_assignment_lifecycle_are_typed() {
     let CommandView::Skill(active) = active.view else {
         panic!("skill view")
     };
-    assert_eq!(active.content.resources[0].body, "Verify every material claim.");
+    assert_eq!(
+        active.content.resources[0].body,
+        "Verify every material claim."
+    );
     let mut rendered = Vec::new();
     ai_stock_forum::ui::command::TextRenderer::render_view(
         &CommandView::Skill(active.clone()),
@@ -854,7 +845,10 @@ fn reviewed_create_version_reads_and_exact_assignment_lifecycle_are_typed() {
     let CommandView::SkillVersion(historical) = historical.view else {
         panic!("historical skill view")
     };
-    assert_eq!(historical.skill_ref.skill_version_id(), created.skill_version_id);
+    assert_eq!(
+        historical.skill_ref.skill_version_id(),
+        created.skill_version_id
+    );
 
     let history = app
         .execute(envelope(
@@ -890,7 +884,10 @@ fn reviewed_create_version_reads_and_exact_assignment_lifecycle_are_typed() {
             historical.skill_ref.clone(),
         )
         .unwrap();
-    assert!(matches!(assign_preview.operation, AgentSkillAssignmentOperation::Assign { .. }));
+    assert!(matches!(
+        assign_preview.operation,
+        AgentSkillAssignmentOperation::Assign { .. }
+    ));
     let assigned = app
         .execute(envelope(
             10_007,
@@ -916,7 +913,8 @@ fn reviewed_create_version_reads_and_exact_assignment_lifecycle_are_typed() {
             active_replacement,
         )
         .unwrap();
-    let AgentSkillAssignmentOperation::Upgrade { replacement, .. } = &upgrade_preview.operation else {
+    let AgentSkillAssignmentOperation::Upgrade { replacement, .. } = &upgrade_preview.operation
+    else {
         panic!("upgrade operation")
     };
     let replacement = replacement.clone();
@@ -956,7 +954,10 @@ fn reviewed_create_version_reads_and_exact_assignment_lifecycle_are_typed() {
             },
         ))
         .unwrap();
-    assert!(matches!(unassigned.view, CommandView::AgentSkillUnassigned(_)));
+    assert!(matches!(
+        unassigned.view,
+        CommandView::AgentSkillUnassigned(_)
+    ));
 }
 
 fn active_skill_ref(
@@ -1003,7 +1004,7 @@ fn create_and_version_reject_name_conflicts_and_stale_active_versions() {
             "  INDEPENDENT   EVIDENCE   review ",
             "Different content.",
         ))
-            .unwrap_err(),
+        .unwrap_err(),
         AppError::DuplicateSkillName,
     );
     assert_eq!(

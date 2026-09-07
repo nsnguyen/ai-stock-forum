@@ -22,8 +22,12 @@ const EXPECTED_PRIVACY_BLOCK: &str = "Privacy warning: users must not enter secr
 
 fn read_repository_document(relative_path: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
-    fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("required documentation {} is unavailable: {error}", path.display()))
+    fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "required documentation {} is unavailable: {error}",
+            path.display()
+        )
+    })
 }
 
 fn heading_level(line: &str) -> Option<usize> {
@@ -247,10 +251,17 @@ fn token_window_is_negated(tokens: &[String], left: usize, right: usize) -> bool
                 | "isnt"
                 | "optional"
         )
-    }) || window.windows(2).any(|pair| pair[0] == "no" && pair[1] == "longer")
+    }) || window
+        .windows(2)
+        .any(|pair| pair[0] == "no" && pair[1] == "longer")
 }
 
-fn token_slice_contains_phrase(tokens: &[String], start: usize, end: usize, phrase: &[&str]) -> bool {
+fn token_slice_contains_phrase(
+    tokens: &[String],
+    start: usize,
+    end: usize,
+    phrase: &[&str],
+) -> bool {
     !phrase.is_empty()
         && start < end
         && end <= tokens.len()
@@ -301,7 +312,11 @@ fn control_relation_is_negated(tokens: &[String], start: usize, end: usize) -> b
 
 fn unit_maps_bare_q_to_exit(tokens: &[String]) -> bool {
     const EXIT_WORDS: [&str; 6] = ["quit", "quits", "exit", "exits", "close", "closes"];
-    for (q_index, _) in tokens.iter().enumerate().filter(|(_, token)| token.as_str() == "q") {
+    for (q_index, _) in tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| token.as_str() == "q")
+    {
         for (verb_index, _) in tokens
             .iter()
             .enumerate()
@@ -330,17 +345,40 @@ fn unit_maps_bare_q_to_exit(tokens: &[String]) -> bool {
 
 fn unit_requires_colon_skill_control(tokens: &[String]) -> bool {
     const OUTCOMES: [&str; 15] = [
-        "continue", "continues", "continuing", "advance", "advances", "advanced", "finish",
-        "finishes", "finished", "create", "creates", "created", "creating", "complete",
+        "continue",
+        "continues",
+        "continuing",
+        "advance",
+        "advances",
+        "advanced",
+        "finish",
+        "finishes",
+        "finished",
+        "create",
+        "creates",
+        "created",
+        "creating",
+        "complete",
         "completed",
     ];
     const REQUIREMENTS: [&str; 11] = [
-        "must", "required", "requires", "mandatory", "need", "needs", "use", "enter", "type",
-        "press", "run",
+        "must",
+        "required",
+        "requires",
+        "mandatory",
+        "need",
+        "needs",
+        "use",
+        "enter",
+        "type",
+        "press",
+        "run",
     ];
-    for (control_index, _) in tokens.iter().enumerate().filter(|(_, token)| {
-        matches!(token.as_str(), ":next" | ":create")
-    }) {
+    for (control_index, _) in tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| matches!(token.as_str(), ":next" | ":create"))
+    {
         for (outcome_index, _) in tokens
             .iter()
             .enumerate()
@@ -377,7 +415,9 @@ fn validate_control_guidance(document: &str) -> Result<(), String> {
             return Err(format!("bare q is mapped to shutdown: {unit}"));
         }
         if unit_requires_colon_skill_control(&tokens) {
-            return Err(format!("colon control is required by Skills guidance: {unit}"));
+            return Err(format!(
+                "colon control is required by Skills guidance: {unit}"
+            ));
         }
     }
     Ok(())
@@ -437,9 +477,8 @@ fn roadmap_status_units(document: &str) -> Vec<RoadmapStatusUnit> {
             continue;
         }
 
-        let starts_list_item = trimmed.starts_with("- ")
-            || trimmed.starts_with("* ")
-            || trimmed.starts_with("+ ");
+        let starts_list_item =
+            trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ");
         if starts_list_item {
             flush(&mut units, &mut current, phase, in_status_section);
         } else if !current.is_empty() {
@@ -548,14 +587,9 @@ fn validate_phase_status_contract(document: &str) -> Result<(), String> {
         let pending = checkbox == Some(false)
             || nearby_pending
             || negated_nearby_complete
-            || tokens
-                .windows(2)
-                .enumerate()
-                .any(|(index, pair)| {
-                    pair[0] == "not"
-                        && pair[1] == "started"
-                        && milestone_index.abs_diff(index) <= 6
-                });
+            || tokens.windows(2).enumerate().any(|(index, pair)| {
+                pair[0] == "not" && pair[1] == "started" && milestone_index.abs_diff(index) <= 6
+            });
         let status_statement = checkbox.is_some()
             || completed
             || pending
@@ -565,7 +599,10 @@ fn validate_phase_status_contract(document: &str) -> Result<(), String> {
             continue;
         }
         if pending {
-            return Err(format!("Milestone 2 has a pending status claim: {}", unit.text));
+            return Err(format!(
+                "Milestone 2 has a pending status claim: {}",
+                unit.text
+            ));
         }
         if completed {
             milestone_two_completions += 1;
@@ -671,19 +708,39 @@ fn declarative_skills_sections_preserve_capability_and_version_boundaries() {
     let guide = read_repository_document("docs/testing/declarative-skills.md");
     let introduction = guide.split("\n## ").next().expect("guide introduction");
     for required in [
-        "inert, bounded context", "cannot execute", "shell", "filesystem", "Git", "MCP",
-        "provider", "network", "Inference and chat begin in Phase 3",
+        "inert, bounded context",
+        "cannot execute",
+        "shell",
+        "filesystem",
+        "Git",
+        "MCP",
+        "provider",
+        "network",
+        "Inference and chat begin in Phase 3",
     ] {
-        assert!(introduction.contains(required), "guide introduction is missing: {required}");
+        assert!(
+            introduction.contains(required),
+            "guide introduction is missing: {required}"
+        );
     }
 
     let version_model = markdown_section(&guide, "## Library and version model");
     for required in [
-        "Evidence Review", "Filing Analysis", "Catalyst Mapping", "Risk Checklist",
-        "immutable version", "exact version", "does not auto-upgrade", "historical version",
-        "explicit upgrade", "Unassign",
+        "Evidence Review",
+        "Filing Analysis",
+        "Catalyst Mapping",
+        "Risk Checklist",
+        "immutable version",
+        "exact version",
+        "does not auto-upgrade",
+        "historical version",
+        "explicit upgrade",
+        "Unassign",
     ] {
-        assert!(version_model.contains(required), "version model is missing: {required}");
+        assert!(
+            version_model.contains(required),
+            "version model is missing: {required}"
+        );
     }
 }
 
@@ -700,11 +757,41 @@ fn keyboard_guide_matches_the_shipped_pane_specific_controller_contract() {
     assert!(!keyboard.contains("Option+"));
     assert!(!keyboard.contains("Alt+"));
     assert!(keyboard.contains("You never need `:next` or `:create`"));
-    validate_pane_keys(panes, "Library", &["Up/Down", "skill rows"], &["Left/Right"]).unwrap();
-    validate_pane_keys(panes, "Create source", &["Up/Down", "starting point"], &["Left/Right"]).unwrap();
-    validate_pane_keys(panes, "Detail actions", &["Left/Right", "action"], &["Up/Down"]).unwrap();
-    validate_pane_keys(panes, "History", &["Up/Down", "version rows"], &["Left/Right"]).unwrap();
-    validate_pane_keys(panes, "Agent picker", &["Up/Down", "agent rows"], &["Left/Right"]).unwrap();
+    validate_pane_keys(
+        panes,
+        "Library",
+        &["Up/Down", "skill rows"],
+        &["Left/Right"],
+    )
+    .unwrap();
+    validate_pane_keys(
+        panes,
+        "Create source",
+        &["Up/Down", "starting point"],
+        &["Left/Right"],
+    )
+    .unwrap();
+    validate_pane_keys(
+        panes,
+        "Detail actions",
+        &["Left/Right", "action"],
+        &["Up/Down"],
+    )
+    .unwrap();
+    validate_pane_keys(
+        panes,
+        "History",
+        &["Up/Down", "version rows"],
+        &["Left/Right"],
+    )
+    .unwrap();
+    validate_pane_keys(
+        panes,
+        "Agent picker",
+        &["Up/Down", "agent rows"],
+        &["Left/Right"],
+    )
+    .unwrap();
     validate_pane_keys(
         panes,
         "Agent assigned skills",
@@ -725,13 +812,7 @@ fn review_and_confirmation_are_documented_as_distinct_controller_states() {
         &["commits"],
     )
     .unwrap();
-    validate_pane_keys(
-        panes,
-        "Confirmation",
-        &["Enter", "commits"],
-        &["validates"],
-    )
-    .unwrap();
+    validate_pane_keys(panes, "Confirmation", &["Enter", "commits"], &["validates"]).unwrap();
 }
 
 #[test]
@@ -753,8 +834,16 @@ fn optional_slash_section_contains_only_the_supported_skill_commands() {
     let guide = read_repository_document("docs/testing/declarative-skills.md");
     let slash = markdown_section(&guide, "## Optional slash fallbacks");
     validate_skill_slash_commands(slash).unwrap();
-    for required in ["stages a review", "does not mutate directly", "Bare `q` is inert", "`/quit` exits"] {
-        assert!(slash.contains(required), "slash section is missing: {required}");
+    for required in [
+        "stages a review",
+        "does not mutate directly",
+        "Bare `q` is inert",
+        "`/quit` exits",
+    ] {
+        assert!(
+            slash.contains(required),
+            "slash section is missing: {required}"
+        );
     }
 }
 
@@ -813,12 +902,18 @@ fn workflow_recovery_compact_and_local_test_sections_remain_complete() {
     let guide = read_repository_document("docs/testing/declarative-skills.md");
     let recovery = markdown_section(&guide, "## Confirmation, cancellation, and recovery");
     for required in ["cancel", "rejected", "stale", "restart", "review"] {
-        assert!(recovery.contains(required), "recovery section is missing: {required}");
+        assert!(
+            recovery.contains(required),
+            "recovery section is missing: {required}"
+        );
     }
 
     let compact = markdown_section(&guide, "## Compact terminal expectations");
     for required in ["compact terminal", "60x18", "Enter", "Esc", "bare `q`"] {
-        assert!(compact.contains(required), "compact section is missing: {required}");
+        assert!(
+            compact.contains(required),
+            "compact section is missing: {required}"
+        );
     }
 
     let commands = markdown_section(&guide, "## Exact local commands");
@@ -827,15 +922,26 @@ fn workflow_recovery_compact_and_local_test_sections_remain_complete() {
         "cargo build --release --locked",
         "XDG_DATA_HOME",
     ] {
-        assert!(commands.contains(required), "local commands section is missing: {required}");
+        assert!(
+            commands.contains(required),
+            "local commands section is missing: {required}"
+        );
     }
 
     let checklist = markdown_section(&guide, "## Manual acceptance checklist");
     for required in [
-        "Create a custom skill", "Create version 2", "Explicitly upgrade", "History",
-        "Unassign", "stale review", "Restart",
+        "Create a custom skill",
+        "Create version 2",
+        "Explicitly upgrade",
+        "History",
+        "Unassign",
+        "stale review",
+        "Restart",
     ] {
-        assert!(checklist.contains(required), "manual checklist is missing: {required}");
+        assert!(
+            checklist.contains(required),
+            "manual checklist is missing: {required}"
+        );
     }
 }
 
@@ -846,14 +952,19 @@ fn readme_points_to_the_detailed_declarative_skills_guide() {
         "[Declarative Skills testing and workflow guide](docs/testing/declarative-skills.md)"
     ));
     let milestone = markdown_section(README, "## Phase 2 Declarative Skills Milestone 2");
-    for required in ["Inference and chat remain deferred to Phase 3"] {
-        assert!(milestone.contains(required), "README milestone is missing: {required}");
-    }
+    let required = "Inference and chat remain deferred to Phase 3";
+    assert!(
+        milestone.contains(required),
+        "README milestone is missing: {required}"
+    );
 }
 
 #[test]
 fn roadmap_marks_only_declarative_skills_complete() {
-    let phase_two = markdown_section(PHASES, "## Phase 2 — Agent profiles, skills, and hybrid memory");
+    let phase_two = markdown_section(
+        PHASES,
+        "## Phase 2 — Agent profiles, skills, and hybrid memory",
+    );
     let milestone_status = markdown_section(PHASES, "### Milestone status");
     for required in [
         "[x] **Milestone 2: Declarative skills.**",
@@ -861,7 +972,10 @@ fn roadmap_marks_only_declarative_skills_complete() {
         "Phase 2 as a whole remains in progress",
         "Phase 3 remains pending",
     ] {
-        assert!(phase_two.contains(required), "Phase 2 roadmap is missing: {required}");
+        assert!(
+            phase_two.contains(required),
+            "Phase 2 roadmap is missing: {required}"
+        );
     }
     assert_eq!(milestone_status.matches("- [x] ").count(), 2);
     assert_eq!(milestone_status.matches("- [ ] ").count(), 1);

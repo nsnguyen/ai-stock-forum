@@ -115,9 +115,15 @@ fn summary(event: &ApplicationEvent) -> String {
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "none".to_owned())
         ),
-        ApplicationEvent::SkillCreated { skill, display_name, provenance } => format!(
+        ApplicationEvent::SkillCreated {
+            skill,
+            display_name,
+            provenance,
+        } => format!(
             "skill created: skill={}, version={}, name={}, provenance={provenance:?}",
-            skill.skill_id(), skill.version().get(), defensive_text(display_name)
+            skill.skill_id(),
+            skill.version().get(),
+            defensive_text(display_name)
         ),
         ApplicationEvent::SkillVersionActivated {
             skill,
@@ -126,34 +132,82 @@ fn summary(event: &ApplicationEvent) -> String {
             provenance,
         } => format!(
             "skill version activated: skill={}, version={}, previous_version={}, name={}, provenance={provenance:?}",
-            skill.skill_id(), skill.version().get(), previous_version_id, defensive_text(display_name)
+            skill.skill_id(),
+            skill.version().get(),
+            previous_version_id,
+            defensive_text(display_name)
         ),
-        ApplicationEvent::SkillsListed { total_count, returned_count, truncated, .. } => format!(
+        ApplicationEvent::SkillsListed {
+            total_count,
+            returned_count,
+            truncated,
+            ..
+        } => format!(
             "skills listed: total_count={total_count}, returned_count={returned_count}, truncated={truncated}"
         ),
-        ApplicationEvent::SkillViewed { skill, display_name, provenance } => format!(
+        ApplicationEvent::SkillViewed {
+            skill,
+            display_name,
+            provenance,
+        } => format!(
             "skill viewed: skill={}, version={}, name={}, provenance={provenance:?}",
-            skill.skill_id(), skill.version().get(), defensive_text(display_name)
+            skill.skill_id(),
+            skill.version().get(),
+            defensive_text(display_name)
         ),
-        ApplicationEvent::SkillHistoryViewed { skill_id, active, total_count, returned_count, truncated, .. } => format!(
+        ApplicationEvent::SkillHistoryViewed {
+            skill_id,
+            active,
+            total_count,
+            returned_count,
+            truncated,
+            ..
+        } => format!(
             "skill history viewed: skill={skill_id}, active_version={}, total_count={total_count}, returned_count={returned_count}, truncated={truncated}",
             active.skill_version_id()
         ),
-        ApplicationEvent::SkillVersionViewed { skill, display_name, provenance, predecessor_version_id } => format!(
+        ApplicationEvent::SkillVersionViewed {
+            skill,
+            display_name,
+            provenance,
+            predecessor_version_id,
+        } => format!(
             "skill version viewed: skill={}, version={}, predecessor={}, name={}, provenance={provenance:?}",
-            skill.skill_id(), skill.version().get(), predecessor_version_id.map(|id| id.to_string()).unwrap_or_else(|| "none".to_owned()), defensive_text(display_name)
+            skill.skill_id(),
+            skill.version().get(),
+            predecessor_version_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".to_owned()),
+            defensive_text(display_name)
         ),
         ApplicationEvent::AgentSkillAssigned { profile, skill, .. } => format!(
             "agent skill assigned: profile={}, profile_version={}, skill={}, skill_version={}",
-            profile.profile_id(), profile.profile_version_id(), skill.skill_id(), skill.skill_version_id()
+            profile.profile_id(),
+            profile.profile_version_id(),
+            skill.skill_id(),
+            skill.skill_version_id()
         ),
-        ApplicationEvent::AgentSkillUpgraded { profile, expected, replacement, .. } => format!(
+        ApplicationEvent::AgentSkillUpgraded {
+            profile,
+            expected,
+            replacement,
+            ..
+        } => format!(
             "agent skill upgraded: profile={}, profile_version={}, skill={}, from={}, to={}",
-            profile.profile_id(), profile.profile_version_id(), replacement.skill_id(), expected.skill_version_id(), replacement.skill_version_id()
+            profile.profile_id(),
+            profile.profile_version_id(),
+            replacement.skill_id(),
+            expected.skill_version_id(),
+            replacement.skill_version_id()
         ),
-        ApplicationEvent::AgentSkillUnassigned { profile, expected, .. } => format!(
+        ApplicationEvent::AgentSkillUnassigned {
+            profile, expected, ..
+        } => format!(
             "agent skill unassigned: profile={}, profile_version={}, skill={}, skill_version={}",
-            profile.profile_id(), profile.profile_version_id(), expected.skill_id(), expected.skill_version_id()
+            profile.profile_id(),
+            profile.profile_version_id(),
+            expected.skill_id(),
+            expected.skill_version_id()
         ),
     }
 }

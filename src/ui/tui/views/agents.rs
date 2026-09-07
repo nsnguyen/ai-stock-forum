@@ -118,10 +118,7 @@ fn list_scroll_offset_for_area(model: &TuiModel, area: Rect) -> usize {
                 .line_count(inner_width)
         })
         .collect::<Vec<_>>();
-    let mut visible_height = heights
-        .iter()
-        .copied()
-        .fold(0usize, usize::saturating_add);
+    let mut visible_height = heights.iter().copied().fold(0usize, usize::saturating_add);
     for height in heights {
         if visible_height <= viewport_height || first == selected {
             break;
@@ -170,19 +167,19 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
             .as_ref()
             .map(|detail| detail_lines(detail, theme))
             .unwrap_or_else(|| {
-            if model.agents.profiles.profiles.is_empty() {
-                vec![
-                    Line::styled("No agent profiles yet", theme.accent),
-                    Line::default(),
-                    Line::raw("Press c to create your first profile."),
-                ]
-            } else {
-                vec![
-                    Line::styled("No profile selected", theme.accent),
-                    Line::default(),
-                    Line::raw("Choose a profile and press Enter to load its detail."),
-                ]
-            }
+                if model.agents.profiles.profiles.is_empty() {
+                    vec![
+                        Line::styled("No agent profiles yet", theme.accent),
+                        Line::default(),
+                        Line::raw("Press c to create your first profile."),
+                    ]
+                } else {
+                    vec![
+                        Line::styled("No profile selected", theme.accent),
+                        Line::default(),
+                        Line::raw("Choose a profile and press Enter to load its detail."),
+                    ]
+                }
             })
     };
     frame.render_widget(
@@ -222,7 +219,12 @@ fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
     };
     let selected_action = model.selected_available_agent_skill_action();
     let mut action_spans = vec![Span::styled("Actions  ", theme.accent)];
-    for (index, action) in model.available_agent_skill_actions().iter().copied().enumerate() {
+    for (index, action) in model
+        .available_agent_skill_actions()
+        .iter()
+        .copied()
+        .enumerate()
+    {
         if index > 0 {
             action_spans.push(Span::raw("  "));
         }
@@ -233,7 +235,11 @@ fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
         };
         action_spans.push(Span::styled(
             format!("[{label}]"),
-            if action == selected_action { theme.focus } else { theme.muted },
+            if action == selected_action {
+                theme.focus
+            } else {
+                theme.muted
+            },
         ));
     }
     let availability = model.agent_skill_upgrade_availability();
@@ -287,12 +293,20 @@ fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
         lines.push(Line::styled(
             format!(
                 "{} {}  v{}  {}",
-                if index == model.agents.selected_assigned_skill { ">" } else { " " },
+                if index == model.agents.selected_assigned_skill {
+                    ">"
+                } else {
+                    " "
+                },
                 index + 1,
                 assigned.version().get(),
                 compact_identifier(&assigned.skill_id().to_string())
             ),
-            if index == model.agents.selected_assigned_skill { theme.focus } else { theme.muted },
+            if index == model.agents.selected_assigned_skill {
+                theme.focus
+            } else {
+                theme.muted
+            },
         ));
     }
     lines.extend([
@@ -300,9 +314,16 @@ fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
         Line::styled("PINNED EXACT VERSION", theme.accent),
         label_value("Version", format!("v{}", reference.version().get()), theme),
         label_value("Skill ID", reference.skill_id().to_string(), theme),
-        label_value("Version ID", reference.skill_version_id().to_string(), theme),
+        label_value(
+            "Version ID",
+            reference.skill_version_id().to_string(),
+            theme,
+        ),
         label_value("Digest", reference.content_digest().to_string(), theme),
-        Line::styled("No automatic upgrades. Skill text grants no capability.", theme.muted),
+        Line::styled(
+            "No automatic upgrades. Skill text grants no capability.",
+            theme.muted,
+        ),
     ]);
     lines
 }

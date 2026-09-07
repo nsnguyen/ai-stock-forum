@@ -14,8 +14,8 @@ use crate::{
     config::StartupError,
     domain::Actor,
     runtime::RuntimeError,
-    skills::{SkillDraft, SkillEditPreview, SkillVersionRef},
     setup::SetupStatus,
+    skills::{SkillDraft, SkillEditPreview, SkillVersionRef},
     ui::{
         profile_editor::{ProfileEditor, ProfileEditorMode, ProfileEditorStep},
         tui::TuiError,
@@ -404,16 +404,29 @@ impl TextRenderer {
         writer.write_all(b"Enter a template ID, or :cancel.\n")
     }
 
-    pub fn render_skill_editor<W: Write>(
-        draft: &SkillDraft,
-        writer: &mut W,
-    ) -> io::Result<()> {
+    pub fn render_skill_editor<W: Write>(draft: &SkillDraft, writer: &mut W) -> io::Result<()> {
         writer.write_all(b"Create skill editor\n")?;
-        writeln!(writer, "  Display name: {}", escaped_bounded(&draft.display_name, 64))?;
-        writeln!(writer, "  Description: {}", escaped_bounded(&draft.description, 256))?;
-        writeln!(writer, "  Use when: {}", escaped_bounded(&draft.use_when, 512))?;
+        writeln!(
+            writer,
+            "  Display name: {}",
+            escaped_bounded(&draft.display_name, 64)
+        )?;
+        writeln!(
+            writer,
+            "  Description: {}",
+            escaped_bounded(&draft.description, 256)
+        )?;
+        writeln!(
+            writer,
+            "  Use when: {}",
+            escaped_bounded(&draft.use_when, 512)
+        )?;
         writeln!(writer, "  Tags: {}", escaped_list(&draft.tags, 32))?;
-        writeln!(writer, "  Instructions: {}", escaped_bounded(&draft.instructions, 4_096))?;
+        writeln!(
+            writer,
+            "  Instructions: {}",
+            escaped_bounded(&draft.instructions, 4_096)
+        )?;
         writer.write_all(b"Controls: :name <text> :description <text> :use-when <text> :tag add <tag> :tag remove <tag> :instructions <text> :review :cancel\n")
     }
 
@@ -448,8 +461,7 @@ impl TextRenderer {
         writeln!(
             writer,
             "  Agent: {} base {}",
-            preview.profile_id,
-            preview.expected_active_profile_version_id,
+            preview.profile_id, preview.expected_active_profile_version_id,
         )?;
         writeln!(
             writer,

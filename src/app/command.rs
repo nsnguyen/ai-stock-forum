@@ -76,14 +76,23 @@ impl SkillSelector {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum AgentSkillAssignmentOperation {
-    Assign { skill: SkillVersionRef },
+    Assign {
+        skill: SkillVersionRef,
+    },
     Upgrade {
         expected: SkillVersionRef,
         replacement: SkillVersionRef,
     },
-    Unassign { expected: SkillVersionRef },
+    Unassign {
+        expected: SkillVersionRef,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,8 +308,7 @@ impl ApplicationCommand {
             Self::ActivateAgentProfileVersion { candidate, .. } => {
                 *candidate = candidate.canonicalized()?;
             }
-            Self::CreateSkill { candidate, .. }
-            | Self::ActivateSkillVersion { candidate, .. } => {
+            Self::CreateSkill { candidate, .. } | Self::ActivateSkillVersion { candidate, .. } => {
                 *candidate = candidate.canonicalized()?;
             }
             _ => {}

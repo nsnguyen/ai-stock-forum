@@ -103,11 +103,26 @@ fn skill_read_events_and_audit_summaries_never_duplicate_full_content() {
 
 #[test]
 fn capabilities_are_exactly_narrow_and_execution_like_values_are_rejected() {
-    assert_eq!(serde_json::to_string(&Capability::SkillRead).unwrap(), "\"skill_read\"");
-    assert_eq!(serde_json::to_string(&Capability::SkillCreate).unwrap(), "\"skill_create\"");
-    assert_eq!(serde_json::to_string(&Capability::SkillVersion).unwrap(), "\"skill_version\"");
-    assert_eq!(serde_json::to_string(&Capability::AgentSkillAssign).unwrap(), "\"skill_assign\"");
-    assert_eq!(serde_json::to_string(&Capability::AgentSkillUnassign).unwrap(), "\"skill_unassign\"");
+    assert_eq!(
+        serde_json::to_string(&Capability::SkillRead).unwrap(),
+        "\"skill_read\""
+    );
+    assert_eq!(
+        serde_json::to_string(&Capability::SkillCreate).unwrap(),
+        "\"skill_create\""
+    );
+    assert_eq!(
+        serde_json::to_string(&Capability::SkillVersion).unwrap(),
+        "\"skill_version\""
+    );
+    assert_eq!(
+        serde_json::to_string(&Capability::AgentSkillAssign).unwrap(),
+        "\"skill_assign\""
+    );
+    assert_eq!(
+        serde_json::to_string(&Capability::AgentSkillUnassign).unwrap(),
+        "\"skill_unassign\""
+    );
     assert!(serde_json::from_str::<Capability>("\"skill_execute\"").is_err());
     assert!(serde_json::from_str::<Capability>("\"execute_skill\"").is_err());
     assert!(serde_json::from_str::<Capability>("\"unknown_skill_capability\"").is_err());

@@ -117,7 +117,10 @@ fn skill_events_round_trip_on_the_existing_schema_and_read_payloads_are_metadata
         transaction.commit().unwrap();
         let wire = serde_json::to_string(&committed).unwrap();
         assert!(!wire.contains("SECRET-INSTRUCTION"));
-        assert_eq!(serde_json::from_str::<EventEnvelope>(&wire).unwrap(), committed);
+        assert_eq!(
+            serde_json::from_str::<EventEnvelope>(&wire).unwrap(),
+            committed
+        );
         assert_eq!(committed.event_schema_version, 1);
     }
     assert_eq!(EVENT_SCHEMA_VERSION, 1);

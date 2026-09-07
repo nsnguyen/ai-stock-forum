@@ -702,6 +702,10 @@ impl SkillDraftInput {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the fallback workflow intentionally owns one complete local skill candidate"
+)]
 enum SkillWorkflow {
     EditingCreation(SkillDraftInput),
     Confirming {
@@ -881,8 +885,10 @@ impl FallbackRunner {
             CommandView::Skill(view) | CommandView::SkillVersion(view) => view.skill_ref,
             _ => return Err(UiError::Panicked),
         };
-        let Some(profile_view) = self
-            .read_view(ApplicationCommand::ShowAgentProfile { selector: agent }, writer)?
+        let Some(profile_view) = self.read_view(
+            ApplicationCommand::ShowAgentProfile { selector: agent },
+            writer,
+        )?
         else {
             return Ok(());
         };
@@ -917,16 +923,18 @@ impl FallbackRunner {
         agent: AgentProfileSelector,
         writer: &mut W,
     ) -> Result<(), UiError> {
-        let Some(skill_view) = self
-            .read_view(ApplicationCommand::ShowSkill { selector: skill }, writer)?
+        let Some(skill_view) =
+            self.read_view(ApplicationCommand::ShowSkill { selector: skill }, writer)?
         else {
             return Ok(());
         };
         let CommandView::Skill(skill_view) = skill_view else {
             return Err(UiError::Panicked);
         };
-        let Some(profile_view) = self
-            .read_view(ApplicationCommand::ShowAgentProfile { selector: agent }, writer)?
+        let Some(profile_view) = self.read_view(
+            ApplicationCommand::ShowAgentProfile { selector: agent },
+            writer,
+        )?
         else {
             return Ok(());
         };
@@ -990,8 +998,7 @@ impl FallbackRunner {
                 action,
                 creation_draft: None,
             });
-        TextRenderer::render_skill_assignment_review(&preview, writer)
-            .map_err(|_| UiError::Write)
+        TextRenderer::render_skill_assignment_review(&preview, writer).map_err(|_| UiError::Write)
     }
 
     fn process_skill_line<W: Write>(&self, line: &str, writer: &mut W) -> Result<(), UiError> {
@@ -1005,7 +1012,9 @@ impl FallbackRunner {
             SkillWorkflow::EditingCreation(mut draft) => {
                 let input = line.trim();
                 if input == ":cancel" {
-                    self.client.cancel_skill_review().map_err(UiError::Runtime)?;
+                    self.client
+                        .cancel_skill_review()
+                        .map_err(UiError::Runtime)?;
                     return TextRenderer::render_skill_cancelled(writer)
                         .map_err(|_| UiError::Write);
                 }
@@ -1020,7 +1029,9 @@ impl FallbackRunner {
                     };
                     let preview = match self.client.preview_skill_creation(candidate.clone()) {
                         Ok(preview) => preview,
-                        Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+                        Err(
+                            error @ (RuntimeError::Application(_) | RuntimeError::Backpressure),
+                        ) => {
                             TextRenderer::render_runtime_error(&error, writer)
                                 .map_err(|_| UiError::Write)?;
                             return self.retain_skill_editor(draft, writer);
@@ -1084,7 +1095,9 @@ impl FallbackRunner {
                     self.execute_skill_confirmation(command, action, creation_draft, writer)
                 }
                 ":cancel" => {
-                    self.client.cancel_skill_review().map_err(UiError::Runtime)?;
+                    self.client
+                        .cancel_skill_review()
+                        .map_err(UiError::Runtime)?;
                     TextRenderer::render_skill_cancelled(writer).map_err(|_| UiError::Write)
                 }
                 _ => {
@@ -1138,8 +1151,8 @@ impl FallbackRunner {
                 return Ok(());
             }
             Err(error @ RuntimeError::Application(_)) => {
-                let primary = TextRenderer::render_runtime_error(&error, writer)
-                    .map_err(|_| UiError::Write);
+                let primary =
+                    TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write);
                 let cleanup = self.client.cancel_skill_review();
                 primary?;
                 if let Some(draft) = creation_draft {
@@ -1450,7 +1463,9 @@ impl FallbackRunner {
             .take()
             .is_some();
         if active {
-            self.client.cancel_skill_review().map_err(UiError::Runtime)?;
+            self.client
+                .cancel_skill_review()
+                .map_err(UiError::Runtime)?;
         }
         Ok(())
     }
@@ -1553,9 +1568,7 @@ impl FallbackRunner {
     }
 }
 
-fn assignment_command(
-    preview: &AgentSkillAssignmentPreview,
-) -> (ApplicationCommand, &'static str) {
+fn assignment_command(preview: &AgentSkillAssignmentPreview) -> (ApplicationCommand, &'static str) {
     match &preview.operation {
         AgentSkillAssignmentOperation::Assign { skill } => (
             ApplicationCommand::AssignAgentSkill {
