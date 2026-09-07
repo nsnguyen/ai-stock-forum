@@ -18,7 +18,7 @@ use ai_stock_forum::{
     ui::{
         profile_editor::{ProfileEditor, ProfileEditorEffect},
         tui::{
-            ProfileConfirmation,
+            ControllerEffect, ProfileConfirmation, TuiEvent, handle_event,
             layout::view_geometry,
             model::{AgentsPane, SkillsPane, TuiModel, View},
             render,
@@ -26,6 +26,7 @@ use ai_stock_forum::{
         },
     },
 };
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use uuid::Uuid;
 
@@ -301,6 +302,34 @@ fn list_scroll_is_an_item_offset_and_keeps_the_last_multiline_row_visible() {
     let text = render_text(&model, 60, 18);
     assert!(text.contains("> Profile 11"));
     assert!(!text.contains("Profile 00"));
+}
+
+#[test]
+fn moving_selection_keeps_all_fitting_agent_cards_stationary() {
+    let mut model = model(true, AgentsPane::List);
+    let mut bear = model.agents.profiles.profiles[0].clone();
+    bear.display_name = "Bear Researcher".to_owned();
+    let mut lnext = bear.clone();
+    lnext.display_name = "Lnext".to_owned();
+    model.agents.profiles = AgentProfilesView {
+        profiles: vec![bear, lnext],
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
+    };
+    model.set_terminal_size(120, 30);
+
+    assert_eq!(
+        handle_event(
+            &mut model,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        ),
+        ControllerEffect::Redraw
+    );
+
+    let text = render_text(&model, 120, 30);
+    assert!(text.contains("  Bear Researcher"));
+    assert!(text.contains("> Lnext"));
 }
 
 #[test]
