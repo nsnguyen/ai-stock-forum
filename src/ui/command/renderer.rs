@@ -56,6 +56,7 @@ impl TextRenderer {
                     let actor = match entry.actor {
                         Actor::Human => "human",
                         Actor::System => "system",
+                        Actor::Agent(_) => "agent",
                     };
                     let kind = escaped_bounded(&entry.kind, 64);
                     let summary = escaped_bounded(&entry.summary, 256);

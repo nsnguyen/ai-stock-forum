@@ -127,6 +127,7 @@ pub(super) fn actor_name(actor: &crate::domain::Actor) -> &'static str {
     match actor {
         crate::domain::Actor::Human => "Human",
         crate::domain::Actor::System => "System",
+        crate::domain::Actor::Agent(_) => "Agent",
     }
 }
 

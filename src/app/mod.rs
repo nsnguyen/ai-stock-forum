@@ -20,11 +20,11 @@ pub use command::{
     MAX_INPUT_BYTES, MAX_SAFE_TOKEN_CHARS, MAX_SKILL_HISTORY_RESULTS, MAX_SKILL_LIST_RESULTS,
     SafeToken, SafeTokenError, SkillSelector,
 };
-pub(crate) use event::envelope_from_pending;
 pub use event::{
     ApplicationEvent, EVENT_SCHEMA_VERSION, EventEnvelope, EventEnvelopeWire, PendingEvent,
     ShutdownReason, SkillEventSummary, SkillHistoryEventEntry,
 };
+pub(crate) use event::{actor_wire, envelope_from_pending};
 pub use outcome::{
     AgentProfileCreatedView, AgentProfileHistoryEntry, AgentProfileHistoryView,
     AgentProfileSummary, AgentProfileVersionActivatedView, AgentProfileVersionView,

@@ -402,14 +402,15 @@ fn digest_for(
     pending: &PendingEvent,
     previous_event_digest: Option<&Sha256Digest>,
 ) -> Result<Sha256Digest, ()> {
+    let (actor_kind, actor_id) = actor_wire(&pending.actor);
     let material = DigestMaterial {
         digest_format_version: DIGEST_FORMAT_VERSION,
         sequence,
         event_id: &pending.event_id,
         event_schema_version: pending.event_schema_version,
         event_type: pending.event.kind(),
-        actor_kind: actor_kind(&pending.actor),
-        actor_id: None,
+        actor_kind,
+        actor_id: actor_id.as_deref(),
         occurred_at_ms: pending.occurred_at_ms,
         correlation_id: &pending.correlation_id,
         causation_id: pending.causation_id.as_ref(),
@@ -422,9 +423,10 @@ fn digest_for(
         .map_err(|_| ())
 }
 
-fn actor_kind(actor: &Actor) -> &'static str {
+pub(crate) fn actor_wire(actor: &Actor) -> (&'static str, Option<String>) {
     match actor {
-        Actor::Human => "human",
-        Actor::System => "system",
+        Actor::Human => ("human", None),
+        Actor::System => ("system", None),
+        Actor::Agent(id) => ("agent", Some(id.to_string())),
     }
 }

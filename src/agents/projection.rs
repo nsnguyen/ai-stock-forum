@@ -4,11 +4,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     app::ApplicationEvent,
-    domain::{AgentProfileId, AgentProfileVersionId, MemoryNamespaceId, ObjectVersion},
+    domain::{
+        AgentProfileId, AgentProfileVersionId, DomainError, MemoryNamespaceId, ObjectVersion,
+    },
     persistence::RecoveryError,
 };
 
-use super::{AgentProfileVersion, NormalizedProfileName};
+use super::{AgentProfileVersion, AgentProfileVersionRef, NormalizedProfileName};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -88,6 +90,23 @@ impl AgentProfilesProjection {
 
     pub fn version(&self, version_id: AgentProfileVersionId) -> Option<&AgentProfileVersion> {
         self.versions_by_id.get(&version_id)
+    }
+
+    pub fn resolve_reference(
+        &self,
+        reference: &AgentProfileVersionRef,
+    ) -> Result<&AgentProfileVersion, DomainError> {
+        let profile = self
+            .versions_by_id
+            .get(&reference.profile_version_id())
+            .ok_or(DomainError::InvalidAgentProfileVersionReference)?;
+        if profile.profile_id() != reference.profile_id()
+            || profile.version() != reference.version()
+            || profile.content_digest() != reference.content_digest()
+        {
+            return Err(DomainError::InvalidAgentProfileVersionReference);
+        }
+        Ok(profile)
     }
 
     pub fn profile_version(

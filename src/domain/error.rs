@@ -26,6 +26,8 @@ pub enum DomainError {
     InvalidProfileTemplateProvenance,
     #[error("agent profile candidate has no semantic changes")]
     AgentProfileUnchanged,
+    #[error("agent profile version reference is invalid")]
+    InvalidAgentProfileVersionReference,
     #[error("invalid skill field")]
     InvalidSkillField { field: &'static str },
     #[error("skill text contains unsafe characters")]
@@ -65,6 +67,7 @@ impl DomainError {
             Self::UnknownProfileTemplate => "unknown_profile_template",
             Self::InvalidProfileTemplateProvenance => "invalid_profile_template_provenance",
             Self::AgentProfileUnchanged => "agent_profile_unchanged",
+            Self::InvalidAgentProfileVersionReference => "invalid_agent_profile_version_reference",
             Self::InvalidSkillField { .. } => "invalid_skill_field",
             Self::UnsafeSkillText { .. } => "unsafe_skill_text",
             Self::TooManySkillTags => "too_many_skill_tags",
