@@ -16,8 +16,8 @@ use crate::{
     ui::{
         profile_editor::{ProfileEditor, ProfileEditorMode, ProfileEditorStep},
         tui::{
-            layout::{agent_layout_mode, agent_workspace},
-            model::{AgentSkillAction, AgentSkillUpgradeAvailability, AgentsPane, TuiModel},
+            layout::{agent_layout_mode, agent_workspace, view_geometry},
+            model::{AgentSkillAction, AgentSkillUpgradeAvailability, AgentsPane, TuiModel, View},
             theme::Theme,
         },
     },
@@ -64,12 +64,7 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Them
             Line::styled("Templates provide a safe starting point.", theme.muted),
         ]
     } else {
-        let profile_count = model.agents.profiles.profiles.len();
-        let first_item = model
-            .agents
-            .list_scroll
-            .min(profile_count.saturating_sub(1))
-            .min(model.agents.selected_profile);
+        let first_item = list_scroll_offset_for_area(model, area);
         model
             .agents
             .profiles
@@ -78,27 +73,7 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Them
             .enumerate()
             .skip(first_item)
             .flat_map(|(index, profile)| {
-                let selected = index == model.agents.selected_profile;
-                let marker = if selected { ">" } else { " " };
-                vec![
-                    Line::styled(
-                        format!("{marker} {}", safe_text(&profile.display_name)),
-                        if selected { theme.focus } else { theme.accent },
-                    ),
-                    Line::from(vec![
-                        Span::styled(format!("  {} | ", profile.role.as_str()), theme.muted),
-                        Span::styled(
-                            readiness_name(profile.readiness),
-                            readiness_style(profile.readiness, theme),
-                        ),
-                        Span::styled(format!(" | v{}", profile.version.get()), theme.muted),
-                    ]),
-                    Line::styled(
-                        format!("  {}", safe_text(&profile.primary_specialty)),
-                        theme.muted,
-                    ),
-                    Line::default(),
-                ]
+                profile_summary_lines(profile, index == model.agents.selected_profile, theme)
             })
             .collect()
     };
@@ -108,6 +83,80 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Them
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+pub(super) fn list_scroll_offset(model: &TuiModel) -> usize {
+    let terminal = Rect::new(0, 0, model.terminal_width, model.terminal_height);
+    let geometry = view_geometry(terminal, View::Agents, model.inspector_open);
+    let workspace = agent_workspace(geometry.cockpit.workspace, geometry.cockpit.mode);
+    let area = workspace.list.unwrap_or(workspace.active);
+    list_scroll_offset_for_area(model, area)
+}
+
+fn list_scroll_offset_for_area(model: &TuiModel, area: Rect) -> usize {
+    let profiles = &model.agents.profiles.profiles;
+    let Some(last) = profiles.len().checked_sub(1) else {
+        return 0;
+    };
+    let selected = model.agents.selected_profile.min(last);
+    let mut first = model.agents.list_scroll.min(last);
+    if selected < first {
+        return selected;
+    }
+
+    let viewport_height = usize::from(area.height.saturating_sub(2));
+    if viewport_height == 0 {
+        return selected;
+    }
+    let inner_width = area.width.saturating_sub(2).max(1);
+    let measurement_theme = Theme::from_no_color(true);
+    let heights = profiles[first..=selected]
+        .iter()
+        .map(|profile| {
+            Paragraph::new(profile_summary_lines(profile, false, &measurement_theme))
+                .wrap(Wrap { trim: false })
+                .line_count(inner_width)
+        })
+        .collect::<Vec<_>>();
+    let mut visible_height = heights
+        .iter()
+        .copied()
+        .fold(0usize, usize::saturating_add);
+    for height in heights {
+        if visible_height <= viewport_height || first == selected {
+            break;
+        }
+        visible_height = visible_height.saturating_sub(height);
+        first = first.saturating_add(1);
+    }
+    first
+}
+
+fn profile_summary_lines(
+    profile: &crate::app::AgentProfileSummary,
+    selected: bool,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let marker = if selected { ">" } else { " " };
+    vec![
+        Line::styled(
+            format!("{marker} {}", safe_text(&profile.display_name)),
+            if selected { theme.focus } else { theme.accent },
+        ),
+        Line::from(vec![
+            Span::styled(format!("  {} | ", profile.role.as_str()), theme.muted),
+            Span::styled(
+                readiness_name(profile.readiness),
+                readiness_style(profile.readiness, theme),
+            ),
+            Span::styled(format!(" | v{}", profile.version.get()), theme.muted),
+        ]),
+        Line::styled(
+            format!("  {}", safe_text(&profile.primary_specialty)),
+            theme.muted,
+        ),
+        Line::default(),
+    ]
 }
 
 fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {

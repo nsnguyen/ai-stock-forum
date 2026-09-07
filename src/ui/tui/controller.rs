@@ -1286,12 +1286,12 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             let last = model.agents.profiles.profiles.len().saturating_sub(1);
             model.agents.selected_profile =
                 model.agents.selected_profile.saturating_add(1).min(last);
-            model.agents.list_scroll = model.agents.selected_profile;
+            model.agents.list_scroll = views::agent_list_scroll_offset(model);
             ControllerEffect::Redraw
         }
         (AgentsPane::List, KeyCode::Up) if no_modifiers(key.modifiers) => {
             model.agents.selected_profile = model.agents.selected_profile.saturating_sub(1);
-            model.agents.list_scroll = model.agents.selected_profile;
+            model.agents.list_scroll = views::agent_list_scroll_offset(model);
             ControllerEffect::Redraw
         }
         (AgentsPane::List, KeyCode::Enter) if no_modifiers(key.modifiers) => {

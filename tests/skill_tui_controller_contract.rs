@@ -75,6 +75,46 @@ fn bare_s_switch_from_agent_panel_restores_the_agents_tab() {
 }
 
 #[test]
+fn returning_from_an_agent_skill_keeps_the_agent_list_viewport() {
+    let assigned = skill(10, "Assigned");
+    let mut model = model();
+    model.select_view(View::Agents);
+    model.set_terminal_size(60, 18);
+    model.agents.profiles = AgentProfilesView {
+        profiles: vec![
+            agent(100, "First"),
+            agent(200, "Second"),
+            agent(300, "Third"),
+        ],
+        total_count: 3,
+        returned_count: 3,
+        truncated: false,
+    };
+    model.agents.selected_profile = 2;
+    model.agents.list_scroll = 1;
+    model.agents.pane = AgentsPane::Detail;
+    model.agents.detail = Some(profile_with_skills(300, vec![assigned.reference()]));
+    model.agents.skill_panel_open = true;
+
+    assert!(matches!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::LoadSkillVersion { .. }
+    ));
+    assert!(model.skills.active);
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Esc)),
+        ControllerEffect::Redraw
+    );
+    assert!(!model.skills.active);
+    assert_eq!(model.active_view, View::Agents);
+    assert_eq!(
+        (model.agents.selected_profile, model.agents.list_scroll),
+        (2, 1)
+    );
+}
+
+#[test]
 fn hidden_skill_editor_blocks_agent_skill_actions_without_losing_its_draft() {
     let assigned = skill(20, "Protected editor skill");
     let mut model = model();
