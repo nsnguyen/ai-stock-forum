@@ -558,6 +558,13 @@ pub struct CommandEditor {
     history_index: Option<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct CommandDraft {
+    buffer: String,
+    cursor_byte: usize,
+    history_index: Option<usize>,
+}
+
 impl CommandEditor {
     pub fn text(&self) -> &str {
         &self.buffer
@@ -698,6 +705,18 @@ impl CommandEditor {
             self.history_index = Some(index);
         }
     }
+
+    fn swap_draft(&mut self, draft: &mut CommandDraft) {
+        std::mem::swap(&mut self.buffer, &mut draft.buffer);
+        std::mem::swap(&mut self.cursor_byte, &mut draft.cursor_byte);
+        std::mem::swap(&mut self.history_index, &mut draft.history_index);
+        if let Some(index) = self.history_index
+            && self.history.get(index) != Some(&self.buffer)
+        {
+            self.history_index = self.history.iter().rposition(|entry| entry == &self.buffer);
+        }
+        self.normalize_cursor();
+    }
 }
 
 fn bounded_safe_prefix(input: &str, byte_limit: usize) -> String {
@@ -712,6 +731,96 @@ fn bounded_safe_prefix(input: &str, byte_limit: usize) -> String {
         bounded.push(character);
     }
     bounded
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NavigationTab {
+    Overview,
+    Setup,
+    Audit,
+    Help,
+    Agents,
+    Skills,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingOutcomeNavigation {
+    SelectIfUnchanged {
+        tab: NavigationTab,
+        generation: u64,
+    },
+    PreserveCurrent,
+}
+
+impl NavigationTab {
+    const fn index(self) -> usize {
+        match self {
+            Self::Overview => 0,
+            Self::Setup => 1,
+            Self::Audit => 2,
+            Self::Help => 3,
+            Self::Agents => 4,
+            Self::Skills => 5,
+        }
+    }
+
+    pub(super) const fn for_view(view: View) -> Self {
+        match view {
+            View::Overview => Self::Overview,
+            View::Setup => Self::Setup,
+            View::Audit => Self::Audit,
+            View::Help => Self::Help,
+            View::Agents => Self::Agents,
+        }
+    }
+
+    pub(super) const fn adjacent(self, forward: bool) -> Self {
+        match (self, forward) {
+            (Self::Overview, true) | (Self::Audit, false) => Self::Setup,
+            (Self::Setup, true) | (Self::Help, false) => Self::Audit,
+            (Self::Audit, true) | (Self::Agents, false) => Self::Help,
+            (Self::Help, true) | (Self::Skills, false) => Self::Agents,
+            (Self::Agents, true) | (Self::Overview, false) => Self::Skills,
+            (Self::Skills, true) | (Self::Setup, false) => Self::Overview,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TabState {
+    focus: Focus,
+    inspector_open: bool,
+    workspace_scroll: u16,
+    command_draft: CommandDraft,
+}
+
+impl Default for TabState {
+    fn default() -> Self {
+        Self {
+            focus: Focus::Workspace,
+            inspector_open: false,
+            workspace_scroll: 0,
+            command_draft: CommandDraft::default(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct NavigationStateSnapshot {
+    active_view: View,
+    skills_active: bool,
+    skills_pane: SkillsPane,
+    skills_workspace_origin: Option<SkillWorkspaceOrigin>,
+    agents_pane: AgentsPane,
+    focus: Focus,
+    inspector_open: bool,
+    command: CommandEditor,
+    workspace_scroll: u16,
+    message: Option<UiMessage>,
+    pending_agent_outcome: Option<AgentOutcomeIntent>,
+    navigation_generation: u64,
+    pending_outcome_navigation: Option<PendingOutcomeNavigation>,
+    tab_states: [TabState; 6],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -740,6 +849,9 @@ pub struct TuiModel {
     pub command_in_flight: bool,
     pub runtime_status: RuntimeStatus,
     pub previous_session_interrupted: bool,
+    navigation_generation: u64,
+    pending_outcome_navigation: Option<PendingOutcomeNavigation>,
+    tab_states: [TabState; 6],
 }
 
 impl TuiModel {
@@ -786,6 +898,9 @@ impl TuiModel {
             command_in_flight: false,
             runtime_status: RuntimeStatus::Ready,
             previous_session_interrupted,
+            navigation_generation: 0,
+            pending_outcome_navigation: None,
+            tab_states: std::array::from_fn(|_| TabState::default()),
         };
         model.replace_audit(recent_audit);
         model.synchronize_geometry();
@@ -793,8 +908,102 @@ impl TuiModel {
     }
 
     pub fn select_view(&mut self, view: View) {
-        self.active_view = view;
+        self.switch_tab(NavigationTab::for_view(view));
+    }
+
+    pub(super) fn switch_tab(&mut self, target: NavigationTab) {
+        let current = self.active_navigation_tab();
+        if current == target {
+            return;
+        }
+
+        self.navigation_generation = self.navigation_generation.wrapping_add(1);
+        self.swap_tab_state(current);
+        match target {
+            NavigationTab::Overview => {
+                self.skills.active = false;
+                self.active_view = View::Overview;
+            }
+            NavigationTab::Setup => {
+                self.skills.active = false;
+                self.active_view = View::Setup;
+            }
+            NavigationTab::Audit => {
+                self.skills.active = false;
+                self.active_view = View::Audit;
+            }
+            NavigationTab::Help => {
+                self.skills.active = false;
+                self.active_view = View::Help;
+            }
+            NavigationTab::Agents => {
+                self.skills.active = false;
+                self.active_view = View::Agents;
+            }
+            NavigationTab::Skills => self.skills.active = true,
+        }
+        self.swap_tab_state(target);
         self.synchronize_geometry();
+        self.normalize_visible_focus();
+    }
+
+    pub(super) fn active_navigation_tab(&self) -> NavigationTab {
+        if self.skills.active {
+            return NavigationTab::Skills;
+        }
+        match self.active_view {
+            View::Overview => NavigationTab::Overview,
+            View::Setup => NavigationTab::Setup,
+            View::Audit => NavigationTab::Audit,
+            View::Help => NavigationTab::Help,
+            View::Agents => NavigationTab::Agents,
+        }
+    }
+
+    fn swap_tab_state(&mut self, tab: NavigationTab) {
+        let state = &mut self.tab_states[tab.index()];
+        std::mem::swap(&mut self.focus, &mut state.focus);
+        std::mem::swap(&mut self.inspector_open, &mut state.inspector_open);
+        std::mem::swap(&mut self.workspace_scroll, &mut state.workspace_scroll);
+        self.command.swap_draft(&mut state.command_draft);
+    }
+
+    pub(super) fn navigation_state_snapshot(&self) -> NavigationStateSnapshot {
+        NavigationStateSnapshot {
+            active_view: self.active_view,
+            skills_active: self.skills.active,
+            skills_pane: self.skills.pane,
+            skills_workspace_origin: self.skills.workspace_origin,
+            agents_pane: self.agents.pane,
+            focus: self.focus,
+            inspector_open: self.inspector_open,
+            command: self.command.clone(),
+            workspace_scroll: self.workspace_scroll,
+            message: self.message.clone(),
+            pending_agent_outcome: self.pending_agent_outcome,
+            navigation_generation: self.navigation_generation,
+            pending_outcome_navigation: self.pending_outcome_navigation,
+            tab_states: self.tab_states.clone(),
+        }
+    }
+
+    pub(super) fn restore_navigation_state(&mut self, snapshot: NavigationStateSnapshot) {
+        self.active_view = snapshot.active_view;
+        self.skills.active = snapshot.skills_active;
+        self.skills.pane = snapshot.skills_pane;
+        self.skills.workspace_origin = snapshot.skills_workspace_origin;
+        self.agents.pane = snapshot.agents_pane;
+        self.focus = snapshot.focus;
+        self.inspector_open = snapshot.inspector_open;
+        self.command = snapshot.command;
+        self.workspace_scroll = snapshot.workspace_scroll;
+        self.message = snapshot.message;
+        self.pending_agent_outcome = snapshot.pending_agent_outcome;
+        self.navigation_generation = snapshot.navigation_generation;
+        self.pending_outcome_navigation = snapshot.pending_outcome_navigation;
+        self.tab_states = snapshot.tab_states;
+        self.synchronize_geometry();
+        self.normalize_visible_focus();
     }
 
     pub fn set_focus(&mut self, focus: Focus) {
@@ -834,27 +1043,62 @@ impl TuiModel {
     }
 
     pub fn synchronize_geometry(&mut self) {
-        let geometry = super::layout::view_geometry(
-            ratatui::layout::Rect::new(0, 0, self.terminal_width, self.terminal_height),
-            self.active_view,
-            self.inspector_open,
+        let area = ratatui::layout::Rect::new(
+            0,
+            0,
+            self.terminal_width,
+            self.terminal_height,
         );
+        let geometry = if self.skills.active {
+            super::layout::skill_geometry(area, self.inspector_open)
+        } else {
+            super::layout::view_geometry(area, self.active_view, self.inspector_open)
+        };
         self.layout_mode = geometry.cockpit.mode;
         self.workspace_body_width = geometry.workspace_body_width;
         self.workspace_body_height = geometry.workspace_body_height;
     }
 
+    fn normalize_visible_focus(&mut self) {
+        if self.focus == Focus::Command {
+            return;
+        }
+        let visible = match self.layout_mode {
+            LayoutMode::Wide => true,
+            LayoutMode::Medium => self.focus != Focus::Inspector || self.inspector_open,
+            LayoutMode::Narrow => {
+                self.focus != Focus::Navigation
+                    && (self.focus != Focus::Inspector || self.inspector_open)
+            }
+            LayoutMode::TooSmall => self.focus == Focus::Workspace,
+        };
+        if !visible {
+            self.focus = Focus::Workspace;
+        }
+    }
+
     pub fn replace_audit(&mut self, mut entries: Vec<AuditEntry>) {
+        let selected_sequence = self
+            .audit_selection
+            .and_then(|selection| self.audit_entries.get(selection))
+            .map(|entry| entry.sequence);
+        let previous_selection = self.audit_selection;
         let first_newest = entries.len().saturating_sub(COMMAND_HISTORY_CAPACITY);
         if first_newest > 0 {
             entries = entries.split_off(first_newest);
         }
         self.audit_entries = entries;
-        self.audit_selection = match (self.audit_selection, self.audit_last_index()) {
-            (_, None) => None,
-            (Some(selection), Some(last_index)) => Some(selection.min(last_index)),
-            (None, Some(last_index)) => Some(last_index),
-        };
+        self.audit_selection = selected_sequence
+            .and_then(|sequence| {
+                self.audit_entries
+                    .iter()
+                    .position(|entry| entry.sequence == sequence)
+            })
+            .or_else(|| match (previous_selection, self.audit_last_index()) {
+                (_, None) => None,
+                (Some(selection), Some(last_index)) => Some(selection.min(last_index)),
+                (None, Some(last_index)) => Some(last_index),
+            });
     }
 
     pub fn select_previous_audit(&mut self) {
@@ -897,7 +1141,33 @@ impl TuiModel {
     }
 
     pub fn set_command_in_flight(&mut self, command_in_flight: bool) {
+        if command_in_flight && !self.command_in_flight {
+            self.pending_outcome_navigation = Some(
+                PendingOutcomeNavigation::SelectIfUnchanged {
+                    tab: self.active_navigation_tab(),
+                    generation: self.navigation_generation,
+                },
+            );
+        } else if !command_in_flight {
+            self.pending_outcome_navigation = None;
+        }
         self.command_in_flight = command_in_flight;
+    }
+
+    pub(super) fn set_command_in_flight_preserving_navigation(&mut self) {
+        self.command_in_flight = true;
+        self.pending_outcome_navigation = Some(PendingOutcomeNavigation::PreserveCurrent);
+    }
+
+    pub(super) fn should_present_pending_outcome(&self) -> bool {
+        match self.pending_outcome_navigation {
+            Some(PendingOutcomeNavigation::SelectIfUnchanged { tab, generation }) => {
+                tab == self.active_navigation_tab()
+                    && generation == self.navigation_generation
+            }
+            Some(PendingOutcomeNavigation::PreserveCurrent) => false,
+            None => true,
+        }
     }
 
     pub fn set_runtime_status(&mut self, runtime_status: RuntimeStatus) {
@@ -1089,6 +1359,18 @@ mod tests {
     }
 
     #[test]
+    fn audit_replacement_preserves_the_selected_event_sequence_when_its_index_moves() {
+        let mut model = TuiModel::new(snapshot(), false);
+        model.replace_audit((1..=100).map(audit_entry).collect());
+        model.audit_selection = Some(75);
+
+        model.replace_audit((2..=101).map(audit_entry).collect());
+
+        assert_eq!(model.audit_selection, Some(74));
+        assert_eq!(model.audit_entries[74].sequence, 76);
+    }
+
+    #[test]
     fn editor_exposes_a_prefix_and_moves_only_between_character_boundaries() {
         let mut editor = CommandEditor::default();
         editor.insert('A');
@@ -1144,6 +1426,44 @@ mod tests {
         editor.history_next();
         assert_eq!(editor.text(), "");
         assert_eq!(editor.history_len(), 1);
+    }
+
+    #[test]
+    fn restored_tab_drops_a_stale_history_position_but_keeps_its_exact_buffer() {
+        let mut model = TuiModel::new(snapshot(), false);
+        for index in 0..COMMAND_HISTORY_CAPACITY {
+            model.command.remember(format!("command {index}"));
+        }
+        for _ in 0..COMMAND_HISTORY_CAPACITY {
+            model.command.history_previous();
+        }
+        assert_eq!(model.command.text(), "command 0");
+
+        model.switch_tab(NavigationTab::Setup);
+        model.command.remember("new command".to_owned());
+        model.switch_tab(NavigationTab::Overview);
+        assert_eq!(model.command.text(), "command 0");
+
+        model.command.history_next();
+        assert_eq!(model.command.text(), "command 0");
+    }
+
+    #[test]
+    fn restored_tab_keeps_the_exact_position_of_a_duplicate_history_entry() {
+        let mut model = TuiModel::new(snapshot(), false);
+        for command in ["A", "B", "A", "C"] {
+            model.command.remember(command.to_owned());
+        }
+        for _ in 0..4 {
+            model.command.history_previous();
+        }
+        assert_eq!(model.command.text(), "A");
+
+        model.switch_tab(NavigationTab::Setup);
+        model.switch_tab(NavigationTab::Overview);
+        model.command.history_previous();
+
+        assert_eq!(model.command.text(), "A");
     }
 
     #[test]

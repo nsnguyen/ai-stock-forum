@@ -57,6 +57,23 @@ pub fn view_geometry(area: Rect, view: View, inspector_open: bool) -> ViewGeomet
     }
 }
 
+pub fn skill_geometry(area: Rect, inspector_open: bool) -> ViewGeometry {
+    let cockpit = calculate_skills(area, inspector_open);
+    let (workspace_body_width, workspace_body_height) = if cockpit.mode == LayoutMode::TooSmall {
+        (0, 0)
+    } else {
+        (
+            cockpit.workspace.width.saturating_sub(2),
+            cockpit.workspace.height.saturating_sub(2),
+        )
+    };
+    ViewGeometry {
+        cockpit,
+        workspace_body_width,
+        workspace_body_height,
+    }
+}
+
 pub fn layout_mode(area: Rect) -> LayoutMode {
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         LayoutMode::TooSmall
@@ -131,9 +148,9 @@ pub fn calculate_agents(area: Rect, inspector_open: bool) -> CockpitLayout {
     calculate_for_mode(area, inspector_open, mode, 4)
 }
 
-pub fn calculate_skills(area: Rect) -> CockpitLayout {
+pub fn calculate_skills(area: Rect, inspector_open: bool) -> CockpitLayout {
     let mode = skill_layout_mode(area);
-    calculate_for_mode(area, false, mode, 4)
+    calculate_for_mode(area, inspector_open, mode, 4)
 }
 
 fn calculate_for_mode(

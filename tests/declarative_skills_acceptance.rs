@@ -57,6 +57,10 @@ fn key(code: KeyCode) -> TuiEvent {
     TuiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
 }
 
+fn alt_key(code: KeyCode) -> TuiEvent {
+    TuiEvent::Key(KeyEvent::new(code, KeyModifiers::ALT))
+}
+
 fn type_line(model: &mut TuiModel, value: &str) -> ControllerEffect {
     model.command.clear();
     model.command.ingest(value);
@@ -175,7 +179,7 @@ fn keyboard_workflow_creates_versions_pins_upgrades_unassigns_and_restores_exact
     let mut model = TuiModel::new(snapshot(Some(empty_agent.clone())), false);
 
     assert_eq!(
-        handle_event(&mut model, key(KeyCode::Char('s'))),
+        handle_event(&mut model, alt_key(KeyCode::Char('6'))),
         ControllerEffect::LoadSkills
     );
     apply_outcome(&mut model, outcome(CommandView::Skills(library(&[&first]))));
@@ -337,6 +341,7 @@ fn keyboard_workflow_creates_versions_pins_upgrades_unassigns_and_restores_exact
             profile_id: upgraded_agent.profile.profile_id(),
         },
     });
+    model.skills.active = true;
     model.skills.pane = SkillsPane::Confirmation;
     assert!(matches!(
         handle_event(&mut model, key(KeyCode::Enter)),
@@ -444,6 +449,33 @@ fn upgrade_availability_derivation_rejects_unknown_and_inconsistent_library_stat
             assert!(!text.contains("[Upgrade]"), "case={case}");
         }
     }
+
+    let mut inconsistent = agent_action_model(
+        vec![pinned_v1.reference()],
+        vec![&divergent],
+        false,
+    );
+    inconsistent.skills.library_loaded = true;
+    let text = availability_text(&inconsistent);
+    assert!(text.contains("INCONSISTENT"));
+    assert!(text.contains("r: reload"));
+    assert!(text.contains("Upgrade is hidden"));
+    assert!(!text.contains("press s"));
+
+    let before = inconsistent.clone();
+    assert_eq!(
+        handle_event(&mut inconsistent, key(KeyCode::Char('s'))),
+        ControllerEffect::None
+    );
+    assert_eq!(inconsistent, before);
+    assert_eq!(
+        handle_event(&mut inconsistent, key(KeyCode::Char('r'))),
+        ControllerEffect::LoadAgentSkillLibrary
+    );
+    assert_eq!(inconsistent.active_view, View::Agents);
+    assert_eq!(inconsistent.agents.pane, AgentsPane::Detail);
+    assert!(inconsistent.agents.skill_panel_open);
+    assert_eq!(inconsistent.agents.selected_assigned_skill, 0);
 }
 
 #[test]

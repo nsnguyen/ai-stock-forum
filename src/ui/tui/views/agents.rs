@@ -200,7 +200,7 @@ fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
             active.version().get()
         ),
         AgentSkillUpgradeAvailability::Inconsistent => {
-            "INCONSISTENT - press s to reload; Upgrade is hidden".to_owned()
+            "INCONSISTENT - r: reload active skill data; Upgrade is hidden".to_owned()
         }
     };
     let enter_guidance = match selected_action {

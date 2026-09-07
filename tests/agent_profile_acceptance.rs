@@ -123,8 +123,8 @@ fn render_text(model: &TuiModel, width: u16, height: u16) -> String {
         .collect()
 }
 
-fn key(character: char) -> TuiEvent {
-    TuiEvent::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+fn alt_key(character: char) -> TuiEvent {
+    TuiEvent::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::ALT))
 }
 
 fn assert_markers_absent(text: &str, markers: &[&str]) {
@@ -395,7 +395,7 @@ fn schema_v1_upgrade_profile_lifecycle_restart_fallback_and_tui_are_accepted() {
 
     let mut tui = TuiModel::new(recovered_detail, recovered.previous_session_interrupted());
     assert_eq!(
-        handle_event(&mut tui, key('a')),
+        handle_event(&mut tui, alt_key('5')),
         ControllerEffect::LoadAgentProfiles
     );
     assert_eq!(tui.active_view, View::Agents);
@@ -426,13 +426,13 @@ fn schema_v1_upgrade_profile_lifecycle_restart_fallback_and_tui_are_accepted() {
         ('4', View::Help),
     ] {
         assert_eq!(
-            handle_event(&mut tui, key(character)),
+            handle_event(&mut tui, alt_key(character)),
             ControllerEffect::Redraw
         );
         assert_eq!(tui.active_view, expected);
     }
     assert_eq!(
-        handle_event(&mut tui, key('a')),
+        handle_event(&mut tui, alt_key('5')),
         ControllerEffect::LoadAgentProfiles
     );
 

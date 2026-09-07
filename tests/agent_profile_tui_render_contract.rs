@@ -20,7 +20,7 @@ use ai_stock_forum::{
         tui::{
             ProfileConfirmation,
             layout::view_geometry,
-            model::{AgentsPane, TuiModel, View},
+            model::{AgentsPane, SkillsPane, TuiModel, View},
             render,
             theme::Theme,
         },
@@ -153,6 +153,23 @@ fn render_rows(model: &TuiModel, width: u16, height: u16) -> Vec<String> {
 }
 
 #[test]
+fn hidden_profile_editor_does_not_claim_the_skills_command_bar() {
+    let mut model = model(false, AgentsPane::List);
+    assert!(
+        model
+            .agents
+            .start_profile_create(0, builtin_profile_templates())
+    );
+    model.skills.active = true;
+    model.skills.pane = SkillsPane::List;
+
+    let text = render_text(&model, 100, 30);
+
+    assert!(text.contains(" Command "));
+    assert!(!text.contains("Profile input"));
+}
+
+#[test]
 fn agents_layout_uses_one_two_and_three_panes_at_exact_width_breakpoints() {
     let list = model(true, AgentsPane::List);
     let narrow_list = render_text(&list, 79, 24);
@@ -210,7 +227,7 @@ fn narrow_header_rows_are_complete_at_sixty_and_seventy_columns() {
         assert_eq!(rows[1].trim_end(), "Active 1  Ready 0  Not Ready 1");
         assert_eq!(
             rows[2].trim_end(),
-            "1 Overview  2 Setup  3 Audit  4 Help  a Agents  s Skills"
+            "Alt 1 Overview 2 Setup 3 Audit 4 Help 5 Agents 6 Skills"
         );
         assert_eq!(rows[3], "-".repeat(usize::from(width)));
     }

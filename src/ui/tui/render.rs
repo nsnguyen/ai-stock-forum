@@ -14,7 +14,7 @@ use super::{
 
 pub fn render(frame: &mut Frame<'_>, model: &TuiModel, theme: &Theme) {
     let cockpit = if model.skills.active {
-        calculate_skills(frame.area())
+        calculate_skills(frame.area(), model.inspector_open)
     } else {
         view_geometry(frame.area(), model.active_view, model.inspector_open).cockpit
     };
@@ -111,38 +111,24 @@ fn render_header(
 }
 
 fn numbered_tabs(model: &TuiModel, theme: &Theme) -> Line<'static> {
-    let mut spans = Vec::new();
-    for (index, view) in [View::Overview, View::Setup, View::Audit, View::Help]
-        .into_iter()
-        .enumerate()
-    {
+    let tabs = [
+        (1, "Overview", !model.skills.active && model.active_view == View::Overview),
+        (2, "Setup", !model.skills.active && model.active_view == View::Setup),
+        (3, "Audit", !model.skills.active && model.active_view == View::Audit),
+        (4, "Help", !model.skills.active && model.active_view == View::Help),
+        (5, "Agents", !model.skills.active && model.active_view == View::Agents),
+        (6, "Skills", model.skills.active),
+    ];
+    let mut spans = vec![Span::styled("Alt ", theme.muted)];
+    for (index, (number, name, selected)) in tabs.into_iter().enumerate() {
         if index > 0 {
-            spans.push(Span::raw("  "));
+            spans.push(Span::raw(" "));
         }
-        let style = if view == model.active_view {
-            theme.focus
-        } else {
-            theme.muted
-        };
         spans.push(Span::styled(
-            format!("{} {}", index + 1, view_name(view)),
-            style,
+            format!("{number} {name}"),
+            if selected { theme.focus } else { theme.muted },
         ));
     }
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(
-        "a Agents",
-        if !model.skills.active && model.active_view == View::Agents {
-            theme.focus
-        } else {
-            theme.muted
-        },
-    ));
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(
-        "s Skills",
-        if model.skills.active { theme.focus } else { theme.muted },
-    ));
     Line::from(spans)
 }
 
@@ -152,43 +138,27 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
     } else {
         theme.muted
     };
+    let tabs = [
+        (1, "Overview", !model.skills.active && model.active_view == View::Overview),
+        (2, "Setup", !model.skills.active && model.active_view == View::Setup),
+        (3, "Audit", !model.skills.active && model.active_view == View::Audit),
+        (4, "Help", !model.skills.active && model.active_view == View::Help),
+        (5, "Agents", !model.skills.active && model.active_view == View::Agents),
+        (6, "Skills", model.skills.active),
+    ];
     let mut lines = vec![Line::styled("VIEWS", theme.accent), Line::default()];
-    for (index, view) in [View::Overview, View::Setup, View::Audit, View::Help]
-        .into_iter()
-        .enumerate()
-    {
-        let selected = view == model.active_view;
+    for (number, name, selected) in tabs {
         lines.push(Line::styled(
             format!(
-                "{} {} {}",
+                "{} Alt+{} {}",
                 if selected { ">" } else { " " },
-                index + 1,
-                view_name(view)
+                number,
+                name,
             ),
             if selected { theme.focus } else { theme.muted },
         ));
     }
     lines.extend([
-        Line::default(),
-        Line::styled(
-            format!(
-                "{} a Agents",
-                if !model.skills.active && model.active_view == View::Agents {
-                    ">"
-                } else {
-                    " "
-                }
-            ),
-            if !model.skills.active && model.active_view == View::Agents {
-                theme.focus
-            } else {
-                theme.muted
-            },
-        ),
-        Line::styled(
-            format!("{} s Skills", if model.skills.active { ">" } else { " " }),
-            if model.skills.active { theme.focus } else { theme.muted },
-        ),
         Line::default(),
         Line::styled("/ command", theme.muted),
         Line::styled("? help", theme.muted),
@@ -233,7 +203,8 @@ fn render_command(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
         && model.skills.pane == crate::ui::tui::model::SkillsPane::Editor
     {
         " Skill input "
-    } else if model.active_view == View::Agents
+    } else if !model.skills.active
+        && model.active_view == View::Agents
         && model.agents.pane == crate::ui::tui::model::AgentsPane::Editor
     {
         " Profile input "
@@ -630,7 +601,7 @@ mod tests {
         ] {
             assert!(help.contains(command), "missing command: {command}");
         }
-        for key in ["1-4", "Tab", "Enter", "Esc", "Up/Down", "Home/End"] {
+        for key in ["Option/Alt+1-6", "Tab", "Enter", "Esc", "Up/Down", "Home/End"] {
             assert!(help.contains(key), "missing key: {key}");
         }
         assert!(!help.contains("q                   Request shutdown"));

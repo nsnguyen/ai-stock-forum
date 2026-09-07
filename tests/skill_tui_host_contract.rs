@@ -28,7 +28,8 @@ use ai_stock_forum::{
             execute_agent_effect, execute_skill_effect, handle_event, run_tui_with_screen,
             model::{
                 AgentSkillAction, AgentSkillUpgradeAvailability, AgentsPane, AssignmentKind,
-                SkillConfirmation, SkillOperationOrigin, SkillsPane, TuiModel, View,
+                Focus, ProfileConfirmation, SkillConfirmation, SkillOperationOrigin,
+                SkillWorkspaceOrigin, SkillsPane, TuiModel, View,
             },
             theme::Theme,
         },
@@ -606,6 +607,10 @@ fn key(code: KeyCode) -> TuiEvent {
     TuiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
 }
 
+fn alt_key(code: KeyCode) -> TuiEvent {
+    TuiEvent::Key(KeyEvent::new(code, KeyModifiers::ALT))
+}
+
 fn push_text(events: &mut VecDeque<Result<Option<TuiEvent>, TuiError>>, value: &str) {
     events.extend(value.chars().map(|value| Ok(Some(key(KeyCode::Char(value))))));
     events.push_back(Ok(Some(key(KeyCode::Enter))));
@@ -613,7 +618,7 @@ fn push_text(events: &mut VecDeque<Result<Option<TuiEvent>, TuiError>>, value: &
 
 fn review_events() -> VecDeque<Result<Option<TuiEvent>, TuiError>> {
     let mut events = VecDeque::from([
-        Ok(Some(key(KeyCode::Char('s')))),
+        Ok(Some(alt_key(KeyCode::Char('6')))),
         Ok(Some(key(KeyCode::Char('c')))),
         Ok(Some(key(KeyCode::Enter))),
     ]);
@@ -760,10 +765,11 @@ fn agent_origin_unassign_cancel_returns_to_the_agent_skill_panel() {
     )
     .unwrap();
     let (mut model, _) = agent_panel_model();
+    model.command.ingest("preserved agent draft");
     let preview_effect = handle_event(&mut model, key(KeyCode::Enter));
 
     execute_skill_effect(&runtime.client(), &mut model, preview_effect).unwrap();
-    assert!(!model.skills.active);
+    assert!(model.skills.active);
     assert!(model.agents.skill_panel_open);
     assert_eq!(model.skills.pane, SkillsPane::Confirmation);
 
@@ -774,6 +780,7 @@ fn agent_origin_unassign_cancel_returns_to_the_agent_skill_panel() {
     assert!(!model.skills.active);
     assert!(model.agents.skill_panel_open);
     assert_eq!(model.active_view, View::Agents);
+    assert_eq!(model.command.text(), "preserved agent draft");
     assert_eq!(
         model.agents.detail.as_ref().map(|detail| detail.profile.profile_id()),
         Some(AgentProfileId::from_uuid(Uuid::from_u128(110)))
@@ -1482,13 +1489,189 @@ fn review_regression_agents_load_upgrade_truth_on_first_open() {
     .unwrap();
     let mut model = model();
 
-    let open = handle_event(&mut model, key(KeyCode::Char('a')));
+    let open = handle_event(&mut model, alt_key(KeyCode::Char('5')));
+    assert_eq!(open, ControllerEffect::LoadAgentProfiles);
     execute_agent_effect(&runtime.client(), &mut model, open).unwrap();
     let detail = handle_event(&mut model, key(KeyCode::Enter));
     execute_agent_effect(&runtime.client(), &mut model, detail).unwrap();
     handle_event(&mut model, key(KeyCode::Enter));
 
     assert!(model.available_agent_skill_actions().contains(&AgentSkillAction::Upgrade));
+    runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
+}
+
+#[test]
+fn agent_skill_reload_replaces_inconsistent_truth_without_closing_the_panel() {
+    let runtime = ApplicationRuntime::spawn(
+        RouteRecorder {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            execute_error: None,
+        },
+        4,
+    )
+    .unwrap();
+    let pinned = assigned_skill();
+    let mut divergent_draft = pinned.content().clone();
+    divergent_draft.instructions = "Divergent equal-version content.".to_owned();
+    let divergent = SkillVersion::create(
+        pinned.skill_id(),
+        SkillVersionId::from_uuid(Uuid::from_u128(199)),
+        pinned.created_at_ms() + 1,
+        SkillProvenance::User,
+        divergent_draft,
+    )
+    .unwrap();
+    let (mut model, _) = agent_panel_model();
+    let agent_origin = SkillWorkspaceOrigin::AgentSkills {
+        profile_id: model
+            .agents
+            .detail
+            .as_ref()
+            .expect("agent detail")
+            .profile
+            .profile_id(),
+    };
+    model.skills.workspace_origin = Some(agent_origin);
+    model.skills.replace_skills(SkillsView {
+        skills: vec![SkillSummary {
+            skill_ref: divergent.reference(),
+            display_name: divergent.content().display_name.clone(),
+            provenance: divergent.provenance().clone(),
+        }],
+        total_count: 1,
+        returned_count: 1,
+        truncated: false,
+    });
+    model.agents.selected_assigned_skill = 0;
+    model.agents.selected_skill_action_index = 0;
+    assert_eq!(
+        model.agent_skill_upgrade_availability(),
+        AgentSkillUpgradeAvailability::Inconsistent
+    );
+
+    let reload = handle_event(&mut model, key(KeyCode::Char('r')));
+    assert_eq!(reload, ControllerEffect::LoadAgentSkillLibrary);
+    execute_agent_effect(&runtime.client(), &mut model, reload).unwrap();
+
+    assert_eq!(
+        model.agent_skill_upgrade_availability(),
+        AgentSkillUpgradeAvailability::Available(replacement_skill().reference())
+    );
+    assert_eq!(model.active_view, View::Agents);
+    assert_eq!(model.agents.pane, AgentsPane::Detail);
+    assert!(model.agents.skill_panel_open);
+    assert_eq!(model.agents.selected_assigned_skill, 0);
+    assert_eq!(model.agents.selected_skill_action_index, 0);
+    assert_eq!(model.skills.workspace_origin, Some(agent_origin));
+
+    runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
+}
+
+#[test]
+fn agent_navigation_refresh_preserves_the_active_tabs_interaction_state() {
+    let runtime = ApplicationRuntime::spawn(
+        RouteRecorder {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            execute_error: None,
+        },
+        4,
+    )
+    .unwrap();
+    let mut model = model();
+    let effect = handle_event(&mut model, alt_key(KeyCode::Char('5')));
+    assert_eq!(effect, ControllerEffect::LoadAgentProfiles);
+    model.agents.pane = AgentsPane::Confirmation;
+    model.agents.history_scroll = 9;
+    model.agents.pending_confirmation = Some(ProfileConfirmation {
+        command: ApplicationCommand::ShowHelp,
+    });
+    model.skills.pane = SkillsPane::History;
+    model.skills.selected_history_version = 4;
+    model.skills.workspace_origin = Some(SkillWorkspaceOrigin::Cockpit(View::Setup));
+    model.set_focus(Focus::Command);
+    model.inspector_open = true;
+    model.workspace_scroll = 7;
+    model.command.ingest("unfinished agent command");
+    let expected_confirmation = model.agents.pending_confirmation.clone();
+
+    execute_agent_effect(&runtime.client(), &mut model, effect).unwrap();
+
+    assert_eq!(model.active_view, View::Agents);
+    assert!(!model.skills.active);
+    assert_eq!(model.agents.pane, AgentsPane::Confirmation);
+    assert_eq!(model.agents.history_scroll, 9);
+    assert_eq!(model.agents.pending_confirmation, expected_confirmation);
+    assert_eq!(model.skills.pane, SkillsPane::History);
+    assert_eq!(model.skills.selected_history_version, 4);
+    assert_eq!(
+        model.skills.workspace_origin,
+        Some(SkillWorkspaceOrigin::Cockpit(View::Setup))
+    );
+    assert_eq!(model.focus, Focus::Command);
+    assert!(model.inspector_open);
+    assert_eq!(model.workspace_scroll, 7);
+    assert_eq!(model.command.text(), "unfinished agent command");
+    assert!(model.skills.library_loaded);
+    assert_eq!(model.agents.profiles.profiles.len(), 1);
+    runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
+}
+
+#[test]
+fn first_skills_load_preserves_an_existing_editor_or_confirmation() {
+    let runtime = ApplicationRuntime::spawn(
+        RouteRecorder {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            execute_error: None,
+        },
+        4,
+    )
+    .unwrap();
+
+    let mut editor_model = model();
+    editor_model.skills.active = true;
+    editor_model.skills.start_create(None);
+    editor_model.set_focus(Focus::Command);
+    editor_model.command.ingest("unfinished skill draft");
+    editor_model.command.move_home();
+    let expected_editor = editor_model.skills.editor.clone();
+
+    execute_skill_effect(
+        &runtime.client(),
+        &mut editor_model,
+        ControllerEffect::LoadSkills,
+    )
+    .unwrap();
+
+    assert!(editor_model.skills.library_loaded);
+    assert_eq!(editor_model.skills.pane, SkillsPane::Editor);
+    assert_eq!(editor_model.skills.editor, expected_editor);
+    assert_eq!(editor_model.focus, Focus::Command);
+    assert_eq!(editor_model.command.text(), "unfinished skill draft");
+    assert_eq!(editor_model.command.cursor_byte(), 0);
+
+    let mut confirmation_model = model();
+    confirmation_model.skills.active = true;
+    confirmation_model.skills.pane = SkillsPane::Confirmation;
+    confirmation_model.skills.pending_confirmation = Some(SkillConfirmation {
+        command: ApplicationCommand::ShowHelp,
+        origin: SkillOperationOrigin::Skills(SkillsPane::Detail),
+    });
+    let expected_confirmation = confirmation_model.skills.pending_confirmation.clone();
+
+    execute_skill_effect(
+        &runtime.client(),
+        &mut confirmation_model,
+        ControllerEffect::LoadSkills,
+    )
+    .unwrap();
+
+    assert!(confirmation_model.skills.library_loaded);
+    assert_eq!(confirmation_model.skills.pane, SkillsPane::Confirmation);
+    assert_eq!(
+        confirmation_model.skills.pending_confirmation,
+        expected_confirmation
+    );
+
     runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
 }
 
@@ -1593,7 +1776,7 @@ fn direct_agent_show_hydrates_upgrade_truth_without_visiting_skills() {
     )
     .unwrap();
     let mut scripted = VecDeque::new();
-    scripted.push_back(Ok(Some(key(KeyCode::Char('s')))));
+    scripted.push_back(Ok(Some(alt_key(KeyCode::Char('6')))));
     scripted.extend((0..4).map(|_| Ok(None)));
     push_text(
         &mut scripted,

@@ -4,7 +4,10 @@ use super::{
     TuiError,
     controller::{ControllerEffect, apply_outcome, handle_event},
     event::{CrosstermEventSource, EventSource, TuiEvent},
-    model::{AgentOutcomeIntent, RuntimeStatus, TuiModel},
+    model::{
+        AgentOutcomeIntent, NavigationTab, RuntimeStatus, SkillOperationOrigin,
+        SkillWorkspaceOrigin, TuiModel,
+    },
     terminal::{CrosstermScreen, Screen},
     theme::Theme,
 };
@@ -26,6 +29,8 @@ use crate::{
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const STALE_PROFILE_MESSAGE: &str =
     "Profile changed elsewhere. Detail refreshed; reopen Edit to continue.";
+const PENDING_INTERACTION_MESSAGE: &str =
+    "Another command is running; this action remains available to retry.";
 
 #[doc(hidden)]
 pub fn execute_agent_effect(
@@ -35,12 +40,7 @@ pub fn execute_agent_effect(
 ) -> Result<(), RuntimeError> {
     match effect {
         ControllerEffect::LoadAgentProfiles => {
-            let skills = submit_agent_command(client, model, ApplicationCommand::ListSkills)?;
-            let _ = apply_outcome(model, skills);
-            model.skills.active = false;
-            let outcome =
-                submit_agent_command(client, model, ApplicationCommand::ListAgentProfiles)?;
-            apply_agent_outcome(model, outcome);
+            refresh_agent_navigation_data(client, model)?;
         }
         ControllerEffect::LoadAgentProfile { selected_profile } => {
             load_profile(client, model, selected_profile)?;
@@ -138,6 +138,7 @@ pub fn execute_agent_effect(
         ControllerEffect::None
         | ControllerEffect::Redraw
         | ControllerEffect::Submit(_)
+        | ControllerEffect::SubmitPreservingNavigation(_)
         | ControllerEffect::RequestShutdown(_)
         | ControllerEffect::LoadSkills
         | ControllerEffect::LoadSkill { .. }
@@ -153,6 +154,26 @@ pub fn execute_agent_effect(
         | ControllerEffect::CancelSkillReview => {}
     }
     Ok(())
+}
+
+fn refresh_agent_navigation_data(
+    client: &RuntimeClient,
+    model: &mut TuiModel,
+) -> Result<(), RuntimeError> {
+    let navigation = model.navigation_state_snapshot();
+    model.pending_agent_outcome = None;
+
+    let result = (|| {
+        let skills = submit_agent_command(client, model, ApplicationCommand::ListSkills)?;
+        let _ = apply_outcome(model, skills);
+        let outcome =
+            submit_agent_command(client, model, ApplicationCommand::ListAgentProfiles)?;
+        apply_agent_outcome(model, outcome);
+        Ok(())
+    })();
+
+    model.restore_navigation_state(navigation);
+    result
 }
 
 #[doc(hidden)]
@@ -183,8 +204,13 @@ pub fn execute_skill_effect(
             }
         }
         ControllerEffect::LoadSkills => {
-            let outcome = submit_agent_command(client, model, ApplicationCommand::ListSkills)?;
-            let _ = apply_outcome(model, outcome);
+            let navigation = model.navigation_state_snapshot();
+            let result = submit_agent_command(client, model, ApplicationCommand::ListSkills)
+                .map(|outcome| {
+                    let _ = apply_outcome(model, outcome);
+                });
+            model.restore_navigation_state(navigation);
+            result?;
         }
         ControllerEffect::LoadSkill { selected_skill }
         | ControllerEffect::LoadSkillStarter { selected_skill } => {
@@ -492,6 +518,10 @@ fn install_assignment_preview(model: &mut TuiModel, preview: AgentSkillAssignmen
         },
     };
     model.skills.review_registered = true;
+    if let SkillOperationOrigin::AgentSkills { profile_id } = model.skills.operation_origin {
+        model.skills.workspace_origin = Some(SkillWorkspaceOrigin::AgentSkills { profile_id });
+        model.switch_tab(NavigationTab::Skills);
+    }
     model.skills.pending_confirmation = Some(super::model::SkillConfirmation {
         command,
         origin: model.skills.operation_origin,
@@ -522,6 +552,12 @@ fn recover_skill_error(
         model.skills.pane = super::model::SkillsPane::Editor;
     } else {
         model.skills.pane = super::model::SkillsPane::Detail;
+    }
+    if let SkillOperationOrigin::AgentSkills { profile_id } = model.skills.operation_origin {
+        model.skills.workspace_origin = None;
+        model.select_view(super::model::View::Agents);
+        model.agents.select_profile_id(profile_id);
+        model.agents.skill_panel_open = true;
     }
     model.set_command_in_flight(false);
     model.set_message(super::model::Severity::Error, "Skill action failed; review cleared.");
@@ -604,17 +640,12 @@ fn load_agent_skill_library(
     client: &RuntimeClient,
     model: &mut TuiModel,
 ) -> Result<(), RuntimeError> {
-    let skills_active = model.skills.active;
-    let skills_pane = model.skills.pane;
-    let active_view = model.active_view;
-    let agents_pane = model.agents.pane;
-    let outcome = submit_agent_command(client, model, ApplicationCommand::ListSkills)?;
-    let _ = apply_outcome(model, outcome);
-    model.skills.active = skills_active;
-    model.skills.pane = skills_pane;
-    model.active_view = active_view;
-    model.agents.pane = agents_pane;
-    Ok(())
+    let navigation = model.navigation_state_snapshot();
+    let result = submit_agent_command(client, model, ApplicationCommand::ListSkills).map(|outcome| {
+        let _ = apply_outcome(model, outcome);
+    });
+    model.restore_navigation_state(navigation);
+    result
 }
 
 fn ensure_agent_skill_library(
@@ -990,6 +1021,7 @@ struct TuiRunner {
     model: TuiModel,
     pending: Option<PendingOutcome>,
     queued_shutdown: Option<ShutdownReason>,
+    deferred_navigation_refresh: Option<ControllerEffect>,
 }
 
 impl TuiRunner {
@@ -1005,6 +1037,7 @@ impl TuiRunner {
             model: TuiModel::new(snapshot, previous_session_interrupted),
             pending: None,
             queued_shutdown: None,
+            deferred_navigation_refresh: None,
         }
     }
 
@@ -1033,6 +1066,16 @@ impl TuiRunner {
             if self.pending.is_none() && self.queued_shutdown.is_some() {
                 self.submit_queued_shutdown()?;
                 dirty = true;
+            }
+
+            if self.pending.is_none()
+                && self.queued_shutdown.is_none()
+                && let Some(effect) = self.deferred_navigation_refresh.take()
+            {
+                match self.apply_effect(effect)? {
+                    LoopControl::Continue { redraw } => dirty |= redraw,
+                    LoopControl::Finish(reason) => return Ok(reason),
+                }
             }
 
             dirty |= self.update_layout(screen)?;
@@ -1072,6 +1115,20 @@ impl TuiRunner {
     }
 
     fn apply_effect(&mut self, effect: ControllerEffect) -> Result<LoopControl, TuiError> {
+        if self.pending.is_some() {
+            if effect.is_navigation_refresh() {
+                self.defer_navigation_refresh(effect);
+                return Ok(LoopControl::Continue { redraw: true });
+            }
+            if effect.blocked_while_command_in_flight() {
+                self.model.set_message(
+                    super::model::Severity::Warning,
+                    PENDING_INTERACTION_MESSAGE,
+                );
+                return Ok(LoopControl::Continue { redraw: true });
+            }
+        }
+
         match effect {
             ControllerEffect::None => Ok(LoopControl::Continue { redraw: false }),
             ControllerEffect::Redraw => Ok(LoopControl::Continue { redraw: true }),
@@ -1083,6 +1140,13 @@ impl TuiRunner {
                     return Ok(LoopControl::Continue { redraw: false });
                 }
                 self.submit(command)?;
+                Ok(LoopControl::Continue { redraw: true })
+            }
+            ControllerEffect::SubmitPreservingNavigation(command) => {
+                if self.model.runtime_status == RuntimeStatus::Stopping {
+                    return Ok(LoopControl::Continue { redraw: false });
+                }
+                self.submit_preserving_navigation(command)?;
                 Ok(LoopControl::Continue { redraw: true })
             }
             ControllerEffect::RequestShutdown(ShutdownReason::UserQuit) => {
@@ -1125,6 +1189,20 @@ impl TuiRunner {
         }
     }
 
+    fn defer_navigation_refresh(&mut self, effect: ControllerEffect) {
+        if matches!(
+            self.deferred_navigation_refresh.as_ref(),
+            Some(ControllerEffect::LoadAgentProfiles)
+        ) {
+            return;
+        }
+        if effect == ControllerEffect::LoadAgentProfiles
+            || self.deferred_navigation_refresh.is_none()
+        {
+            self.deferred_navigation_refresh = Some(effect);
+        }
+    }
+
     fn request_auditable_shutdown(
         &mut self,
         reason: ShutdownReason,
@@ -1152,6 +1230,25 @@ impl TuiRunner {
     fn submit(&mut self, command: ApplicationCommand) -> Result<(), TuiError> {
         debug_assert!(self.pending.is_none());
         self.model.set_command_in_flight(true);
+        match self.client.try_submit(command) {
+            Ok(pending) => {
+                self.pending = Some(pending);
+                Ok(())
+            }
+            Err(error) => {
+                self.model.set_command_in_flight(false);
+                self.model.pending_agent_outcome = None;
+                Err(error.into())
+            }
+        }
+    }
+
+    fn submit_preserving_navigation(
+        &mut self,
+        command: ApplicationCommand,
+    ) -> Result<(), TuiError> {
+        debug_assert!(self.pending.is_none());
+        self.model.set_command_in_flight_preserving_navigation();
         match self.client.try_submit(command) {
             Ok(pending) => {
                 self.pending = Some(pending);
@@ -1263,12 +1360,15 @@ mod tests {
             AppError, ApplicationCommand, CommandOutcome, CommandView, HelpView,
             PresentationSnapshot, ShutdownDisposition, ShutdownReason, ShutdownView, StatusView,
         },
-        domain::{CommandId, CorrelationId, InstallationId, SessionId},
+        domain::{CommandId, CorrelationId, InstallationId, SessionId, SkillId},
         runtime::{ApplicationRuntime, CommandExecutor, RuntimeError},
         setup::SetupStatus,
         ui::tui::{
-            EventSource, Screen, TuiError, TuiEvent,
-            model::{LayoutMode, RuntimeStatus, TuiModel, View},
+            ControllerEffect, EventSource, Screen, TuiError, TuiEvent, handle_event,
+            model::{
+                LayoutMode, RuntimeStatus, SkillConfirmation, SkillOperationOrigin, SkillsPane,
+                TuiModel, View,
+            },
             theme::Theme,
         },
     };
@@ -1595,6 +1695,13 @@ mod tests {
         )))
     }
 
+    fn alt_tab(number: char) -> EventStep {
+        EventStep::Event(TuiEvent::Key(KeyEvent::new(
+            KeyCode::Char(number),
+            KeyModifiers::ALT,
+        )))
+    }
+
     fn special_key(code: KeyCode) -> EventStep {
         EventStep::Event(TuiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)))
     }
@@ -1626,7 +1733,7 @@ mod tests {
             EventStep::Idle,
             EventStep::Idle,
             EventStep::Event(TuiEvent::Resize(70, 20)),
-            key('2'),
+            alt_tab('2'),
             EventStep::Idle,
         ];
         steps.extend(command_steps("/quit"));
@@ -1679,6 +1786,235 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(observer.commands(), [ApplicationCommand::ShowStatus]);
         assert_eq!(observer.finishes(), [ShutdownReason::Interrupted]);
+    }
+
+    #[test]
+    fn tab_hydration_is_deferred_while_an_async_command_is_pending() {
+        let (runtime, observer, release) = runtime(true, false, false);
+        let mut runner = TuiRunner::new(runtime, snapshot(), false);
+        runner.submit(ApplicationCommand::ShowStatus).unwrap();
+        for _ in 0..100_000 {
+            if observer.commands() == [ApplicationCommand::ShowStatus] {
+                break;
+            }
+            thread::yield_now();
+        }
+        assert_eq!(observer.commands(), [ApplicationCommand::ShowStatus]);
+
+        let effect = handle_event(
+            &mut runner.model,
+            TuiEvent::Key(KeyEvent::new(
+                KeyCode::Char('6'),
+                KeyModifiers::ALT,
+            )),
+        );
+        assert_eq!(effect, ControllerEffect::LoadSkills);
+        assert!(runner.model.skills.active);
+        let super::LoopControl::Continue { redraw } = runner.apply_effect(effect).unwrap() else {
+            panic!("navigation refresh cannot finish the loop")
+        };
+        assert!(redraw);
+
+        assert_eq!(
+            runner.deferred_navigation_refresh,
+            Some(ControllerEffect::LoadSkills)
+        );
+        assert_eq!(observer.commands(), [ApplicationCommand::ShowStatus]);
+
+        release.unwrap().send(()).unwrap();
+        let completed = loop {
+            if let Some(effect) = runner.poll_pending().unwrap() {
+                break effect;
+            }
+            thread::yield_now();
+        };
+        assert!(runner.model.skills.active);
+        runner.apply_effect(completed).unwrap();
+        let refresh = runner
+            .deferred_navigation_refresh
+            .take()
+            .expect("deferred tab hydration");
+        runner.apply_effect(refresh).unwrap();
+
+        assert_eq!(
+            observer.commands(),
+            [ApplicationCommand::ShowStatus, ApplicationCommand::ListSkills]
+        );
+        assert!(runner.model.skills.active);
+        runner.finish(ShutdownReason::Interrupted).unwrap();
+    }
+
+    #[test]
+    fn background_follow_up_hydrates_without_presenting_its_result() {
+        let (runtime, observer, _) = runtime(false, false, false);
+        let mut runner = TuiRunner::new(runtime, snapshot(), false);
+        runner.model.select_view(View::Setup);
+
+        let super::LoopControl::Continue { redraw } = runner
+            .apply_effect(ControllerEffect::SubmitPreservingNavigation(
+                ApplicationCommand::ShowStatus,
+            ))
+            .unwrap()
+        else {
+            panic!("background follow-up cannot finish the loop")
+        };
+        assert!(redraw);
+        let completed = loop {
+            if let Some(effect) = runner.poll_pending().unwrap() {
+                break effect;
+            }
+            thread::yield_now();
+        };
+        runner.apply_effect(completed).unwrap();
+
+        assert_eq!(observer.commands(), [ApplicationCommand::ShowStatus]);
+        assert_eq!(runner.model.active_view, View::Setup);
+        assert!(!runner.model.command_in_flight);
+        runner.finish(ShutdownReason::Interrupted).unwrap();
+    }
+
+    #[test]
+    fn restored_confirmation_cannot_block_behind_an_async_command() {
+        let (runtime, observer, release) = runtime(true, false, false);
+        let mut runner = TuiRunner::new(runtime, snapshot(), false);
+        runner.model.skills.active = true;
+        runner.model.skills.library_loaded = true;
+        runner.model.skills.pane = SkillsPane::Confirmation;
+        runner.model.skills.pending_confirmation = Some(SkillConfirmation {
+            command: ApplicationCommand::ShowHelp,
+            origin: SkillOperationOrigin::Skills(SkillsPane::Detail),
+        });
+        runner.model.skills.review_registered = true;
+        let expected_confirmation = runner.model.skills.pending_confirmation.clone();
+        runner.model.select_view(View::Overview);
+        runner.submit(ApplicationCommand::ShowStatus).unwrap();
+        for _ in 0..100_000 {
+            if observer.commands() == [ApplicationCommand::ShowStatus] {
+                break;
+            }
+            thread::yield_now();
+        }
+        assert_eq!(observer.commands(), [ApplicationCommand::ShowStatus]);
+
+        assert_eq!(
+            handle_event(
+                &mut runner.model,
+                TuiEvent::Key(KeyEvent::new(
+                    KeyCode::Char('6'),
+                    KeyModifiers::ALT,
+                )),
+            ),
+            ControllerEffect::Redraw
+        );
+        assert_eq!(runner.model.skills.pane, SkillsPane::Confirmation);
+        let execute = handle_event(
+            &mut runner.model,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        assert_eq!(execute, ControllerEffect::Redraw);
+        let super::LoopControl::Continue { redraw } = runner.apply_effect(execute).unwrap() else {
+            panic!("a staged confirmation cannot finish the loop")
+        };
+
+        assert!(redraw);
+        assert_eq!(runner.model.skills.pending_confirmation, expected_confirmation);
+        assert!(runner.model.skills.review_registered);
+        assert_eq!(observer.commands(), [ApplicationCommand::ShowStatus]);
+        assert_eq!(
+            runner.model.message.as_ref().map(|message| message.text.as_str()),
+            Some("A command is already running.")
+        );
+
+        runner.model.clear_message();
+        assert_eq!(
+            handle_event(
+                &mut runner.model,
+                TuiEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            ),
+            ControllerEffect::Redraw
+        );
+        assert!(runner.model.skills.active);
+        assert_eq!(runner.model.skills.pane, SkillsPane::Confirmation);
+        assert_eq!(runner.model.skills.pending_confirmation, expected_confirmation);
+        assert!(runner.model.skills.review_registered);
+
+        release.unwrap().send(()).unwrap();
+        runner.finish(ShutdownReason::Interrupted).unwrap();
+    }
+
+    #[test]
+    fn deferred_agent_hydration_is_not_downgraded_by_a_later_skills_switch() {
+        let (runtime, observer, release) = runtime(true, false, false);
+        let mut runner = TuiRunner::new(runtime, snapshot(), false);
+        runner.submit(ApplicationCommand::ShowStatus).unwrap();
+        for _ in 0..100_000 {
+            if observer.commands() == [ApplicationCommand::ShowStatus] {
+                break;
+            }
+            thread::yield_now();
+        }
+        assert_eq!(observer.commands(), [ApplicationCommand::ShowStatus]);
+
+        runner
+            .apply_effect(ControllerEffect::LoadAgentProfiles)
+            .unwrap();
+        runner.apply_effect(ControllerEffect::LoadSkills).unwrap();
+
+        assert_eq!(
+            runner.deferred_navigation_refresh,
+            Some(ControllerEffect::LoadAgentProfiles)
+        );
+        release.unwrap().send(()).unwrap();
+        runner.finish(ShutdownReason::Interrupted).unwrap();
+    }
+
+    #[test]
+    fn restored_skills_result_cannot_submit_behind_an_async_command() {
+        let (runtime, observer, release) = runtime(true, false, false);
+        let mut runner = TuiRunner::new(runtime, snapshot(), false);
+        runner.model.skills.active = true;
+        runner.model.skills.library_loaded = true;
+        runner.model.skills.pane = SkillsPane::Result;
+        runner.model.skills.pending_active_skill = Some(SkillId::from_uuid(Uuid::from_u128(77)));
+        runner.model.select_view(View::Overview);
+        runner.submit(ApplicationCommand::ShowStatus).unwrap();
+        for _ in 0..100_000 {
+            if observer.commands() == [ApplicationCommand::ShowStatus] {
+                break;
+            }
+            thread::yield_now();
+        }
+        assert_eq!(observer.commands(), [ApplicationCommand::ShowStatus]);
+
+        assert_eq!(
+            handle_event(
+                &mut runner.model,
+                TuiEvent::Key(KeyEvent::new(
+                    KeyCode::Char('6'),
+                    KeyModifiers::ALT,
+                )),
+            ),
+            ControllerEffect::Redraw
+        );
+        let submit = handle_event(
+            &mut runner.model,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        assert_eq!(submit, ControllerEffect::Redraw);
+        let super::LoopControl::Continue { redraw } = runner.apply_effect(submit).unwrap() else {
+            panic!("a staged result cannot finish the loop")
+        };
+
+        assert!(redraw);
+        assert_eq!(runner.model.skills.pane, SkillsPane::Result);
+        assert_eq!(observer.commands(), [ApplicationCommand::ShowStatus]);
+        assert_eq!(
+            runner.model.message.as_ref().map(|message| message.text.as_str()),
+            Some("A command is already running.")
+        );
+
+        release.unwrap().send(()).unwrap();
+        runner.finish(ShutdownReason::Interrupted).unwrap();
     }
 
     #[test]
