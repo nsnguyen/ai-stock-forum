@@ -19,6 +19,15 @@ impl PlaintextField {
             Self::EpisodicBody => "episodic_body",
         }
     }
+
+    const fn maximum_token_characters(self) -> usize {
+        match self {
+            Self::MemoryValue => 4_096,
+            Self::ProposalRationale => 512,
+            Self::EpisodicLabel => 128,
+            Self::EpisodicBody => 8_192,
+        }
+    }
 }
 
 pub struct CredentialPatternSetV1;
@@ -27,8 +36,8 @@ impl CredentialPatternSetV1 {
     pub fn validate(field: PlaintextField, value: &str) -> Result<(), DomainError> {
         let bytes = value.as_bytes();
         if has_private_key_marker(bytes)
-            || has_bearer_credential(bytes)
-            || has_prefixed_token(bytes)
+            || has_bearer_credential(bytes, field.maximum_token_characters())
+            || has_prefixed_token(bytes, field.maximum_token_characters())
         {
             Err(DomainError::UnsafeMemoryText {
                 field: field.as_str(),
@@ -85,7 +94,7 @@ fn has_private_key_marker(bytes: &[u8]) -> bool {
     false
 }
 
-fn has_bearer_credential(bytes: &[u8]) -> bool {
+fn has_bearer_credential(bytes: &[u8], maximum_token_characters: usize) -> bool {
     let marker = b"authorization";
     if bytes.len() < marker.len() {
         return false;
@@ -121,34 +130,33 @@ fn has_bearer_credential(bytes: &[u8]) -> bool {
             .iter()
             .take_while(|&&byte| is_bearer_token_byte(byte))
             .count();
-        if token_length >= 16 {
+        if (16..=maximum_token_characters).contains(&token_length) {
             return true;
         }
     }
     false
 }
 
-fn has_prefixed_token(bytes: &[u8]) -> bool {
+fn has_prefixed_token(bytes: &[u8], maximum_token_characters: usize) -> bool {
     let prefixes = [b"sk-ant-".as_slice(), b"sk-".as_slice(), b"xai-".as_slice()];
     for start in 0..bytes.len() {
         if start > 0 && is_token_byte(bytes[start - 1]) {
             continue;
         }
-        for prefix in prefixes {
-            if !bytes
+        let Some(prefix) = prefixes.into_iter().find(|prefix| {
+            bytes
                 .get(start..start + prefix.len())
                 .is_some_and(|part| ascii_eq_ignore_case(part, prefix))
-            {
-                continue;
-            }
-            let token_start = start + prefix.len();
-            let token_length = bytes[token_start..]
-                .iter()
-                .take_while(|&&byte| is_token_byte(byte))
-                .count();
-            if token_length >= 20 {
-                return true;
-            }
+        }) else {
+            continue;
+        };
+        let token_start = start + prefix.len();
+        let token_length = bytes[token_start..]
+            .iter()
+            .take_while(|&&byte| is_token_byte(byte))
+            .count();
+        if (20..=maximum_token_characters).contains(&token_length) {
+            return true;
         }
     }
     false

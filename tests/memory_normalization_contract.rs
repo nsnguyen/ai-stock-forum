@@ -7,7 +7,7 @@ use ai_stock_forum::{
 };
 use proptest::prelude::*;
 
-const DISPLAY_KEY_MAX_BYTES: usize = 128;
+const DISPLAY_KEY_MAX_BYTES: usize = 96;
 const VALUE_MAX_BYTES: usize = 4_096;
 const TAG_MAX_BYTES: usize = 32;
 
@@ -36,6 +36,33 @@ fn memory_draft_enforces_exact_display_key_and_value_byte_boundaries() {
                 .is_ok()
         );
     }
+    assert!(
+        MemoryEntryDraft::new("é".repeat(48), "value".to_owned(), vec!["tag".to_owned()],).is_ok()
+    );
+    assert_eq!(
+        MemoryEntryDraft::new("é".repeat(49), "value".to_owned(), vec!["tag".to_owned()])
+            .unwrap_err()
+            .code(),
+        "invalid_memory_field"
+    );
+    assert!(
+        MemoryEntryDraft::new(
+            format!("  {}  ", "k".repeat(DISPLAY_KEY_MAX_BYTES)),
+            "value".to_owned(),
+            vec!["tag".to_owned()],
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        MemoryEntryDraft::new(
+            format!("  {}  ", "k".repeat(DISPLAY_KEY_MAX_BYTES + 1)),
+            "value".to_owned(),
+            vec!["tag".to_owned()],
+        )
+        .unwrap_err()
+        .code(),
+        "invalid_memory_field"
+    );
     for len in [0, DISPLAY_KEY_MAX_BYTES + 1] {
         assert_eq!(
             MemoryEntryDraft::new("k".repeat(len), "value".to_owned(), vec!["tag".to_owned()])
@@ -107,7 +134,7 @@ fn memory_key_folds_internal_whitespace_nfkc_and_case() {
 }
 
 #[test]
-fn memory_draft_sorts_tags_and_rejects_duplicates_and_reserved_general_key() {
+fn memory_draft_sorts_tags_and_rejects_duplicates_and_reserved_general_tag() {
     let draft = MemoryEntryDraft::new(
         "thesis".to_owned(),
         "value".to_owned(),
@@ -125,8 +152,15 @@ fn memory_draft_sorts_tags_and_rejects_duplicates_and_reserved_general_key() {
         .code(),
         "invalid_memory_field"
     );
+    assert_eq!(normalize_memory_key("general").unwrap().as_str(), "general");
     assert_eq!(
-        normalize_memory_key("general").unwrap_err().code(),
+        MemoryEntryDraft::new(
+            "thesis".to_owned(),
+            "value".to_owned(),
+            vec!["ＧＥＮＥＲＡＬ".to_owned()],
+        )
+        .unwrap_err()
+        .code(),
         "invalid_memory_field"
     );
 }
@@ -197,8 +231,11 @@ fn credential_oriented_keys_use_exact_separator_aware_reserved_words() {
 fn serde_rejects_noncanonical_or_unsafe_memory_drafts() {
     for invalid in [
         r#"{"display_key":" Market  Thesis ","value":"value","purpose_tags":["tag"]}"#,
-        r#"{"display_key":"general","value":"value","purpose_tags":["tag"]}"#,
+        r#"{"display_key":"key","value":"value","purpose_tags":[" tag "]}"#,
+        r#"{"display_key":"key","value":"value","purpose_tags":["Zeta","alpha"]}"#,
+        r#"{"display_key":"key","value":"value","purpose_tags":["ＧＥＮＥＲＡＬ"]}"#,
         r#"{"display_key":"key","value":"value","purpose_tags":["Alpha","alpha"]}"#,
+        r#"{"display_key":"api-key","value":"value","purpose_tags":["tag"]}"#,
         r#"{"display_key":"key","value":"tab\ttext","purpose_tags":["tag"]}"#,
         r#"{"display_key":"key","value":"sk-ant-abcdefghijklmnopqrst","purpose_tags":["tag"]}"#,
     ] {
@@ -237,36 +274,114 @@ fn credential_pattern_v1_is_delimiter_aware_and_versioned() {
 }
 
 #[test]
-fn credential_scanner_matches_all_families_and_skips_near_misses() {
+fn credential_scanner_matches_every_private_key_marker_and_only_private_key_markers() {
     for value in [
         "-----BEGIN PRIVATE KEY-----",
-        "-----begin rsa private key-----",
-        "Authorization: Bearer abcdefghijklmnop",
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "-----BEGIN DSA PRIVATE KEY-----",
+        "-----BEGIN EC PRIVATE KEY-----",
+        "-----begin openssh private key-----",
+    ] {
+        assert_credential_match(PlaintextField::MemoryValue, value);
+    }
+    assert_no_credential_match(PlaintextField::MemoryValue, "-----BEGIN PUBLIC KEY-----");
+}
+
+#[test]
+fn bearer_scanner_honors_allowed_alphabet_and_exact_optional_spaces() {
+    assert_credential_match(
+        PlaintextField::MemoryValue,
+        "Authorization: Bearer A0._~+/=-abcdefg",
+    );
+    assert_credential_match(
+        PlaintextField::MemoryValue,
+        "authorization : bearer abcdefghijklmnop",
+    );
+    assert_credential_match(
+        PlaintextField::MemoryValue,
         "authorization:bearer abcdefghijklmnop",
-        "xai-abcdefghijklmnopqrst",
-        "sk-abcdefghijklmnopqrst",
-        "sk-ant-abcdefghijklmnopqrst",
-    ] {
-        assert_eq!(
-            CredentialPatternSetV1::validate(PlaintextField::MemoryValue, value)
-                .unwrap_err()
-                .code(),
-            "unsafe_memory_text",
-            "{value}"
-        );
-    }
+    );
     for value in [
-        "-----BEGIN PUBLIC KEY-----",
+        "Authorization: Bearer abcdefghijklmno%",
+        "Authorization  : Bearer abcdefghijklmnop",
+        "Authorization:  Bearer abcdefghijklmnop",
         "Authorization: Basic abcdefghijklmnop",
-        "Authorization: Bearer abcdefghijklmno",
-        "ask-abcdefghijklmnopqrst",
-        "xsk-abcdefghijklmnopqrst",
     ] {
-        assert!(
-            CredentialPatternSetV1::validate(PlaintextField::MemoryValue, value).is_ok(),
-            "{value}"
+        assert_no_credential_match(PlaintextField::MemoryValue, value);
+    }
+}
+
+#[test]
+fn credential_token_scanners_enforce_minimum_and_field_specific_maximums() {
+    for (field, maximum) in plaintext_field_limits() {
+        let bearer_prefix = "Authorization: Bearer ";
+        assert_no_credential_match(field, &format!("{bearer_prefix}{}", "a".repeat(15)));
+        assert_credential_match(field, &format!("{bearer_prefix}{}", "a".repeat(16)));
+        assert_credential_match(field, &format!("{bearer_prefix}{}", "a".repeat(maximum)));
+        assert_no_credential_match(
+            field,
+            &format!("{bearer_prefix}{}", "a".repeat(maximum + 1)),
+        );
+
+        for prefix in ["sk-", "sk-ant-", "xai-"] {
+            assert_no_credential_match(field, &format!("{prefix}{}", "a".repeat(19)));
+            assert_credential_match(field, &format!("{prefix}{}", "a".repeat(20)));
+            assert_credential_match(field, &format!("{prefix}{}", "a".repeat(maximum)));
+            assert_no_credential_match(field, &format!("{prefix}{}", "a".repeat(maximum + 1)));
+        }
+    }
+}
+
+#[test]
+fn prefixed_token_scanner_uses_longest_prefix_and_token_delimiters() {
+    for suffix_length in 16..20 {
+        assert_no_credential_match(
+            PlaintextField::MemoryValue,
+            &format!("sk-ant-{}", "a".repeat(suffix_length)),
         );
     }
+    assert_credential_match(
+        PlaintextField::MemoryValue,
+        &format!("?sk-ant-{}!", "a".repeat(20)),
+    );
+    assert_no_credential_match(
+        PlaintextField::MemoryValue,
+        &format!("xsk-ant-{}", "a".repeat(20)),
+    );
+    assert_no_credential_match(
+        PlaintextField::MemoryValue,
+        &format!("sk-{}%", "a".repeat(19)),
+    );
+    assert_credential_match(
+        PlaintextField::MemoryValue,
+        &format!("sk-A0_-{}.", "a".repeat(16)),
+    );
+}
+
+fn plaintext_field_limits() -> [(PlaintextField, usize); 4] {
+    [
+        (PlaintextField::MemoryValue, 4_096),
+        (PlaintextField::ProposalRationale, 512),
+        (PlaintextField::EpisodicLabel, 128),
+        (PlaintextField::EpisodicBody, 8_192),
+    ]
+}
+
+fn assert_credential_match(field: PlaintextField, value: &str) {
+    assert_eq!(
+        CredentialPatternSetV1::validate(field, value)
+            .unwrap_err()
+            .code(),
+        "unsafe_memory_text",
+        "{field:?}: {value:?}"
+    );
+}
+
+fn assert_no_credential_match(field: PlaintextField, value: &str) {
+    assert!(
+        CredentialPatternSetV1::validate(field, value).is_ok(),
+        "{field:?}: {value:?}"
+    );
 }
 
 #[test]

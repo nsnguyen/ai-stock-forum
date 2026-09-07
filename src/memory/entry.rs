@@ -9,7 +9,7 @@ use crate::{
     memory::normalization::{PLAINTEXT_VALIDATION_VERSION_V1, PlaintextField, validate_plaintext},
 };
 
-pub const DISPLAY_KEY_MAX_BYTES: usize = 128;
+pub const DISPLAY_KEY_MAX_BYTES: usize = 96;
 pub const VALUE_MAX_BYTES: usize = 4_096;
 pub const MAX_PURPOSE_TAGS: usize = 8;
 pub const PURPOSE_TAG_MAX_BYTES: usize = 32;
@@ -77,7 +77,7 @@ impl MemoryEntryDraft {
             let tag =
                 canonicalize_memory_single_line("purpose_tag", &tag, 1, PURPOSE_TAG_MAX_BYTES)?;
             let key = normalized_comparison_key("purpose_tag", &tag)?;
-            if !tag_keys.insert(key.clone()) {
+            if key == "general" || !tag_keys.insert(key.clone()) {
                 return Err(DomainError::InvalidMemoryField {
                     field: "purpose_tags",
                 });
@@ -145,7 +145,7 @@ pub fn normalize_memory_key(display_key: &str) -> Result<NormalizedMemoryKey, Do
     let display_key =
         canonicalize_memory_single_line("display_key", display_key, 1, DISPLAY_KEY_MAX_BYTES)?;
     let normalized = normalized_comparison_key("display_key", &display_key)?;
-    if normalized == "general" || is_reserved_credential_key(&normalized) {
+    if is_reserved_credential_key(&normalized) {
         return Err(DomainError::InvalidMemoryField {
             field: "display_key",
         });
