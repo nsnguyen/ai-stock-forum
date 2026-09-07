@@ -203,6 +203,9 @@ impl MemoryEntryVersion {
         creation_event_id: EventId,
     ) -> Result<Self, DomainError> {
         let normalized_key = draft.normalized_key();
+        if normalized_key != self.normalized_key {
+            return Err(DomainError::InvalidMemoryEntry);
+        }
         Self::build(
             self.namespace_id,
             self.entry_id,

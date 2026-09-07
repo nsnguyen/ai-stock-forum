@@ -20,4 +20,7 @@ pub use review::{
     MemoryPlaintextAcknowledgement, MemoryReviewRegistry,
 };
 #[allow(unused_imports)]
-pub(crate) use review::{MemoryEditReviewBinding, ReservedMemoryReview};
+pub(crate) use review::{
+    MemoryEditPreviewOutcome, MemoryEditReviewBinding, PreparedMemoryEdit, ReservedMemoryReview,
+    prepare_direct_memory_edit,
+};

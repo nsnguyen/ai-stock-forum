@@ -60,6 +60,8 @@ pub enum DomainError {
     InvalidMemoryEntry,
     #[error("memory review is unavailable")]
     MemoryReviewUnavailable,
+    #[error("memory expected state does not match the authoritative entry")]
+    MemoryExpectedStateMismatch,
 }
 
 impl DomainError {
@@ -94,6 +96,7 @@ impl DomainError {
             Self::UnknownPlaintextValidationVersion => "unknown_plaintext_validation_version",
             Self::InvalidMemoryEntry => "invalid_memory_entry",
             Self::MemoryReviewUnavailable => "memory_review_unavailable",
+            Self::MemoryExpectedStateMismatch => "memory_expected_state_mismatch",
         }
     }
 }
