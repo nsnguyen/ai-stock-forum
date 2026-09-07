@@ -54,7 +54,9 @@ thresholds it is Narrow from `60x18`, Medium from `80x24`, and Wide from
 
 | Control | Result |
 | --- | --- |
-| `Option+1` through `Option+6` on macOS; `Alt+1` through `Alt+6` on Windows and Linux | Open Overview, Setup, Audit, Help, Agents, or Skills from any pane, editor, or confirmation. |
+| Bare `1`-`4` | Open Overview, Setup, Audit, or Help from any non-text browsing pane or confirmation. |
+| Bare `a` | Open Agents from any non-text browsing pane or confirmation. |
+| Bare `s` | Open Skills from any non-text browsing pane or confirmation. |
 | `?` | Open Help. |
 | `Tab`, `Shift+Tab` | Move focus forward or backward among visible regions. |
 | Arrow keys, `PageUp`, `PageDown`, `Home`, `End` | Navigate the focused view or Audit selection. |
@@ -69,7 +71,8 @@ thresholds it is Narrow from `60x18`, Medium from `80x24`, and Wide from
 non-color focus distinction. Mouse capture remains disabled. Only one process
 may use a state directory at once; a second process is rejected through the
 existing single-instance guard. Bare `q` has no global shortcut behavior and is
-ordinary text inside editors. `/help`, `/status`, `/setup status`, `/audit tail`,
+ordinary text inside editors. Bare navigation keys are ordinary text while
+command, profile, or skill text entry owns input. `/help`, `/status`, `/setup status`, `/audit tail`,
 `/audit tail N`, `/quit`, and rejected input continue through the existing parser,
 runtime, application, policy, event, audit, and persistence boundaries. Bare
 `/audit` is rejected as malformed input.
@@ -106,8 +109,10 @@ restart.
 
 ### Keyboard-first profile editor
 
-In the Adaptive Cockpit, press `Option+5` on macOS or `Alt+5` on Windows and
-Linux to open Agents, then press `c` to create a profile.
+In the Adaptive Cockpit, press bare `a` to open Agents, then press `c` to
+create a profile. Bare `1`-`4`, `a`, and `s` work from non-text browsing panes
+and confirmations; while command, profile, or skill text entry owns input,
+those characters remain text.
 Use `Up` and `Down` to choose a complete built-in template. Press `Enter` to
 accept it, then press `Enter` on each prefilled field to keep its current value
 and continue. Typing a replacement before `Enter` saves that replacement and
@@ -150,8 +155,8 @@ unassign reviews, schema version 3 persistence, recovery, and compact-to-wide
 Adaptive Cockpit views. Skills are inert accepted context: they cannot execute
 or grant shell, filesystem, Git, MCP, provider, browser, or network access.
 
-Normal use is keyboard-first: press `Option+6` on macOS or `Alt+6` on Windows
-and Linux, navigate with arrows, and use `Enter` and `Esc` through visible review and confirmation steps. Optional `/skill`
+Normal use is keyboard-first: press bare `s` to open Skills, navigate with
+arrows, and use `Enter` and `Esc` through visible review and confirmation steps. Optional `/skill`
 commands open the same typed workflows; mutation shortcuts stage review rather
 than writing directly. Bare `q` remains inert and `/quit` remains normal
 shutdown. Inference and chat remain deferred to Phase 3. See the

@@ -71,10 +71,12 @@ target/release/ai-stock-forum
 
 Perform this exact flow in the cockpit:
 
-1. Press `Option+5` on macOS or `Alt+5` on Windows and Linux. Confirm Agents
-   opens. Use `Option/Alt+1`, `Option/Alt+2`, `Option/Alt+3`, and `Option/Alt+4`
-   in turn, then return with `Option/Alt+5`. Each shortcut must work regardless
-   of the focused pane, and Agents must return to the same pane and selection.
+1. Press bare `a` and confirm Agents opens. Use bare `1`, `2`, `3`, and `4` in
+   turn, then return with bare `a`. Each shortcut must work from every non-text
+   browsing pane and confirmation, and Agents must return to the same pane and
+   selection. While command, profile, or skill text entry owns input, these
+   characters remain text; switching preserves tab state, drafts, and pending
+   confirmations.
 2. Press `c` to copy the selected pinned template. Keep bindings empty, rename
    the draft `Research North`, walk every guided step, and inspect the Review
    screen. No durable profile exists before confirmation.

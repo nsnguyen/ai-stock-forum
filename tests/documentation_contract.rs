@@ -693,10 +693,12 @@ fn keyboard_guide_matches_the_shipped_pane_specific_controller_contract() {
     let keyboard = markdown_section(&guide, "## Keyboard-first workflow");
     let panes = markdown_section(&guide, "### Pane controls");
 
-    assert!(keyboard.contains(
-        "Press `Option+6` on macOS or `Alt+6` on Windows and Linux"
-    ));
-    assert!(!keyboard.contains("Press `s`"));
+    assert!(keyboard.contains("press bare `s` to open Skills"));
+    assert!(keyboard.contains("Bare `1`-`4`, `a`, and `s` navigate from non-text browsing panes"));
+    assert!(keyboard.contains("characters remain text"));
+    assert!(keyboard.contains("pending confirmation"));
+    assert!(!keyboard.contains("Option+"));
+    assert!(!keyboard.contains("Alt+"));
     assert!(keyboard.contains("You never need `:next` or `:create`"));
     validate_pane_keys(panes, "Library", &["Up/Down", "skill rows"], &["Left/Right"]).unwrap();
     validate_pane_keys(panes, "Create source", &["Up/Down", "starting point"], &["Left/Right"]).unwrap();

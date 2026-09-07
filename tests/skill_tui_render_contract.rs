@@ -434,15 +434,18 @@ fn confirmation_and_help_advertise_only_real_keyboard_and_quit_behavior() {
     let mut help = TuiModel::new(snapshot(), false);
     help.active_view = View::Help;
     let help_text = render_text(&help, 100, 36);
-    assert!(help_text.contains("Option/Alt+1-6"));
-    assert!(help_text.contains("Open any tab from anywhere"));
-    assert!(!help_text.contains("s                   Open Skills"));
+    assert!(help_text.contains("1-4 / a / s"));
+    assert!(help_text.contains("Open a view outside active text entry"));
+    assert!(help_text.contains("a Agents / s Skills"));
+    assert!(!help_text.contains("Option/Alt+1-6"));
     assert!(help_text.contains("q                   Inert"));
     assert!(help_text.contains("/quit"));
     assert!(!help_text.contains("q                   Request shutdown"));
 
     let navigation = render_text(&help, 120, 36);
-    assert!(navigation.contains("Alt+6 Skills"));
+    assert!(navigation.contains("s Skills"));
+    assert!(navigation.contains("a Agents"));
+    assert!(!navigation.contains("Alt+"));
     assert!(navigation.contains("q inert"));
     assert!(navigation.contains("/quit exit"));
 }
@@ -606,8 +609,8 @@ fn list_focus_is_exclusive_and_skills_suppresses_agents_navigation_focus() {
     assert!(!detail_corner.modifier.contains(ratatui::style::Modifier::REVERSED));
 
     let text = render_text(&model, 120, 36);
-    assert!(text.contains("> Alt+6 Skills"));
-    assert!(!text.contains("> Alt+5 Agents"));
+    assert!(text.contains("> s Skills"));
+    assert!(!text.contains("> a Agents"));
 }
 
 #[test]

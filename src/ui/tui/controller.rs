@@ -26,9 +26,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 const COMMAND_IN_FLIGHT_MESSAGE: &str = "A command is already running.";
 const COMMAND_REJECTED_MESSAGE: &str = "Command rejected. Check the command and try again.";
 const PROTECTED_AGENTS_MESSAGE: &str =
-    "Finish the protected Agents workflow first with Option/Alt+5.";
+    "Press a outside text input to finish the protected Agents workflow.";
 const PROTECTED_SKILLS_MESSAGE: &str =
-    "Finish the protected Skills workflow first with Option/Alt+6.";
+    "Press s outside text input to finish the protected Skills workflow.";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControllerEffect {
     None,
@@ -415,12 +415,12 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         return ControllerEffect::RequestShutdown(ShutdownReason::Interrupted);
     }
 
-    if let Some(effect) = handle_global_tab_shortcut(model, key) {
-        return effect;
-    }
-
     if model.layout_mode == LayoutMode::TooSmall {
         return handle_too_small_key(model, key);
+    }
+
+    if let Some(effect) = handle_global_navigation_shortcut(model, key) {
+        return effect;
     }
 
     if active_confirmation(model) {
@@ -494,8 +494,15 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
     }
 }
 
-fn handle_global_tab_shortcut(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEffect> {
-    if key.modifiers != KeyModifiers::ALT {
+fn handle_global_navigation_shortcut(
+    model: &mut TuiModel,
+    key: KeyEvent,
+) -> Option<ControllerEffect> {
+    let confirmation_active = active_confirmation(model) || active_skill_confirmation(model);
+    let text_entry_active = active_profile_editor(model)
+        || active_skill_editor(model)
+        || model.focus == Focus::Command;
+    if key.modifiers != KeyModifiers::NONE || (text_entry_active && !confirmation_active) {
         return None;
     }
 
@@ -504,8 +511,8 @@ fn handle_global_tab_shortcut(model: &mut TuiModel, key: KeyEvent) -> Option<Con
         KeyCode::Char('2') => switch_to_tab(model, NavigationTab::Setup),
         KeyCode::Char('3') => switch_to_tab(model, NavigationTab::Audit),
         KeyCode::Char('4') => switch_to_tab(model, NavigationTab::Help),
-        KeyCode::Char('5') => switch_to_tab(model, NavigationTab::Agents),
-        KeyCode::Char('6') => switch_to_skills(model),
+        KeyCode::Char('a') => switch_to_tab(model, NavigationTab::Agents),
+        KeyCode::Char('s') => switch_to_skills(model),
         _ => return None,
     };
     Some(effect)
@@ -1898,17 +1905,17 @@ mod tests {
         let mut model = model();
         assert_redraw_and_view(
             &mut model,
-            key_code(KeyCode::Char('2'), KeyModifiers::ALT),
+            key('2'),
             View::Setup,
         );
         assert_redraw_and_view(
             &mut model,
-            key_code(KeyCode::Char('3'), KeyModifiers::ALT),
+            key('3'),
             View::Audit,
         );
         assert_redraw_and_view(
             &mut model,
-            key_code(KeyCode::Char('4'), KeyModifiers::ALT),
+            key('4'),
             View::Help,
         );
         assert_eq!(handle_event(&mut model, key('i')), ControllerEffect::Redraw);
@@ -2341,10 +2348,7 @@ mod tests {
         model.replace_audit((1..=100).map(audit_entry).collect());
         model.set_command_in_flight(true);
         assert_eq!(
-            handle_event(
-                &mut model,
-                key_code(KeyCode::Char('3'), KeyModifiers::ALT)
-            ),
+            handle_event(&mut model, key('3')),
             ControllerEffect::Redraw
         );
         model.audit_selection = Some(75);

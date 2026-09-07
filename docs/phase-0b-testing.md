@@ -92,7 +92,9 @@ must never emit a transcript while navigating them.
 
 | Control | Expected result |
 | --- | --- |
-| `Option+1`-`Option+6` on macOS; `Alt+1`-`Alt+6` on Windows and Linux | Select Overview, Setup, Audit, Help, Agents, or Skills from any pane, editor, or confirmation while preserving each tab's state. |
+| Bare `1`-`4` | Select Overview, Setup, Audit, or Help from any non-text browsing pane or confirmation. |
+| Bare `a` | Select Agents from any non-text browsing pane or confirmation. |
+| Bare `s` | Select Skills from any non-text browsing pane or confirmation. |
 | `?` | Select Help. |
 | `Tab`, `Shift+Tab` | Cycle visible focus forward or backward. |
 | `Up`, `Down`, `Left`, `Right`, `PageUp`, `PageDown`, `Home`, `End` | Navigate the focused region, including Audit selection. |
@@ -106,6 +108,10 @@ must never emit a transcript while navigating them.
 Only one application command can be pending. While one is pending, a second
 submission is refused locally and cannot race the existing runtime command.
 Bare `q` has no global shortcut behavior and remains ordinary text in editors.
+While command, profile, or skill text entry owns input, `1`-`4`, `a`, and `s`
+remain text rather than navigation. Each tab retains its focus, scroll position,
+unfinished input, selected pane, editor draft, and pending confirmation while
+another tab is visible; switching never submits or cancels the retained action.
 
 ## Layout, color, and restoration
 
@@ -142,7 +148,7 @@ safely without corrupting the first session.
 | Redirected stdout | Command mode is selected automatically. |
 | Widths 59, 60, 79, 80, 119, 120 | TooSmall, Narrow, Narrow, Medium, Medium, Wide when the matching height threshold is met. |
 | Heights 17, 18, 23, 24, 29, 30 | TooSmall below 18; width-dependent Narrow/Medium/Wide above it. |
-| Keys `Option/Alt+1`-`Option/Alt+6`, Tab, arrows, paging, `/`, Esc, `i`, `?` | Focus and native views update without transcript output. |
+| Bare `1`-`4`, `a`, `s`, Tab, arrows, paging, `/`, Esc, `i`, `?` | Focus and native views update without transcript output; text-entry ownership keeps navigation characters as text. |
 | `/help`, `/status`, `/setup status`, `/audit tail`, `/audit tail N`, invalid input | Existing application command semantics and audit behavior are preserved. Bare `/audit` is rejected as malformed input. |
 | `/quit` | Auditable normal shutdown, terminal restored, success exit. |
 | Ctrl+C | Clean external-signal shutdown and terminal restoration. |
