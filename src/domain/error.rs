@@ -56,6 +56,10 @@ pub enum DomainError {
     UnsafeMemoryText { field: &'static str },
     #[error("plaintext validation version is unknown")]
     UnknownPlaintextValidationVersion,
+    #[error("memory entry is structurally invalid")]
+    InvalidMemoryEntry,
+    #[error("memory review is unavailable")]
+    MemoryReviewUnavailable,
 }
 
 impl DomainError {
@@ -88,6 +92,8 @@ impl DomainError {
             Self::InvalidMemoryField { .. } => "invalid_memory_field",
             Self::UnsafeMemoryText { .. } => "unsafe_memory_text",
             Self::UnknownPlaintextValidationVersion => "unknown_plaintext_validation_version",
+            Self::InvalidMemoryEntry => "invalid_memory_entry",
+            Self::MemoryReviewUnavailable => "memory_review_unavailable",
         }
     }
 }
