@@ -1,7 +1,7 @@
 # Phase 2 Milestone 3: Hybrid Memory Design
 
 Date: 2026-09-07
-Status: Pending written-spec review
+Status: Approved for implementation planning on 2026-09-07
 Baseline: `origin/main` at `be1c3a6`
 
 ## Summary
@@ -993,14 +993,26 @@ No-update/no-delete triggers apply to both tables.
 
 ### Approval and receipt evolution
 
-Migration v4 adds update guards to `approval_records` so exact object-binding
-columns never change and status can transition from pending to one terminal
-state only once. Resolution metadata must match that transition.
+Migration v4 rebuilds `approval_records` without changing any existing row
+value and adds nullable `resolution_actor_kind` and `resolution_actor_id`
+columns. Existing pre-v4 rows retain `NULL` in both new columns. New pending
+rows also require both columns to be `NULL`; a terminal memory-mutation row
+requires the canonical Human resolver shape (`human`, `NULL`) together with
+its resolution time, kind, and event. The rebuilt table also gains update
+guards so exact requester/object-binding columns never change and status can
+transition from pending to one terminal state only once. The terminal
+resolution metadata and resolver columns must be populated by that same
+transition and cannot subsequently change.
+
+Legacy terminal non-memory approvals remain valid when their pre-v4
+`resolution_event_id` is `NULL`; migration v4 neither invents nor rewrites that
+historical value. The non-null resolution-event requirement applies only to
+new terminal `MemoryMutation` approvals.
 
 The migration rebuilds `command_receipts` to admit the five memory capability
 wire values while preserving existing rows and command-event references
-exactly. Every migration boundary has an injected-failure test proving full
-rollback to schema v3.
+exactly. Every approval and receipt copy/rebuild boundary has an
+injected-failure test proving full rollback to schema v3.
 
 ## Transaction and concurrency semantics
 
