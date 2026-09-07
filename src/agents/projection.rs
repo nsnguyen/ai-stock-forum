@@ -101,6 +101,7 @@ impl AgentProfilesProjection {
             .get(&reference.profile_version_id())
             .ok_or(DomainError::InvalidAgentProfileVersionReference)?;
         if profile.profile_id() != reference.profile_id()
+            || profile.profile_version_id() != reference.profile_version_id()
             || profile.version() != reference.version()
             || profile.content_digest() != reference.content_digest()
         {

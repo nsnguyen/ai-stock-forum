@@ -3,13 +3,14 @@ use ai_stock_forum::{
     app::{ApplicationEvent, EVENT_SCHEMA_VERSION, EventEnvelope, PendingEvent},
     config::AppPaths,
     domain::{
-        Actor, AgentProfileId, AgentProfileVersionId, CorrelationId, EventId, MemoryNamespaceId,
-        ObjectVersion, sha256,
+        Actor, AgentProfileId, AgentProfileVersionId, CausationId, CorrelationId, EventId,
+        MemoryNamespaceId, ObjectRef, ObjectVersion, Sha256Digest, canonical_json_bytes, sha256,
     },
     persistence::{Database, EventRepository, RecoveryError},
     recovery::{ProjectionState, reduce},
 };
 use rusqlite::params;
+use serde::Serialize;
 use uuid::Uuid;
 
 const LEGACY_HUMAN_HELP_DIGEST: &str =
@@ -69,6 +70,48 @@ fn seal(pending: PendingEvent) -> EventEnvelope {
     let envelope = EventRepository::append(&transaction, pending).unwrap();
     transaction.commit().unwrap();
     envelope
+}
+
+#[derive(Serialize)]
+struct EventDigestFixture<'a> {
+    digest_format_version: u16,
+    sequence: u64,
+    event_id: &'a EventId,
+    event_schema_version: u16,
+    event_type: &'a str,
+    actor_kind: &'a str,
+    actor_id: Option<&'a str>,
+    occurred_at_ms: i64,
+    correlation_id: &'a CorrelationId,
+    causation_id: Option<&'a CausationId>,
+    object: Option<&'a ObjectRef>,
+    previous_event_digest: Option<&'a Sha256Digest>,
+    payload_json: String,
+}
+
+fn canonical_agent_event_digest(
+    event_id: &EventId,
+    correlation_id: &CorrelationId,
+    canonical_actor_id: &str,
+) -> Sha256Digest {
+    sha256(
+        &canonical_json_bytes(&EventDigestFixture {
+            digest_format_version: 1,
+            sequence: 1,
+            event_id,
+            event_schema_version: EVENT_SCHEMA_VERSION,
+            event_type: "help_viewed",
+            actor_kind: "agent",
+            actor_id: Some(canonical_actor_id),
+            occurred_at_ms: 1_700_000_000_000,
+            correlation_id,
+            causation_id: None,
+            object: None,
+            previous_event_digest: None,
+            payload_json: "{}".to_owned(),
+        })
+        .unwrap(),
+    )
 }
 
 #[test]
@@ -247,6 +290,86 @@ fn exact_profile_version_references_resolve_only_authoritative_fields() {
             .resolve_reference(&wrong_profile)
             .is_err()
     );
+}
+
+#[test]
+fn malformed_projection_key_cannot_substitute_an_embedded_profile_version_id() {
+    let profile = profile();
+    let envelope = EventEnvelope {
+        sequence: 1,
+        event_id: EventId::from_uuid(Uuid::from_u128(40)),
+        event_schema_version: EVENT_SCHEMA_VERSION,
+        actor: Actor::Human,
+        occurred_at_ms: 1_700_000_000_000,
+        correlation_id: CorrelationId::from_uuid(Uuid::from_u128(41)),
+        causation_id: None,
+        object: None,
+        event: ApplicationEvent::AgentProfileCreated {
+            profile: profile.clone(),
+        },
+        previous_event_digest: None,
+        event_digest: sha256(b"profile-created"),
+    };
+    let mut state = ProjectionState::default();
+    reduce(&mut state, &envelope).unwrap();
+
+    let mut serialized = serde_json::to_value(&state.agent_profiles).unwrap();
+    let versions = serialized
+        .get_mut("versions_by_id")
+        .unwrap()
+        .as_object_mut()
+        .unwrap();
+    let embedded_id = profile.profile_version_id().to_string();
+    let mismatched_key = profile_version_id(99).to_string();
+    let embedded_profile = versions.remove(&embedded_id).unwrap();
+    versions.insert(mismatched_key, embedded_profile);
+    let malformed: ai_stock_forum::agents::AgentProfilesProjection =
+        serde_json::from_value(serialized).unwrap();
+    let forged = ai_stock_forum::agents::AgentProfileVersionRef::new(
+        profile.profile_id(),
+        profile_version_id(99),
+        profile.version(),
+        profile.content_digest().clone(),
+    )
+    .unwrap();
+
+    assert!(malformed.resolve_reference(&forged).is_err());
+}
+
+#[test]
+fn alternate_agent_uuid_spellings_are_rejected_before_digest_verification() {
+    let actor_id = profile_id(0xab);
+    let canonical_actor_id = actor_id.to_string();
+    let event_id = EventId::from_uuid(Uuid::from_u128(50));
+    let correlation_id = CorrelationId::from_uuid(Uuid::from_u128(51));
+    let digest = canonical_agent_event_digest(&event_id, &correlation_id, &canonical_actor_id);
+
+    for alternate in [
+        "000000000000000000000000000000ab",
+        "00000000-0000-0000-0000-0000000000AB",
+        "{00000000-0000-0000-0000-0000000000ab}",
+        "urn:uuid:00000000-0000-0000-0000-0000000000ab",
+    ] {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let database = Database::open(&AppPaths::for_test(temporary_directory.path())).unwrap();
+        database
+            .connection()
+            .execute(
+                "INSERT INTO event_stream (sequence, event_id, event_schema_version, event_type, actor_kind, actor_id, occurred_at_ms, correlation_id, payload_json, event_digest) VALUES (1, ?1, 1, 'help_viewed', 'agent', ?2, 1700000000000, ?3, '{}', ?4)",
+                params![
+                    event_id.to_string(),
+                    alternate,
+                    correlation_id.to_string(),
+                    digest.as_str(),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(
+            EventRepository::load_all(database.connection()).unwrap_err(),
+            RecoveryError::InvalidEventRecord
+        );
+    }
 }
 
 #[test]

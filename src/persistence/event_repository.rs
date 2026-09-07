@@ -384,7 +384,13 @@ fn parse_actor(kind: &str, id: Option<String>) -> Result<crate::domain::Actor, R
     match (kind, id) {
         ("human", None) => Ok(crate::domain::Actor::Human),
         ("system", None) => Ok(crate::domain::Actor::System),
-        ("agent", Some(id)) => parse_id(id).map(crate::domain::Actor::Agent),
+        ("agent", Some(id)) => {
+            let profile_id: crate::domain::AgentProfileId = parse_id(id.clone())?;
+            if id != profile_id.to_string() {
+                return Err(RecoveryError::InvalidEventRecord);
+            }
+            Ok(crate::domain::Actor::Agent(profile_id))
+        }
         _ => Err(RecoveryError::InvalidEventRecord),
     }
 }
