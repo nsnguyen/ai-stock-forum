@@ -50,6 +50,12 @@ pub enum DomainError {
     InvalidSkillVersion,
     #[error("skill review token is invalid")]
     InvalidSkillReviewToken,
+    #[error("invalid memory field")]
+    InvalidMemoryField { field: &'static str },
+    #[error("memory text contains unsafe characters")]
+    UnsafeMemoryText { field: &'static str },
+    #[error("plaintext validation version is unknown")]
+    UnknownPlaintextValidationVersion,
 }
 
 impl DomainError {
@@ -79,6 +85,9 @@ impl DomainError {
             Self::SkillUnchanged => "skill_unchanged",
             Self::InvalidSkillVersion => "invalid_skill_version",
             Self::InvalidSkillReviewToken => "invalid_skill_review_token",
+            Self::InvalidMemoryField { .. } => "invalid_memory_field",
+            Self::UnsafeMemoryText { .. } => "unsafe_memory_text",
+            Self::UnknownPlaintextValidationVersion => "unknown_plaintext_validation_version",
         }
     }
 }
