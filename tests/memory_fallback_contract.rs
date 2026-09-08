@@ -3,9 +3,9 @@ use ai_stock_forum::{
     app::{
         AgentProfileSelector, AgentProfilesView, ApplicationCommand, CommandView,
         DatabaseReadiness, EpisodicSummariesView, EpisodicSummaryListItem, EpisodicSummaryView,
-        HelpView, InputRejectionCategory, MemoryEntriesView, MemoryEntryHistorySummary,
-        MemoryEntryHistoryView, MemoryEntryMutationView, MemoryEntrySummary,
-        MemoryEntryVersionView, MemoryEntryView, MemoryProfileIdentityView,
+        HelpView, InputRejectedView, InputRejectionCategory, MemoryEntriesView,
+        MemoryEntryHistorySummary, MemoryEntryHistoryView, MemoryEntryMutationView,
+        MemoryEntrySummary, MemoryEntryVersionView, MemoryEntryView, MemoryProfileIdentityView,
         MemoryProposalCreatedView, MemoryProposalResolutionView, MemoryProposalSummary,
         MemoryProposalView, MemoryProposalsView, PresentationSnapshot, ProcessGuardOwnership,
     },
@@ -321,6 +321,60 @@ fn render(view: CommandView) -> String {
     let mut bytes = Vec::new();
     TextRenderer::render_view(&view, &mut bytes).unwrap();
     String::from_utf8(bytes).unwrap()
+}
+
+fn tui_model() -> TuiModel {
+    TuiModel::new(
+        PresentationSnapshot {
+            installation_id: InstallationId::from_uuid(Uuid::from_u128(201)),
+            session_id: SessionId::from_uuid(Uuid::from_u128(202)),
+            database_readiness: DatabaseReadiness::Ready,
+            process_guard_ownership: ProcessGuardOwnership::Held,
+            setup_status: SetupStatus::NotStarted,
+            recent_audit: vec![],
+            agent_profiles: AgentProfilesView {
+                profiles: vec![],
+                total_count: 0,
+                returned_count: 0,
+                truncated: false,
+            },
+            selected_agent_profile: None,
+            selected_agent_profile_history: None,
+        },
+        false,
+    )
+}
+
+fn assert_exact_memory_usage(text: &str) {
+    for route in [
+        "/memory list <agent>",
+        "/memory get <agent> <key>",
+        "/memory history <agent> <key> [positive-version]",
+        "/memory set <agent> <key>",
+        "/memory delete <agent> <key>",
+        "/memory proposals <agent> [pending|all]",
+        "/memory proposal <proposal-id>",
+        "/memory approve <proposal-id>",
+        "/memory reject <proposal-id>",
+        "/memory episodes <agent>",
+        "/memory episode <summary-id>",
+    ] {
+        assert_exact_line(text, &format!("  {route}"));
+    }
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.starts_with("  /memory "))
+            .count(),
+        11
+    );
+    for unsupported in [
+        "  /memory propose ",
+        "  /memory summary ",
+        "  /memory snapshot ",
+    ] {
+        assert!(!text.contains(unsupported));
+    }
+    assert!(!text.lines().any(|line| line == "  /memory"));
 }
 
 fn assert_exact_line(text: &str, expected: &str) {
@@ -707,26 +761,77 @@ fn help_lists_only_supported_memory_routes_and_no_internal_route() {
 }
 
 #[test]
-fn tui_memory_workflow_only_shows_guidance_without_navigation_or_history_mutation() {
-    let mut model = TuiModel::new(
-        PresentationSnapshot {
-            installation_id: InstallationId::from_uuid(Uuid::from_u128(201)),
-            session_id: SessionId::from_uuid(Uuid::from_u128(202)),
-            database_readiness: DatabaseReadiness::Ready,
-            process_guard_ownership: ProcessGuardOwnership::Held,
-            setup_status: SetupStatus::NotStarted,
-            recent_audit: vec![],
-            agent_profiles: AgentProfilesView {
-                profiles: vec![],
-                total_count: 0,
-                returned_count: 0,
-                truncated: false,
-            },
-            selected_agent_profile: None,
-            selected_agent_profile_history: None,
-        },
-        false,
+fn malformed_memory_rejection_renders_only_static_actionable_usage() {
+    let ApplicationCommand::RejectInput(rejection) =
+        command(b"/memory unknown \x1b[31mcredential=top-secret-password")
+    else {
+        panic!("expected malformed memory rejection");
+    };
+    let input_digest = rejection.input_digest.to_string();
+
+    let text = render(CommandView::InputRejected(InputRejectedView { rejection }));
+
+    assert!(text.starts_with("Input rejected: malformed command.\nUsage:\n"));
+    assert_exact_memory_usage(&text);
+    assert!(!text.contains("credential"));
+    assert!(!text.contains("top-secret-password"));
+    assert!(!text.contains(&input_digest));
+    assert!(!text.contains('\x1b'));
+}
+
+#[test]
+fn tui_malformed_memory_is_consumed_without_history_and_its_usage_is_visible() {
+    let mut model = tui_model();
+    model.set_focus(Focus::Command);
+    model
+        .command
+        .ingest("/memory unknown credential=top-secret-password");
+
+    let effect = handle_event(
+        &mut model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
     );
+
+    let ControllerEffect::Submit(ApplicationCommand::RejectInput(rejection)) = effect else {
+        panic!("malformed memory must submit its typed rejection");
+    };
+    assert_eq!(model.command.text(), "");
+    assert_eq!(model.command.cursor_byte(), 0);
+    assert_eq!(model.command.history_len(), 0);
+    assert!(model.command_in_flight);
+    let text = render(CommandView::InputRejected(InputRejectedView { rejection }));
+    assert_exact_memory_usage(&text);
+    assert!(!text.contains("top-secret-password"));
+}
+
+#[test]
+fn tui_direct_memory_read_is_consumed_submitted_and_remembered() {
+    let mut model = tui_model();
+    model.set_focus(Focus::Command);
+    model.command.remember("/status".into());
+    model.command.ingest("/memory list analyst");
+
+    let effect = handle_event(
+        &mut model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    );
+
+    assert_eq!(
+        effect,
+        ControllerEffect::Submit(ApplicationCommand::ListMemoryEntries {
+            selector: AgentProfileSelector::Name("analyst".into()),
+        })
+    );
+    assert_eq!(model.command.text(), "");
+    assert_eq!(model.command.cursor_byte(), 0);
+    assert_eq!(model.command.history_len(), 2);
+    assert_eq!(model.command.history_back(), Some("/memory list analyst"));
+    assert!(model.command_in_flight);
+}
+
+#[test]
+fn tui_memory_workflow_only_shows_guidance_without_navigation_or_history_mutation() {
+    let mut model = tui_model();
     model.active_view = View::Help;
     model.set_focus(Focus::Command);
     model.workspace_body_width = 80;

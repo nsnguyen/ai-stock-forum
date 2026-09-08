@@ -39,6 +39,7 @@ const MAX_MEMORY_RATIONALE_RENDER_BYTES: usize = 2_048;
 const MAX_EPISODIC_LABEL_RENDER_BYTES: usize = 512;
 const MAX_EPISODIC_BODY_RENDER_BYTES: usize = 32_768;
 const MAX_EPISODIC_EVENT_TYPE_RENDER_BYTES: usize = 512;
+const MEMORY_USAGE: &[u8] = b"Usage:\n  /memory list <agent>\n  /memory get <agent> <key>\n  /memory history <agent> <key> [positive-version]\n  /memory set <agent> <key>\n  /memory delete <agent> <key>\n  /memory proposals <agent> [pending|all]\n  /memory proposal <proposal-id>\n  /memory approve <proposal-id>\n  /memory reject <proposal-id>\n  /memory episodes <agent>\n  /memory episode <summary-id>\n";
 
 pub struct TextRenderer;
 
@@ -100,13 +101,10 @@ impl TextRenderer {
                 }
                 InputRejectionCategory::Malformed => {
                     writer.write_all(b"Input rejected: malformed command.\n")?;
-                    if matches!(
-                        view.rejection.safe_token.as_ref().map(SafeToken::as_str),
-                        Some("/skill" | "/skills")
-                    ) {
-                        writer.write_all(b"Usage: /skill list | /skill add | /skill show <name-or-id> [version] | /skill assign <skill> <agent> [version] | /skill unassign <skill> <agent>\n")
-                    } else {
-                        Ok(())
+                    match view.rejection.safe_token.as_ref().map(SafeToken::as_str) {
+                        Some("/skill" | "/skills") => writer.write_all(b"Usage: /skill list | /skill add | /skill show <name-or-id> [version] | /skill assign <skill> <agent> [version] | /skill unassign <skill> <agent>\n"),
+                        Some("/memory") => writer.write_all(MEMORY_USAGE),
+                        _ => Ok(()),
                     }
                 }
                 InputRejectionCategory::Unknown => {
