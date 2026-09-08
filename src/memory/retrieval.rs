@@ -372,6 +372,7 @@ pub struct EpisodicContextItem {
     body: String,
     purpose_tags: Vec<String>,
     sources: Vec<EpisodicSourceRef>,
+    created_at_ms: i64,
 }
 
 #[derive(Deserialize)]
@@ -383,6 +384,7 @@ struct EpisodicContextItemWire {
     body: String,
     purpose_tags: Vec<String>,
     sources: Vec<EpisodicSourceRef>,
+    created_at_ms: i64,
 }
 
 impl EpisodicContextItem {
@@ -394,6 +396,7 @@ impl EpisodicContextItem {
             summary.body().to_owned(),
             summary.purpose_tags().to_vec(),
             summary.sources().to_vec(),
+            summary.created_at_ms(),
         )
     }
     fn from_parts(
@@ -403,6 +406,7 @@ impl EpisodicContextItem {
         body: String,
         purpose_tags: Vec<String>,
         sources: Vec<EpisodicSourceRef>,
+        created_at_ms: i64,
     ) -> Result<Self, DomainError> {
         let item = Self {
             summary,
@@ -411,6 +415,7 @@ impl EpisodicContextItem {
             body,
             purpose_tags,
             sources,
+            created_at_ms,
         };
         item.validate()?;
         Ok(item)
@@ -444,6 +449,7 @@ impl EpisodicContextItem {
                 &self.body,
                 &self.purpose_tags,
                 super::PLAINTEXT_VALIDATION_VERSION_V1,
+                self.created_at_ms,
                 self.summary.source_set_digest(),
             )? != *self.summary.content_digest()
         {
@@ -481,6 +487,9 @@ impl EpisodicContextItem {
     pub fn sources(&self) -> &[EpisodicSourceRef] {
         &self.sources
     }
+    pub fn created_at_ms(&self) -> i64 {
+        self.created_at_ms
+    }
 }
 
 impl<'de> Deserialize<'de> for EpisodicContextItem {
@@ -496,6 +505,7 @@ impl<'de> Deserialize<'de> for EpisodicContextItem {
             wire.body,
             wire.purpose_tags,
             wire.sources,
+            wire.created_at_ms,
         )
         .map_err(serde::de::Error::custom)
     }
@@ -770,6 +780,7 @@ where
         (
             purpose_rank(request.scope().purpose(), item.purpose_tags()),
             item.entry.normalized_key().clone(),
+            item.entry.version(),
             item.entry.entry_id(),
             item.entry.entry_version_id(),
         )
@@ -777,8 +788,7 @@ where
     summaries.sort_by_key(|item| {
         (
             purpose_rank(request.scope().purpose(), item.purpose_tags()),
-            Reverse(item.summary.creation_event_sequence()),
-            item.summary.creation_event_id(),
+            Reverse(item.created_at_ms),
             item.summary.summary_id(),
         )
     });
@@ -905,7 +915,7 @@ fn summary_is_eligible(scope: &MemoryRetrievalScope, item: &EpisodicContextItem)
 }
 fn purpose_matches(purpose: &MemoryPurposeScope, tags: &[String]) -> bool {
     match purpose {
-        MemoryPurposeScope::General => true,
+        MemoryPurposeScope::General => tags.is_empty(),
         MemoryPurposeScope::Tagged(wanted) => {
             tags.is_empty() || tags.iter().any(|tag| wanted.contains(tag))
         }
@@ -988,6 +998,7 @@ fn validate_snapshot_shape(
         (
             purpose_rank(scope.purpose(), item.purpose_tags()),
             item.entry.normalized_key().clone(),
+            item.entry.version(),
             item.entry.entry_id(),
             item.entry.entry_version_id(),
         )
@@ -995,8 +1006,7 @@ fn validate_snapshot_shape(
     sorted_summaries.sort_by_key(|item| {
         (
             purpose_rank(scope.purpose(), item.purpose_tags()),
-            Reverse(item.summary.creation_event_sequence()),
-            item.summary.creation_event_id(),
+            Reverse(item.created_at_ms),
             item.summary.summary_id(),
         )
     });
@@ -1015,6 +1025,8 @@ fn validate_metadata_shape(
 ) -> Result<(), DomainError> {
     if entries.len() > budget.max_entries as usize
         || summaries.len() > budget.max_summaries as usize
+        || accounting.accepted_byte_count > budget.max_bytes
+        || accounting.accepted_source_count > budget.max_sources
     {
         return Err(DomainError::InvalidMemorySnapshot);
     }
@@ -1038,6 +1050,20 @@ fn validate_metadata_shape(
         .any(|summary| !summary_ids.insert(summary.summary_id()))
     {
         return Err(DomainError::InvalidMemorySnapshot);
+    }
+    if matches!(scope.purpose(), MemoryPurposeScope::General) {
+        let mut sorted_entries = entries.to_vec();
+        sorted_entries.sort_by_key(|entry| {
+            (
+                entry.normalized_key().clone(),
+                entry.version(),
+                entry.entry_id(),
+                entry.entry_version_id(),
+            )
+        });
+        if sorted_entries != entries {
+            return Err(DomainError::InvalidMemorySnapshot);
+        }
     }
     if accounting.accepted_entry_count
         != u64::try_from(entries.len()).map_err(|_| DomainError::MemoryRetrievalOverflow)?
@@ -1135,4 +1161,18 @@ struct MemoryEntryContentDigestMaterial<'a> {
     value: Option<&'a str>,
     purpose_tags: &'a [String],
     plaintext_validation_version: u16,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_accounting_overflow_has_a_stable_error_code() {
+        let mut counter = u64::MAX;
+        assert_eq!(
+            increment(&mut counter, 1).unwrap_err().code(),
+            "memory_retrieval_overflow"
+        );
+    }
 }

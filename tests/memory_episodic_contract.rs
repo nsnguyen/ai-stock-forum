@@ -256,6 +256,98 @@ fn summary_serialization_rejects_tampering_and_noncanonical_plaintext() {
 }
 
 #[test]
+fn summary_accepts_exact_utf8_boundaries_and_rejects_one_byte_over() {
+    let profile = profile_version_fixture();
+    let label = "é".repeat(64);
+    let body = "é".repeat(4_096);
+    assert!(
+        EpisodicSummary::new(
+            summary_id(20),
+            &profile,
+            label.clone(),
+            body.clone(),
+            vec![],
+            source_refs_fixture(),
+            30,
+            10,
+            event_id(10),
+        )
+        .is_ok()
+    );
+    assert!(
+        EpisodicSummary::new(
+            summary_id(21),
+            &profile,
+            format!("{label}a"),
+            body.clone(),
+            vec![],
+            source_refs_fixture(),
+            30,
+            10,
+            event_id(10),
+        )
+        .is_err()
+    );
+    assert!(
+        EpisodicSummary::new(
+            summary_id(22),
+            &profile,
+            label,
+            format!("{body}a"),
+            vec![],
+            source_refs_fixture(),
+            30,
+            10,
+            event_id(10),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn summary_accepts_exact_source_limit_and_rejects_fixed_version_and_source_tampering() {
+    let profile = profile_version_fixture();
+    let sources = (1..=128)
+        .map(|sequence| {
+            EpisodicSourceRef::new(
+                sequence,
+                event_id(sequence as u128),
+                "MemoryEntryCreated".to_owned(),
+                sha256(&sequence.to_le_bytes()),
+            )
+            .unwrap()
+        })
+        .collect();
+    let summary = EpisodicSummary::new(
+        summary_id(30),
+        &profile,
+        "label".to_owned(),
+        "body".to_owned(),
+        vec![],
+        sources,
+        30,
+        129,
+        event_id(129),
+    )
+    .unwrap();
+    let encoded: Value = serde_json::from_slice(&canonical_json_bytes(&summary).unwrap()).unwrap();
+    for (field, value) in [
+        ("version", serde_json::json!(2)),
+        ("plaintext_validation_version", serde_json::json!(2)),
+    ] {
+        let mut tampered = encoded.clone();
+        tampered[field] = value;
+        assert!(serde_json::from_value::<EpisodicSummary>(tampered).is_err());
+    }
+    let mut source_type = encoded.clone();
+    source_type["sources"][0]["event_type"] = serde_json::json!("OtherEvent");
+    assert!(serde_json::from_value::<EpisodicSummary>(source_type).is_err());
+    let mut source_digest = encoded;
+    source_digest["sources"][0]["event_digest"] = serde_json::json!(sha256(b"other").as_str());
+    assert!(serde_json::from_value::<EpisodicSummary>(source_digest).is_err());
+}
+
+#[test]
 fn summary_exposes_the_required_verify_sources_qualification() {
     let qualification = EpisodicQualification::SummaryVerifySources;
     assert_eq!(qualification.label(), "Summary — verify sources");

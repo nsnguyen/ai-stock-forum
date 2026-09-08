@@ -420,6 +420,7 @@ impl EpisodicSummary {
             &self.body,
             &self.purpose_tags,
             self.plaintext_validation_version,
+            self.created_at_ms,
             &self.source_set_digest,
         )
     }
@@ -511,6 +512,7 @@ pub(crate) fn episodic_content_digest(
     body: &str,
     purpose_tags: &[String],
     plaintext_validation_version: u16,
+    created_at_ms: i64,
     source_set_digest: &Digest,
 ) -> Result<Digest, DomainError> {
     Ok(sha256(&canonical_json_bytes(
@@ -519,6 +521,7 @@ pub(crate) fn episodic_content_digest(
             body,
             purpose_tags,
             plaintext_validation_version,
+            created_at_ms,
             source_set_digest,
         },
     )?))
@@ -530,6 +533,7 @@ struct EpisodicContentDigestMaterial<'a> {
     body: &'a str,
     purpose_tags: &'a [String],
     plaintext_validation_version: u16,
+    created_at_ms: i64,
     source_set_digest: &'a Digest,
 }
 

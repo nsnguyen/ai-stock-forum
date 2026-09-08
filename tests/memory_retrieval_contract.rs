@@ -2,14 +2,15 @@ use ai_stock_forum::{
     agents::{AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentRole},
     domain::{
         Actor, AgentProfileId, AgentProfileVersionId, EpisodicSummaryId, EventId, MemoryEntryId,
-        MemoryEntryVersionId, MemoryNamespaceId, canonical_json_bytes,
+        MemoryEntryVersionId, MemoryNamespaceId, canonical_json_bytes, sha256,
     },
     memory::{
         EpisodicContextItem, EpisodicSourceRef, EpisodicSummary, MemoryEntryDraft,
-        MemoryEntryVersion, MemoryPurposeScope, MemoryRetrievalBudget, MemoryRetrievalRequest,
-        MemoryRetrievalScope, select_snapshot,
+        MemoryEntryVersion, MemoryKvContextItem, MemoryPurposeScope, MemoryRetrievalBudget,
+        MemoryRetrievalRequest, MemoryRetrievalScope, MemorySnapshotMetadata, select_snapshot,
     },
 };
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 fn uuid(value: u128) -> Uuid {
@@ -51,6 +52,30 @@ fn foreign_profile() -> AgentProfileVersion {
         10,
         AgentProfileDraft::new(
             "Foreign Analyst".to_owned(),
+            "A separate immutable research profile.".to_owned(),
+            AgentRole::Custom,
+            "equity research".to_owned(),
+            vec!["valuation".to_owned()],
+            "Deliberate and concise.".to_owned(),
+            "Assess evidence before answering.".to_owned(),
+            AgentBindings::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap(),
+        None,
+    )
+    .unwrap()
+}
+
+fn same_namespace_different_profile() -> AgentProfileVersion {
+    AgentProfileVersion::create(
+        AgentProfileId::from_uuid(uuid(111)),
+        AgentProfileVersionId::from_uuid(uuid(112)),
+        profile().memory_namespace_id(),
+        10,
+        AgentProfileDraft::new(
+            "Same Namespace Foreign Analyst".to_owned(),
             "A separate immutable research profile.".to_owned(),
             AgentRole::Custom,
             "equity research".to_owned(),
@@ -141,6 +166,75 @@ fn summary_item_for(
     EpisodicContextItem::from_summary(&summary).unwrap()
 }
 
+fn summary_item_at(
+    label: &str,
+    created_at_ms: i64,
+    creation_event_sequence: u64,
+    summary_seed: u128,
+) -> EpisodicContextItem {
+    let summary = EpisodicSummary::new(
+        EpisodicSummaryId::from_uuid(uuid(summary_seed)),
+        &profile(),
+        label.to_owned(),
+        "Body".to_owned(),
+        vec![],
+        vec![
+            EpisodicSourceRef::new(
+                1,
+                event_id(summary_seed + 1),
+                "MemoryEntryCreated".to_owned(),
+                sha256(b"event"),
+            )
+            .unwrap(),
+        ],
+        created_at_ms,
+        creation_event_sequence,
+        event_id(summary_seed + 2),
+    )
+    .unwrap();
+    EpisodicContextItem::from_summary(&summary).unwrap()
+}
+
+fn summary_item_with_body(
+    label: &str,
+    body: String,
+    created_at_ms: i64,
+    seed: u128,
+) -> EpisodicContextItem {
+    let summary = EpisodicSummary::new(
+        EpisodicSummaryId::from_uuid(uuid(seed)),
+        &profile(),
+        label.to_owned(),
+        body,
+        vec![],
+        vec![
+            EpisodicSourceRef::new(
+                1,
+                event_id(seed + 1),
+                "MemoryEntryCreated".to_owned(),
+                sha256(b"event"),
+            )
+            .unwrap(),
+        ],
+        created_at_ms,
+        2,
+        event_id(seed + 2),
+    )
+    .unwrap();
+    EpisodicContextItem::from_summary(&summary).unwrap()
+}
+
+fn recompute_metadata_digest(value: &mut Value) {
+    let material = json!({
+        "scope": value["scope"].clone(),
+        "budget": value["budget"].clone(),
+        "entries": value["entry_refs"].clone(),
+        "summaries": value["summary_refs"].clone(),
+        "accounting": value["accounting"].clone(),
+    });
+    value["snapshot_digest"] = json!(sha256(&canonical_json_bytes(&material).unwrap()).as_str());
+}
+
 #[test]
 fn oversized_item_is_skipped_without_blocking_later_items() {
     let snapshot = select_snapshot(
@@ -212,6 +306,281 @@ fn tagged_selection_matches_once_then_uses_untagged_fallback() {
         ["tagged", "untagged"]
     );
     assert_eq!(snapshot.summaries().len(), 2);
+}
+
+#[test]
+fn general_scope_excludes_tagged_kv_and_episodic_context() {
+    let snapshot = select_snapshot(
+        &request_with_byte_budget(32_768),
+        vec![
+            Ok(MemoryKvContextItem::from_entry(&entry("untagged", vec![], 61)).unwrap()),
+            Ok(MemoryKvContextItem::from_entry(&entry("tagged", vec!["research"], 62)).unwrap()),
+        ],
+        vec![
+            Ok(summary_item(vec![], 63)),
+            Ok(summary_item(vec!["research"], 64)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot
+            .entries()
+            .iter()
+            .map(|item| item.value())
+            .collect::<Vec<_>>(),
+        ["untagged"]
+    );
+    assert_eq!(
+        snapshot
+            .summaries()
+            .iter()
+            .map(|item| item.summary().summary_id())
+            .collect::<Vec<_>>(),
+        [EpisodicSummaryId::from_uuid(uuid(63))]
+    );
+}
+
+#[test]
+fn bounded_kv_selection_orders_object_version_before_entry_id() {
+    let local = profile();
+    let first = MemoryEntryVersion::create_present(
+        local.memory_namespace_id(),
+        MemoryEntryId::from_uuid(uuid(70)),
+        MemoryEntryVersionId::from_uuid(uuid(71)),
+        MemoryEntryDraft::new("Shared key".to_owned(), "version one".to_owned(), vec![]).unwrap(),
+        Actor::Human,
+        1,
+        None,
+        event_id(72),
+    )
+    .unwrap();
+    let second_version = first
+        .next_present(
+            MemoryEntryVersionId::from_uuid(uuid(73)),
+            MemoryEntryDraft::new("Shared key".to_owned(), "version two".to_owned(), vec![])
+                .unwrap(),
+            Actor::Human,
+            2,
+            None,
+            event_id(74),
+        )
+        .unwrap();
+    let lower_id = MemoryEntryVersion::create_present(
+        local.memory_namespace_id(),
+        MemoryEntryId::from_uuid(uuid(80)),
+        MemoryEntryVersionId::from_uuid(uuid(81)),
+        MemoryEntryDraft::new("Shared key".to_owned(), "lower entry id".to_owned(), vec![])
+            .unwrap(),
+        Actor::Human,
+        1,
+        None,
+        event_id(82),
+    )
+    .unwrap();
+    let request = MemoryRetrievalRequest::new(
+        MemoryRetrievalScope::new(&local, MemoryPurposeScope::General).unwrap(),
+        MemoryRetrievalBudget::new(1, 8, 32_768, 128).unwrap(),
+    )
+    .unwrap();
+    let snapshot = select_snapshot(
+        &request,
+        vec![
+            Ok(MemoryKvContextItem::from_entry(&second_version).unwrap()),
+            Ok(MemoryKvContextItem::from_entry(&lower_id).unwrap()),
+        ],
+        Vec::<Result<EpisodicContextItem, _>>::new(),
+    )
+    .unwrap();
+    assert_eq!(snapshot.entries()[0].value(), "lower entry id");
+}
+
+#[test]
+fn bounded_summary_selection_orders_newest_creation_time_then_summary_id() {
+    let request = MemoryRetrievalRequest::new(
+        MemoryRetrievalScope::new(&profile(), MemoryPurposeScope::General).unwrap(),
+        MemoryRetrievalBudget::new(32, 1, 32_768, 128).unwrap(),
+    )
+    .unwrap();
+    let snapshot = select_snapshot(
+        &request,
+        Vec::<Result<MemoryKvContextItem, _>>::new(),
+        vec![
+            Ok(summary_item_at("older high sequence", 10, 9, 90)),
+            Ok(summary_item_at("newer low sequence", 20, 2, 91)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(snapshot.summaries()[0].label(), "newer low sequence");
+}
+
+#[test]
+fn equal_summary_creation_times_use_summary_id_as_the_stable_tie_breaker() {
+    let request = MemoryRetrievalRequest::new(
+        MemoryRetrievalScope::new(&profile(), MemoryPurposeScope::General).unwrap(),
+        MemoryRetrievalBudget::new(32, 1, 32_768, 128).unwrap(),
+    )
+    .unwrap();
+    let snapshot = select_snapshot(
+        &request,
+        Vec::<Result<MemoryKvContextItem, _>>::new(),
+        vec![
+            Ok(summary_item_at("larger id", 20, 3, 95)),
+            Ok(summary_item_at("smaller id", 20, 9, 94)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(snapshot.summaries()[0].label(), "smaller id");
+}
+
+#[test]
+fn metadata_rejects_reordered_references_and_over_budget_accounting_even_with_recomputed_digest() {
+    let snapshot = select_snapshot(
+        &request_with_byte_budget(32_768),
+        vec![
+            Ok(MemoryKvContextItem::from_entry(&entry("a", vec![], 101)).unwrap()),
+            Ok(MemoryKvContextItem::from_entry(&entry("b", vec![], 102)).unwrap()),
+        ],
+        vec![Ok(summary_item(vec![], 103))],
+    )
+    .unwrap();
+    let metadata = snapshot.metadata();
+    let mut reordered = serde_json::to_value(&metadata).unwrap();
+    reordered["entry_refs"].as_array_mut().unwrap().swap(0, 1);
+    recompute_metadata_digest(&mut reordered);
+    assert!(serde_json::from_value::<MemorySnapshotMetadata>(reordered).is_err());
+
+    let mut excessive_bytes = serde_json::to_value(&metadata).unwrap();
+    excessive_bytes["accounting"]["accepted_byte_count"] = json!(32_769_u64);
+    recompute_metadata_digest(&mut excessive_bytes);
+    assert!(serde_json::from_value::<MemorySnapshotMetadata>(excessive_bytes).is_err());
+
+    let mut excessive_sources = serde_json::to_value(metadata).unwrap();
+    excessive_sources["accounting"]["accepted_source_count"] = json!(129_u64);
+    recompute_metadata_digest(&mut excessive_sources);
+    assert!(serde_json::from_value::<MemorySnapshotMetadata>(excessive_sources).is_err());
+}
+
+#[test]
+fn same_namespace_but_different_profile_summary_is_ineligible() {
+    let foreign = same_namespace_different_profile();
+    let snapshot = select_snapshot(
+        &request_with_byte_budget(32_768),
+        Vec::<Result<MemoryKvContextItem, _>>::new(),
+        vec![Ok(summary_item_for(&foreign, vec![], 120))],
+    )
+    .unwrap();
+    assert!(snapshot.summaries().is_empty());
+    assert_eq!(snapshot.accounting().eligible_summary_count(), 0);
+}
+
+#[test]
+fn exact_count_limits_and_zero_budgets_keep_whole_items_and_deterministic_empty_digests() {
+    let entries = (0..33)
+        .map(|seed| {
+            Ok(MemoryKvContextItem::from_entry(&entry("value", vec![], 130 + seed)).unwrap())
+        })
+        .collect::<Vec<_>>();
+    let summaries = (0..9)
+        .map(|seed| Ok(summary_item(vec![], 170 + seed)))
+        .collect::<Vec<_>>();
+    let bounded = MemoryRetrievalRequest::new(
+        MemoryRetrievalScope::new(&profile(), MemoryPurposeScope::General).unwrap(),
+        MemoryRetrievalBudget::new(32, 8, 32_768, 128).unwrap(),
+    )
+    .unwrap();
+    let snapshot = select_snapshot(&bounded, entries, summaries).unwrap();
+    assert_eq!(snapshot.accounting().eligible_entry_count(), 33);
+    assert_eq!(snapshot.accounting().accepted_entry_count(), 32);
+    assert_eq!(snapshot.accounting().omitted_entry_count(), 1);
+    assert_eq!(snapshot.accounting().eligible_summary_count(), 9);
+    assert_eq!(snapshot.accounting().accepted_summary_count(), 8);
+    assert_eq!(snapshot.accounting().omitted_summary_count(), 1);
+
+    let zero = MemoryRetrievalRequest::new(
+        MemoryRetrievalScope::new(&profile(), MemoryPurposeScope::General).unwrap(),
+        MemoryRetrievalBudget::new(0, 0, 0, 0).unwrap(),
+    )
+    .unwrap();
+    let first = select_snapshot(
+        &zero,
+        Vec::<Result<MemoryKvContextItem, _>>::new(),
+        Vec::<Result<EpisodicContextItem, _>>::new(),
+    )
+    .unwrap();
+    let second = select_snapshot(
+        &zero,
+        Vec::<Result<MemoryKvContextItem, _>>::new(),
+        Vec::<Result<EpisodicContextItem, _>>::new(),
+    )
+    .unwrap();
+    assert!(first.entries().is_empty() && first.summaries().is_empty());
+    assert_eq!(first.snapshot_digest(), second.snapshot_digest());
+}
+
+#[test]
+fn omission_accounting_uses_exact_canonical_costs_and_summary_skip_continues() {
+    let first = MemoryKvContextItem::from_entry(&entry("first", vec![], 190)).unwrap();
+    let second = MemoryKvContextItem::from_entry(&entry("second", vec![], 191)).unwrap();
+    let first_cost = u64::try_from(canonical_json_bytes(&first).unwrap().len()).unwrap();
+    let second_cost = u64::try_from(canonical_json_bytes(&second).unwrap().len()).unwrap();
+    let request = MemoryRetrievalRequest::new(
+        MemoryRetrievalScope::new(&profile(), MemoryPurposeScope::General).unwrap(),
+        MemoryRetrievalBudget::new(32, 8, first_cost, 128).unwrap(),
+    )
+    .unwrap();
+    let snapshot = select_snapshot(
+        &request,
+        vec![Ok(first), Ok(second)],
+        Vec::<Result<EpisodicContextItem, _>>::new(),
+    )
+    .unwrap();
+    assert_eq!(snapshot.accounting().accepted_byte_count(), first_cost);
+    assert_eq!(snapshot.accounting().omitted_byte_count(), second_cost);
+
+    let short = summary_item_with_body("short", "Body".to_owned(), 10, 200);
+    let short_cost = u64::try_from(canonical_json_bytes(&short).unwrap().len()).unwrap();
+    let request = MemoryRetrievalRequest::new(
+        MemoryRetrievalScope::new(&profile(), MemoryPurposeScope::General).unwrap(),
+        MemoryRetrievalBudget::new(32, 8, short_cost, 128).unwrap(),
+    )
+    .unwrap();
+    let snapshot = select_snapshot(
+        &request,
+        Vec::<Result<MemoryKvContextItem, _>>::new(),
+        vec![
+            Ok(summary_item_with_body("large", "x".repeat(4_000), 20, 201)),
+            Ok(short),
+        ],
+    )
+    .unwrap();
+    assert_eq!(snapshot.summaries().len(), 1);
+    assert_eq!(snapshot.summaries()[0].label(), "short");
+    assert_eq!(snapshot.accounting().omitted_summary_count(), 1);
+}
+
+#[test]
+fn summary_timestamp_tampering_and_accounting_overflow_fail_closed() {
+    let context = summary_item_at("summary", 10, 2, 210);
+    let mut encoded = serde_json::to_value(context).unwrap();
+    encoded["created_at_ms"] = json!(11);
+    assert!(serde_json::from_value::<EpisodicContextItem>(encoded).is_err());
+
+    let snapshot = select_snapshot(
+        &request_with_byte_budget(32_768),
+        vec![Ok(MemoryKvContextItem::from_entry(&entry(
+            "value",
+            vec![],
+            211,
+        ))
+        .unwrap())],
+        Vec::<Result<EpisodicContextItem, _>>::new(),
+    )
+    .unwrap();
+    let mut snapshot_value = serde_json::to_value(snapshot).unwrap();
+    snapshot_value["accounting"]["omitted_entry_count"] = json!(u64::MAX);
+    assert!(
+        serde_json::from_value::<ai_stock_forum::memory::MemorySnapshot>(snapshot_value).is_err()
+    );
 }
 
 #[test]
