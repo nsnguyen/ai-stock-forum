@@ -19,6 +19,7 @@ pub use normalization::{
 };
 pub use projection::MemoryProjection;
 pub use proposal::{MemoryProposal, MemoryProposalOperation, MemoryProposalRef};
+pub(crate) use retrieval::MemorySnapshotBuilder;
 pub use retrieval::{
     EpisodicContextItem, MAX_MEMORY_RETRIEVAL_BYTES, MAX_MEMORY_RETRIEVAL_ENTRIES,
     MAX_MEMORY_RETRIEVAL_SOURCES, MAX_MEMORY_RETRIEVAL_SUMMARIES, MemoryEntryMetadataOrder,

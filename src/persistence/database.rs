@@ -17,6 +17,10 @@ use super::migrations::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum PersistenceError {
+    #[error("memory proposal capacity has been reached")]
+    Capacity,
+    #[error("memory row does not match its authenticated representation")]
+    MemoryRowMismatch,
     #[error("database query failed")]
     QueryFailed,
     #[error("database migration record is invalid")]
@@ -60,6 +64,8 @@ pub enum PersistenceError {
 impl PersistenceError {
     pub const fn code(self) -> &'static str {
         match self {
+            Self::Capacity => "memory_proposal_capacity_reached",
+            Self::MemoryRowMismatch => "memory_row_mismatch",
             Self::QueryFailed => "database_write_failed",
             Self::InvalidMigrationRecord => "invalid_migration_record",
             Self::InvalidEventRecord => "invalid_event_record",
