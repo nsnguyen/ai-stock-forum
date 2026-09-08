@@ -70,3 +70,53 @@ fn every_authenticated_entry_column_tamper_fails_closed_without_exposing_content
         assert!(!error.to_string().contains("Private value"));
     }
 }
+
+#[test]
+fn current_pointer_and_terminal_proposal_status_tampering_fail_closed() {
+    let mut database = database();
+    let event_id = EventId::from_uuid(Uuid::from_u128(200));
+    let tx = database.immediate_transaction().unwrap();
+    EventRepository::append(
+        &tx,
+        PendingEvent {
+            event_id,
+            event_schema_version: EVENT_SCHEMA_VERSION,
+            actor: Actor::Human,
+            occurred_at_ms: 1,
+            correlation_id: CorrelationId::from_uuid(Uuid::from_u128(201)),
+            causation_id: None,
+            object: None,
+            event: ApplicationEvent::HelpViewed,
+        },
+    )
+    .unwrap();
+    let entry = MemoryEntryVersion::create_present(
+        MemoryNamespaceId::from_uuid(Uuid::from_u128(2)),
+        MemoryEntryId::from_uuid(Uuid::from_u128(3)),
+        MemoryEntryVersionId::from_uuid(Uuid::from_u128(4)),
+        MemoryEntryDraft::new("Pointer".into(), "value".into(), vec![]).unwrap(),
+        Actor::Human,
+        2,
+        None,
+        event_id,
+    )
+    .unwrap();
+    MemoryRepository::insert_entry_version(&tx, 1, &entry).unwrap();
+    MemoryRepository::replace_current_entry(&tx, &entry).unwrap();
+    tx.commit().unwrap();
+    database
+        .connection()
+        .execute_batch("PRAGMA foreign_keys=OFF;")
+        .unwrap();
+    database
+        .connection()
+        .execute("UPDATE current_memory_entries SET version=2", [])
+        .unwrap();
+    let tx = database.immediate_transaction().unwrap();
+    assert_eq!(
+        MemoryRepository::list_current_entries(&tx, entry.reference().namespace_id(), 100)
+            .unwrap_err(),
+        PersistenceError::MemoryRowMismatch
+    );
+    tx.rollback().unwrap();
+}

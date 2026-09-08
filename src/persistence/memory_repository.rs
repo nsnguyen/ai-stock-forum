@@ -25,7 +25,7 @@ use crate::{
     policy::{ApprovalAction, ApprovalRecord, ApprovalStatus},
 };
 
-use super::{ImmediateTransaction, PersistenceError, load_all_versions};
+use super::{ImmediateTransaction, PersistenceError, load_exact_profile_version};
 
 const PAGE_LIMIT: u16 = 100;
 const MAX_PENDING_MEMORY_PROPOSALS: u64 = 256;
@@ -127,6 +127,9 @@ impl MemoryRepository {
             entry.reference().normalized_key(),
         )?;
         if let Some(prior) = prior {
+            if prior == entry.reference() {
+                return Ok(());
+            }
             let prior_entry = load_entry_by_version_id(tx, prior.entry_version_id())?
                 .ok_or(PersistenceError::MemoryRowMismatch)?;
             if prior_entry.reference().entry_id() != entry.reference().entry_id()
@@ -233,7 +236,8 @@ impl MemoryRepository {
             [namespace.to_string()],
         )?;
         let mut statement = tx.transaction().prepare(
-            "SELECT v.entry_version_id, v.display_key, v.purpose_tags_json, v.value_bytes, v.created_at_ms
+            "SELECT v.entry_version_id, v.display_key, v.purpose_tags_json, v.value_bytes, v.created_at_ms,
+                    c.version, c.state, c.content_digest
              FROM current_memory_entries AS c JOIN memory_entry_versions AS v
                ON v.memory_namespace_id=c.memory_namespace_id AND v.normalized_key=c.normalized_key
               AND v.entry_id=c.entry_id AND v.entry_version_id=c.entry_version_id
@@ -250,6 +254,9 @@ impl MemoryRepository {
                         r.get::<_, Vec<u8>>(2)?,
                         r.get::<_, i64>(3)?,
                         r.get::<_, i64>(4)?,
+                        r.get::<_, i64>(5)?,
+                        r.get::<_, String>(6)?,
+                        r.get::<_, String>(7)?,
                     ))
                 },
             )
@@ -257,11 +264,27 @@ impl MemoryRepository {
             .collect::<Result<Vec<_>, _>>()
             .map_err(query)?;
         let mut records = Vec::with_capacity(rows.len());
-        for (id, display_key, tags_json, value_bytes, created_at_ms) in rows {
+        for (
+            id,
+            display_key,
+            tags_json,
+            value_bytes,
+            created_at_ms,
+            pointer_version,
+            pointer_state,
+            pointer_digest,
+        ) in rows
+        {
             let entry = load_entry_by_version_id(tx, parse_id(&id)?)?
                 .ok_or(PersistenceError::MemoryRowMismatch)?;
             let tags: Vec<String> = serde_json::from_slice(&tags_json)
                 .map_err(|_| PersistenceError::MemoryRowMismatch)?;
+            validate_current_pointer_columns(
+                &entry,
+                pointer_version,
+                &pointer_state,
+                &pointer_digest,
+            )?;
             if entry.reference().namespace_id() != namespace
                 || entry.reference().state() != MemoryEntryState::Present
                 || entry.display_key() != display_key
@@ -340,20 +363,32 @@ impl MemoryRepository {
         approval: &ApprovalRecord,
     ) -> Result<(), PersistenceError> {
         validate_event(tx, resolution_sequence, resolution.resolution_event_id())?;
-        let proposal = Self::load_proposal(tx, resolution.proposal().proposal_id())?
-            .ok_or(PersistenceError::MemoryRowMismatch)?
-            .0;
+        let (proposal, status, stored_resolution) =
+            Self::load_proposal(tx, resolution.proposal().proposal_id())?
+                .ok_or(PersistenceError::MemoryRowMismatch)?;
         if proposal.reference() != *resolution.proposal() {
             return Err(PersistenceError::MemoryRowMismatch);
         }
-        let (_, status, _) = Self::load_proposal(tx, resolution.proposal().proposal_id())?
-            .ok_or(PersistenceError::MemoryRowMismatch)?;
+        let expected = resolution_row(resolution, resolution_sequence)?;
         if status != MemoryProposalStatus::Pending {
+            let stored_row = load_resolution(tx, resolution.proposal().proposal_id())?
+                .ok_or(PersistenceError::MemoryRowMismatch)?;
+            let stored_approval = load_approval(tx, approval.approval_id())?
+                .ok_or(PersistenceError::MemoryRowMismatch)?;
+            if stored_resolution.as_ref() == Some(resolution)
+                && stored_row == expected
+                && approval_equal(
+                    &stored_approval,
+                    approval,
+                    Some(resolution.resolution_event_id()),
+                )
+            {
+                return Ok(());
+            }
             return Err(PersistenceError::MemoryRowMismatch);
         }
         validate_memory_approval(&proposal, approval, Some(resolution))?;
         update_approval_resolution(tx, approval, resolution)?;
-        let expected = resolution_row(resolution, resolution_sequence)?;
         let existing = load_resolution(tx, resolution.proposal().proposal_id())?;
         match existing {
             None => {
@@ -444,21 +479,12 @@ impl MemoryRepository {
             return Ok(None);
         };
         let proposal = decode_proposal_row(tx, row)?;
-        let status = load_proposal_status(tx, &proposal)?;
+        let (status, status_event) = load_proposal_status(tx, &proposal)?;
         let resolution = match load_resolution(tx, proposal_id)? {
-            Some(row) => Some(decode_resolution_row(&proposal, row)?),
+            Some(row) => Some(decode_resolution_row(tx, &proposal, row)?),
             None => None,
         };
-        match (status, resolution.as_ref()) {
-            (MemoryProposalStatus::Pending, None)
-            | (
-                MemoryProposalStatus::Accepted
-                | MemoryProposalStatus::Rejected
-                | MemoryProposalStatus::Expired,
-                Some(_),
-            ) => {}
-            _ => return Err(PersistenceError::MemoryRowMismatch),
-        }
+        validate_proposal_coherence(tx, &proposal, status, status_event, resolution.as_ref())?;
         Self::validate_proposal_context(tx, &proposal)?;
         Ok(Some((proposal, status, resolution)))
     }
@@ -1195,11 +1221,12 @@ fn validate_proposal_status(
 fn load_proposal_status(
     tx: &ImmediateTransaction<'_>,
     p: &MemoryProposal,
-) -> Result<MemoryProposalStatus, PersistenceError> {
+) -> Result<(MemoryProposalStatus, Option<EventId>), PersistenceError> {
     let row=tx.transaction().query_row("SELECT status,resolution_event_id FROM current_memory_proposal_status WHERE proposal_id=?1",[p.reference().proposal_id().to_string()],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?))).optional().map_err(query)?.ok_or(PersistenceError::MemoryRowMismatch)?;
     let status = parse_proposal_status(&row.0)?;
-    validate_proposal_status(tx, p, status, row.1.map(|x| parse_id(&x)).transpose()?)?;
-    Ok(status)
+    let event = row.1.map(|x| parse_id(&x)).transpose()?;
+    validate_proposal_status(tx, p, status, event)?;
+    Ok((status, event))
 }
 
 fn insert_resolution_row(
@@ -1215,6 +1242,7 @@ fn load_resolution(
     tx.transaction().query_row("SELECT proposal_id,proposal_version,proposal_content_digest,status,approval_id,resolved_by_kind,resolved_by_id,resolved_at_ms,resolution_event_sequence,resolution_event_id,resolution_json FROM memory_proposal_resolutions WHERE proposal_id=?1",[id.to_string()],|r|Ok(ResolutionRow{proposal_id:r.get(0)?,proposal_version:r.get(1)?,proposal_digest:r.get(2)?,status:r.get(3)?,approval_id:r.get(4)?,resolved_by_kind:r.get(5)?,resolved_by_id:r.get(6)?,resolved_at:r.get(7)?,resolution_sequence:r.get(8)?,resolution_event_id:r.get(9)?,resolution_json:r.get(10)?})).optional().map_err(query)
 }
 fn decode_resolution_row(
+    tx: &ImmediateTransaction<'_>,
     p: &MemoryProposal,
     r: ResolutionRow,
 ) -> Result<MemoryProposalResolution, PersistenceError> {
@@ -1224,6 +1252,11 @@ fn decode_resolution_row(
     if expected != r || resolution.proposal() != &p.reference() {
         return Err(PersistenceError::MemoryRowMismatch);
     };
+    validate_event(
+        tx,
+        to_u64(expected.resolution_sequence)?,
+        resolution.resolution_event_id(),
+    )?;
     Ok(resolution)
 }
 
@@ -1455,6 +1488,40 @@ fn validate_proposal_approval_binding(
     }
 }
 
+fn validate_proposal_coherence(
+    tx: &ImmediateTransaction<'_>,
+    proposal: &MemoryProposal,
+    status: MemoryProposalStatus,
+    status_event: Option<EventId>,
+    resolution: Option<&MemoryProposalResolution>,
+) -> Result<(), PersistenceError> {
+    let approval =
+        load_approval(tx, proposal.approval_id())?.ok_or(PersistenceError::MemoryRowMismatch)?;
+    validate_proposal_approval_binding(proposal, &approval.record)?;
+    match (status, status_event, resolution) {
+        (MemoryProposalStatus::Pending, None, None)
+            if approval.record.status() == ApprovalStatus::Pending
+                && approval.record.resolution().is_none()
+                && approval.resolution_event_id.is_none() =>
+        {
+            Ok(())
+        }
+        (
+            MemoryProposalStatus::Accepted
+            | MemoryProposalStatus::Rejected
+            | MemoryProposalStatus::Expired,
+            Some(event_id),
+            Some(resolution),
+        ) if status == resolution.status()
+            && event_id == resolution.resolution_event_id()
+            && approval.resolution_event_id == Some(event_id) =>
+        {
+            validate_memory_approval(proposal, &approval.record, Some(resolution))
+        }
+        _ => Err(PersistenceError::MemoryRowMismatch),
+    }
+}
+
 fn stream_entries(
     tx: &ImmediateTransaction<'_>,
     namespace: MemoryNamespaceId,
@@ -1463,7 +1530,7 @@ fn stream_entries(
     builder: &mut MemorySnapshotBuilder,
 ) -> Result<(), PersistenceError> {
     let sql = format!(
-        "SELECT v.memory_namespace_id,v.entry_id,v.entry_version_id,v.version,v.predecessor_version_id,v.display_key,v.normalized_key,v.state,v.value_text,v.value_bytes,v.purpose_tags_json,v.created_by_kind,v.created_by_id,v.created_at_ms,v.accepted_proposal_id,v.accepted_proposal_version,v.accepted_proposal_digest,v.plaintext_validation_version,v.creation_event_sequence,v.creation_event_id,v.content_digest,v.record_digest,v.record_json FROM current_memory_entries c JOIN memory_entry_versions v ON v.memory_namespace_id=c.memory_namespace_id AND v.normalized_key=c.normalized_key AND v.entry_id=c.entry_id AND v.entry_version_id=c.entry_version_id WHERE c.memory_namespace_id=?1 AND v.state='present' AND {where_clause} ORDER BY c.normalized_key ASC,v.version ASC,c.entry_id ASC,v.entry_version_id ASC"
+        "SELECT v.memory_namespace_id,v.entry_id,v.entry_version_id,v.version,v.predecessor_version_id,v.display_key,v.normalized_key,v.state,v.value_text,v.value_bytes,v.purpose_tags_json,v.created_by_kind,v.created_by_id,v.created_at_ms,v.accepted_proposal_id,v.accepted_proposal_version,v.accepted_proposal_digest,v.plaintext_validation_version,v.creation_event_sequence,v.creation_event_id,v.content_digest,v.record_digest,v.record_json,c.version,c.state,c.content_digest FROM current_memory_entries c JOIN memory_entry_versions v ON v.memory_namespace_id=c.memory_namespace_id AND v.normalized_key=c.normalized_key AND v.entry_id=c.entry_id AND v.entry_version_id=c.entry_version_id WHERE c.memory_namespace_id=?1 AND v.state='present' AND {where_clause} ORDER BY c.normalized_key ASC,v.version ASC,c.entry_id ASC,v.entry_version_id ASC"
     );
     let mut parameters = Vec::with_capacity(values.len() + 1);
     parameters.push(Value::Text(namespace.to_string()));
@@ -1474,7 +1541,11 @@ fn stream_entries(
         .map_err(query)?;
     while let Some(row) = rows.next().map_err(query)? {
         let stored = decode_entry_row(row).map_err(query)?;
+        let pointer_version = row.get::<_, i64>(23).map_err(query)?;
+        let pointer_state = row.get::<_, String>(24).map_err(query)?;
+        let pointer_digest = row.get::<_, String>(25).map_err(query)?;
         let entry = decode_entry_row_checked(tx, stored)?;
+        validate_current_pointer_columns(&entry, pointer_version, &pointer_state, &pointer_digest)?;
         builder
             .consider_entry(MemoryKvContextItem::from_entry(&entry).map_err(integrity)?)
             .map_err(integrity)?;
@@ -1523,19 +1594,29 @@ fn tag_clause(column: &str, first_parameter: usize, len: usize) -> String {
     )
 }
 
+fn validate_current_pointer_columns(
+    entry: &MemoryEntryVersion,
+    version: i64,
+    state: &str,
+    digest: &str,
+) -> Result<(), PersistenceError> {
+    let reference = entry.reference();
+    if version != to_i64(reference.version().get())?
+        || state != entry_state(reference.state())
+        || digest != reference.content_digest().as_str()
+    {
+        Err(PersistenceError::MemoryRowMismatch)
+    } else {
+        Ok(())
+    }
+}
+
 fn load_exact_profile(
     tx: &ImmediateTransaction<'_>,
     reference: &AgentProfileVersionRef,
 ) -> Result<AgentProfileVersion, PersistenceError> {
-    let mut matches = load_all_versions(tx.transaction())?
-        .into_iter()
-        .filter(|stored| stored.profile.reference() == *reference)
-        .map(|stored| stored.profile);
-    let profile = matches.next().ok_or(PersistenceError::MemoryRowMismatch)?;
-    if matches.next().is_some() {
-        return Err(PersistenceError::MemoryRowMismatch);
-    };
-    Ok(profile)
+    load_exact_profile_version(tx.transaction(), reference)?
+        .ok_or(PersistenceError::MemoryRowMismatch)
 }
 fn validate_event(
     tx: &ImmediateTransaction<'_>,

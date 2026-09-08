@@ -8,7 +8,8 @@ use ai_stock_forum::{
     },
     memory::{
         MemoryEntryDraft, MemoryEntryVersion, MemoryProposal, MemoryProposalOperation,
-        MemoryProposalResolution, MemoryProposalStatus, NormalizedMemoryKey,
+        MemoryProposalResolution, MemoryProposalStatus, MemoryPurposeScope, MemoryRetrievalRequest,
+        MemoryRetrievalScope, NormalizedMemoryKey,
     },
     persistence::{
         Database, EventRepository, MemoryRepository, PersistenceError, insert_expected_version,
@@ -238,10 +239,35 @@ fn proposal_approval_and_resolution_are_context_bound_and_second_resolution_fail
             .1,
         MemoryProposalStatus::Accepted
     );
+    MemoryRepository::resolve_proposal(&tx, 2, &resolution, &resolved_approval).unwrap();
+    tx.commit().unwrap();
+    database
+        .connection()
+        .execute_batch("PRAGMA foreign_keys=OFF;")
+        .unwrap();
+    database
+        .connection()
+        .execute(
+            "UPDATE current_memory_proposal_status SET status='rejected'",
+            [],
+        )
+        .unwrap();
+    let tx = database.immediate_transaction().unwrap();
     assert_eq!(
-        MemoryRepository::resolve_proposal(&tx, 2, &resolution, &resolved_approval).unwrap_err(),
+        MemoryRepository::load_proposal(&tx, proposal.reference().proposal_id()).unwrap_err(),
         PersistenceError::MemoryRowMismatch
     );
+    tx.rollback().unwrap();
+}
+
+#[test]
+fn replacing_an_already_current_exact_entry_is_idempotent() {
+    let mut database = database();
+    let entry = entry(append_help(&mut database, 41));
+    let tx = database.immediate_transaction().unwrap();
+    MemoryRepository::insert_entry_version(&tx, 1, &entry).unwrap();
+    MemoryRepository::replace_current_entry(&tx, &entry).unwrap();
+    MemoryRepository::replace_current_entry(&tx, &entry).unwrap();
     tx.commit().unwrap();
 }
 
@@ -318,6 +344,73 @@ fn pending_proposal_capacity_is_exact_and_rejects_without_writing_the_overflow_a
         MemoryRepository::load_memory_approval(&tx, overflow.approval_id())
             .unwrap()
             .is_none()
+    );
+    tx.rollback().unwrap();
+}
+
+#[test]
+fn snapshot_streams_tagged_matches_once_before_untagged_fallback() {
+    let mut database = database();
+    let profile = profile();
+    let event = append_help(&mut database, 60);
+    let tx = database.connection_mut().transaction().unwrap();
+    insert_expected_version(&tx, 1, &profile).unwrap();
+    tx.commit().unwrap();
+    let tagged = MemoryEntryVersion::create_present(
+        profile.memory_namespace_id(),
+        MemoryEntryId::from_uuid(Uuid::from_u128(8_001)),
+        MemoryEntryVersionId::from_uuid(Uuid::from_u128(8_002)),
+        MemoryEntryDraft::new("Alpha".into(), "tagged".into(), vec!["earnings".into()]).unwrap(),
+        Actor::Human,
+        1,
+        None,
+        event,
+    )
+    .unwrap();
+    let fallback = MemoryEntryVersion::create_present(
+        profile.memory_namespace_id(),
+        MemoryEntryId::from_uuid(Uuid::from_u128(8_003)),
+        MemoryEntryVersionId::from_uuid(Uuid::from_u128(8_004)),
+        MemoryEntryDraft::new("Zebra".into(), "fallback".into(), vec![]).unwrap(),
+        Actor::Human,
+        2,
+        None,
+        event,
+    )
+    .unwrap();
+    let scope = MemoryRetrievalScope::new(
+        &profile,
+        MemoryPurposeScope::tagged(vec!["earnings".into()]).unwrap(),
+    )
+    .unwrap();
+    let request = MemoryRetrievalRequest::new(scope, Default::default()).unwrap();
+    let tx = database.immediate_transaction().unwrap();
+    for entry in [&tagged, &fallback] {
+        MemoryRepository::insert_entry_version(&tx, 1, entry).unwrap();
+        MemoryRepository::replace_current_entry(&tx, entry).unwrap();
+    }
+    let snapshot = MemoryRepository::build_snapshot(&tx, &request).unwrap();
+    assert_eq!(
+        snapshot
+            .entries()
+            .iter()
+            .map(|item| item.display_key())
+            .collect::<Vec<_>>(),
+        vec!["Alpha", "Zebra"]
+    );
+    tx.commit().unwrap();
+    database
+        .connection()
+        .execute_batch("PRAGMA foreign_keys=OFF;")
+        .unwrap();
+    database
+        .connection()
+        .execute("UPDATE current_memory_entries SET content_digest='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' WHERE entry_id=?1", [tagged.reference().entry_id().to_string()])
+        .unwrap();
+    let tx = database.immediate_transaction().unwrap();
+    assert_eq!(
+        MemoryRepository::build_snapshot(&tx, &request).unwrap_err(),
+        PersistenceError::MemoryRowMismatch
     );
     tx.rollback().unwrap();
 }

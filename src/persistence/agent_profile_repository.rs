@@ -1,7 +1,9 @@
-use rusqlite::{Connection, Error as SqliteError, ErrorCode, Transaction, params};
+use rusqlite::{
+    Connection, Error as SqliteError, ErrorCode, OptionalExtension, Transaction, params,
+};
 
 use crate::{
-    agents::{AgentProfileVersion, AgentProfilesProjection},
+    agents::{AgentProfileVersion, AgentProfileVersionRef, AgentProfilesProjection},
     app::{ApplicationEvent, EventEnvelope},
     domain::canonical_json_bytes,
 };
@@ -72,6 +74,46 @@ pub fn load_all_versions(
             })
         })
         .collect()
+}
+
+/// Loads and validates only the requested immutable profile version.
+pub fn load_exact_profile_version(
+    connection: &Connection,
+    reference: &AgentProfileVersionRef,
+) -> Result<Option<AgentProfileVersion>, PersistenceError> {
+    let row = connection
+        .query_row(
+            "SELECT profile_id, profile_version_id, version, supersedes_version_id,
+                    template_id, template_version, template_digest, role, display_name,
+                    normalized_name, memory_namespace_id, policy_profile_ref, content_digest,
+                    payload_json, source_event_sequence, created_at_ms
+             FROM agent_profile_versions
+             WHERE profile_id=?1 AND profile_version_id=?2 AND version=?3 AND content_digest=?4",
+            params![
+                reference.profile_id().to_string(),
+                reference.profile_version_id().to_string(),
+                i64::try_from(reference.version().get())
+                    .map_err(|_| PersistenceError::InvalidAgentProfilePayload)?,
+                reference.content_digest().as_str(),
+            ],
+            decode_row,
+        )
+        .optional()
+        .map_err(|_| PersistenceError::QueryFailed)?;
+    row.map(|stored| {
+        let profile = serde_json::from_slice::<AgentProfileVersion>(&stored.payload_json)
+            .map_err(|_| PersistenceError::InvalidAgentProfilePayload)?;
+        for skill in profile.skill_refs() {
+            validate_skill_version_ref(connection, skill)?;
+        }
+        if profile.reference() != *reference
+            || expected_row(stored.source_event_sequence, &profile)? != stored
+        {
+            return Err(PersistenceError::AgentProfileHistoryMismatch);
+        }
+        Ok(profile)
+    })
+    .transpose()
 }
 
 pub fn replace_active_profiles(
