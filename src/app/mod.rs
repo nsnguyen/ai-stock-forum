@@ -42,7 +42,8 @@ pub use outcome::{
 pub use service::{
     ApplicationService, ApplicationWorker, AuthorizationDecision, CommandPolicy,
     CommandTransactionHook, DatabaseReadiness, IndependentApplicationService, MemoryEditPreview,
-    NoopCommandTransactionHook, PresentationSnapshot, ProcessGuardOwnership,
+    MemoryProposalResolutionReview, NoopCommandTransactionHook, PresentationSnapshot,
+    ProcessGuardOwnership,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -102,8 +103,6 @@ pub enum AppError {
     MemoryProposalNotFound,
     #[error("episodic summary was not found")]
     EpisodicSummaryNotFound,
-    #[error("memory command is not implemented")]
-    MemoryCommandNotImplemented,
     #[error("wrong memory command dispatcher")]
     WrongMemoryCommandDispatcher,
 }
@@ -137,7 +136,6 @@ impl AppError {
             Self::MemoryEntryNotFound => "memory_entry_not_found",
             Self::MemoryProposalNotFound => "memory_proposal_not_found",
             Self::EpisodicSummaryNotFound => "episodic_summary_not_found",
-            Self::MemoryCommandNotImplemented => "memory_command_not_implemented",
             Self::WrongMemoryCommandDispatcher => "wrong_memory_command_dispatcher",
         }
     }

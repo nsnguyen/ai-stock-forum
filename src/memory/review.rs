@@ -583,6 +583,37 @@ fn resolution_review_digest(
     )?))
 }
 
+pub(crate) fn prepare_memory_resolution_review(
+    action: MemoryResolutionAction,
+    proposal: MemoryProposalRef,
+    approval_id: ApprovalId,
+    expected_entry: ExpectedMemoryEntryState,
+) -> Result<(Digest, MemoryResolutionReviewBinding), DomainError> {
+    let actor = Actor::Human;
+    let expected_approval_status = ApprovalStatus::Pending;
+    let plaintext_acknowledgement = MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1;
+    let review_digest = resolution_review_digest(
+        &actor,
+        action,
+        &proposal,
+        approval_id,
+        expected_approval_status,
+        &expected_entry,
+        &plaintext_acknowledgement,
+    )?;
+    let binding = MemoryResolutionReviewBinding::new(
+        actor,
+        action,
+        proposal,
+        approval_id,
+        expected_approval_status,
+        expected_entry,
+        plaintext_acknowledgement,
+        review_digest.clone(),
+    )?;
+    Ok((review_digest, binding))
+}
+
 #[derive(Serialize)]
 struct MemoryResolutionReviewDigestMaterial<'a> {
     actor: &'a Actor,

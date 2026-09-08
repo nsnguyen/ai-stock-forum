@@ -34,20 +34,21 @@ use crate::{
     audit::AuditEntry,
     config::{AppPaths, StartupError},
     domain::{
-        Actor, AgentProfileId, AgentProfileVersionId, CausationId, Clock, CommandId, CorrelationId,
-        EventId, IdGenerator, InstallationId, MemoryEntryId, MemoryEntryVersionId,
-        MemoryNamespaceId, MemoryReviewToken, ObjectRef, ObjectVersion, ProfileReviewToken,
-        SessionId, Sha256Digest, SkillId, SkillReviewToken, SkillVersionId, canonical_json_bytes,
-        sha256,
+        Actor, AgentProfileId, AgentProfileVersionId, ApprovalId, CausationId, Clock, CommandId,
+        CorrelationId, Digest, EventId, IdGenerator, InstallationId, MemoryEntryId,
+        MemoryEntryVersionId, MemoryNamespaceId, MemoryProposalId, MemoryReviewToken, ObjectRef,
+        ObjectVersion, ProfileReviewToken, SessionId, Sha256Digest, SkillId, SkillReviewToken,
+        SkillVersionId, canonical_json_bytes, sha256,
     },
     memory::{
         EpisodicContextItem, EpisodicQualification, ExpectedMemoryEntryState,
         MemoryEditPreviewOutcome, MemoryEditReview, MemoryEditReviewBinding, MemoryEntryDraft,
         MemoryEntryState, MemoryEntryVersion, MemoryKvContextItem, MemoryMutationKind,
-        MemoryNoChange, MemoryPlaintextAcknowledgement, MemoryProposalOperation,
-        MemoryProposalOperationKind, MemoryProposalResolution, MemoryProposalStatus,
+        MemoryNoChange, MemoryPlaintextAcknowledgement, MemoryProposal, MemoryProposalOperation,
+        MemoryProposalOperationKind, MemoryProposalRef, MemoryProposalResolution,
+        MemoryProposalStatus, MemoryResolutionAction, MemoryResolutionReviewBinding,
         MemoryRetrievalRequest, MemoryReviewRegistry, MemorySnapshot, NormalizedMemoryKey,
-        ReservedMemoryReview, prepare_direct_memory_edit,
+        ReservedMemoryReview, prepare_direct_memory_edit, prepare_memory_resolution_review,
     },
     persistence::{
         CommandReceiptRecord, CommandReceiptRepository, Database, EventRepository,
@@ -56,7 +57,10 @@ use crate::{
         load_active_skill_by_name, load_all_skill_versions, load_skill_history, load_skill_version,
         set_active_skill,
     },
-    policy::{Capability, Effect, PolicyDecision, PolicyRule, evaluate},
+    policy::{
+        ApprovalAction, ApprovalRecord, ApprovalStatus, Capability, Effect, PolicyDecision,
+        PolicyRule, evaluate,
+    },
     recovery::{BootstrapState, ProjectionState, RecoveryCoordinator, reduce},
     setup::SetupStatus,
     skills::{
@@ -352,6 +356,21 @@ pub enum MemoryEditPreview {
     Review(MemoryEditReview),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryProposalResolutionReview {
+    pub action: MemoryResolutionAction,
+    pub proposal: MemoryProposal,
+    pub approval_id: ApprovalId,
+    pub expected_approval_status: ApprovalStatus,
+    pub expected_entry: ExpectedMemoryEntryState,
+    pub proposer_is_historical: bool,
+    pub proposer_identity: MemoryProfileIdentityView,
+    pub namespace_owner_identity: MemoryProfileIdentityView,
+    pub plaintext_acknowledgement: MemoryPlaintextAcknowledgement,
+    pub review_token: MemoryReviewToken,
+    pub review_digest: Digest,
+}
+
 pub struct ApplicationWorker {
     executor: CommandExecutor,
 }
@@ -625,6 +644,22 @@ impl ApplicationService {
         self.executor.preview_memory_delete(selector, display_key)
     }
 
+    pub fn preview_memory_proposal_approval(
+        &self,
+        proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        self.executor
+            .preview_memory_proposal_resolution(proposal, MemoryResolutionAction::Approve)
+    }
+
+    pub fn preview_memory_proposal_rejection(
+        &self,
+        proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        self.executor
+            .preview_memory_proposal_resolution(proposal, MemoryResolutionAction::Reject)
+    }
+
     pub fn cancel_memory_review(&self) -> Result<(), AppError> {
         self.executor
             .memory_reviews
@@ -821,6 +856,22 @@ impl IndependentApplicationService {
         self.executor.preview_memory_delete(selector, display_key)
     }
 
+    pub fn preview_memory_proposal_approval(
+        &self,
+        proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        self.executor
+            .preview_memory_proposal_resolution(proposal, MemoryResolutionAction::Approve)
+    }
+
+    pub fn preview_memory_proposal_rejection(
+        &self,
+        proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        self.executor
+            .preview_memory_proposal_resolution(proposal, MemoryResolutionAction::Reject)
+    }
+
     pub fn cancel_memory_review(&self) -> Result<(), AppError> {
         self.executor
             .memory_reviews
@@ -938,6 +989,82 @@ impl CommandExecutor {
                 ))
             }
         }
+    }
+
+    fn preview_memory_proposal_resolution(
+        &self,
+        proposal_ref: MemoryProposalRef,
+        action: MemoryResolutionAction,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        self.ensure_passive_open(Capability::MemoryPreview)?;
+        let mut database =
+            Database::open(&self.paths).map_err(|_| PersistenceError::QueryFailed)?;
+        let transaction = database.immediate_transaction()?;
+        let projection = ProjectionRepository::load_in(&transaction)?;
+        let (proposal, status, resolution) =
+            MemoryRepository::load_proposal(&transaction, proposal_ref.proposal_id())?
+                .ok_or(AppError::MemoryProposalNotFound)?;
+        if proposal.reference() != proposal_ref
+            || status != MemoryProposalStatus::Pending
+            || resolution.is_some()
+        {
+            return Err(crate::domain::DomainError::MemoryProposalReviewUnavailable.into());
+        }
+        let approval =
+            MemoryRepository::load_memory_approval(&transaction, proposal.approval_id())?
+                .ok_or(PersistenceError::MemoryRowMismatch)?;
+        if approval.action() != ApprovalAction::MemoryMutation
+            || approval.object() != &proposal.object_ref()?
+            || approval.actor() != &Actor::Agent(proposal.proposer().profile_id())
+            || approval.status() != ApprovalStatus::Pending
+            || approval.expires_at_millis().is_some()
+            || approval.resolution().is_some()
+        {
+            return Err(PersistenceError::MemoryRowMismatch.into());
+        }
+        let proposer = projection
+            .agent_profiles
+            .resolve_reference(proposal.proposer())
+            .map_err(|_| PersistenceError::MemoryRowMismatch)?;
+        if proposer.memory_namespace_id() != proposal.namespace_id() {
+            return Err(PersistenceError::MemoryRowMismatch.into());
+        }
+        let namespace_owner = projection
+            .agent_profiles
+            .active_profiles()
+            .into_iter()
+            .find(|profile| profile.memory_namespace_id() == proposal.namespace_id())
+            .ok_or(PersistenceError::MemoryRowMismatch)?;
+        let expected_entry = current_expected_memory_entry(
+            &transaction,
+            proposal.namespace_id(),
+            proposal.normalized_key(),
+        )?;
+        let acknowledgement = MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1;
+        let (review_digest, binding) = prepare_memory_resolution_review(
+            action,
+            proposal.reference(),
+            proposal.approval_id(),
+            expected_entry.clone(),
+        )?;
+        let proposer_is_historical = namespace_owner.reference() != *proposal.proposer();
+        transaction.commit()?;
+        let review_token = MemoryReviewToken::from_uuid(self.ids.next_uuid());
+        self.memory_reviews
+            .replace_resolution(review_token, binding);
+        Ok(MemoryProposalResolutionReview {
+            action,
+            proposal,
+            approval_id: approval.approval_id(),
+            expected_approval_status: approval.status(),
+            expected_entry,
+            proposer_is_historical,
+            proposer_identity: memory_profile_identity(proposer),
+            namespace_owner_identity: memory_profile_identity(&namespace_owner),
+            plaintext_acknowledgement: acknowledgement,
+            review_token,
+            review_digest,
+        })
     }
 
     fn preview_skill_creation(&self, candidate: SkillDraft) -> Result<SkillEditPreview, AppError> {
@@ -1126,9 +1253,9 @@ impl CommandExecutor {
             actor: Actor::Human,
             command,
         };
-        let direct_memory_mutation = is_direct_memory_mutation(&envelope.command);
+        let reviewed_memory_mutation = is_reviewed_memory_mutation(&envelope.command);
         let result = self.execute_locked(envelope, lifecycle.session_id, phase);
-        self.invalidate_memory_review_after_terminal_failure(direct_memory_mutation, &result);
+        self.invalidate_memory_review_after_terminal_failure(reviewed_memory_mutation, &result);
         result
     }
 
@@ -1141,18 +1268,18 @@ impl CommandExecutor {
         if *phase == LifecyclePhase::Closed {
             return Err(AppError::LifecycleFinished);
         }
-        let direct_memory_mutation = is_direct_memory_mutation(&envelope.command);
+        let reviewed_memory_mutation = is_reviewed_memory_mutation(&envelope.command);
         let result = self.execute_locked(envelope, lifecycle.session_id, phase);
-        self.invalidate_memory_review_after_terminal_failure(direct_memory_mutation, &result);
+        self.invalidate_memory_review_after_terminal_failure(reviewed_memory_mutation, &result);
         result
     }
 
     fn invalidate_memory_review_after_terminal_failure(
         &self,
-        direct_memory_mutation: bool,
+        reviewed_memory_mutation: bool,
         result: &Result<CommandOutcome, AppError>,
     ) {
-        if direct_memory_mutation
+        if reviewed_memory_mutation
             && result.as_ref().is_err_and(|error| {
                 memory_review_failure_disposition(error)
                     == MemoryReviewFailureDisposition::Invalidate
@@ -1182,6 +1309,8 @@ impl CommandExecutor {
                 | ApplicationCommand::UnassignAgentSkill { .. }
                 | ApplicationCommand::SetMemoryEntry { .. }
                 | ApplicationCommand::DeleteMemoryEntry { .. }
+                | ApplicationCommand::ApproveMemoryProposal { .. }
+                | ApplicationCommand::RejectMemoryProposal { .. }
         );
         if reviewed_mutation {
             let replay_transaction = self.database.immediate_transaction()?;
@@ -1609,7 +1738,52 @@ impl CommandExecutor {
                                 .expect("direct mutation owns its memory review"),
                         )?
                     }
-                    command => prepare_event(
+                    command @ ApplicationCommand::ProposeMemoryMutation { .. } => {
+                        prepare_memory_proposal_creation(
+                            &transaction,
+                            &projection,
+                            self.ids.as_ref(),
+                            self.clock.as_ref(),
+                            &request.actor,
+                            command,
+                        )?
+                    }
+                    command @ (ApplicationCommand::ApproveMemoryProposal { .. }
+                    | ApplicationCommand::RejectMemoryProposal { .. }) => {
+                        let (review_token, binding) =
+                            memory_resolution_review_binding(&request.actor, command)?;
+                        let reserved = memory_reviews
+                            .reserve_resolution(envelope.command_id, review_token, &binding)
+                            .map_err(AppError::from)?;
+                        memory_reserved = Some(reserved);
+                        prepare_memory_resolution(
+                            &transaction,
+                            &projection,
+                            self.ids.as_ref(),
+                            self.clock.as_ref(),
+                            &request.actor,
+                            envelope.command_id,
+                            command,
+                            memory_reserved
+                                .as_ref()
+                                .expect("proposal resolution owns its memory review"),
+                        )?
+                    }
+                    command @ (ApplicationCommand::CreateAgentProfile { .. }
+                    | ApplicationCommand::ListAgentProfiles
+                    | ApplicationCommand::ShowAgentProfile { .. }
+                    | ApplicationCommand::ShowAgentProfileHistory { .. }
+                    | ApplicationCommand::ShowAgentProfileVersion { .. }
+                    | ApplicationCommand::ListSkills
+                    | ApplicationCommand::ShowSkill { .. }
+                    | ApplicationCommand::ShowSkillHistory { .. }
+                    | ApplicationCommand::ShowSkillVersion { .. }
+                    | ApplicationCommand::ShowHelp
+                    | ApplicationCommand::ShowStatus
+                    | ApplicationCommand::ShowSetupStatus
+                    | ApplicationCommand::ShowAuditTail { .. }
+                    | ApplicationCommand::RejectInput(_)
+                    | ApplicationCommand::RequestShutdown) => prepare_event(
                         command,
                         &projection,
                         self.clock.as_ref(),
@@ -1620,7 +1794,7 @@ impl CommandExecutor {
                     )?,
                 };
                 let pending = PendingEvent {
-                    event_id: direct_memory_event_id(&event)
+                    event_id: memory_mutation_event_id(&event)
                         .unwrap_or_else(|| EventId::from_uuid(self.ids.next_uuid())),
                     event_schema_version: EVENT_SCHEMA_VERSION,
                     actor: request.actor.clone(),
@@ -1628,12 +1802,12 @@ impl CommandExecutor {
                         .unwrap_or_else(|| self.clock.now_millis()),
                     correlation_id: request.correlation_id,
                     causation_id: Some(CausationId::from_uuid(envelope.command_id.as_uuid())),
-                    object: direct_memory_event_object(&event)?.or(skill_event_object),
+                    object: memory_mutation_event_object(&event)?.or(skill_event_object),
                     event,
                 };
                 let committed = EventRepository::append(&transaction, pending)?;
                 self.hook.after_event_append(transaction.transaction())?;
-                persist_direct_memory_event(&transaction, &committed)?;
+                persist_memory_mutation_event(&transaction, &committed)?;
                 reduce(&mut projection, &committed)?;
                 if let ApplicationEvent::AgentProfileCreated { profile }
                 | ApplicationEvent::AgentProfileVersionActivated { profile, .. } =
@@ -1837,10 +2011,13 @@ fn is_memory_command(command: &ApplicationCommand) -> bool {
     )
 }
 
-fn is_direct_memory_mutation(command: &ApplicationCommand) -> bool {
+fn is_reviewed_memory_mutation(command: &ApplicationCommand) -> bool {
     matches!(
         command,
-        ApplicationCommand::SetMemoryEntry { .. } | ApplicationCommand::DeleteMemoryEntry { .. }
+        ApplicationCommand::SetMemoryEntry { .. }
+            | ApplicationCommand::DeleteMemoryEntry { .. }
+            | ApplicationCommand::ApproveMemoryProposal { .. }
+            | ApplicationCommand::RejectMemoryProposal { .. }
     )
 }
 
@@ -1923,8 +2100,70 @@ fn direct_memory_review_binding(
                 )?,
             ))
         }
-        _ => Err(AppError::WrongMemoryCommandDispatcher),
+        _ => unreachable!("direct memory review commands are dispatched exhaustively"),
     }
+}
+
+fn memory_resolution_review_binding(
+    actor: &Actor,
+    command: &ApplicationCommand,
+) -> Result<(MemoryReviewToken, MemoryResolutionReviewBinding), AppError> {
+    let (
+        action,
+        proposal,
+        approval_id,
+        expected_approval_status,
+        expected_entry,
+        review_token,
+        review_digest,
+    ) = match command {
+        ApplicationCommand::ApproveMemoryProposal {
+            proposal,
+            approval_id,
+            expected_approval_status,
+            expected_entry,
+            review_token,
+            review_digest,
+        } => (
+            MemoryResolutionAction::Approve,
+            proposal,
+            *approval_id,
+            *expected_approval_status,
+            expected_entry,
+            *review_token,
+            review_digest,
+        ),
+        ApplicationCommand::RejectMemoryProposal {
+            proposal,
+            approval_id,
+            expected_approval_status,
+            expected_entry,
+            review_token,
+            review_digest,
+        } => (
+            MemoryResolutionAction::Reject,
+            proposal,
+            *approval_id,
+            *expected_approval_status,
+            expected_entry,
+            *review_token,
+            review_digest,
+        ),
+        _ => unreachable!("resolution review commands are dispatched exhaustively"),
+    };
+    Ok((
+        review_token,
+        MemoryResolutionReviewBinding::new(
+            actor.clone(),
+            action,
+            proposal.clone(),
+            approval_id,
+            expected_approval_status,
+            expected_entry.clone(),
+            MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1,
+            review_digest.clone(),
+        )?,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1964,7 +2203,7 @@ fn prepare_direct_memory_mutation(
             None,
             *review_token,
         ),
-        _ => return Err(AppError::WrongMemoryCommandDispatcher),
+        _ => unreachable!("direct memory mutation commands are dispatched exhaustively"),
     };
     if reserved.token() != token {
         return Err(crate::domain::DomainError::MemoryReviewUnavailable.into());
@@ -2083,15 +2322,337 @@ fn prepare_direct_memory_mutation(
     })
 }
 
-fn direct_memory_event_id(event: &ApplicationEvent) -> Option<EventId> {
+fn prepare_memory_proposal_creation(
+    tx: &ImmediateTransaction<'_>,
+    projection: &ProjectionState,
+    ids: &dyn IdGenerator,
+    clock: &dyn Clock,
+    actor: &Actor,
+    command: &ApplicationCommand,
+) -> Result<ApplicationEvent, AppError> {
+    let ApplicationCommand::ProposeMemoryMutation {
+        proposer,
+        expected,
+        operation,
+        rationale,
+    } = command
+    else {
+        unreachable!("proposal creation commands are dispatched exhaustively")
+    };
+    let proposer = projection.agent_profiles.resolve_reference(proposer)?;
+    if actor != &Actor::Agent(proposer.profile_id()) {
+        return Err(crate::domain::DomainError::MemoryProposalActorMismatch.into());
+    }
+    let (key, candidate) = match operation {
+        MemoryProposalOperation::Set { candidate } => {
+            (candidate.normalized_key(), Some(candidate.clone()))
+        }
+        MemoryProposalOperation::Delete => match expected {
+            ExpectedMemoryEntryState::Present(reference) => {
+                (reference.normalized_key().clone(), None)
+            }
+            _ => return Err(crate::domain::DomainError::InvalidMemoryProposal.into()),
+        },
+    };
+    let current = MemoryRepository::load_current_entry(tx, proposer.memory_namespace_id(), &key)?;
+    let mutation_kind = if candidate.is_some() {
+        MemoryMutationKind::Set
+    } else {
+        MemoryMutationKind::Delete
+    };
+    match prepare_direct_memory_edit(
+        Actor::Human,
+        proposer.reference(),
+        proposer.memory_namespace_id(),
+        current.as_ref(),
+        expected.clone(),
+        mutation_kind,
+        candidate,
+        MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1,
+    )? {
+        MemoryEditPreviewOutcome::Prepared(_) => {}
+        MemoryEditPreviewOutcome::NoChange(_) => {
+            return Err(crate::domain::DomainError::InvalidMemoryProposal.into());
+        }
+    }
+    if MemoryRepository::count_pending_proposals(tx, proposer.memory_namespace_id())? >= 256 {
+        return Err(PersistenceError::Capacity.into());
+    }
+    let display_key = match operation {
+        MemoryProposalOperation::Set { candidate } => candidate.display_key().to_owned(),
+        MemoryProposalOperation::Delete => current
+            .as_ref()
+            .ok_or(crate::domain::DomainError::MemoryExpectedStateMismatch)?
+            .display_key()
+            .to_owned(),
+    };
+    let proposal_id = MemoryProposalId::from_uuid(ids.next_uuid());
+    let approval_id = ApprovalId::from_uuid(ids.next_uuid());
+    let event_id = EventId::from_uuid(ids.next_uuid());
+    let occurred_at_ms = clock.now_millis();
+    let proposal = MemoryProposal::new(
+        proposal_id,
+        proposer,
+        actor,
+        operation.clone(),
+        display_key,
+        expected.clone(),
+        rationale.clone(),
+        occurred_at_ms,
+        event_id,
+        approval_id,
+    )?;
+    let approval = ApprovalRecord::builder(ApprovalAction::MemoryMutation)
+        .approval_id(approval_id)
+        .object(proposal.object_ref()?)
+        .actor(actor.clone())
+        .created_at_millis(occurred_at_ms)
+        .build()
+        .map_err(|_| crate::domain::DomainError::InvalidMemoryProposal)?;
+    Ok(ApplicationEvent::MemoryProposalCreated { proposal, approval })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_memory_resolution(
+    tx: &ImmediateTransaction<'_>,
+    projection: &ProjectionState,
+    ids: &dyn IdGenerator,
+    clock: &dyn Clock,
+    actor: &Actor,
+    command_id: CommandId,
+    command: &ApplicationCommand,
+    reserved: &ReservedMemoryReview<'_>,
+) -> Result<ApplicationEvent, AppError> {
+    if actor != &Actor::Human || reserved.command_id() != command_id {
+        return Err(crate::domain::DomainError::MemoryProposalReviewUnavailable.into());
+    }
+    let (action, proposal_ref, approval_id, expected_status, expected_entry, token) = match command
+    {
+        ApplicationCommand::ApproveMemoryProposal {
+            proposal,
+            approval_id,
+            expected_approval_status,
+            expected_entry,
+            review_token,
+            ..
+        } => (
+            MemoryResolutionAction::Approve,
+            proposal,
+            *approval_id,
+            *expected_approval_status,
+            expected_entry,
+            *review_token,
+        ),
+        ApplicationCommand::RejectMemoryProposal {
+            proposal,
+            approval_id,
+            expected_approval_status,
+            expected_entry,
+            review_token,
+            ..
+        } => (
+            MemoryResolutionAction::Reject,
+            proposal,
+            *approval_id,
+            *expected_approval_status,
+            expected_entry,
+            *review_token,
+        ),
+        _ => unreachable!("proposal resolution commands are dispatched exhaustively"),
+    };
+    if reserved.token() != token || expected_status != ApprovalStatus::Pending {
+        return Err(crate::domain::DomainError::MemoryProposalReviewUnavailable.into());
+    }
+    let (proposal, status, existing_resolution) =
+        MemoryRepository::load_proposal(tx, proposal_ref.proposal_id())?
+            .ok_or(AppError::MemoryProposalNotFound)?;
+    if proposal.reference() != *proposal_ref
+        || status != MemoryProposalStatus::Pending
+        || existing_resolution.is_some()
+        || proposal.approval_id() != approval_id
+    {
+        return Err(crate::domain::DomainError::MemoryProposalReviewUnavailable.into());
+    }
+    let projected = projection
+        .memory
+        .proposals()
+        .find(|(id, _)| **id == proposal_ref.proposal_id())
+        .map(|(_, projected)| projected)
+        .ok_or(PersistenceError::MemoryRowMismatch)?;
+    if projected.proposal() != proposal_ref
+        || projected.namespace_id() != proposal.namespace_id()
+        || projected.normalized_key() != proposal.normalized_key()
+        || projected.expected() != proposal.expected()
+        || projected.approval_id() != approval_id
+        || projected.status() != MemoryProposalStatus::Pending
+        || projected.resolution_event_id().is_some()
+    {
+        return Err(PersistenceError::MemoryRowMismatch.into());
+    }
+    let approval = MemoryRepository::load_memory_approval(tx, approval_id)?
+        .ok_or(PersistenceError::MemoryRowMismatch)?;
+    if approval.approval_id() != approval_id
+        || approval.action() != ApprovalAction::MemoryMutation
+        || approval.object() != &proposal.object_ref()?
+        || approval.actor() != &Actor::Agent(proposal.proposer().profile_id())
+        || approval.status() != expected_status
+        || approval.expires_at_millis().is_some()
+        || approval.resolution().is_some()
+    {
+        return Err(crate::domain::DomainError::MemoryProposalReviewUnavailable.into());
+    }
+    let current = MemoryRepository::load_current_entry(
+        tx,
+        proposal.namespace_id(),
+        proposal.normalized_key(),
+    )?;
+    let current_expected = match current.as_ref() {
+        None => ExpectedMemoryEntryState::Absent,
+        Some(entry) if entry.reference().state() == MemoryEntryState::Present => {
+            ExpectedMemoryEntryState::Present(entry.reference())
+        }
+        Some(entry) => ExpectedMemoryEntryState::Deleted(entry.reference()),
+    };
+    if &current_expected != expected_entry || &current_expected != proposal.expected() {
+        return Err(crate::domain::DomainError::MemoryExpectedStateMismatch.into());
+    }
+    let pending_for_key = if action == MemoryResolutionAction::Approve {
+        MemoryRepository::load_pending_proposals_for_key(
+            tx,
+            proposal.namespace_id(),
+            proposal.normalized_key(),
+        )?
+    } else {
+        Vec::new()
+    };
+    if action == MemoryResolutionAction::Approve {
+        let creates_active_key =
+            matches!(proposal.operation(), MemoryProposalOperation::Set { .. })
+                && current
+                    .as_ref()
+                    .is_none_or(|entry| entry.reference().state() == MemoryEntryState::Deleted);
+        if creates_active_key
+            && MemoryRepository::count_active_entries(tx, proposal.namespace_id())? >= 1_024
+        {
+            return Err(PersistenceError::Capacity.into());
+        }
+    }
+    let _next_sequence = projection
+        .last_sequence
+        .checked_add(1)
+        .ok_or(PersistenceError::InvalidEventRecord)?;
+
+    if action == MemoryResolutionAction::Reject {
+        let event_id = EventId::from_uuid(ids.next_uuid());
+        let occurred_at_ms = clock.now_millis();
+        let resolution = MemoryProposalResolution::new(
+            proposal.reference(),
+            MemoryProposalStatus::Rejected,
+            approval_id,
+            Actor::Human,
+            occurred_at_ms,
+            event_id,
+        )?;
+        return Ok(ApplicationEvent::MemoryProposalRejected { resolution });
+    }
+
+    let entry = match (current.as_ref(), proposal.operation()) {
+        (None, MemoryProposalOperation::Set { candidate }) => {
+            let entry_id = MemoryEntryId::from_uuid(ids.next_uuid());
+            let version_id = MemoryEntryVersionId::from_uuid(ids.next_uuid());
+            let event_id = EventId::from_uuid(ids.next_uuid());
+            let occurred_at_ms = clock.now_millis();
+            MemoryEntryVersion::create_present(
+                proposal.namespace_id(),
+                entry_id,
+                version_id,
+                candidate.clone(),
+                Actor::Human,
+                occurred_at_ms,
+                Some(proposal.reference()),
+                event_id,
+            )?
+        }
+        (Some(current), MemoryProposalOperation::Set { candidate }) => {
+            let version_id = MemoryEntryVersionId::from_uuid(ids.next_uuid());
+            let event_id = EventId::from_uuid(ids.next_uuid());
+            let occurred_at_ms = clock.now_millis();
+            current.next_present(
+                version_id,
+                candidate.clone(),
+                Actor::Human,
+                occurred_at_ms,
+                Some(proposal.reference()),
+                event_id,
+            )?
+        }
+        (Some(current), MemoryProposalOperation::Delete) => {
+            let version_id = MemoryEntryVersionId::from_uuid(ids.next_uuid());
+            let event_id = EventId::from_uuid(ids.next_uuid());
+            let occurred_at_ms = clock.now_millis();
+            current.next_deleted(
+                version_id,
+                Actor::Human,
+                occurred_at_ms,
+                Some(proposal.reference()),
+                event_id,
+            )?
+        }
+        (None, MemoryProposalOperation::Delete) => {
+            return Err(crate::domain::DomainError::MemoryExpectedStateMismatch.into());
+        }
+    };
+    let resolution = MemoryProposalResolution::new(
+        proposal.reference(),
+        MemoryProposalStatus::Accepted,
+        approval_id,
+        Actor::Human,
+        entry.created_at_ms(),
+        entry.creation_event_id(),
+    )?;
+    let new_expected = match entry.reference().state() {
+        MemoryEntryState::Present => ExpectedMemoryEntryState::Present(entry.reference()),
+        MemoryEntryState::Deleted => ExpectedMemoryEntryState::Deleted(entry.reference()),
+    };
+    let mut expired_proposals = pending_for_key
+        .into_iter()
+        .filter(|sibling| sibling.reference() != proposal.reference())
+        .filter(|sibling| sibling.expected() != &new_expected)
+        .map(|sibling| {
+            MemoryProposalResolution::new(
+                sibling.reference(),
+                MemoryProposalStatus::Expired,
+                sibling.approval_id(),
+                Actor::Human,
+                entry.created_at_ms(),
+                entry.creation_event_id(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    expired_proposals.sort_by_key(|resolution| resolution.proposal().proposal_id());
+    Ok(ApplicationEvent::MemoryProposalAccepted {
+        resolution,
+        entry,
+        expired_proposals,
+    })
+}
+
+fn memory_mutation_event_id(event: &ApplicationEvent) -> Option<EventId> {
     match event {
         ApplicationEvent::MemoryEntrySet { entry, .. }
         | ApplicationEvent::MemoryEntryDeleted { entry, .. } => Some(entry.creation_event_id()),
+        ApplicationEvent::MemoryProposalCreated { proposal, .. } => {
+            Some(proposal.creation_event_id())
+        }
+        ApplicationEvent::MemoryProposalAccepted { resolution, .. }
+        | ApplicationEvent::MemoryProposalRejected { resolution } => {
+            Some(resolution.resolution_event_id())
+        }
         _ => None,
     }
 }
 
-fn direct_memory_event_object(event: &ApplicationEvent) -> Result<Option<ObjectRef>, AppError> {
+fn memory_mutation_event_object(event: &ApplicationEvent) -> Result<Option<ObjectRef>, AppError> {
     match event {
         ApplicationEvent::MemoryEntrySet { entry, .. }
         | ApplicationEvent::MemoryEntryDeleted { entry, .. } => {
@@ -2103,14 +2664,78 @@ fn direct_memory_event_object(event: &ApplicationEvent) -> Result<Option<ObjectR
                 reference.content_digest().clone(),
             )?))
         }
+        ApplicationEvent::MemoryProposalCreated { proposal, .. } => {
+            Ok(Some(proposal.object_ref()?))
+        }
+        ApplicationEvent::MemoryProposalAccepted { resolution, .. }
+        | ApplicationEvent::MemoryProposalRejected { resolution } => Ok(Some(ObjectRef::new(
+            "memory_proposal",
+            resolution.proposal().proposal_id().to_string(),
+            resolution.proposal().version(),
+            resolution.proposal().content_digest().clone(),
+        )?)),
         _ => Ok(None),
     }
 }
 
-fn persist_direct_memory_event(
+fn persist_memory_mutation_event(
     tx: &ImmediateTransaction<'_>,
     committed: &crate::app::EventEnvelope,
 ) -> Result<(), AppError> {
+    if let ApplicationEvent::MemoryProposalCreated { proposal, approval } = &committed.event {
+        MemoryRepository::insert_proposal_with_approval(
+            tx,
+            committed.sequence,
+            proposal,
+            approval,
+        )?;
+        return Ok(());
+    }
+    if let ApplicationEvent::MemoryProposalRejected { resolution } = &committed.event {
+        let approval = MemoryRepository::load_memory_approval(tx, resolution.approval_id())?
+            .ok_or(PersistenceError::MemoryRowMismatch)?;
+        let resolved = approval
+            .resolve(
+                ApprovalStatus::Rejected,
+                Actor::Human,
+                resolution.resolved_at_ms(),
+            )
+            .map_err(|_| PersistenceError::MemoryRowMismatch)?;
+        MemoryRepository::resolve_proposal(tx, committed.sequence, resolution, &resolved)?;
+        return Ok(());
+    }
+    if let ApplicationEvent::MemoryProposalAccepted {
+        resolution,
+        entry,
+        expired_proposals,
+    } = &committed.event
+    {
+        let approval = MemoryRepository::load_memory_approval(tx, resolution.approval_id())?
+            .ok_or(PersistenceError::MemoryRowMismatch)?;
+        let resolved = approval
+            .resolve(
+                ApprovalStatus::Accepted,
+                Actor::Human,
+                resolution.resolved_at_ms(),
+            )
+            .map_err(|_| PersistenceError::MemoryRowMismatch)?;
+        MemoryRepository::resolve_proposal(tx, committed.sequence, resolution, &resolved)?;
+        MemoryRepository::insert_entry_version(tx, committed.sequence, entry)?;
+        MemoryRepository::replace_current_entry(tx, entry)?;
+        for sibling in expired_proposals {
+            let approval = MemoryRepository::load_memory_approval(tx, sibling.approval_id())?
+                .ok_or(PersistenceError::MemoryRowMismatch)?;
+            let expired = approval
+                .resolve(
+                    ApprovalStatus::Expired,
+                    Actor::Human,
+                    sibling.resolved_at_ms(),
+                )
+                .map_err(|_| PersistenceError::MemoryRowMismatch)?;
+            MemoryRepository::resolve_proposal(tx, committed.sequence, sibling, &expired)?;
+        }
+        return Ok(());
+    }
     let (entry, expired_proposals) = match &committed.event {
         ApplicationEvent::MemoryEntrySet {
             entry,
@@ -2674,7 +3299,7 @@ fn prepare_event(
         | ApplicationCommand::ListEpisodicSummaries { .. }
         | ApplicationCommand::ShowEpisodicSummary { .. }
         | ApplicationCommand::BuildMemorySnapshot { .. } => {
-            Err(AppError::MemoryCommandNotImplemented)
+            unreachable!("memory commands are dispatched before prepare_event")
         }
         ApplicationCommand::ActivateAgentProfileVersion { .. }
         | ApplicationCommand::CreateSkill { .. }

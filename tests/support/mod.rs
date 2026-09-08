@@ -641,6 +641,23 @@ impl DerefMut for TestApp {
 }
 
 impl TestApp {
+    pub fn into_runtime(self) -> RuntimeFixture {
+        let TestApp {
+            _temporary_directory,
+            paths,
+            service,
+            ..
+        } = self;
+        let session_id = service.session_id();
+        let runtime = ApplicationRuntime::spawn_application(service, 32).unwrap();
+        RuntimeFixture {
+            _temporary_directory,
+            paths,
+            session_id,
+            runtime,
+        }
+    }
+
     pub fn open_database(&self) -> Database {
         Database::open(&self.paths).unwrap()
     }

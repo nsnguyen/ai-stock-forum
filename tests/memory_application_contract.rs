@@ -254,19 +254,10 @@ fn memory_application_vocabulary_has_exact_capabilities_and_mappings() {
 }
 
 #[test]
-fn staged_errors_are_content_free_and_have_exact_codes() {
-    assert_eq!(
-        AppError::MemoryCommandNotImplemented.code(),
-        "memory_command_not_implemented"
-    );
+fn defensive_dispatch_error_is_content_free_and_has_an_exact_code() {
     assert_eq!(
         AppError::WrongMemoryCommandDispatcher.code(),
         "wrong_memory_command_dispatcher"
-    );
-    assert!(
-        !AppError::MemoryCommandNotImplemented
-            .to_string()
-            .contains("private")
     );
     assert!(
         !AppError::WrongMemoryCommandDispatcher
@@ -276,31 +267,23 @@ fn staged_errors_are_content_free_and_have_exact_codes() {
 }
 
 #[test]
-fn proposal_and_resolution_mutations_remain_deliberately_staged_through_the_service() {
+fn service_dispatch_reaches_all_fourteen_memory_command_variants() {
     let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
     let mut app = support::app_with_policy(Arc::new(policy.clone()));
-    let event_count = app.max_event_sequence();
-    let clock_calls = app.clock.calls();
-    let id_calls = app.ids.calls();
-    for (index, (actor, command, capability)) in commands().into_iter().skip(2).take(3).enumerate()
-    {
+    for (index, (actor, command, capability)) in commands().into_iter().enumerate() {
         let envelope = CommandEnvelope {
             command_id: CommandId::from_uuid(uuid(1_000 + index as u128)),
             correlation_id: CorrelationId::from_uuid(uuid(2_000 + index as u128)),
             actor,
             command,
         };
-        assert_eq!(
-            app.execute(envelope),
-            Err(AppError::MemoryCommandNotImplemented),
-            "staged command {index}",
-        );
+        let result = app.execute(envelope);
+        assert!(!matches!(
+            result,
+            Err(AppError::WrongMemoryCommandDispatcher)
+        ));
         assert_eq!(policy.capabilities().last(), Some(&capability));
     }
-    assert_eq!(app.max_event_sequence(), event_count);
-    assert_eq!(app.count_rows("command_receipts"), 0);
-    assert_eq!(app.clock.calls(), clock_calls);
-    assert_eq!(app.ids.calls(), id_calls);
 }
 
 #[test]
@@ -373,7 +356,11 @@ fn memory_actor_matrix_is_exhaustive_and_runs_before_policy() {
             command,
         });
         if index == 2 {
-            assert_eq!(result, Err(AppError::MemoryCommandNotImplemented));
+            assert!(!matches!(result, Err(AppError::CapabilityDenied { .. })));
+            assert!(!matches!(
+                result,
+                Err(AppError::WrongMemoryCommandDispatcher)
+            ));
             assert_eq!(policy.calls(), calls + 1);
         } else {
             assert_eq!(

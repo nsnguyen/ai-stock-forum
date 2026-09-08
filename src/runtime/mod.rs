@@ -16,10 +16,11 @@ use thiserror::Error;
 use crate::agents::{AgentProfileDraft, ProfileEditPreview, ProfileTemplate};
 use crate::app::{
     AgentProfileSelector, AgentSkillAssignmentPreview, AppError, ApplicationCommand,
-    ApplicationService, ApplicationWorker, CommandOutcome, MemoryEditPreview, ShutdownReason,
+    ApplicationService, ApplicationWorker, CommandOutcome, MemoryEditPreview,
+    MemoryProposalResolutionReview, ShutdownReason,
 };
 use crate::domain::{AgentProfileId, AgentProfileVersionId, SkillId, SkillVersionId};
-use crate::memory::MemoryEntryDraft;
+use crate::memory::{MemoryEntryDraft, MemoryProposalRef};
 use crate::panic_boundary::catch_sensitive_unwind;
 use crate::skills::{SkillDraft, SkillEditPreview, SkillVersionRef};
 
@@ -108,6 +109,20 @@ pub trait CommandExecutor: Send + 'static {
         _display_key: String,
     ) -> Result<MemoryEditPreview, AppError> {
         Err(crate::domain::DomainError::MemoryReviewUnavailable.into())
+    }
+
+    fn preview_memory_proposal_approval(
+        &mut self,
+        _proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        Err(crate::domain::DomainError::MemoryProposalReviewUnavailable.into())
+    }
+
+    fn preview_memory_proposal_rejection(
+        &mut self,
+        _proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        Err(crate::domain::DomainError::MemoryProposalReviewUnavailable.into())
     }
 
     fn cancel_memory_review(&mut self) -> Result<(), AppError> {
@@ -208,6 +223,20 @@ impl CommandExecutor for ApplicationService {
         display_key: String,
     ) -> Result<MemoryEditPreview, AppError> {
         Self::preview_memory_delete(self, selector, display_key)
+    }
+
+    fn preview_memory_proposal_approval(
+        &mut self,
+        proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        Self::preview_memory_proposal_approval(self, proposal)
+    }
+
+    fn preview_memory_proposal_rejection(
+        &mut self,
+        proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        Self::preview_memory_proposal_rejection(self, proposal)
     }
 
     fn cancel_memory_review(&mut self) -> Result<(), AppError> {
@@ -314,6 +343,14 @@ enum Request {
         selector: AgentProfileSelector,
         display_key: String,
         response: Sender<Result<MemoryEditPreview, RuntimeError>>,
+    },
+    PreviewMemoryProposalApproval {
+        proposal: MemoryProposalRef,
+        response: Sender<Result<MemoryProposalResolutionReview, RuntimeError>>,
+    },
+    PreviewMemoryProposalRejection {
+        proposal: MemoryProposalRef,
+        response: Sender<Result<MemoryProposalResolutionReview, RuntimeError>>,
     },
     CancelMemoryReview {
         response: Sender<Result<(), RuntimeError>>,
@@ -736,6 +773,23 @@ impl RuntimeClient {
         })
     }
 
+    pub fn preview_memory_proposal_approval(
+        &self,
+        proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, RuntimeError> {
+        self.request_reply(|response| Request::PreviewMemoryProposalApproval { proposal, response })
+    }
+
+    pub fn preview_memory_proposal_rejection(
+        &self,
+        proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, RuntimeError> {
+        self.request_reply(|response| Request::PreviewMemoryProposalRejection {
+            proposal,
+            response,
+        })
+    }
+
     pub fn cancel_memory_review(&self) -> Result<(), RuntimeError> {
         self.request_reply(|response| Request::CancelMemoryReview { response })
     }
@@ -1120,6 +1174,20 @@ impl CommandExecutor for ServiceWorker {
         self.service.preview_memory_delete(selector, display_key)
     }
 
+    fn preview_memory_proposal_approval(
+        &mut self,
+        proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        self.service.preview_memory_proposal_approval(proposal)
+    }
+
+    fn preview_memory_proposal_rejection(
+        &mut self,
+        proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        self.service.preview_memory_proposal_rejection(proposal)
+    }
+
     fn cancel_memory_review(&mut self) -> Result<(), AppError> {
         self.service.cancel_memory_review()
     }
@@ -1346,6 +1414,16 @@ fn execute_request(executor: &mut dyn CommandExecutor, request: Request, shared:
         } => {
             send_runtime_reply(executor, shared, response, |executor| {
                 executor.preview_memory_delete(selector, display_key)
+            });
+        }
+        Request::PreviewMemoryProposalApproval { proposal, response } => {
+            send_runtime_reply(executor, shared, response, |executor| {
+                executor.preview_memory_proposal_approval(proposal)
+            });
+        }
+        Request::PreviewMemoryProposalRejection { proposal, response } => {
+            send_runtime_reply(executor, shared, response, |executor| {
+                executor.preview_memory_proposal_rejection(proposal)
             });
         }
         Request::CancelMemoryReview { response } => {

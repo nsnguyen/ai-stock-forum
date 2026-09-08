@@ -37,4 +37,5 @@ pub use review::{
 pub(crate) use review::{
     MemoryEditPreviewOutcome, MemoryEditReviewBinding, MemoryResolutionReviewBinding,
     PreparedMemoryEdit, ReservedMemoryReview, prepare_direct_memory_edit,
+    prepare_memory_resolution_review,
 };
