@@ -67,6 +67,7 @@ struct WorkflowExecutor {
     entry: Option<MemoryEntryView>,
     proposal: Option<MemoryProposalView>,
     edit_preview: Option<Result<MemoryEditPreview, AppError>>,
+    edit_previews: VecDeque<Result<MemoryEditPreview, AppError>>,
     resolution_preview: Option<Result<MemoryProposalResolutionReview, AppError>>,
     execution_gate: Option<(
         crossbeam_channel::Sender<()>,
@@ -127,10 +128,11 @@ impl CommandExecutor for WorkflowExecutor {
         _selector: AgentProfileSelector,
         _candidate: MemoryEntryDraft,
     ) -> Result<MemoryEditPreview, AppError> {
-        let result = self
-            .edit_preview
-            .clone()
-            .unwrap_or(Err(AppError::WrongMemoryCommandDispatcher));
+        let result = self.edit_previews.pop_front().unwrap_or_else(|| {
+            self.edit_preview
+                .clone()
+                .unwrap_or(Err(AppError::WrongMemoryCommandDispatcher))
+        });
         if matches!(&result, Ok(MemoryEditPreview::Review(_))) {
             self.state.lock().unwrap().preview_count += 1;
         }
@@ -388,6 +390,7 @@ fn workflow_runtime_with_entry_view(
             entry,
             proposal,
             edit_preview,
+            edit_previews: VecDeque::new(),
             resolution_preview,
             execution_gate: None,
             panic_on_mutation: false,
@@ -946,6 +949,217 @@ fn fallback_set_rejects_a_cross_wired_delete_preview_before_render_or_submission
     assert!(output.contains("Memory editor [Value]"));
     assert!(!output.contains("Memory set review"));
     assert!(!output.contains("Memory delete review"));
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
+}
+
+fn seeded_set_candidate() -> MemoryEntryDraft {
+    MemoryEntryDraft::new(
+        "Earnings Thesis".into(),
+        "replacement value".into(),
+        vec!["fresh".into()],
+    )
+    .unwrap()
+}
+
+fn seeded_set_input() -> Vec<u8> {
+    format!(
+        "/memory set {} \"Earnings Thesis\"\nreplacement value\nfresh\n",
+        profile().profile_id()
+    )
+    .into_bytes()
+}
+
+#[test]
+fn fallback_seeded_set_rejects_another_present_version_for_the_same_key() {
+    let current = entry(&profile());
+    let alternate = current
+        .next_present(
+            MemoryEntryVersionId::from_uuid(Uuid::from_u128(301)),
+            MemoryEntryDraft::new(
+                "Earnings Thesis".into(),
+                "alternate prior value".into(),
+                vec!["alternate".into()],
+            )
+            .unwrap(),
+            Actor::Human,
+            1_700_000_000_012,
+            None,
+            EventId::from_uuid(Uuid::from_u128(302)),
+        )
+        .unwrap();
+    let candidate = seeded_set_candidate();
+    let mut review = edit_review(
+        MemoryMutationKind::Set,
+        ExpectedMemoryEntryState::Present(alternate.reference()),
+        Some(candidate.clone()),
+        b"seeded-alternate-present",
+    );
+    review.diff = vec![
+        memory_diff(
+            MemoryField::Value,
+            MemoryFieldValue::Text("alternate prior value".into()),
+            MemoryFieldValue::Text(candidate.value().into()),
+        ),
+        memory_diff(
+            MemoryField::PurposeTags,
+            MemoryFieldValue::Tags(vec!["alternate".into()]),
+            MemoryFieldValue::Tags(candidate.purpose_tags().to_vec()),
+        ),
+    ];
+
+    assert_rejected_edit_preview(Some(current), review, seeded_set_input());
+}
+
+#[test]
+fn fallback_seeded_set_rejects_absent_expected_state() {
+    let candidate = seeded_set_candidate();
+    let review = edit_review(
+        MemoryMutationKind::Set,
+        ExpectedMemoryEntryState::Absent,
+        Some(candidate),
+        b"seeded-absent",
+    );
+
+    assert_rejected_edit_preview(Some(entry(&profile())), review, seeded_set_input());
+}
+
+#[test]
+fn fallback_seeded_set_rejects_deleted_expected_state() {
+    let current = entry(&profile());
+    let deleted = current
+        .next_deleted(
+            MemoryEntryVersionId::from_uuid(Uuid::from_u128(303)),
+            Actor::Human,
+            1_700_000_000_013,
+            None,
+            EventId::from_uuid(Uuid::from_u128(304)),
+        )
+        .unwrap();
+    let review = edit_review(
+        MemoryMutationKind::Set,
+        ExpectedMemoryEntryState::Deleted(deleted.reference()),
+        Some(seeded_set_candidate()),
+        b"seeded-deleted",
+    );
+
+    assert_rejected_edit_preview(Some(current), review, seeded_set_input());
+}
+
+#[test]
+fn fallback_seeded_set_rejects_false_or_incomplete_before_to_candidate_diff() {
+    let current = entry(&profile());
+    let candidate = seeded_set_candidate();
+    let mut review = edit_review(
+        MemoryMutationKind::Set,
+        ExpectedMemoryEntryState::Present(current.reference()),
+        Some(candidate),
+        b"seeded-false-diff",
+    );
+    review.diff[0].before = MemoryFieldValue::Text("fabricated prior value".into());
+    review.diff.pop();
+
+    assert_rejected_edit_preview(Some(current), review, seeded_set_input());
+}
+
+#[test]
+fn fallback_unseeded_set_rejects_a_race_created_present_entry() {
+    let candidate = seeded_set_candidate();
+    let review = edit_review(
+        MemoryMutationKind::Set,
+        ExpectedMemoryEntryState::Present(entry(&profile()).reference()),
+        Some(candidate),
+        b"unseeded-race-present",
+    );
+
+    assert_rejected_edit_preview(None, review, seeded_set_input());
+}
+
+#[test]
+fn fallback_seeded_set_retains_the_loaded_version_across_back_and_repreview() {
+    let current = entry(&profile());
+    let candidate = seeded_set_candidate();
+    let canonical = edit_review(
+        MemoryMutationKind::Set,
+        ExpectedMemoryEntryState::Present(current.reference()),
+        Some(candidate.clone()),
+        b"seeded-first-preview",
+    );
+    let alternate = current
+        .next_present(
+            MemoryEntryVersionId::from_uuid(Uuid::from_u128(305)),
+            MemoryEntryDraft::new(
+                "Earnings Thesis".into(),
+                "alternate prior value".into(),
+                vec!["alternate".into()],
+            )
+            .unwrap(),
+            Actor::Human,
+            1_700_000_000_014,
+            None,
+            EventId::from_uuid(Uuid::from_u128(306)),
+        )
+        .unwrap();
+    let mut substituted = edit_review(
+        MemoryMutationKind::Set,
+        ExpectedMemoryEntryState::Present(alternate.reference()),
+        Some(candidate.clone()),
+        b"seeded-second-preview",
+    );
+    substituted.diff = vec![
+        memory_diff(
+            MemoryField::Value,
+            MemoryFieldValue::Text("alternate prior value".into()),
+            MemoryFieldValue::Text(candidate.value().into()),
+        ),
+        memory_diff(
+            MemoryField::PurposeTags,
+            MemoryFieldValue::Tags(vec!["alternate".into()]),
+            MemoryFieldValue::Tags(candidate.purpose_tags().to_vec()),
+        ),
+    ];
+    let state = Arc::new(Mutex::new(WorkflowExecutorState::default()));
+    let runtime = ApplicationRuntime::spawn(
+        WorkflowExecutor {
+            state: state.clone(),
+            entry: Some(MemoryEntryView {
+                profile: profile().reference(),
+                entry: current,
+            }),
+            proposal: None,
+            edit_preview: None,
+            edit_previews: VecDeque::from([
+                Ok(MemoryEditPreview::Review(canonical)),
+                Ok(MemoryEditPreview::Review(substituted)),
+            ]),
+            resolution_preview: None,
+            execution_gate: None,
+            panic_on_mutation: false,
+        },
+        8,
+    )
+    .unwrap();
+    let input = format!(
+        "/memory set {} \"Earnings Thesis\"\nreplacement value\nfresh\n:back\nfresh\n",
+        profile().profile_id()
+    );
+    let runner = FallbackRunner::new(runtime.client(), false);
+    let error = runner
+        .run(Cursor::new(input.into_bytes()), Vec::new())
+        .unwrap_err();
+
+    assert!(matches!(error, UiError::Panicked));
+    assert!(mutation_commands(&state).is_empty());
+    assert_eq!(state.lock().unwrap().preview_count, 2);
+    assert_eq!(state.lock().unwrap().cancel_count, 2);
+    assert_eq!(
+        runner
+            .run(Cursor::new(b":cancel\n".to_vec()), Vec::new())
+            .unwrap(),
+        ShutdownReason::InputClosed
+    );
+    assert_eq!(state.lock().unwrap().cancel_count, 2);
     runtime
         .finish_and_join(ShutdownReason::ApplicationError)
         .unwrap();
@@ -1789,6 +2003,7 @@ fn enqueue_backpressure_retains_the_registered_review_for_exact_retry() {
             entry: None,
             proposal: None,
             edit_preview: Some(Ok(MemoryEditPreview::Review(review.clone()))),
+            edit_previews: VecDeque::new(),
             resolution_preview: None,
             execution_gate: Some((entered_tx, release_rx)),
             panic_on_mutation: false,
@@ -1897,6 +2112,7 @@ fn non_application_worker_failure_clears_confirmation_and_requires_a_fresh_revie
             entry: None,
             proposal: None,
             edit_preview: Some(Ok(MemoryEditPreview::Review(review.clone()))),
+            edit_previews: VecDeque::new(),
             resolution_preview: None,
             execution_gate: None,
             panic_on_mutation: true,
@@ -2217,6 +2433,7 @@ fn backpressure_runtime(
             entry: None,
             proposal: None,
             edit_preview: Some(Ok(MemoryEditPreview::Review(review.clone()))),
+            edit_previews: VecDeque::new(),
             resolution_preview: None,
             execution_gate: Some((entered_tx, release_rx)),
             panic_on_mutation: false,

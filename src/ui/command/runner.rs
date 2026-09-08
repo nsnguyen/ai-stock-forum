@@ -21,7 +21,8 @@ use crate::{
     domain::Digest,
     memory::{
         ExpectedMemoryEntryState, MemoryEditReview, MemoryEntryDraft, MemoryEntryState,
-        MemoryField, MemoryFieldDiff, MemoryFieldValue, MemoryMutationKind, NormalizedMemoryKey,
+        MemoryEntryVersion, MemoryField, MemoryFieldDiff, MemoryFieldValue, MemoryMutationKind,
+        NormalizedMemoryKey,
     },
     panic_boundary::catch_sensitive_unwind,
     persistence::PersistenceError,
@@ -728,9 +729,13 @@ enum SkillWorkflow {
 }
 
 enum MemoryWorkflow {
-    Editing(MemoryEditor),
+    Editing {
+        editor: MemoryEditor,
+        seed: Option<MemoryEntryVersion>,
+    },
     SetReview {
         editor: MemoryEditor,
+        seed: Option<MemoryEntryVersion>,
         review: MemoryEditReview,
     },
     SetConfirmation {
@@ -982,7 +987,7 @@ impl FallbackRunner {
                 return Ok(());
             }
         };
-        let editor = match self.client.submit(ApplicationCommand::ShowMemoryEntry {
+        let (editor, seed) = match self.client.submit(ApplicationCommand::ShowMemoryEntry {
             selector: agent.clone(),
             display_key: key.clone(),
         }) {
@@ -1000,8 +1005,9 @@ impl FallbackRunner {
                     .map_err(|_| UiError::Write)?;
                     return Ok(());
                 }
-                match MemoryEditor::for_set(agent, view.entry) {
-                    Ok(editor) => editor,
+                let seed = view.entry;
+                match MemoryEditor::for_set(agent, seed.clone()) {
+                    Ok(editor) => (editor, Some(seed)),
                     Err(error) => {
                         TextRenderer::render_memory_editor_error(error.code(), writer)
                             .map_err(|_| UiError::Write)?;
@@ -1014,7 +1020,7 @@ impl FallbackRunner {
                 editor
                     .submit_line(key)
                     .map_err(|error| UiError::Runtime(RuntimeError::Application(error.into())))?;
-                editor
+                (editor, None)
             }
             Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
                 TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write)?;
@@ -1024,7 +1030,7 @@ impl FallbackRunner {
         };
         TextRenderer::render_memory_editor(&editor, writer).map_err(|_| UiError::Write)?;
         *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? =
-            Some(MemoryWorkflow::Editing(editor));
+            Some(MemoryWorkflow::Editing { editor, seed });
         Ok(())
     }
 
@@ -1142,7 +1148,9 @@ impl FallbackRunner {
             .take()
             .ok_or(UiError::Panicked)?;
         let rendered = match &workflow {
-            MemoryWorkflow::Editing(editor) => TextRenderer::render_memory_editor(editor, writer),
+            MemoryWorkflow::Editing { editor, .. } => {
+                TextRenderer::render_memory_editor(editor, writer)
+            }
             MemoryWorkflow::SetReview { review, .. }
             | MemoryWorkflow::DeleteReview { review, .. } => {
                 TextRenderer::render_memory_edit_review(review, writer)
@@ -1187,7 +1195,7 @@ impl FallbackRunner {
             .take()
             .ok_or(UiError::Panicked)?;
         match state {
-            MemoryWorkflow::Editing(mut editor) => {
+            MemoryWorkflow::Editing { mut editor, seed } => {
                 if line.trim() == "/quit" {
                     TextRenderer::render_memory_cancelled(writer).map_err(|_| UiError::Write)?;
                     return self
@@ -1205,7 +1213,7 @@ impl FallbackRunner {
                             TextRenderer::render_memory_editor_error(error.code(), writer)
                                 .map_err(|_| UiError::Write)?;
                             *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? =
-                                Some(MemoryWorkflow::Editing(editor));
+                                Some(MemoryWorkflow::Editing { editor, seed });
                             return Ok(());
                         }
                     }
@@ -1227,7 +1235,7 @@ impl FallbackRunner {
                             ) => {
                                 editor.report_error(runtime_error_code(&error));
                                 *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? =
-                                    Some(MemoryWorkflow::Editing(editor));
+                                    Some(MemoryWorkflow::Editing { editor, seed });
                                 TextRenderer::render_runtime_error(&error, writer)
                                     .map_err(|_| UiError::Write)?;
                                 return self.render_memory_workflow(writer);
@@ -1238,7 +1246,7 @@ impl FallbackRunner {
                             MemoryEditPreview::NoChange(no_change) => {
                                 editor.clear_review();
                                 *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? =
-                                    Some(MemoryWorkflow::Editing(editor));
+                                    Some(MemoryWorkflow::Editing { editor, seed });
                                 TextRenderer::render_memory_no_change(no_change, writer)
                                     .map_err(|_| UiError::Write)?;
                                 self.render_memory_workflow(writer)
@@ -1248,6 +1256,7 @@ impl FallbackRunner {
                                     &review,
                                     &requested_selector,
                                     &requested_candidate,
+                                    seed.as_ref(),
                                 ) {
                                     return self.reject_new_memory_edit_review();
                                 }
@@ -1260,7 +1269,11 @@ impl FallbackRunner {
                                 self.install_memory_workflow(
                                     {
                                         self.register_memory_review()?;
-                                        MemoryWorkflow::SetReview { editor, review }
+                                        MemoryWorkflow::SetReview {
+                                            editor,
+                                            seed,
+                                            review,
+                                        }
                                     },
                                     writer,
                                 )
@@ -1271,14 +1284,16 @@ impl FallbackRunner {
                         TextRenderer::render_memory_editor(&editor, writer)
                             .map_err(|_| UiError::Write)?;
                         *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? =
-                            Some(MemoryWorkflow::Editing(editor));
+                            Some(MemoryWorkflow::Editing { editor, seed });
                         Ok(())
                     }
                 }
             }
-            MemoryWorkflow::SetReview { editor, review } => {
-                self.process_set_review(line, editor, review, writer)
-            }
+            MemoryWorkflow::SetReview {
+                editor,
+                seed,
+                review,
+            } => self.process_set_review(line, editor, seed, review, writer),
             MemoryWorkflow::DeleteReview { review } => {
                 self.process_delete_review(line, review, writer)
             }
@@ -1297,6 +1312,7 @@ impl FallbackRunner {
         &self,
         line: &str,
         mut editor: MemoryEditor,
+        seed: Option<MemoryEntryVersion>,
         review: MemoryEditReview,
         writer: &mut W,
     ) -> Result<(), UiError> {
@@ -1333,10 +1349,17 @@ impl FallbackRunner {
             self.cancel_registered_memory_review()?;
             let _ = editor.back();
             *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? =
-                Some(MemoryWorkflow::Editing(editor));
+                Some(MemoryWorkflow::Editing { editor, seed });
             return self.render_memory_workflow(writer);
         }
-        self.retain_memory_review(MemoryWorkflow::SetReview { editor, review }, writer)
+        self.retain_memory_review(
+            MemoryWorkflow::SetReview {
+                editor,
+                seed,
+                review,
+            },
+            writer,
+        )
     }
 
     fn process_delete_review<W: Write>(
@@ -2297,6 +2320,7 @@ fn memory_set_review_matches_request(
     review: &MemoryEditReview,
     requested_selector: &AgentProfileSelector,
     requested_candidate: &MemoryEntryDraft,
+    seed: Option<&MemoryEntryVersion>,
 ) -> bool {
     if review.operation != MemoryMutationKind::Set
         || review.candidate.as_ref() != Some(requested_candidate)
@@ -2305,17 +2329,18 @@ fn memory_set_review_matches_request(
     {
         return false;
     }
-    match &review.expected {
-        ExpectedMemoryEntryState::Absent => {
+    match (seed, &review.expected) {
+        (Some(seed), ExpectedMemoryEntryState::Present(entry)) => {
+            *entry == seed.reference()
+                && entry.namespace_id() == review.namespace_id
+                && seeded_present_set_diff(seed, requested_candidate)
+                    .is_some_and(|expected| review.diff == expected)
+        }
+        (Some(_), _) | (None, ExpectedMemoryEntryState::Present(_)) => false,
+        (None, ExpectedMemoryEntryState::Absent) => {
             absent_set_diff_matches(&review.diff, requested_candidate)
         }
-        ExpectedMemoryEntryState::Present(entry) => {
-            entry.namespace_id() == review.namespace_id
-                && entry.state() == MemoryEntryState::Present
-                && *entry.normalized_key() == requested_candidate.normalized_key()
-                && present_set_diff_matches(&review.diff, requested_candidate)
-        }
-        ExpectedMemoryEntryState::Deleted(entry) => {
+        (None, ExpectedMemoryEntryState::Deleted(entry)) => {
             entry.namespace_id() == review.namespace_id
                 && entry.state() == MemoryEntryState::Deleted
                 && *entry.normalized_key() == requested_candidate.normalized_key()
@@ -2387,22 +2412,47 @@ fn absent_set_diff_matches(diff: &[MemoryFieldDiff], candidate: &MemoryEntryDraf
         && tags_value_matches(&diff[3].after, candidate.purpose_tags())
 }
 
-fn present_set_diff_matches(diff: &[MemoryFieldDiff], candidate: &MemoryEntryDraft) -> bool {
-    diff.iter().all(|item| match item.field {
-        MemoryField::DisplayKey => {
-            matches!(item.before, MemoryFieldValue::Text(_))
-                && text_value_matches(&item.after, candidate.display_key())
-        }
-        MemoryField::Value => {
-            matches!(item.before, MemoryFieldValue::Text(_))
-                && text_value_matches(&item.after, candidate.value())
-        }
-        MemoryField::PurposeTags => {
-            matches!(item.before, MemoryFieldValue::Tags(_))
-                && tags_value_matches(&item.after, candidate.purpose_tags())
-        }
-        MemoryField::State => false,
-    })
+fn seeded_present_set_diff(
+    seed: &MemoryEntryVersion,
+    candidate: &MemoryEntryDraft,
+) -> Option<Vec<MemoryFieldDiff>> {
+    if seed.reference().state() != MemoryEntryState::Present
+        || *seed.reference().normalized_key() != candidate.normalized_key()
+    {
+        return None;
+    }
+    let value = seed.value()?;
+    let before = [
+        MemoryFieldValue::Text(seed.display_key().to_owned()),
+        MemoryFieldValue::State(MemoryEntryState::Present),
+        MemoryFieldValue::Text(value.to_owned()),
+        MemoryFieldValue::Tags(seed.purpose_tags().to_vec()),
+    ];
+    let after = [
+        MemoryFieldValue::Text(candidate.display_key().to_owned()),
+        MemoryFieldValue::State(MemoryEntryState::Present),
+        MemoryFieldValue::Text(candidate.value().to_owned()),
+        MemoryFieldValue::Tags(candidate.purpose_tags().to_vec()),
+    ];
+    Some(
+        [
+            MemoryField::DisplayKey,
+            MemoryField::State,
+            MemoryField::Value,
+            MemoryField::PurposeTags,
+        ]
+        .into_iter()
+        .zip(before)
+        .zip(after)
+        .filter_map(|((field, before), after)| {
+            (before != after).then_some(MemoryFieldDiff {
+                field,
+                before,
+                after,
+            })
+        })
+        .collect(),
+    )
 }
 
 fn deleted_set_diff_matches(diff: &[MemoryFieldDiff], candidate: &MemoryEntryDraft) -> bool {
