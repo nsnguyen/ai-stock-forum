@@ -3533,8 +3533,8 @@ fn parse_id<T: FromStr>(value: &str) -> Result<T, PersistenceError> {
         .parse()
         .map_err(|_| PersistenceError::MemoryRowMismatch)
 }
-fn query(_: rusqlite::Error) -> PersistenceError {
-    PersistenceError::QueryFailed
+fn query(error: rusqlite::Error) -> PersistenceError {
+    super::database::persistence_error(error)
 }
 fn integrity(_: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::MemoryRowMismatch
@@ -3645,5 +3645,25 @@ fn actor_json(actor: Actor) -> serde_json::Value {
         Actor::Human => serde_json::json!("Human"),
         Actor::System => serde_json::json!("System"),
         Actor::Agent(id) => serde_json::json!({"Agent":id}),
+    }
+}
+
+#[cfg(test)]
+mod task_13_tests {
+    use rusqlite::{Error as SqliteError, ffi};
+
+    use super::*;
+
+    #[test]
+    fn memory_queries_map_sqlite_capacity_codes_without_leaking_messages() {
+        for code in [ffi::SQLITE_FULL, ffi::SQLITE_TOOBIG] {
+            let mapped = query(SqliteError::SqliteFailure(
+                ffi::Error::new(code),
+                Some("sensitive sqlite detail".to_owned()),
+            ));
+            assert_eq!(mapped, PersistenceError::Capacity);
+            assert_eq!(mapped.code(), "memory_proposal_capacity_reached");
+            assert!(!mapped.to_string().contains("sensitive"));
+        }
     }
 }

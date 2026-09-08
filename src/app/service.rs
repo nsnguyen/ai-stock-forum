@@ -85,6 +85,8 @@ pub trait CommandTransactionHook: Send + Sync {
 
     fn before_profile_review_operation(&self, _command_id: CommandId) {}
 
+    fn before_memory_review_operation(&self, _command_id: CommandId) {}
+
     fn after_profile_name_precheck(
         &self,
         _transaction: &rusqlite::Transaction<'_>,
@@ -97,6 +99,49 @@ pub trait CommandTransactionHook: Send + Sync {
         &self,
         _transaction: &rusqlite::Transaction<'_>,
         _command_id: CommandId,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn after_memory_review_reservation(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+        _command_id: CommandId,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn after_memory_proposal_insert(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn after_memory_approval_write(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn after_memory_entry_insert(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn after_memory_resolution_insert(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn after_memory_current_update(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
     ) -> Result<(), PersistenceError> {
         Ok(())
     }
@@ -1330,6 +1375,10 @@ impl CommandExecutor {
             replay_transaction.commit()?;
             self.hook
                 .before_profile_review_operation(envelope.command_id);
+            if is_reviewed_memory_mutation(&request.command) {
+                self.hook
+                    .before_memory_review_operation(envelope.command_id);
+            }
         }
         let profile_review_operation = matches!(
             &request.command,
@@ -1725,6 +1774,10 @@ impl CommandExecutor {
                             .reserve_direct(envelope.command_id, review_token, &binding)
                             .map_err(AppError::from)?;
                         memory_reserved = Some(reserved);
+                        self.hook.after_memory_review_reservation(
+                            transaction.transaction(),
+                            envelope.command_id,
+                        )?;
                         prepare_direct_memory_mutation(
                             &transaction,
                             &projection,
@@ -1756,6 +1809,10 @@ impl CommandExecutor {
                             .reserve_resolution(envelope.command_id, review_token, &binding)
                             .map_err(AppError::from)?;
                         memory_reserved = Some(reserved);
+                        self.hook.after_memory_review_reservation(
+                            transaction.transaction(),
+                            envelope.command_id,
+                        )?;
                         prepare_memory_resolution(
                             &transaction,
                             &projection,
@@ -1807,7 +1864,7 @@ impl CommandExecutor {
                 };
                 let committed = EventRepository::append(&transaction, pending)?;
                 self.hook.after_event_append(transaction.transaction())?;
-                persist_memory_mutation_event(&transaction, &committed)?;
+                persist_memory_mutation_event(&transaction, &committed, self.hook.as_ref())?;
                 reduce(&mut projection, &committed)?;
                 if let ApplicationEvent::AgentProfileCreated { profile }
                 | ApplicationEvent::AgentProfileVersionActivated { profile, .. } =
@@ -2681,6 +2738,7 @@ fn memory_mutation_event_object(event: &ApplicationEvent) -> Result<Option<Objec
 fn persist_memory_mutation_event(
     tx: &ImmediateTransaction<'_>,
     committed: &crate::app::EventEnvelope,
+    hook: &dyn CommandTransactionHook,
 ) -> Result<(), AppError> {
     if let ApplicationEvent::MemoryProposalCreated { proposal, approval } = &committed.event {
         MemoryRepository::insert_proposal_with_approval(
@@ -2689,6 +2747,9 @@ fn persist_memory_mutation_event(
             proposal,
             approval,
         )?;
+        hook.after_memory_proposal_insert(tx.transaction())?;
+        hook.after_memory_approval_write(tx.transaction())?;
+        hook.after_memory_current_update(tx.transaction())?;
         return Ok(());
     }
     if let ApplicationEvent::MemoryProposalRejected { resolution } = &committed.event {
@@ -2702,6 +2763,9 @@ fn persist_memory_mutation_event(
             )
             .map_err(|_| PersistenceError::MemoryRowMismatch)?;
         MemoryRepository::resolve_proposal(tx, committed.sequence, resolution, &resolved)?;
+        hook.after_memory_approval_write(tx.transaction())?;
+        hook.after_memory_resolution_insert(tx.transaction())?;
+        hook.after_memory_current_update(tx.transaction())?;
         return Ok(());
     }
     if let ApplicationEvent::MemoryProposalAccepted {
@@ -2720,8 +2784,13 @@ fn persist_memory_mutation_event(
             )
             .map_err(|_| PersistenceError::MemoryRowMismatch)?;
         MemoryRepository::resolve_proposal(tx, committed.sequence, resolution, &resolved)?;
+        hook.after_memory_approval_write(tx.transaction())?;
+        hook.after_memory_resolution_insert(tx.transaction())?;
+        hook.after_memory_current_update(tx.transaction())?;
         MemoryRepository::insert_entry_version(tx, committed.sequence, entry)?;
+        hook.after_memory_entry_insert(tx.transaction())?;
         MemoryRepository::replace_current_entry(tx, entry)?;
+        hook.after_memory_current_update(tx.transaction())?;
         for sibling in expired_proposals {
             let approval = MemoryRepository::load_memory_approval(tx, sibling.approval_id())?
                 .ok_or(PersistenceError::MemoryRowMismatch)?;
@@ -2733,6 +2802,9 @@ fn persist_memory_mutation_event(
                 )
                 .map_err(|_| PersistenceError::MemoryRowMismatch)?;
             MemoryRepository::resolve_proposal(tx, committed.sequence, sibling, &expired)?;
+            hook.after_memory_approval_write(tx.transaction())?;
+            hook.after_memory_resolution_insert(tx.transaction())?;
+            hook.after_memory_current_update(tx.transaction())?;
         }
         return Ok(());
     }
@@ -2748,7 +2820,9 @@ fn persist_memory_mutation_event(
         _ => return Ok(()),
     };
     MemoryRepository::insert_entry_version(tx, committed.sequence, entry)?;
+    hook.after_memory_entry_insert(tx.transaction())?;
     MemoryRepository::replace_current_entry(tx, entry)?;
+    hook.after_memory_current_update(tx.transaction())?;
     for resolution in expired_proposals {
         let approval = MemoryRepository::load_memory_approval(tx, resolution.approval_id())?
             .ok_or(PersistenceError::MemoryRowMismatch)?;
@@ -2760,6 +2834,9 @@ fn persist_memory_mutation_event(
             )
             .map_err(|_| PersistenceError::MemoryRowMismatch)?;
         MemoryRepository::resolve_proposal(tx, committed.sequence, resolution, &resolved)?;
+        hook.after_memory_approval_write(tx.transaction())?;
+        hook.after_memory_resolution_insert(tx.transaction())?;
+        hook.after_memory_current_update(tx.transaction())?;
     }
     Ok(())
 }

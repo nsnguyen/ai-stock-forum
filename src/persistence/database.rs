@@ -519,8 +519,13 @@ fn startup_error(error: SqliteError) -> StartupError {
     }
 }
 
-fn persistence_error(error: SqliteError) -> PersistenceError {
+pub(crate) fn persistence_error(error: SqliteError) -> PersistenceError {
     match error {
+        SqliteError::SqliteFailure(error, _)
+            if matches!(error.code, ErrorCode::DiskFull | ErrorCode::TooBig) =>
+        {
+            PersistenceError::Capacity
+        }
         SqliteError::SqliteFailure(error, _)
             if matches!(
                 error.code,
@@ -552,6 +557,58 @@ mod tests {
         let error = verify_connection_pragmas(&connection).unwrap_err();
 
         assert_eq!(error.code(), "database_pragma_mismatch");
+    }
+
+    #[test]
+    fn real_sqlite_too_big_is_a_content_free_capacity_error() {
+        let connection = Connection::open_in_memory().unwrap();
+        let error = connection
+            .query_row("SELECT zeroblob(?1)", [i64::MAX], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            SqliteError::SqliteFailure(detail, _) if detail.code == ErrorCode::TooBig
+        ));
+
+        let mapped = persistence_error(error);
+        assert_eq!(mapped, PersistenceError::Capacity);
+        assert_eq!(mapped.code(), "memory_proposal_capacity_reached");
+        assert!(!mapped.to_string().contains("too big"));
+    }
+
+    #[test]
+    fn real_sqlite_disk_full_is_a_content_free_capacity_error() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let path = temporary_directory.path().join("capacity.sqlite3");
+        let connection = Connection::open(path).unwrap();
+        connection.pragma_update(None, "page_size", 512).unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "delete")
+            .unwrap();
+        connection.execute_batch("VACUUM;").unwrap();
+        connection
+            .execute_batch("CREATE TABLE capacity_test (value BLOB);")
+            .unwrap();
+        let pages: i64 = connection
+            .pragma_query_value(None, "page_count", |row| row.get(0))
+            .unwrap();
+        connection
+            .pragma_update(None, "max_page_count", pages)
+            .unwrap();
+        let error = connection
+            .execute("INSERT INTO capacity_test VALUES (randomblob(8192))", [])
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            SqliteError::SqliteFailure(detail, _) if detail.code == ErrorCode::DiskFull
+        ));
+
+        let mapped = persistence_error(error);
+        assert_eq!(mapped, PersistenceError::Capacity);
+        assert_eq!(mapped.code(), "memory_proposal_capacity_reached");
+        assert!(!mapped.to_string().contains("database or disk is full"));
     }
 
     #[cfg(unix)]

@@ -16,8 +16,9 @@ use ai_stock_forum::{
     policy::Capability,
     runtime::{ApplicationRuntime, RuntimeClient},
 };
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, types::ValueRef};
 use std::{
+    collections::BTreeMap,
     ops::{Deref, DerefMut},
     sync::{
         Arc, Barrier, Mutex,
@@ -86,7 +87,81 @@ pub struct PersistentFixture {
     ids: Arc<TestIds>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawDatabaseSnapshot {
+    pub tables: BTreeMap<String, Vec<Vec<String>>>,
+}
+
+fn raw_database_snapshot(paths: &AppPaths) -> RawDatabaseSnapshot {
+    let connection = Connection::open(paths.database_path()).unwrap();
+    let table_names = {
+        let mut statement = connection
+            .prepare(
+                "SELECT name FROM sqlite_schema
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                 ORDER BY name",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>()
+    };
+    let tables = table_names
+        .into_iter()
+        .map(|table_name| {
+            let quoted_name = table_name.replace('"', "\"\"");
+            let mut statement = connection
+                .prepare(&format!("SELECT * FROM \"{quoted_name}\""))
+                .unwrap();
+            let column_count = statement.column_count();
+            let mut rows = statement
+                .query_map([], |row| {
+                    (0..column_count)
+                        .map(|column| {
+                            Ok(match row.get_ref(column)? {
+                                ValueRef::Null => "null".to_owned(),
+                                ValueRef::Integer(value) => format!("integer:{value}"),
+                                ValueRef::Real(value) => {
+                                    format!("real:{:016x}", value.to_bits())
+                                }
+                                ValueRef::Text(value) => {
+                                    format!("text:{}", encode_hex(value))
+                                }
+                                ValueRef::Blob(value) => {
+                                    format!("blob:{}", encode_hex(value))
+                                }
+                            })
+                        })
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>();
+            rows.sort();
+            (table_name, rows)
+        })
+        .collect();
+    RawDatabaseSnapshot { tables }
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    bytes.iter().fold(
+        String::with_capacity(bytes.len().saturating_mul(2)),
+        |mut encoded, byte| {
+            write!(encoded, "{byte:02x}").unwrap();
+            encoded
+        },
+    )
+}
+
 impl PersistentFixture {
+    pub fn raw_database_snapshot(&self) -> RawDatabaseSnapshot {
+        raw_database_snapshot(&self.paths)
+    }
     pub fn service(&self) -> ApplicationService {
         ApplicationService::bootstrap(&self.paths, self.clock.clone(), self.ids.clone()).unwrap()
     }
@@ -681,6 +756,30 @@ impl DerefMut for TestApp {
 }
 
 impl TestApp {
+    pub fn raw_database_snapshot(&self) -> RawDatabaseSnapshot {
+        raw_database_snapshot(&self.paths)
+    }
+
+    pub fn record_test_episodic_summary(
+        &self,
+        profile: ai_stock_forum::agents::AgentProfileVersionRef,
+        label: String,
+        body: String,
+        purpose_tags: Vec<String>,
+        source_event_ids: Vec<EventId>,
+    ) -> Result<ai_stock_forum::memory::EpisodicSummaryRef, ai_stock_forum::app::AppError> {
+        record_test_episodic_summary_at(
+            &self.paths,
+            self.ids.as_ref(),
+            self.clock.as_ref(),
+            profile,
+            label,
+            body,
+            purpose_tags,
+            source_event_ids,
+        )
+    }
+
     pub fn into_runtime(self) -> RuntimeFixture {
         let TestApp {
             _temporary_directory,
@@ -1108,13 +1207,36 @@ pub fn record_test_episodic_summary(
     purpose_tags: Vec<String>,
     source_event_ids: Vec<EventId>,
 ) -> Result<ai_stock_forum::memory::EpisodicSummaryRef, ai_stock_forum::app::AppError> {
+    record_test_episodic_summary_at(
+        &fixture.paths,
+        fixture.ids.as_ref(),
+        fixture.clock.as_ref(),
+        profile,
+        label,
+        body,
+        purpose_tags,
+        source_event_ids,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_test_episodic_summary_at(
+    paths: &AppPaths,
+    ids: &TestIds,
+    clock: &TestClock,
+    profile: ai_stock_forum::agents::AgentProfileVersionRef,
+    label: String,
+    body: String,
+    purpose_tags: Vec<String>,
+    source_event_ids: Vec<EventId>,
+) -> Result<ai_stock_forum::memory::EpisodicSummaryRef, ai_stock_forum::app::AppError> {
     use ai_stock_forum::{
         app::AppError,
         persistence::{MemoryRepository, load_exact_profile_version},
         recovery::reduce,
     };
-    let connection = Connection::open(fixture.paths.database_path())
-        .map_err(|_| PersistenceError::QueryFailed)?;
+    let connection =
+        Connection::open(paths.database_path()).map_err(|_| PersistenceError::QueryFailed)?;
     let profile =
         load_exact_profile_version(&connection, &profile)?.ok_or(AppError::AgentProfileNotFound)?;
 
@@ -1155,7 +1277,7 @@ pub fn record_test_episodic_summary(
     )?;
 
     drop(connection);
-    let mut database = Database::open(&fixture.paths).map_err(|_| PersistenceError::QueryFailed)?;
+    let mut database = Database::open(paths).map_err(|_| PersistenceError::QueryFailed)?;
     let tx = database.immediate_transaction()?;
     let mut sources = Vec::with_capacity(source_event_ids.len());
     for event_id in source_event_ids {
@@ -1200,9 +1322,9 @@ pub fn record_test_episodic_summary(
         sequence,
         placeholder_event_id,
     )?;
-    let summary_id = EpisodicSummaryId::from_uuid(fixture.ids.next_uuid());
-    let event_id = EventId::from_uuid(fixture.ids.next_uuid());
-    let occurred_at_ms = fixture.clock.now_millis();
+    let summary_id = EpisodicSummaryId::from_uuid(ids.next_uuid());
+    let event_id = EventId::from_uuid(ids.next_uuid());
+    let occurred_at_ms = clock.now_millis();
     let summary = EpisodicSummary::new(
         summary_id,
         &profile,
