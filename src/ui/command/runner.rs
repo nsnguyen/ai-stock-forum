@@ -19,7 +19,7 @@ use crate::{
         MemoryProposalResolutionReview, ShutdownDisposition, ShutdownReason, SkillSelector,
     },
     domain::Digest,
-    memory::{ExpectedMemoryEntryState, MemoryEditReview},
+    memory::{ExpectedMemoryEntryState, MemoryEditReview, MemoryEntryState, MemoryMutationKind},
     panic_boundary::catch_sensitive_unwind,
     persistence::PersistenceError,
     runtime::{ApplicationRuntime, RuntimeClient, RuntimeError},
@@ -38,6 +38,7 @@ use super::windows::{
 use super::{
     AgentWorkflowCommand, BoundedLineReader, FallbackParsedLine, MemoryWorkflowCommand, RawLine,
     SkillWorkflowCommand, TextRenderer, parse_fallback_line, reader::LineAccumulator,
+    renderer::canonical_memory_edit_diff,
 };
 
 #[derive(Debug, Error)]
@@ -1011,6 +1012,9 @@ impl FallbackRunner {
                 TextRenderer::render_memory_no_change(no_change, writer).map_err(|_| UiError::Write)
             }
             Ok(MemoryEditPreview::Review(review)) => {
+                if !memory_edit_review_matches_request(&review, MemoryMutationKind::Delete) {
+                    return self.reject_new_memory_edit_review();
+                }
                 self.register_memory_review()?;
                 let workflow = MemoryWorkflow::DeleteReview { review };
                 self.install_memory_workflow(workflow, writer)
@@ -1190,6 +1194,12 @@ impl FallbackRunner {
                                 self.render_memory_workflow(writer)
                             }
                             MemoryEditPreview::Review(review) => {
+                                if !memory_edit_review_matches_request(
+                                    &review,
+                                    MemoryMutationKind::Set,
+                                ) {
+                                    return self.reject_new_memory_edit_review();
+                                }
                                 if !editor.apply_preview(
                                     request.generation,
                                     MemoryEditPreview::Review(review.clone()),
@@ -1440,6 +1450,12 @@ impl FallbackRunner {
         }
         *registered = true;
         Ok(())
+    }
+
+    fn reject_new_memory_edit_review(&self) -> Result<(), UiError> {
+        let mut registered = true;
+        cancel_registered_memory_review(&self.client, &mut registered).map_err(UiError::Runtime)?;
+        Err(UiError::Panicked)
     }
 
     fn clear_memory_review_registration(&self) -> Result<(), UiError> {
@@ -2224,6 +2240,44 @@ fn expected_memory_confirmation(action: &str, digest: &Digest) -> String {
 
 fn confirmation_matches(input: &str, expected: &str) -> bool {
     input.len() <= 80 && input == expected
+}
+
+fn memory_edit_review_matches_request(
+    review: &MemoryEditReview,
+    requested_operation: MemoryMutationKind,
+) -> bool {
+    if review.operation != requested_operation || !canonical_memory_edit_diff(&review.diff) {
+        return false;
+    }
+    match requested_operation {
+        MemoryMutationKind::Set => {
+            let Some(candidate) = review.candidate.as_ref() else {
+                return false;
+            };
+            match &review.expected {
+                ExpectedMemoryEntryState::Absent => true,
+                ExpectedMemoryEntryState::Present(entry) => {
+                    entry.namespace_id() == review.namespace_id
+                        && entry.state() == MemoryEntryState::Present
+                        && *entry.normalized_key() == candidate.normalized_key()
+                }
+                ExpectedMemoryEntryState::Deleted(entry) => {
+                    entry.namespace_id() == review.namespace_id
+                        && entry.state() == MemoryEntryState::Deleted
+                        && *entry.normalized_key() == candidate.normalized_key()
+                }
+            }
+        }
+        MemoryMutationKind::Delete => {
+            review.candidate.is_none()
+                && matches!(
+                    &review.expected,
+                    ExpectedMemoryEntryState::Present(entry)
+                        if entry.namespace_id() == review.namespace_id
+                            && entry.state() == MemoryEntryState::Present
+                )
+        }
+    }
 }
 
 fn cancel_registered_memory_review(

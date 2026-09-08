@@ -463,7 +463,7 @@ fn fallback_recreates_from_a_tombstone_and_delete_tombstone_is_passive_no_change
     let ExpectedMemoryEntryState::Present(expected) = delete_review.expected else {
         panic!("delete must bind a present entry");
     };
-    client
+    let deleted = client
         .submit(ApplicationCommand::DeleteMemoryEntry {
             profile: delete_review.profile,
             expected,
@@ -471,13 +471,47 @@ fn fallback_recreates_from_a_tombstone_and_delete_tombstone_is_passive_no_change
             review_digest: delete_review.review_digest,
         })
         .unwrap();
+    let CommandView::MemoryEntryMutation(deleted) = deleted.view else {
+        panic!("expected deleted memory entry view");
+    };
+    assert_eq!(
+        deleted.entry.state(),
+        ai_stock_forum::memory::MemoryEntryState::Deleted
+    );
+
+    let replacement = MemoryEntryDraft::new(
+        "Thesis".into(),
+        "restored value".into(),
+        vec!["reopened".into(), "verified".into()],
+    )
+    .unwrap();
+    let recreate_review = match client
+        .preview_memory_set(
+            AgentProfileSelector::Name("Fallback Tombstone Agent".into()),
+            replacement.clone(),
+        )
+        .unwrap()
+    {
+        MemoryEditPreview::Review(review) => review,
+        other => panic!("expected recreate review, got {other:?}"),
+    };
+    assert_eq!(
+        recreate_review.expected,
+        ExpectedMemoryEntryState::Deleted(deleted.entry.clone())
+    );
+    assert_eq!(recreate_review.operation, MemoryMutationKind::Set);
+    assert_eq!(recreate_review.candidate.as_ref(), Some(&replacement));
+    let recreate_phrase = format!("set {}", recreate_review.review_digest);
+    client.cancel_memory_review().unwrap();
 
     let mut output = Vec::new();
-    let reason = FallbackRunner::new(client, false)
+    let reason = FallbackRunner::new(client.clone(), false)
         .run(
             Cursor::new(
-                b"/memory set \"Fallback Tombstone Agent\" thesis\n:cancel\n/memory delete \"Fallback Tombstone Agent\" thesis\n"
-                    .to_vec(),
+                format!(
+                    "/memory delete \"Fallback Tombstone Agent\" thesis\n/memory set \"Fallback Tombstone Agent\" \"Thesis\"\nrestored value\nreopened, verified\n{recreate_phrase}\n"
+                )
+                .into_bytes(),
             ),
             &mut output,
         )
@@ -486,6 +520,42 @@ fn fallback_recreates_from_a_tombstone_and_delete_tombstone_is_passive_no_change
     let output = String::from_utf8(output).unwrap();
     assert!(output.contains("Memory editor [Value]"));
     assert!(output.contains("Memory edit has no effect: AlreadyAbsent."));
+    assert!(output.contains("Memory set review"));
+    assert!(output.contains(&format!(
+        "Expected entry: {} version {} version-id {} state Deleted digest {}",
+        deleted.entry.entry_id(),
+        deleted.entry.version().get(),
+        deleted.entry.entry_version_id(),
+        deleted.entry.content_digest(),
+    )));
+    assert!(output.contains(&format!("Type exactly: {recreate_phrase}")));
+
+    let current = client
+        .submit(ApplicationCommand::ShowMemoryEntry {
+            selector: AgentProfileSelector::Name("Fallback Tombstone Agent".into()),
+            display_key: "Thesis".into(),
+        })
+        .unwrap();
+    let CommandView::MemoryEntry(current) = current.view else {
+        panic!("expected current memory entry");
+    };
+    assert_eq!(
+        current.entry.reference().state(),
+        ai_stock_forum::memory::MemoryEntryState::Present
+    );
+    assert_eq!(
+        current.entry.reference().entry_id(),
+        deleted.entry.entry_id()
+    );
+    assert_eq!(
+        current.entry.predecessor_version_id(),
+        Some(deleted.entry.entry_version_id())
+    );
+    assert_eq!(current.entry.value(), Some("restored value"));
+    assert_eq!(
+        current.entry.purpose_tags(),
+        &["reopened".to_owned(), "verified".to_owned()]
+    );
     fixture.finish_and_join(reason);
 }
 
@@ -647,6 +717,136 @@ fn fallback_delete_review_shows_detail_and_submits_the_exact_bound_command() {
     assert!(state_diff < value_diff && value_diff < tags_diff);
     assert!(output.contains(MEMORY_PLAINTEXT_WARNING));
     runtime.finish_and_join(reason).unwrap();
+}
+
+#[test]
+fn fallback_delete_rejects_a_cross_wired_set_preview_before_render_or_submission() {
+    let candidate = MemoryEntryDraft::new(
+        "Fresh Key".into(),
+        "replacement value".into(),
+        vec!["fresh".into()],
+    )
+    .unwrap();
+    let review = edit_review(
+        MemoryMutationKind::Set,
+        ExpectedMemoryEntryState::Absent,
+        Some(candidate),
+        b"delete-received-set",
+    );
+    let (runtime, state) = workflow_runtime(
+        None,
+        None,
+        Some(Ok(MemoryEditPreview::Review(review))),
+        None,
+    );
+    let mut output = Vec::new();
+    let error = FallbackRunner::new(runtime.client(), false)
+        .run(
+            Cursor::new(
+                format!("/memory delete {} \"Fresh Key\"\n", profile().profile_id()).into_bytes(),
+            ),
+            &mut output,
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, UiError::Panicked));
+    assert!(mutation_commands(&state).is_empty());
+    assert_eq!(state.lock().unwrap().preview_count, 1);
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    let output = String::from_utf8(output).unwrap();
+    assert!(!output.contains("Memory set review"));
+    assert!(!output.contains("Memory delete review"));
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
+}
+
+#[test]
+fn fallback_set_rejects_a_cross_wired_delete_preview_before_render_or_submission() {
+    let current = entry(&profile());
+    let review = edit_review(
+        MemoryMutationKind::Delete,
+        ExpectedMemoryEntryState::Present(current.reference()),
+        None,
+        b"set-received-delete",
+    );
+    let (runtime, state) = workflow_runtime(
+        Some(current.clone()),
+        None,
+        Some(Ok(MemoryEditPreview::Review(review))),
+        None,
+    );
+    let mut output = Vec::new();
+    let error = FallbackRunner::new(runtime.client(), false)
+        .run(
+            Cursor::new(
+                format!(
+                    "/memory set {} \"{}\"\nreplacement value\nfresh\n",
+                    profile().profile_id(),
+                    current.display_key(),
+                )
+                .into_bytes(),
+            ),
+            &mut output,
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, UiError::Panicked));
+    assert!(mutation_commands(&state).is_empty());
+    assert_eq!(state.lock().unwrap().preview_count, 1);
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("Memory editor [Value]"));
+    assert!(!output.contains("Memory set review"));
+    assert!(!output.contains("Memory delete review"));
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
+}
+
+#[test]
+fn fallback_rejects_noncanonical_edit_diff_before_confirmation() {
+    let current = entry(&profile());
+    let mut review = edit_review(
+        MemoryMutationKind::Delete,
+        ExpectedMemoryEntryState::Present(current.reference()),
+        None,
+        b"duplicate-diff",
+    );
+    review.diff.insert(1, review.diff[0].clone());
+    let (runtime, state) = workflow_runtime(
+        Some(current.clone()),
+        None,
+        Some(Ok(MemoryEditPreview::Review(review))),
+        None,
+    );
+    let mut output = Vec::new();
+    let error = FallbackRunner::new(runtime.client(), false)
+        .run(
+            Cursor::new(
+                format!(
+                    "/memory delete {} \"{}\"\n",
+                    profile().profile_id(),
+                    current.display_key(),
+                )
+                .into_bytes(),
+            ),
+            &mut output,
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, UiError::Panicked));
+    assert!(mutation_commands(&state).is_empty());
+    assert_eq!(state.lock().unwrap().preview_count, 1);
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    assert!(
+        !String::from_utf8(output)
+            .unwrap()
+            .contains("Memory delete review")
+    );
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
 }
 
 #[test]
@@ -818,6 +1018,45 @@ fn render_memory_resolution_review(review: &MemoryProposalResolutionReview) -> S
     let mut bytes = Vec::new();
     TextRenderer::render_memory_resolution_review(review, &mut bytes).unwrap();
     String::from_utf8(bytes).unwrap()
+}
+
+#[test]
+fn memory_edit_renderer_omits_noncanonical_or_oversized_public_diffs() {
+    const SENTINEL: &str = "ADVERSARIAL_DIFF_MUST_NOT_RENDER";
+    let base = MemoryFieldDiff {
+        field: MemoryField::State,
+        before: MemoryFieldValue::Text(SENTINEL.into()),
+        after: MemoryFieldValue::Missing,
+    };
+    let cases = [
+        vec![base.clone(); 128],
+        vec![base.clone(), base.clone()],
+        vec![
+            MemoryFieldDiff {
+                field: MemoryField::PurposeTags,
+                before: MemoryFieldValue::Text(SENTINEL.into()),
+                after: MemoryFieldValue::Missing,
+            },
+            base,
+        ],
+    ];
+
+    for diff in cases {
+        let mut review = edit_review(
+            MemoryMutationKind::Delete,
+            ExpectedMemoryEntryState::Present(entry(&profile()).reference()),
+            None,
+            b"adversarial-render",
+        );
+        review.diff = diff;
+        let mut bytes = Vec::new();
+        TextRenderer::render_memory_edit_review(&review, &mut bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+
+        assert!(text.contains("Review diff omitted:"));
+        assert!(!text.contains(SENTINEL));
+        assert!(text.len() < 25_000);
+    }
 }
 
 #[test]

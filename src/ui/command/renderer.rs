@@ -95,9 +95,14 @@ impl TextRenderer {
         if let Some(candidate) = &review.candidate {
             render_memory_candidate(candidate, writer)?;
         }
-        writeln!(writer, "Changed fields: {}", review.diff.len())?;
-        for diff in &review.diff {
-            render_memory_field_diff(diff, writer)?;
+        if canonical_memory_edit_diff(&review.diff) {
+            writeln!(writer, "Changed fields: {}", review.diff.len())?;
+            for diff in &review.diff {
+                render_memory_field_diff(diff, writer)?;
+            }
+        } else {
+            writeln!(writer, "Changed fields: invalid review shape")?;
+            writeln!(writer, "Review diff omitted: {} fields.", review.diff.len())?;
         }
         writeln!(writer, "Review digest: {}", review.review_digest)?;
         writeln!(writer, "Type exactly: {action} {}", review.review_digest)
@@ -879,6 +884,44 @@ impl TextRenderer {
             TuiError::Panicked => writer.write_all(b"Terminal interface stopped unexpectedly.\n"),
         }
     }
+}
+
+pub(super) fn canonical_memory_edit_diff(diff: &[MemoryFieldDiff]) -> bool {
+    if diff.is_empty() || diff.len() > 4 {
+        return false;
+    }
+    diff.iter().all(|item| {
+        item.before != item.after
+            && memory_field_value_matches(item.field, &item.before)
+            && memory_field_value_matches(item.field, &item.after)
+    }) && diff
+        .windows(2)
+        .all(|items| memory_field_rank(items[0].field) < memory_field_rank(items[1].field))
+}
+
+fn memory_field_rank(field: MemoryField) -> u8 {
+    match field {
+        MemoryField::DisplayKey => 0,
+        MemoryField::State => 1,
+        MemoryField::Value => 2,
+        MemoryField::PurposeTags => 3,
+    }
+}
+
+fn memory_field_value_matches(field: MemoryField, value: &MemoryFieldValue) -> bool {
+    matches!(
+        (field, value),
+        (
+            MemoryField::DisplayKey | MemoryField::Value,
+            MemoryFieldValue::Missing | MemoryFieldValue::Text(_)
+        ) | (
+            MemoryField::State,
+            MemoryFieldValue::Missing | MemoryFieldValue::State(_)
+        ) | (
+            MemoryField::PurposeTags,
+            MemoryFieldValue::Missing | MemoryFieldValue::Tags(_)
+        )
+    )
 }
 
 fn render_memory_view<W: Write>(view: &CommandView, writer: &mut W) -> Option<io::Result<()>> {

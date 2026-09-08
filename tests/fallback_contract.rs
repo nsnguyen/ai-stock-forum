@@ -26,7 +26,8 @@ use ai_stock_forum::{
     },
     memory::{
         ExpectedMemoryEntryState, MemoryEditReview, MemoryEntryDraft, MemoryEntryVersion,
-        MemoryMutationKind, MemoryPlaintextAcknowledgement,
+        MemoryField, MemoryFieldDiff, MemoryFieldValue, MemoryMutationKind,
+        MemoryPlaintextAcknowledgement,
     },
     persistence::{PersistenceError, RecoveryError},
     runtime::{ApplicationRuntime, CommandExecutor, RuntimeError},
@@ -539,7 +540,23 @@ fn memory_cleanup_review() -> MemoryEditReview {
         expected: ExpectedMemoryEntryState::Present(entry.reference()),
         operation: MemoryMutationKind::Delete,
         candidate: None,
-        diff: vec![],
+        diff: vec![
+            MemoryFieldDiff {
+                field: MemoryField::State,
+                before: MemoryFieldValue::State(ai_stock_forum::memory::MemoryEntryState::Present),
+                after: MemoryFieldValue::State(ai_stock_forum::memory::MemoryEntryState::Deleted),
+            },
+            MemoryFieldDiff {
+                field: MemoryField::Value,
+                before: MemoryFieldValue::Text("private value".into()),
+                after: MemoryFieldValue::Missing,
+            },
+            MemoryFieldDiff {
+                field: MemoryField::PurposeTags,
+                before: MemoryFieldValue::Tags(Vec::new()),
+                after: MemoryFieldValue::Missing,
+            },
+        ],
         plaintext_acknowledgement: MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1,
         review_token: MemoryReviewToken::from_uuid(id(8_007)),
         review_digest: sha256(b"fallback host cleanup"),
