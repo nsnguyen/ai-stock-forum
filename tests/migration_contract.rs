@@ -851,6 +851,16 @@ fn v4_memory_history_pointer_and_episodic_source_guards_are_effective() {
         "INSERT INTO current_memory_entries (memory_namespace_id, normalized_key, entry_id, entry_version_id, version, state, content_digest) VALUES (?1, 'wrong', ?2, '00000000-0000-0000-0000-000000000099', 1, 'present', ?3)",
         rusqlite::params![namespace, entry, digest],
     ).is_err());
+    let successor_version = "00000000-0000-0000-0000-000000000023";
+    let transaction = connection.unchecked_transaction().unwrap();
+    transaction.execute(
+        "INSERT INTO memory_entry_versions (memory_namespace_id, entry_id, entry_version_id, version, predecessor_version_id, display_key, normalized_key, state, value_text, value_bytes, purpose_tags_json, created_by_kind, created_by_id, created_at_ms, accepted_proposal_id, accepted_proposal_version, accepted_proposal_digest, plaintext_validation_version, creation_event_sequence, creation_event_id, content_digest, record_digest, record_json) VALUES (?1, ?2, ?3, 2, ?4, 'Key', 'key', 'present', 'next', 4, CAST('[]' AS BLOB), 'human', NULL, 2, NULL, NULL, NULL, 1, 2, 'event-2', ?5, ?5, CAST('{}' AS BLOB))",
+        rusqlite::params![namespace, entry, successor_version, entry_version, digest],
+    ).unwrap();
+    transaction.execute("DELETE FROM current_memory_entries WHERE memory_namespace_id = ?1 AND normalized_key = 'key'", [namespace]).unwrap();
+    transaction.execute("INSERT INTO current_memory_entries (memory_namespace_id, normalized_key, entry_id, entry_version_id, version, state, content_digest) VALUES (?1, 'key', ?2, ?3, 2, 'present', ?4)", rusqlite::params![namespace, entry, successor_version, digest]).unwrap();
+    transaction.commit().unwrap();
+    assert_eq!(connection.query_row("SELECT entry_version_id, version, content_digest FROM current_memory_entries WHERE memory_namespace_id = ?1 AND normalized_key = 'key'", [namespace], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))).unwrap(), (successor_version.to_owned(), 2, digest.clone()));
     assert!(
         connection
             .execute(
@@ -897,6 +907,22 @@ fn v4_memory_history_pointer_and_episodic_source_guards_are_effective() {
             )
             .is_err()
     );
+    assert!(
+        connection
+            .execute(
+                "DELETE FROM episodic_summaries WHERE summary_id = ?1",
+                [summary]
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
+                "UPDATE episodic_summary_sources SET event_type = 'changed' WHERE summary_id = ?1",
+                [summary]
+            )
+            .is_err()
+    );
 }
 
 #[test]
@@ -925,6 +951,8 @@ fn v4_memory_proposal_resolution_and_current_status_lifecycle_is_exact() {
     transaction.execute("INSERT INTO current_memory_proposal_status (proposal_id, proposal_version, proposal_content_digest, memory_namespace_id, normalized_key, status, resolution_event_id, created_at_ms) VALUES (?1, 1, ?2, ?3, 'key', 'accepted', 'event-2', 1)", rusqlite::params![proposal, digest, namespace]).unwrap();
     transaction.commit().unwrap();
     assert!(connection.execute("INSERT INTO memory_proposal_resolutions (proposal_id, proposal_version, proposal_content_digest, status, approval_id, resolved_by_kind, resolved_by_id, resolved_at_ms, resolution_event_sequence, resolution_event_id, resolution_json) VALUES (?1, 1, ?2, 'accepted', ?3, 'human', NULL, 2, 2, 'event-2', CAST('{}' AS BLOB))", rusqlite::params![proposal, digest, approval]).is_err());
+    assert!(connection.execute("INSERT INTO memory_proposal_resolutions (proposal_id, proposal_version, proposal_content_digest, status, approval_id, resolved_by_kind, resolved_by_id, resolved_at_ms, resolution_event_sequence, resolution_event_id, resolution_json) VALUES ('00000000-0000-0000-0000-000000000051', 1, ?1, 'accepted', ?2, 'human', NULL, 2, 2, 'event-2', CAST('{}' AS BLOB))", rusqlite::params!["b".repeat(64), approval]).is_err());
+    assert!(connection.execute("INSERT INTO current_memory_proposal_status (proposal_id, proposal_version, proposal_content_digest, memory_namespace_id, normalized_key, status, resolution_event_id, created_at_ms) VALUES (?1, 1, ?2, ?3, 'key', 'rejected', 'event-2', 1)", rusqlite::params![proposal, digest, namespace]).is_err());
     for table in ["memory_proposals", "memory_proposal_resolutions"] {
         assert!(
             connection
