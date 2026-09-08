@@ -25,6 +25,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 const COMMAND_IN_FLIGHT_MESSAGE: &str = "A command is already running.";
 const COMMAND_REJECTED_MESSAGE: &str = "Command rejected. Check the command and try again.";
+const MEMORY_OUTCOME_MESSAGE: &str = "Memory command completed.";
 const PROTECTED_AGENTS_MESSAGE: &str =
     "Press a outside text input to finish the protected Agents workflow.";
 const PROTECTED_SKILLS_MESSAGE: &str =
@@ -401,6 +402,23 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
         | CommandView::AgentSkillUnassigned(_) => {
             if present_outcome {
                 model.clear_message();
+            }
+            ShutdownDisposition::Continue
+        }
+        CommandView::MemoryEntries(_)
+        | CommandView::MemoryEntry(_)
+        | CommandView::MemoryEntryHistory(_)
+        | CommandView::MemoryEntryVersion(_)
+        | CommandView::MemoryProposals(_)
+        | CommandView::MemoryProposal(_)
+        | CommandView::EpisodicSummaries(_)
+        | CommandView::EpisodicSummary(_)
+        | CommandView::MemoryEntryMutation(_)
+        | CommandView::MemoryProposalCreated(_)
+        | CommandView::MemoryProposalResolution(_)
+        | CommandView::MemorySnapshot(_) => {
+            if present_outcome {
+                model.set_message(Severity::Info, MEMORY_OUTCOME_MESSAGE);
             }
             ShutdownDisposition::Continue
         }

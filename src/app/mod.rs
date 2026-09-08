@@ -21,17 +21,23 @@ pub use command::{
     SafeToken, SafeTokenError, SkillSelector,
 };
 pub use event::{
-    ApplicationEvent, EVENT_SCHEMA_VERSION, EventEnvelope, EventEnvelopeWire, PendingEvent,
-    ShutdownReason, SkillEventSummary, SkillHistoryEventEntry,
+    ApplicationEvent, EVENT_SCHEMA_VERSION, EventEnvelope, EventEnvelopeWire,
+    MemoryProposalStatusRef, PendingEvent, ShutdownReason, SkillEventSummary,
+    SkillHistoryEventEntry,
 };
 pub(crate) use event::{actor_wire, envelope_from_pending};
 pub use outcome::{
     AgentProfileCreatedView, AgentProfileHistoryEntry, AgentProfileHistoryView,
     AgentProfileSummary, AgentProfileVersionActivatedView, AgentProfileVersionView,
     AgentProfileView, AgentProfilesView, AgentSkillAssignmentPreview, AgentSkillMutationView,
-    AuditTailView, CommandOutcome, CommandView, HelpView, InputRejectedView, SetupStatusView,
-    ShutdownDisposition, ShutdownView, SkillCreatedView, SkillHistoryEntry, SkillHistoryView,
-    SkillSummary, SkillVersionActivatedView, SkillView, SkillsView, StatusView,
+    AuditTailView, CommandOutcome, CommandView, EpisodicSummariesView, EpisodicSummaryListItem,
+    EpisodicSummaryView, HelpView, InputRejectedView, MemoryEntriesView, MemoryEntryHistorySummary,
+    MemoryEntryHistoryView, MemoryEntryMutationView, MemoryEntrySummary, MemoryEntryVersionView,
+    MemoryEntryView, MemoryProfileIdentityView, MemoryProposalCreatedView,
+    MemoryProposalResolutionView, MemoryProposalSummary, MemoryProposalView, MemoryProposalsView,
+    MemorySnapshotView, SetupStatusView, ShutdownDisposition, ShutdownView, SkillCreatedView,
+    SkillHistoryEntry, SkillHistoryView, SkillSummary, SkillVersionActivatedView, SkillView,
+    SkillsView, StatusView,
 };
 pub use service::{
     ApplicationService, ApplicationWorker, AuthorizationDecision, CommandPolicy,
@@ -90,6 +96,10 @@ pub enum AppError {
     BindingReferenceUnavailable,
     #[error("application lifecycle is already finished")]
     LifecycleFinished,
+    #[error("memory command is not implemented")]
+    MemoryCommandNotImplemented,
+    #[error("wrong memory command dispatcher")]
+    WrongMemoryCommandDispatcher,
 }
 
 impl AppError {
@@ -118,6 +128,8 @@ impl AppError {
             Self::AgentProfileHistoryMismatch => "agent_profile_history_mismatch",
             Self::BindingReferenceUnavailable => "binding_reference_unavailable",
             Self::LifecycleFinished => "lifecycle_finished",
+            Self::MemoryCommandNotImplemented => "memory_command_not_implemented",
+            Self::WrongMemoryCommandDispatcher => "wrong_memory_command_dispatcher",
         }
     }
 }

@@ -1724,6 +1724,22 @@ fn prepare_event(
             rejection: rejection.clone(),
         }),
         ApplicationCommand::RequestShutdown => Ok(ApplicationEvent::ShutdownRequested),
+        ApplicationCommand::SetMemoryEntry { .. }
+        | ApplicationCommand::DeleteMemoryEntry { .. }
+        | ApplicationCommand::ProposeMemoryMutation { .. }
+        | ApplicationCommand::ApproveMemoryProposal { .. }
+        | ApplicationCommand::RejectMemoryProposal { .. }
+        | ApplicationCommand::ListMemoryEntries { .. }
+        | ApplicationCommand::ShowMemoryEntry { .. }
+        | ApplicationCommand::ShowMemoryEntryHistory { .. }
+        | ApplicationCommand::ShowMemoryEntryVersion { .. }
+        | ApplicationCommand::ListMemoryProposals { .. }
+        | ApplicationCommand::ShowMemoryProposal { .. }
+        | ApplicationCommand::ListEpisodicSummaries { .. }
+        | ApplicationCommand::ShowEpisodicSummary { .. }
+        | ApplicationCommand::BuildMemorySnapshot { .. } => {
+            Err(AppError::MemoryCommandNotImplemented)
+        }
         ApplicationCommand::ActivateAgentProfileVersion { .. }
         | ApplicationCommand::CreateSkill { .. }
         | ApplicationCommand::ActivateSkillVersion { .. }
@@ -1742,6 +1758,14 @@ fn event_occurred_at(event: &ApplicationEvent) -> Option<i64> {
         ApplicationEvent::AgentSkillAssigned { profile, .. }
         | ApplicationEvent::AgentSkillUpgraded { profile, .. }
         | ApplicationEvent::AgentSkillUnassigned { profile, .. } => Some(profile.created_at_ms()),
+        ApplicationEvent::MemoryEntrySet { entry, .. }
+        | ApplicationEvent::MemoryEntryDeleted { entry, .. }
+        | ApplicationEvent::MemoryProposalAccepted { entry, .. } => Some(entry.created_at_ms()),
+        ApplicationEvent::MemoryProposalCreated { proposal, .. } => Some(proposal.created_at_ms()),
+        ApplicationEvent::MemoryProposalRejected { resolution } => {
+            Some(resolution.resolved_at_ms())
+        }
+        ApplicationEvent::EpisodicSummaryRecorded { summary } => Some(summary.created_at_ms()),
         _ => None,
     }
 }
@@ -2097,6 +2121,18 @@ fn normalize_catalog_readiness(view: &mut CommandView) {
         | CommandView::AgentSkillAssigned(_)
         | CommandView::AgentSkillUpgraded(_)
         | CommandView::AgentSkillUnassigned(_)
+        | CommandView::MemoryEntries(_)
+        | CommandView::MemoryEntry(_)
+        | CommandView::MemoryEntryHistory(_)
+        | CommandView::MemoryEntryVersion(_)
+        | CommandView::MemoryProposals(_)
+        | CommandView::MemoryProposal(_)
+        | CommandView::EpisodicSummaries(_)
+        | CommandView::EpisodicSummary(_)
+        | CommandView::MemoryEntryMutation(_)
+        | CommandView::MemoryProposalCreated(_)
+        | CommandView::MemoryProposalResolution(_)
+        | CommandView::MemorySnapshot(_)
         | CommandView::InputRejected(_)
         | CommandView::Shutdown(_) => {}
     }
@@ -2939,6 +2975,11 @@ fn capability_name(capability: Capability) -> &'static str {
         Capability::SkillVersion => "skill_version",
         Capability::AgentSkillAssign => "skill_assign",
         Capability::AgentSkillUnassign => "skill_unassign",
+        Capability::MemoryRead => "memory_read",
+        Capability::MemoryPreview => "memory_preview",
+        Capability::MemoryMutate => "memory_mutate",
+        Capability::MemoryPropose => "memory_propose",
+        Capability::MemoryResolve => "memory_resolve",
         Capability::Shutdown => "shutdown",
         Capability::DiscussionRun => "discussion_run",
         Capability::McpUse => "mcp_use",
@@ -2964,6 +3005,11 @@ fn parse_capability(value: &str) -> Result<Capability, AppError> {
         "skill_version" => Ok(Capability::SkillVersion),
         "skill_assign" => Ok(Capability::AgentSkillAssign),
         "skill_unassign" => Ok(Capability::AgentSkillUnassign),
+        "memory_read" => Ok(Capability::MemoryRead),
+        "memory_preview" => Ok(Capability::MemoryPreview),
+        "memory_mutate" => Ok(Capability::MemoryMutate),
+        "memory_propose" => Ok(Capability::MemoryPropose),
+        "memory_resolve" => Ok(Capability::MemoryResolve),
         "shutdown" => Ok(Capability::Shutdown),
         "discussion_run" => Ok(Capability::DiscussionRun),
         "mcp_use" => Ok(Capability::McpUse),

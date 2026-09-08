@@ -209,6 +209,109 @@ fn summary(event: &ApplicationEvent) -> String {
             expected.skill_id(),
             expected.skill_version_id()
         ),
+        ApplicationEvent::MemoryEntrySet {
+            entry,
+            expired_proposals,
+        } => format!(
+            "memory entry set: entry_version={}, version={}, expired_count={}",
+            entry.reference().entry_version_id(),
+            entry.reference().version().get(),
+            expired_proposals.len()
+        ),
+        ApplicationEvent::MemoryEntryDeleted {
+            entry,
+            expired_proposals,
+        } => format!(
+            "memory entry deleted: entry_version={}, version={}, expired_count={}",
+            entry.reference().entry_version_id(),
+            entry.reference().version().get(),
+            expired_proposals.len()
+        ),
+        ApplicationEvent::MemoryProposalCreated { proposal, .. } => format!(
+            "memory proposal created: proposal={}, version={}",
+            proposal.reference().proposal_id(),
+            proposal.reference().version().get()
+        ),
+        ApplicationEvent::MemoryProposalAccepted {
+            resolution,
+            entry,
+            expired_proposals,
+        } => format!(
+            "memory proposal accepted: proposal={}, entry_version={}, expired_count={}",
+            resolution.proposal().proposal_id(),
+            entry.reference().entry_version_id(),
+            expired_proposals.len()
+        ),
+        ApplicationEvent::MemoryProposalRejected { resolution } => format!(
+            "memory proposal rejected: proposal={}",
+            resolution.proposal().proposal_id()
+        ),
+        ApplicationEvent::EpisodicSummaryRecorded { summary } => format!(
+            "episodic summary recorded: summary={}",
+            summary.reference().summary_id()
+        ),
+        ApplicationEvent::MemoryEntriesListed {
+            profile,
+            total_count,
+            returned_count,
+            omitted_count,
+            ..
+        } => format!(
+            "memory entries listed: profile={}, total_count={total_count}, returned_count={returned_count}, omitted_count={omitted_count}",
+            profile.profile_id()
+        ),
+        ApplicationEvent::MemoryEntryShown { profile, entry }
+        | ApplicationEvent::MemoryEntryVersionShown { profile, entry } => format!(
+            "memory entry viewed: profile={}, entry_version={}",
+            profile.profile_id(),
+            entry.entry_version_id()
+        ),
+        ApplicationEvent::MemoryEntryHistoryShown {
+            profile,
+            current,
+            total_count,
+            returned_count,
+            omitted_count,
+            ..
+        } => format!(
+            "memory entry history viewed: profile={}, current_entry_version={}, total_count={total_count}, returned_count={returned_count}, omitted_count={omitted_count}",
+            profile.profile_id(),
+            current.entry_version_id()
+        ),
+        ApplicationEvent::MemoryProposalsListed {
+            profile,
+            total_count,
+            returned_count,
+            omitted_count,
+            ..
+        } => format!(
+            "memory proposals listed: profile={}, total_count={total_count}, returned_count={returned_count}, omitted_count={omitted_count}",
+            profile.profile_id()
+        ),
+        ApplicationEvent::MemoryProposalShown {
+            proposal, status, ..
+        } => format!(
+            "memory proposal viewed: proposal={}, status={status:?}",
+            proposal.proposal_id()
+        ),
+        ApplicationEvent::EpisodicSummariesListed {
+            profile,
+            total_count,
+            returned_count,
+            omitted_count,
+            ..
+        } => format!(
+            "episodic summaries listed: profile={}, total_count={total_count}, returned_count={returned_count}, omitted_count={omitted_count}",
+            profile.profile_id()
+        ),
+        ApplicationEvent::EpisodicSummaryShown { summary } => {
+            format!("episodic summary viewed: summary={}", summary.summary_id())
+        }
+        ApplicationEvent::MemorySnapshotBuilt { metadata } => format!(
+            "memory snapshot built: entry_count={}, summary_count={}",
+            metadata.entry_refs().len(),
+            metadata.summary_refs().len()
+        ),
     }
 }
 

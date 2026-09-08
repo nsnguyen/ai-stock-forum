@@ -384,6 +384,96 @@ impl TextRenderer {
                 view.profile_id,
                 view.version.get(),
             ),
+            CommandView::MemoryEntries(view) => writeln!(
+                writer,
+                "Memory entries: profile {} returned {} of {} ({} omitted)",
+                view.profile.profile_id(),
+                view.returned_count,
+                view.total_count,
+                view.omitted_count,
+            ),
+            CommandView::MemoryEntry(view) => writeln!(
+                writer,
+                "Memory entry: profile {} entry version {} version {} digest {}",
+                view.profile.profile_id(),
+                view.entry.reference().entry_version_id(),
+                view.entry.reference().version().get(),
+                view.entry.reference().content_digest(),
+            ),
+            CommandView::MemoryEntryVersion(view) => writeln!(
+                writer,
+                "Memory entry version: profile {} entry version {} version {} digest {}",
+                view.profile.profile_id(),
+                view.entry.reference().entry_version_id(),
+                view.entry.reference().version().get(),
+                view.entry.reference().content_digest(),
+            ),
+            CommandView::MemoryEntryHistory(view) => writeln!(
+                writer,
+                "Memory entry history: current {} returned {} of {} ({} omitted)",
+                view.current.entry_version_id(),
+                view.returned_count,
+                view.total_count,
+                view.omitted_count,
+            ),
+            CommandView::MemoryProposals(view) => writeln!(
+                writer,
+                "Memory proposals: profile {} returned {} of {} ({} omitted)",
+                view.profile.profile_id(),
+                view.returned_count,
+                view.total_count,
+                view.omitted_count,
+            ),
+            CommandView::MemoryProposal(view) => writeln!(
+                writer,
+                "Memory proposal: {} version {} status {:?}",
+                view.proposal.reference().proposal_id(),
+                view.proposal.reference().version().get(),
+                view.status,
+            ),
+            CommandView::EpisodicSummaries(view) => writeln!(
+                writer,
+                "Episodic summaries: profile {} returned {} of {} ({} omitted)",
+                view.profile.profile_id(),
+                view.returned_count,
+                view.total_count,
+                view.omitted_count,
+            ),
+            CommandView::EpisodicSummary(view) => writeln!(
+                writer,
+                "Episodic summary: {} version {} digest {}",
+                view.summary.reference().summary_id(),
+                view.summary.reference().version().get(),
+                view.summary.reference().content_digest(),
+            ),
+            CommandView::MemoryEntryMutation(view) => writeln!(
+                writer,
+                "Memory entry mutation: {} version {} expired proposals {}",
+                view.entry.entry_version_id(),
+                view.entry.version().get(),
+                view.expired_proposals.len(),
+            ),
+            CommandView::MemoryProposalCreated(view) => writeln!(
+                writer,
+                "Memory proposal created: {} approval {} status {:?}",
+                view.proposal.proposal_id(),
+                view.approval_id,
+                view.status,
+            ),
+            CommandView::MemoryProposalResolution(view) => writeln!(
+                writer,
+                "Memory proposal resolved: {} status {:?} expired proposals {}",
+                view.resolution.proposal().proposal_id(),
+                view.resolution.status(),
+                view.expired_proposals.len(),
+            ),
+            CommandView::MemorySnapshot(view) => writeln!(
+                writer,
+                "Memory snapshot: entries {} summaries {} digest {}",
+                view.snapshot.entries().len(),
+                view.snapshot.summaries().len(),
+                view.snapshot.snapshot_digest(),
+            ),
         }
     }
 
@@ -935,6 +1025,9 @@ fn app_error_message(error: &AppError) -> &'static str {
         | AppError::SkillAlreadyAssigned
         | AppError::SkillNotAssigned
         | AppError::AgentSkillLimitExceeded => "Skill operation could not be completed.",
+        AppError::MemoryCommandNotImplemented | AppError::WrongMemoryCommandDispatcher => {
+            "Memory operation could not be completed."
+        }
         AppError::LifecycleFinished => "Application is shutting down.",
     }
 }

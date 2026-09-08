@@ -342,6 +342,1061 @@ fn setup_and_projection_deserialization_reject_invalid_states() {
     );
 }
 
+mod memory_reduction {
+    use ai_stock_forum::{
+        agents::{AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentRole},
+        app::{
+            ApplicationEvent, EVENT_SCHEMA_VERSION, EventEnvelope, MemoryProposalStatusRef,
+            PendingEvent,
+        },
+        domain::{
+            Actor, AgentProfileId, AgentProfileVersionId, ApprovalId, CorrelationId,
+            EpisodicSummaryId, EventId, MemoryEntryId, MemoryEntryVersionId, MemoryNamespaceId,
+            MemoryProposalId, ObjectRef, canonical_json_bytes, sha256,
+        },
+        memory::{
+            EpisodicSourceRef, EpisodicSummary, ExpectedMemoryEntryState, MemoryEntryDraft,
+            MemoryEntryVersion, MemoryProposal, MemoryProposalFilter, MemoryProposalOperation,
+            MemoryProposalResolution, MemoryProposalStatus, MemoryPurposeScope,
+            MemoryRetrievalBudget, MemoryRetrievalRequest, MemoryRetrievalScope, select_snapshot,
+        },
+        persistence::{EventRepository, ProjectionRepository, RecoveryError},
+        policy::{ApprovalAction, ApprovalRecord, ApprovalStatus},
+        recovery::{ProjectionState, reduce},
+    };
+    use uuid::Uuid;
+
+    fn uuid(value: u128) -> Uuid {
+        Uuid::from_u128(value)
+    }
+
+    fn profile(seed: u128) -> AgentProfileVersion {
+        AgentProfileVersion::create(
+            AgentProfileId::from_uuid(uuid(seed)),
+            AgentProfileVersionId::from_uuid(uuid(seed + 1)),
+            MemoryNamespaceId::from_uuid(uuid(seed + 2)),
+            10,
+            AgentProfileDraft::new(
+                format!("Memory Agent {seed}"),
+                "Fixture profile.".into(),
+                AgentRole::Custom,
+                "research".into(),
+                vec![],
+                "Careful.".into(),
+                "Use evidence.".into(),
+                AgentBindings::default(),
+                vec![],
+                vec![],
+            )
+            .unwrap(),
+            None,
+        )
+        .unwrap()
+    }
+
+    fn event_id(value: u128) -> EventId {
+        EventId::from_uuid(uuid(value))
+    }
+
+    fn envelope(
+        state: &ProjectionState,
+        id: u128,
+        actor: Actor,
+        occurred_at_ms: i64,
+        object: Option<ObjectRef>,
+        event: ApplicationEvent,
+    ) -> EventEnvelope {
+        let sequence = state.last_sequence + 1;
+        EventEnvelope {
+            sequence,
+            event_id: event_id(id),
+            event_schema_version: EVENT_SCHEMA_VERSION,
+            actor,
+            occurred_at_ms,
+            correlation_id: CorrelationId::from_uuid(uuid(10_000 + id)),
+            causation_id: None,
+            object,
+            event,
+            previous_event_digest: state.last_event_digest.clone(),
+            event_digest: sha256(&sequence.to_be_bytes()),
+        }
+    }
+
+    fn seed_profile(state: &mut ProjectionState, profile: &AgentProfileVersion, id: u128) {
+        let event = envelope(
+            state,
+            id,
+            Actor::Human,
+            profile.created_at_ms(),
+            None,
+            ApplicationEvent::AgentProfileCreated {
+                profile: profile.clone(),
+            },
+        );
+        reduce(state, &event).unwrap();
+    }
+
+    fn entry_object(entry: &MemoryEntryVersion) -> ObjectRef {
+        let reference = entry.reference();
+        ObjectRef::new(
+            "memory_entry_version",
+            reference.entry_version_id().to_string(),
+            reference.version(),
+            reference.content_digest().clone(),
+        )
+        .unwrap()
+    }
+
+    fn summary_object(summary: &EpisodicSummary) -> ObjectRef {
+        let reference = summary.reference();
+        ObjectRef::new(
+            "episodic_summary",
+            reference.summary_id().to_string(),
+            reference.version(),
+            reference.content_digest().clone(),
+        )
+        .unwrap()
+    }
+
+    fn proposal(
+        profile: &AgentProfileVersion,
+        id: u128,
+        key: &str,
+        expected: ExpectedMemoryEntryState,
+    ) -> MemoryProposal {
+        MemoryProposal::new(
+            MemoryProposalId::from_uuid(uuid(id)),
+            profile,
+            &Actor::Agent(profile.profile_id()),
+            MemoryProposalOperation::Set {
+                candidate: MemoryEntryDraft::new(
+                    key.into(),
+                    format!("private candidate {id}"),
+                    vec![],
+                )
+                .unwrap(),
+            },
+            key.into(),
+            expected,
+            format!("private rationale {id}"),
+            i64::try_from(id).unwrap(),
+            event_id(id),
+            ApprovalId::from_uuid(uuid(1_000 + id)),
+        )
+        .unwrap()
+    }
+
+    fn approval(proposal: &MemoryProposal) -> ApprovalRecord {
+        ApprovalRecord::builder(ApprovalAction::MemoryMutation)
+            .approval_id(proposal.approval_id())
+            .object(proposal.object_ref().unwrap())
+            .actor(Actor::Agent(proposal.proposer().profile_id()))
+            .created_at_millis(proposal.created_at_ms())
+            .build()
+            .unwrap()
+    }
+
+    fn create_proposal(state: &mut ProjectionState, proposal: &MemoryProposal) {
+        let event = envelope(
+            state,
+            proposal.creation_event_id().as_uuid().as_u128(),
+            Actor::Agent(proposal.proposer().profile_id()),
+            proposal.created_at_ms(),
+            Some(proposal.object_ref().unwrap()),
+            ApplicationEvent::MemoryProposalCreated {
+                proposal: proposal.clone(),
+                approval: approval(proposal),
+            },
+        );
+        reduce(state, &event).unwrap();
+    }
+
+    fn resolution(
+        proposal: &MemoryProposal,
+        status: MemoryProposalStatus,
+        event: u128,
+        time: i64,
+    ) -> MemoryProposalResolution {
+        MemoryProposalResolution::new(
+            proposal.reference(),
+            status,
+            proposal.approval_id(),
+            Actor::Human,
+            time,
+            event_id(event),
+        )
+        .unwrap()
+    }
+
+    fn direct_entry(
+        profile: &AgentProfileVersion,
+        entry_id: u128,
+        version_id: u128,
+        event: u128,
+        time: i64,
+        key: &str,
+    ) -> MemoryEntryVersion {
+        MemoryEntryVersion::create_present(
+            profile.memory_namespace_id(),
+            MemoryEntryId::from_uuid(uuid(entry_id)),
+            MemoryEntryVersionId::from_uuid(uuid(version_id)),
+            MemoryEntryDraft::new(
+                key.into(),
+                "private current value".into(),
+                vec!["tag".into()],
+            )
+            .unwrap(),
+            Actor::Human,
+            time,
+            None,
+            event_id(event),
+        )
+        .unwrap()
+    }
+
+    fn assert_invalid_unchanged(state: &ProjectionState, event: EventEnvelope) {
+        let mut candidate = state.clone();
+        assert_eq!(
+            reduce(&mut candidate, &event),
+            Err(RecoveryError::InvalidEventRecord)
+        );
+        assert_eq!(&candidate, state);
+    }
+
+    #[test]
+    fn direct_entry_mutations_reduce_and_memory_reads_are_no_ops() {
+        let profile = profile(1);
+        let mut state = ProjectionState::default();
+        seed_profile(&mut state, &profile, 19);
+        let entry = direct_entry(&profile, 20, 21, 22, 22, "Earnings Thesis");
+        let set = envelope(
+            &state,
+            22,
+            Actor::Human,
+            22,
+            Some(entry_object(&entry)),
+            ApplicationEvent::MemoryEntrySet {
+                entry: entry.clone(),
+                expired_proposals: vec![],
+            },
+        );
+        reduce(&mut state, &set).unwrap();
+        assert_eq!(
+            state.memory.current_entry(
+                profile.memory_namespace_id(),
+                entry.reference().normalized_key()
+            ),
+            Some(&entry.reference())
+        );
+
+        let deleted = entry
+            .next_deleted(
+                MemoryEntryVersionId::from_uuid(uuid(23)),
+                Actor::Human,
+                24,
+                None,
+                event_id(24),
+            )
+            .unwrap();
+        let delete = envelope(
+            &state,
+            24,
+            Actor::Human,
+            24,
+            Some(entry_object(&deleted)),
+            ApplicationEvent::MemoryEntryDeleted {
+                entry: deleted.clone(),
+                expired_proposals: vec![],
+            },
+        );
+        reduce(&mut state, &delete).unwrap();
+        assert_eq!(
+            state.memory.current_entry(
+                profile.memory_namespace_id(),
+                deleted.reference().normalized_key()
+            ),
+            Some(&deleted.reference())
+        );
+
+        let before = state.memory.clone();
+        let read = envelope(
+            &state,
+            25,
+            Actor::Human,
+            25,
+            None,
+            ApplicationEvent::MemoryEntryVersionShown {
+                profile: profile.reference(),
+                entry: deleted.reference(),
+            },
+        );
+        reduce(&mut state, &read).unwrap();
+        assert_eq!(state.memory, before);
+    }
+
+    #[test]
+    fn proposal_create_accept_and_reject_validate_transitions() {
+        let profile = profile(100);
+        let accepted_proposal = proposal(
+            &profile,
+            120,
+            "Accepted Key",
+            ExpectedMemoryEntryState::Absent,
+        );
+        let mut accepted_state = ProjectionState::default();
+        seed_profile(&mut accepted_state, &profile, 119);
+        create_proposal(&mut accepted_state, &accepted_proposal);
+        let accepted_resolution =
+            resolution(&accepted_proposal, MemoryProposalStatus::Accepted, 121, 121);
+        let accepted_entry = MemoryEntryVersion::create_present(
+            profile.memory_namespace_id(),
+            MemoryEntryId::from_uuid(uuid(122)),
+            MemoryEntryVersionId::from_uuid(uuid(123)),
+            MemoryEntryDraft::new("Accepted Key".into(), "private accepted".into(), vec![])
+                .unwrap(),
+            Actor::Human,
+            121,
+            Some(accepted_proposal.reference()),
+            event_id(121),
+        )
+        .unwrap();
+        let accepted = envelope(
+            &accepted_state,
+            121,
+            Actor::Human,
+            121,
+            Some(accepted_proposal.object_ref().unwrap()),
+            ApplicationEvent::MemoryProposalAccepted {
+                resolution: accepted_resolution,
+                entry: accepted_entry.clone(),
+                expired_proposals: vec![],
+            },
+        );
+        reduce(&mut accepted_state, &accepted).unwrap();
+        assert_eq!(
+            accepted_state.memory.current_entry(
+                profile.memory_namespace_id(),
+                accepted_entry.reference().normalized_key()
+            ),
+            Some(&accepted_entry.reference())
+        );
+        assert!(
+            serde_json::to_string(&accepted_state.memory)
+                .unwrap()
+                .contains("Accepted")
+        );
+
+        let rejected_proposal = proposal(
+            &profile,
+            130,
+            "Rejected Key",
+            ExpectedMemoryEntryState::Absent,
+        );
+        let mut rejected_state = ProjectionState::default();
+        seed_profile(&mut rejected_state, &profile, 129);
+        create_proposal(&mut rejected_state, &rejected_proposal);
+        let rejected = envelope(
+            &rejected_state,
+            131,
+            Actor::Human,
+            131,
+            Some(rejected_proposal.object_ref().unwrap()),
+            ApplicationEvent::MemoryProposalRejected {
+                resolution: resolution(
+                    &rejected_proposal,
+                    MemoryProposalStatus::Rejected,
+                    131,
+                    131,
+                ),
+            },
+        );
+        reduce(&mut rejected_state, &rejected).unwrap();
+        assert!(
+            serde_json::to_string(&rejected_state.memory)
+                .unwrap()
+                .contains("Rejected")
+        );
+    }
+
+    #[test]
+    fn proposal_approval_and_terminal_resolution_links_are_exhaustive() {
+        let profile = profile(150);
+        let proposal = proposal(
+            &profile,
+            170,
+            "Linked Proposal",
+            ExpectedMemoryEntryState::Absent,
+        );
+        let mut base = ProjectionState::default();
+        seed_profile(&mut base, &profile, 169);
+        let build = |approval| {
+            envelope(
+                &base,
+                170,
+                Actor::Agent(profile.profile_id()),
+                170,
+                Some(proposal.object_ref().unwrap()),
+                ApplicationEvent::MemoryProposalCreated {
+                    proposal: proposal.clone(),
+                    approval,
+                },
+            )
+        };
+        let wrong_id = ApprovalRecord::builder(ApprovalAction::MemoryMutation)
+            .approval_id(ApprovalId::from_uuid(uuid(9_170)))
+            .object(proposal.object_ref().unwrap())
+            .actor(Actor::Agent(profile.profile_id()))
+            .created_at_millis(170)
+            .build()
+            .unwrap();
+        let wrong_action = ApprovalRecord::builder(ApprovalAction::DiscussionRun)
+            .approval_id(proposal.approval_id())
+            .object(proposal.object_ref().unwrap())
+            .actor(Actor::Agent(profile.profile_id()))
+            .created_at_millis(170)
+            .build()
+            .unwrap();
+        let wrong_object = ApprovalRecord::builder(ApprovalAction::MemoryMutation)
+            .approval_id(proposal.approval_id())
+            .object(
+                ObjectRef::new(
+                    "memory_proposal",
+                    MemoryProposalId::from_uuid(uuid(9_171)).to_string(),
+                    proposal.reference().version(),
+                    proposal.reference().content_digest().clone(),
+                )
+                .unwrap(),
+            )
+            .actor(Actor::Agent(profile.profile_id()))
+            .created_at_millis(170)
+            .build()
+            .unwrap();
+        let wrong_actor = ApprovalRecord::builder(ApprovalAction::MemoryMutation)
+            .approval_id(proposal.approval_id())
+            .object(proposal.object_ref().unwrap())
+            .actor(Actor::Human)
+            .created_at_millis(170)
+            .build()
+            .unwrap();
+        let wrong_time = ApprovalRecord::builder(ApprovalAction::MemoryMutation)
+            .approval_id(proposal.approval_id())
+            .object(proposal.object_ref().unwrap())
+            .actor(Actor::Agent(profile.profile_id()))
+            .created_at_millis(171)
+            .build()
+            .unwrap();
+        let expiring = ApprovalRecord::builder(ApprovalAction::MemoryMutation)
+            .approval_id(proposal.approval_id())
+            .object(proposal.object_ref().unwrap())
+            .actor(Actor::Agent(profile.profile_id()))
+            .created_at_millis(170)
+            .expires_at_millis(171)
+            .build()
+            .unwrap();
+        let terminal = approval(&proposal)
+            .resolve(ApprovalStatus::Accepted, Actor::Human, 171)
+            .unwrap();
+        for forged in [
+            wrong_id,
+            wrong_action,
+            wrong_object,
+            wrong_actor,
+            wrong_time,
+            expiring,
+            terminal,
+        ] {
+            assert_invalid_unchanged(&base, build(forged));
+        }
+
+        let valid_create = build(approval(&proposal));
+        let mut pending = base;
+        reduce(&mut pending, &valid_create).unwrap();
+        let accepted = resolution(&proposal, MemoryProposalStatus::Accepted, 171, 171);
+        let unassociated_entry = MemoryEntryVersion::create_present(
+            profile.memory_namespace_id(),
+            MemoryEntryId::from_uuid(uuid(172)),
+            MemoryEntryVersionId::from_uuid(uuid(173)),
+            MemoryEntryDraft::new("Linked Proposal".into(), "private value".into(), vec![])
+                .unwrap(),
+            Actor::Human,
+            171,
+            None,
+            event_id(171),
+        )
+        .unwrap();
+        assert_invalid_unchanged(
+            &pending,
+            envelope(
+                &pending,
+                171,
+                Actor::Human,
+                171,
+                Some(proposal.object_ref().unwrap()),
+                ApplicationEvent::MemoryProposalAccepted {
+                    resolution: accepted.clone(),
+                    entry: unassociated_entry,
+                    expired_proposals: vec![],
+                },
+            ),
+        );
+        let wrong_approval = MemoryProposalResolution::new(
+            proposal.reference(),
+            MemoryProposalStatus::Accepted,
+            ApprovalId::from_uuid(uuid(9_172)),
+            Actor::Human,
+            171,
+            event_id(171),
+        )
+        .unwrap();
+        let associated_entry = MemoryEntryVersion::create_present(
+            profile.memory_namespace_id(),
+            MemoryEntryId::from_uuid(uuid(174)),
+            MemoryEntryVersionId::from_uuid(uuid(175)),
+            MemoryEntryDraft::new("Linked Proposal".into(), "private value".into(), vec![])
+                .unwrap(),
+            Actor::Human,
+            171,
+            Some(proposal.reference()),
+            event_id(171),
+        )
+        .unwrap();
+        assert_invalid_unchanged(
+            &pending,
+            envelope(
+                &pending,
+                171,
+                Actor::Human,
+                171,
+                Some(proposal.object_ref().unwrap()),
+                ApplicationEvent::MemoryProposalAccepted {
+                    resolution: wrong_approval,
+                    entry: associated_entry.clone(),
+                    expired_proposals: vec![],
+                },
+            ),
+        );
+        let valid = envelope(
+            &pending,
+            171,
+            Actor::Human,
+            171,
+            Some(proposal.object_ref().unwrap()),
+            ApplicationEvent::MemoryProposalAccepted {
+                resolution: accepted,
+                entry: associated_entry,
+                expired_proposals: vec![],
+            },
+        );
+        reduce(&mut pending, &valid).unwrap();
+        let retry = envelope(
+            &pending,
+            176,
+            Actor::Human,
+            176,
+            Some(proposal.object_ref().unwrap()),
+            ApplicationEvent::MemoryProposalRejected {
+                resolution: resolution(&proposal, MemoryProposalStatus::Rejected, 176, 176),
+            },
+        );
+        assert_invalid_unchanged(&pending, retry);
+    }
+
+    #[test]
+    fn mutation_envelopes_require_exact_primary_object_actor_time_and_embedded_links() {
+        let profile = profile(200);
+        let entry = direct_entry(&profile, 220, 221, 222, 222, "Exact Entry");
+        let valid_set = |state: &ProjectionState| {
+            envelope(
+                state,
+                222,
+                Actor::Human,
+                222,
+                Some(entry_object(&entry)),
+                ApplicationEvent::MemoryEntrySet {
+                    entry: entry.clone(),
+                    expired_proposals: vec![],
+                },
+            )
+        };
+        let base = ProjectionState::default();
+        let mut no_object = valid_set(&base);
+        no_object.object = None;
+        assert_invalid_unchanged(&base, no_object);
+        let mut wrong_actor = valid_set(&base);
+        wrong_actor.actor = Actor::System;
+        assert_invalid_unchanged(&base, wrong_actor);
+        let mut wrong_time = valid_set(&base);
+        wrong_time.occurred_at_ms += 1;
+        assert_invalid_unchanged(&base, wrong_time);
+
+        let proposed = proposal(
+            &profile,
+            230,
+            "Exact Proposal",
+            ExpectedMemoryEntryState::Absent,
+        );
+        let valid_create = envelope(
+            &base,
+            230,
+            Actor::Agent(profile.profile_id()),
+            230,
+            Some(proposed.object_ref().unwrap()),
+            ApplicationEvent::MemoryProposalCreated {
+                proposal: proposed.clone(),
+                approval: ApprovalRecord::builder(ApprovalAction::DiscussionRun)
+                    .approval_id(proposed.approval_id())
+                    .object(proposed.object_ref().unwrap())
+                    .actor(Actor::Agent(profile.profile_id()))
+                    .created_at_millis(230)
+                    .build()
+                    .unwrap(),
+            },
+        );
+        assert_invalid_unchanged(&base, valid_create);
+
+        let mut summary_state = base.clone();
+        seed_profile(&mut summary_state, &profile, 239);
+        let source_event = envelope(
+            &summary_state,
+            240,
+            Actor::Human,
+            240,
+            None,
+            ApplicationEvent::HelpViewed,
+        );
+        reduce(&mut summary_state, &source_event).unwrap();
+        let summary_sequence = summary_state.last_sequence + 1;
+        let summary = EpisodicSummary::new(
+            EpisodicSummaryId::from_uuid(uuid(241)),
+            &profile,
+            "private label".into(),
+            "private body".into(),
+            vec![],
+            vec![
+                EpisodicSourceRef::new(
+                    summary_state.last_sequence,
+                    event_id(240),
+                    "help_viewed".into(),
+                    sha256(b"source"),
+                )
+                .unwrap(),
+            ],
+            241,
+            summary_sequence,
+            event_id(241),
+        )
+        .unwrap();
+        let summary_event = envelope(
+            &summary_state,
+            241,
+            Actor::System,
+            241,
+            Some(summary_object(&summary)),
+            ApplicationEvent::EpisodicSummaryRecorded { summary },
+        );
+        let mut wrong_summary_actor = summary_event.clone();
+        wrong_summary_actor.actor = Actor::Human;
+        assert_invalid_unchanged(&summary_state, wrong_summary_actor);
+        let mut missing_summary_object = summary_event.clone();
+        missing_summary_object.object = None;
+        assert_invalid_unchanged(&summary_state, missing_summary_object);
+        let mut wrong_summary_time = summary_event.clone();
+        wrong_summary_time.occurred_at_ms += 1;
+        assert_invalid_unchanged(&summary_state, wrong_summary_time);
+        let memory_before = summary_state.memory.clone();
+        reduce(&mut summary_state, &summary_event).unwrap();
+        assert_eq!(summary_state.memory, memory_before);
+    }
+
+    #[test]
+    fn sibling_expirations_are_exact_sorted_unique_and_same_key() {
+        let profile = profile(300);
+        let first = proposal(
+            &profile,
+            320,
+            "Shared Key",
+            ExpectedMemoryEntryState::Absent,
+        );
+        let second = proposal(
+            &profile,
+            321,
+            "Shared Key",
+            ExpectedMemoryEntryState::Absent,
+        );
+        let unrelated = proposal(&profile, 322, "Other Key", ExpectedMemoryEntryState::Absent);
+        let mut state = ProjectionState::default();
+        seed_profile(&mut state, &profile, 319);
+        create_proposal(&mut state, &first);
+        create_proposal(&mut state, &second);
+        create_proposal(&mut state, &unrelated);
+        let entry = direct_entry(&profile, 330, 331, 332, 332, "Shared Key");
+        let first_expired = resolution(&first, MemoryProposalStatus::Expired, 332, 332);
+        let second_expired = resolution(&second, MemoryProposalStatus::Expired, 332, 332);
+        let make = |expired_proposals| {
+            envelope(
+                &state,
+                332,
+                Actor::Human,
+                332,
+                Some(entry_object(&entry)),
+                ApplicationEvent::MemoryEntrySet {
+                    entry: entry.clone(),
+                    expired_proposals,
+                },
+            )
+        };
+        assert_invalid_unchanged(&state, make(vec![first_expired.clone()]));
+        assert_invalid_unchanged(
+            &state,
+            make(vec![second_expired.clone(), first_expired.clone()]),
+        );
+        assert_invalid_unchanged(
+            &state,
+            make(vec![first_expired.clone(), first_expired.clone()]),
+        );
+        assert_invalid_unchanged(
+            &state,
+            make(vec![
+                first_expired.clone(),
+                second_expired.clone(),
+                resolution(&unrelated, MemoryProposalStatus::Expired, 332, 332),
+            ]),
+        );
+        let valid = make(vec![first_expired, second_expired]);
+        reduce(&mut state, &valid).unwrap();
+    }
+
+    #[test]
+    fn read_event_cross_field_invariants_fail_closed_without_mutating_state() {
+        let owner = profile(400);
+        let other_profile = profile(500);
+        let entry = direct_entry(&owner, 420, 421, 422, 422, "Read Entry");
+        let deleted = entry
+            .next_deleted(
+                MemoryEntryVersionId::from_uuid(uuid(423)),
+                Actor::Human,
+                423,
+                None,
+                event_id(423),
+            )
+            .unwrap();
+        let mut state = ProjectionState::default();
+        seed_profile(&mut state, &owner, 410);
+        seed_profile(&mut state, &other_profile, 411);
+        let set = envelope(
+            &state,
+            422,
+            Actor::Human,
+            422,
+            Some(entry_object(&entry)),
+            ApplicationEvent::MemoryEntrySet {
+                entry: entry.clone(),
+                expired_proposals: vec![],
+            },
+        );
+        reduce(&mut state, &set).unwrap();
+        let delete = envelope(
+            &state,
+            423,
+            Actor::Human,
+            423,
+            Some(entry_object(&deleted)),
+            ApplicationEvent::MemoryEntryDeleted {
+                entry: deleted.clone(),
+                expired_proposals: vec![],
+            },
+        );
+        reduce(&mut state, &delete).unwrap();
+
+        let mismatched_namespace = envelope(
+            &state,
+            430,
+            Actor::Human,
+            430,
+            None,
+            ApplicationEvent::MemoryEntriesListed {
+                profile: owner.reference(),
+                namespace_id: other_profile.memory_namespace_id(),
+                entries: vec![],
+                total_count: 0,
+                returned_count: 0,
+                omitted_count: 0,
+            },
+        );
+        assert_invalid_unchanged(&state, mismatched_namespace);
+
+        let deleted_current = envelope(
+            &state,
+            431,
+            Actor::Human,
+            431,
+            None,
+            ApplicationEvent::MemoryEntryShown {
+                profile: owner.reference(),
+                entry: deleted.reference(),
+            },
+        );
+        assert_invalid_unchanged(&state, deleted_current);
+
+        let wrong_profile_history = envelope(
+            &state,
+            432,
+            Actor::Human,
+            432,
+            None,
+            ApplicationEvent::MemoryEntryHistoryShown {
+                profile: other_profile.reference(),
+                current: deleted.reference(),
+                versions: vec![deleted.reference(), entry.reference()],
+                total_count: 2,
+                returned_count: 2,
+                omitted_count: 0,
+            },
+        );
+        assert_invalid_unchanged(&state, wrong_profile_history);
+
+        let proposed = proposal(
+            &owner,
+            440,
+            "Read Proposal",
+            ExpectedMemoryEntryState::Absent,
+        );
+        let wrong_filter = envelope(
+            &state,
+            440,
+            Actor::Human,
+            440,
+            None,
+            ApplicationEvent::MemoryProposalsListed {
+                profile: owner.reference(),
+                filter: MemoryProposalFilter::Pending,
+                proposals: vec![MemoryProposalStatusRef {
+                    proposal: proposed.reference(),
+                    status: MemoryProposalStatus::Rejected,
+                }],
+                total_count: 1,
+                returned_count: 1,
+                omitted_count: 0,
+            },
+        );
+        assert_invalid_unchanged(&state, wrong_filter);
+
+        let mut bad_object = envelope(
+            &state,
+            441,
+            Actor::Human,
+            441,
+            None,
+            ApplicationEvent::MemoryEntryVersionShown {
+                profile: owner.reference(),
+                entry: entry.reference(),
+            },
+        );
+        bad_object.object = Some(entry_object(&entry));
+        assert_invalid_unchanged(&state, bad_object);
+    }
+
+    #[test]
+    fn empty_memory_preserves_legacy_bytes_and_nonempty_memory_is_digest_material() {
+        let empty = ProjectionState::default();
+        let legacy = br#"{"installation":null,"last_event_digest":null,"last_sequence":0,"sessions":{},"setup_status":"not_started"}"#;
+        assert_eq!(canonical_json_bytes(&empty).unwrap(), legacy);
+        assert_eq!(empty.digest().unwrap(), sha256(legacy));
+        assert_eq!(
+            serde_json::from_slice::<ProjectionState>(legacy).unwrap(),
+            empty
+        );
+
+        let profile = profile(600);
+        let entry = direct_entry(&profile, 620, 621, 622, 622, "Digest Entry");
+        let event = envelope(
+            &empty,
+            622,
+            Actor::Human,
+            622,
+            Some(entry_object(&entry)),
+            ApplicationEvent::MemoryEntrySet {
+                entry,
+                expired_proposals: vec![],
+            },
+        );
+        let mut nonempty = empty.clone();
+        reduce(&mut nonempty, &event).unwrap();
+        let bytes = canonical_json_bytes(&nonempty).unwrap();
+        assert!(std::str::from_utf8(&bytes).unwrap().contains("\"memory\""));
+        assert_ne!(nonempty.digest().unwrap(), empty.digest().unwrap());
+    }
+
+    #[test]
+    fn every_memory_read_event_validates_and_leaves_memory_unchanged() {
+        let profile = profile(800);
+        let mut state = ProjectionState::default();
+        seed_profile(&mut state, &profile, 809);
+        let entry = direct_entry(&profile, 820, 821, 822, 822, "Readable Entry");
+        let set = envelope(
+            &state,
+            822,
+            Actor::Human,
+            822,
+            Some(entry_object(&entry)),
+            ApplicationEvent::MemoryEntrySet {
+                entry: entry.clone(),
+                expired_proposals: vec![],
+            },
+        );
+        reduce(&mut state, &set).unwrap();
+        let proposal = proposal(
+            &profile,
+            830,
+            "Proposed Entry",
+            ExpectedMemoryEntryState::Absent,
+        );
+        create_proposal(&mut state, &proposal);
+        let summary = EpisodicSummary::new(
+            EpisodicSummaryId::from_uuid(uuid(840)),
+            &profile,
+            "private label".into(),
+            "private summary".into(),
+            vec![],
+            vec![
+                EpisodicSourceRef::new(
+                    1,
+                    event_id(809),
+                    "agent_profile_created".into(),
+                    sha256(b"source"),
+                )
+                .unwrap(),
+            ],
+            840,
+            2,
+            event_id(840),
+        )
+        .unwrap();
+        let request = MemoryRetrievalRequest::new(
+            MemoryRetrievalScope::new(&profile, MemoryPurposeScope::General).unwrap(),
+            MemoryRetrievalBudget::default(),
+        )
+        .unwrap();
+        let snapshot = select_snapshot(&request, std::iter::empty(), std::iter::empty()).unwrap();
+        let entry_ref = entry.reference();
+        let proposal_ref = proposal.reference();
+        let reads = vec![
+            ApplicationEvent::MemoryEntriesListed {
+                profile: profile.reference(),
+                namespace_id: profile.memory_namespace_id(),
+                entries: vec![entry_ref.clone()],
+                total_count: 1,
+                returned_count: 1,
+                omitted_count: 0,
+            },
+            ApplicationEvent::MemoryEntryShown {
+                profile: profile.reference(),
+                entry: entry_ref.clone(),
+            },
+            ApplicationEvent::MemoryEntryHistoryShown {
+                profile: profile.reference(),
+                current: entry_ref.clone(),
+                versions: vec![entry_ref.clone()],
+                total_count: 1,
+                returned_count: 1,
+                omitted_count: 0,
+            },
+            ApplicationEvent::MemoryEntryVersionShown {
+                profile: profile.reference(),
+                entry: entry_ref,
+            },
+            ApplicationEvent::MemoryProposalsListed {
+                profile: profile.reference(),
+                filter: MemoryProposalFilter::Pending,
+                proposals: vec![MemoryProposalStatusRef {
+                    proposal: proposal_ref.clone(),
+                    status: MemoryProposalStatus::Pending,
+                }],
+                total_count: 1,
+                returned_count: 1,
+                omitted_count: 0,
+            },
+            ApplicationEvent::MemoryProposalShown {
+                proposal: proposal_ref,
+                status: MemoryProposalStatus::Pending,
+                resolution: None,
+            },
+            ApplicationEvent::EpisodicSummariesListed {
+                profile: profile.reference(),
+                summaries: vec![summary.reference()],
+                total_count: 1,
+                returned_count: 1,
+                omitted_count: 0,
+            },
+            ApplicationEvent::EpisodicSummaryShown {
+                summary: summary.reference(),
+            },
+            ApplicationEvent::MemorySnapshotBuilt {
+                metadata: snapshot.metadata(),
+            },
+        ];
+        assert_eq!(reads.len(), 9);
+        for (index, read) in reads.into_iter().enumerate() {
+            let before = state.memory.clone();
+            let event = envelope(
+                &state,
+                850 + index as u128,
+                Actor::Human,
+                850 + index as i64,
+                None,
+                read,
+            );
+            reduce(&mut state, &event).unwrap();
+            assert_eq!(state.memory, before, "read event {index}");
+        }
+    }
+
+    #[test]
+    fn projection_repository_load_and_rebuild_preserve_reduced_memory() {
+        let (_temporary_directory, mut database) = super::database();
+        let profile = profile(700);
+        let entry = direct_entry(&profile, 720, 721, 722, 722, "Persisted Entry");
+        let event = ApplicationEvent::MemoryEntrySet {
+            entry: entry.clone(),
+            expired_proposals: vec![],
+        };
+        let transaction = database.immediate_transaction().unwrap();
+        let committed = EventRepository::append(
+            &transaction,
+            PendingEvent {
+                event_id: event_id(722),
+                event_schema_version: EVENT_SCHEMA_VERSION,
+                actor: Actor::Human,
+                occurred_at_ms: 722,
+                correlation_id: CorrelationId::from_uuid(uuid(10_722)),
+                causation_id: None,
+                object: Some(entry_object(&entry)),
+                event,
+            },
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+
+        let mut expected = ProjectionState::default();
+        reduce(&mut expected, &committed).unwrap();
+        let transaction = database.immediate_transaction().unwrap();
+        ProjectionRepository::store(&transaction, &expected).unwrap();
+        transaction.commit().unwrap();
+        let loaded = ProjectionRepository::load(database.connection()).unwrap();
+        assert_eq!(loaded.memory, expected.memory);
+
+        let rebuilt =
+            ProjectionRepository::rebuild(database.connection_mut(), &[committed]).unwrap();
+        assert_eq!(rebuilt.memory, expected.memory);
+        assert_eq!(
+            ProjectionRepository::load(database.connection())
+                .unwrap()
+                .memory,
+            expected.memory
+        );
+    }
+}
+
 #[test]
 fn reducer_accepts_every_valid_event_variant_without_startup_local_history() {
     let (_temporary_directory, mut database) = database();
@@ -733,6 +1788,7 @@ fn projection_state_deserialization_rejects_zero_marker_installations_and_multip
         sessions,
         agent_profiles: Default::default(),
         skills: Default::default(),
+        memory: Default::default(),
         setup_status: SetupStatus::NotStarted,
         last_sequence: 1,
         last_event_digest: Some(sha256(b"marker")),
@@ -910,6 +1966,7 @@ fn projection_lower_bound_rejects_each_underrepresented_installation_session_and
             sessions,
             agent_profiles: Default::default(),
             skills: Default::default(),
+            memory: Default::default(),
             setup_status: SetupStatus::NotStarted,
             last_sequence: sequence,
             last_event_digest: if sequence == 0 {
@@ -936,6 +1993,7 @@ fn newer_store_rejects_a_digest_consistent_fabricated_persisted_prefix() {
         sessions: BTreeMap::new(),
         agent_profiles: Default::default(),
         skills: Default::default(),
+        memory: Default::default(),
         setup_status: SetupStatus::NotStarted,
         last_sequence: 2,
         last_event_digest: Some(events[1].event_digest.clone()),

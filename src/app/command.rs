@@ -9,9 +9,13 @@ use crate::{
         canonicalize_visible_text, normalize_profile_name_key,
     },
     domain::{
-        Actor, AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, Digest,
-        DomainError, ObjectVersion, ProfileReviewToken, Sha256Digest, SkillId, SkillReviewToken,
-        SkillVersionId, sha256,
+        Actor, AgentProfileId, AgentProfileVersionId, ApprovalId, CommandId, CorrelationId, Digest,
+        DomainError, EpisodicSummaryId, MemoryProposalId, MemoryReviewToken, ObjectVersion,
+        ProfileReviewToken, Sha256Digest, SkillId, SkillReviewToken, SkillVersionId, sha256,
+    },
+    memory::{
+        ExpectedMemoryEntryState, MemoryEntryDraft, MemoryEntryRef, MemoryProposalFilter,
+        MemoryProposalOperation, MemoryProposalRef, MemoryRetrievalRequest,
     },
     skills::{SkillDraft, SkillVersionRef},
 };
@@ -297,6 +301,73 @@ pub enum ApplicationCommand {
         review_token: SkillReviewToken,
         review_digest: Digest,
     },
+    SetMemoryEntry {
+        profile: crate::agents::AgentProfileVersionRef,
+        expected: ExpectedMemoryEntryState,
+        candidate: MemoryEntryDraft,
+        review_token: MemoryReviewToken,
+        review_digest: Digest,
+    },
+    DeleteMemoryEntry {
+        profile: crate::agents::AgentProfileVersionRef,
+        expected: MemoryEntryRef,
+        review_token: MemoryReviewToken,
+        review_digest: Digest,
+    },
+    ProposeMemoryMutation {
+        proposer: crate::agents::AgentProfileVersionRef,
+        expected: ExpectedMemoryEntryState,
+        operation: MemoryProposalOperation,
+        rationale: String,
+    },
+    ApproveMemoryProposal {
+        proposal: MemoryProposalRef,
+        approval_id: ApprovalId,
+        expected_approval_status: crate::policy::ApprovalStatus,
+        expected_entry: ExpectedMemoryEntryState,
+        review_token: MemoryReviewToken,
+        review_digest: Digest,
+    },
+    RejectMemoryProposal {
+        proposal: MemoryProposalRef,
+        approval_id: ApprovalId,
+        expected_approval_status: crate::policy::ApprovalStatus,
+        expected_entry: ExpectedMemoryEntryState,
+        review_token: MemoryReviewToken,
+        review_digest: Digest,
+    },
+    ListMemoryEntries {
+        selector: AgentProfileSelector,
+    },
+    ShowMemoryEntry {
+        selector: AgentProfileSelector,
+        display_key: String,
+    },
+    ShowMemoryEntryHistory {
+        selector: AgentProfileSelector,
+        display_key: String,
+    },
+    ShowMemoryEntryVersion {
+        selector: AgentProfileSelector,
+        display_key: String,
+        version: ObjectVersion,
+    },
+    ListMemoryProposals {
+        selector: AgentProfileSelector,
+        filter: MemoryProposalFilter,
+    },
+    ShowMemoryProposal {
+        proposal_id: MemoryProposalId,
+    },
+    ListEpisodicSummaries {
+        selector: AgentProfileSelector,
+    },
+    ShowEpisodicSummary {
+        summary_id: EpisodicSummaryId,
+    },
+    BuildMemorySnapshot {
+        request: MemoryRetrievalRequest,
+    },
     RejectInput(InputRejection),
     RequestShutdown,
 }
@@ -310,6 +381,15 @@ impl ApplicationCommand {
             }
             Self::CreateSkill { candidate, .. } | Self::ActivateSkillVersion { candidate, .. } => {
                 *candidate = candidate.canonicalized()?;
+            }
+            Self::SetMemoryEntry { candidate, .. } => {
+                *candidate = canonicalize_memory_draft(candidate)?;
+            }
+            Self::ProposeMemoryMutation {
+                operation: MemoryProposalOperation::Set { candidate },
+                ..
+            } => {
+                *candidate = canonicalize_memory_draft(candidate)?;
             }
             _ => {}
         }
@@ -344,9 +424,35 @@ impl ApplicationCommand {
                 Capability::AgentSkillAssign
             }
             Self::UnassignAgentSkill { .. } => Capability::AgentSkillUnassign,
+            Self::SetMemoryEntry { .. } | Self::DeleteMemoryEntry { .. } => {
+                Capability::MemoryMutate
+            }
+            Self::ProposeMemoryMutation { .. } => Capability::MemoryPropose,
+            Self::ApproveMemoryProposal { .. } | Self::RejectMemoryProposal { .. } => {
+                Capability::MemoryResolve
+            }
+            Self::ListMemoryEntries { .. }
+            | Self::ShowMemoryEntry { .. }
+            | Self::ShowMemoryEntryHistory { .. }
+            | Self::ShowMemoryEntryVersion { .. }
+            | Self::ListMemoryProposals { .. }
+            | Self::ShowMemoryProposal { .. }
+            | Self::ListEpisodicSummaries { .. }
+            | Self::ShowEpisodicSummary { .. }
+            | Self::BuildMemorySnapshot { .. } => Capability::MemoryRead,
             Self::RequestShutdown => Capability::Shutdown,
         }
     }
+}
+
+fn canonicalize_memory_draft(
+    candidate: &MemoryEntryDraft,
+) -> Result<MemoryEntryDraft, DomainError> {
+    MemoryEntryDraft::new(
+        candidate.display_key().to_owned(),
+        candidate.value().to_owned(),
+        candidate.purpose_tags().to_vec(),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

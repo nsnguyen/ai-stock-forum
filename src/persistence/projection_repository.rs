@@ -314,6 +314,7 @@ fn read_projection_rows(
         sessions,
         agent_profiles: expected.agent_profiles.clone(),
         skills: expected.skills.clone(),
+        memory: expected.memory.clone(),
         last_sequence: u64::try_from(sequence).map_err(|_| RecoveryError::InvalidEventRecord)?,
         last_event_digest: digest
             .map(|value| Sha256Digest::parse(&value))
