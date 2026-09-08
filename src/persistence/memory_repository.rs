@@ -1,15 +1,19 @@
 //! Immutable SQLite codecs for the hybrid-memory domain records.
 //!
-//! This layer authenticates repository rows and their relational context.  It
-//! intentionally does not authenticate event payloads; that correlation is
-//! introduced by the later event-payload and verified-stream contracts.
+//! This layer authenticates repository rows and their relational context. It
+//! also derives recovery evidence only from the verified event stream before
+//! reconciling immutable memory rows and rebuildable projections.
 
-use std::{collections::BTreeMap, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    str::FromStr,
+};
 
-use rusqlite::{OptionalExtension, Row, params, params_from_iter, types::Value};
+use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter, types::Value};
 
 use crate::{
     agents::{AgentProfileVersion, AgentProfileVersionRef},
+    app::{ApplicationEvent, EventEnvelope},
     domain::{
         Actor, ApprovalId, Digest, EpisodicSummaryId, EventId, MemoryEntryVersionId,
         MemoryNamespaceId, MemoryProposalId, ObjectVersion, canonical_json_bytes,
@@ -26,7 +30,7 @@ use crate::{
 };
 
 use super::{
-    ImmediateTransaction, PersistenceError,
+    ImmediateTransaction, PersistenceError, RecoveryError,
     agent_profile_repository::load_exact_profile_versions_batch, load_exact_profile_version,
 };
 
@@ -34,6 +38,493 @@ const PAGE_LIMIT: u16 = 100;
 const MAX_PENDING_MEMORY_PROPOSALS: u64 = 256;
 
 pub struct MemoryRepository;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ExpectedMemoryRecords {
+    pub entries: BTreeMap<MemoryEntryVersionId, (u64, MemoryEntryVersion)>,
+    pub proposals: BTreeMap<MemoryProposalId, (u64, MemoryProposal)>,
+    pub resolutions: BTreeMap<MemoryProposalId, (u64, MemoryProposalResolution)>,
+    pub summaries: BTreeMap<EpisodicSummaryId, (u64, EpisodicSummary)>,
+    pub approvals: BTreeMap<ApprovalId, ExpectedMemoryApproval>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExpectedMemoryApproval {
+    pub record: ApprovalRecord,
+    pub resolution_event_id: Option<EventId>,
+    pub resolution_actor: Option<Actor>,
+}
+
+pub(crate) fn expected_memory_records(
+    events: &[EventEnvelope],
+) -> Result<ExpectedMemoryRecords, RecoveryError> {
+    let mut state = crate::recovery::ProjectionState::default();
+    derive_expected_memory_records(events, &mut state)
+}
+
+fn derive_expected_memory_records(
+    events: &[EventEnvelope],
+    state: &mut crate::recovery::ProjectionState,
+) -> Result<ExpectedMemoryRecords, RecoveryError> {
+    let mut expected = ExpectedMemoryRecords::default();
+    let mut prior_events = BTreeMap::<u64, &EventEnvelope>::new();
+    for envelope in events {
+        crate::recovery::reduce(state, envelope)?;
+        let mut add_entry = |entry: &MemoryEntryVersion| -> Result<(), RecoveryError> {
+            if entry.creation_event_id() != envelope.event_id
+                || entry.created_at_ms() != envelope.occurred_at_ms
+            {
+                return Err(RecoveryError::InvalidEventRecord);
+            }
+            match expected.entries.insert(
+                entry.reference().entry_version_id(),
+                (envelope.sequence, entry.clone()),
+            ) {
+                None => Ok(()),
+                Some((sequence, prior)) if sequence == envelope.sequence && prior == *entry => {
+                    Ok(())
+                }
+                Some(_) => Err(RecoveryError::InvalidEventRecord),
+            }
+        };
+        let mut add_resolution =
+            |resolution: &MemoryProposalResolution| -> Result<(), RecoveryError> {
+                if resolution.resolution_event_id() != envelope.event_id
+                    || resolution.resolved_at_ms() != envelope.occurred_at_ms
+                    || envelope.actor != Actor::Human
+                {
+                    return Err(RecoveryError::InvalidEventRecord);
+                }
+                if expected
+                    .resolutions
+                    .insert(
+                        resolution.proposal().proposal_id(),
+                        (envelope.sequence, resolution.clone()),
+                    )
+                    .is_some()
+                {
+                    return Err(RecoveryError::InvalidEventRecord);
+                }
+                let approval = expected
+                    .approvals
+                    .get_mut(&resolution.approval_id())
+                    .ok_or(RecoveryError::InvalidEventRecord)?;
+                approval.record = approval
+                    .record
+                    .resolve(
+                        match resolution.status() {
+                            MemoryProposalStatus::Accepted => ApprovalStatus::Accepted,
+                            MemoryProposalStatus::Rejected => ApprovalStatus::Rejected,
+                            MemoryProposalStatus::Expired => ApprovalStatus::Expired,
+                            MemoryProposalStatus::Pending => {
+                                return Err(RecoveryError::InvalidEventRecord);
+                            }
+                        },
+                        Actor::Human,
+                        resolution.resolved_at_ms(),
+                    )
+                    .map_err(|_| RecoveryError::InvalidEventRecord)?;
+                approval.resolution_event_id = Some(envelope.event_id);
+                approval.resolution_actor = Some(Actor::Human);
+                Ok(())
+            };
+        match &envelope.event {
+            ApplicationEvent::MemoryEntrySet {
+                entry,
+                expired_proposals,
+            }
+            | ApplicationEvent::MemoryEntryDeleted {
+                entry,
+                expired_proposals,
+            } => {
+                add_entry(entry)?;
+                for resolution in expired_proposals {
+                    add_resolution(resolution)?;
+                }
+            }
+            ApplicationEvent::MemoryProposalCreated { proposal, approval } => {
+                if proposal.creation_event_id() != envelope.event_id
+                    || proposal.created_at_ms() != envelope.occurred_at_ms
+                    || approval.approval_id() != proposal.approval_id()
+                {
+                    return Err(RecoveryError::InvalidEventRecord);
+                }
+                if expected
+                    .proposals
+                    .insert(
+                        proposal.reference().proposal_id(),
+                        (envelope.sequence, proposal.clone()),
+                    )
+                    .is_some()
+                    || expected
+                        .approvals
+                        .insert(
+                            proposal.approval_id(),
+                            ExpectedMemoryApproval {
+                                record: approval.clone(),
+                                resolution_event_id: None,
+                                resolution_actor: None,
+                            },
+                        )
+                        .is_some()
+                {
+                    return Err(RecoveryError::InvalidEventRecord);
+                }
+            }
+            ApplicationEvent::MemoryProposalAccepted {
+                resolution,
+                entry,
+                expired_proposals,
+            } => {
+                add_resolution(resolution)?;
+                add_entry(entry)?;
+                for resolution in expired_proposals {
+                    add_resolution(resolution)?;
+                }
+            }
+            ApplicationEvent::MemoryProposalRejected { resolution } => add_resolution(resolution)?,
+            ApplicationEvent::EpisodicSummaryRecorded { summary } => {
+                if summary.creation_event_sequence() != envelope.sequence
+                    || summary.creation_event_id() != envelope.event_id
+                    || summary.created_at_ms() != envelope.occurred_at_ms
+                    || envelope.actor != Actor::System
+                    || expected
+                        .summaries
+                        .insert(
+                            summary.reference().summary_id(),
+                            (envelope.sequence, summary.clone()),
+                        )
+                        .is_some()
+                {
+                    return Err(RecoveryError::InvalidEventRecord);
+                }
+                for source in summary.sources() {
+                    let prior = prior_events
+                        .get(&source.sequence())
+                        .ok_or(RecoveryError::InvalidEventRecord)?;
+                    if prior.event_id != source.event_id()
+                        || prior.event.kind() != source.event_type()
+                        || prior.event_digest.as_str() != source.event_digest().as_str()
+                    {
+                        return Err(RecoveryError::InvalidEventRecord);
+                    }
+                }
+            }
+            _ => {}
+        }
+        if prior_events.insert(envelope.sequence, envelope).is_some() {
+            return Err(RecoveryError::InvalidEventRecord);
+        }
+    }
+    Ok(expected)
+}
+
+/// Materialize only wholly missing immutable entry rows after deriving their
+/// exact canonical representation from the verified stream. Any collision,
+/// altered row, or extra immutable entry fails closed before mutable pointers
+/// are rebuilt.
+pub(crate) fn reconcile_verified_memory(
+    tx: &rusqlite::Transaction<'_>,
+    events: &[EventEnvelope],
+    expected_projection: &MemoryProjection,
+) -> Result<(), RecoveryError> {
+    let expected = expected_memory_records(events)?;
+    let mut derived_state = crate::recovery::ProjectionState::default();
+    for event in events {
+        crate::recovery::reduce(&mut derived_state, event)?;
+    }
+    if &derived_state.memory != expected_projection {
+        return Err(RecoveryError::InvalidEventRecord);
+    }
+    reject_unexpected_ids(
+        tx,
+        "SELECT entry_version_id FROM memory_entry_versions",
+        expected.entries.keys().map(ToString::to_string).collect(),
+    )?;
+    reject_unexpected_ids(
+        tx,
+        "SELECT proposal_id FROM memory_proposals",
+        expected.proposals.keys().map(ToString::to_string).collect(),
+    )?;
+    reject_unexpected_ids(
+        tx,
+        "SELECT proposal_id FROM memory_proposal_resolutions",
+        expected
+            .resolutions
+            .keys()
+            .map(ToString::to_string)
+            .collect(),
+    )?;
+    reject_unexpected_ids(
+        tx,
+        "SELECT summary_id FROM episodic_summaries",
+        expected.summaries.keys().map(ToString::to_string).collect(),
+    )?;
+    reject_unexpected_source_keys(tx, &expected)?;
+    for (approval_id, approval) in &expected.approvals {
+        if approval
+            .record
+            .resolution()
+            .map(|resolution| resolution.actor())
+            != approval.resolution_actor.as_ref()
+        {
+            return Err(RecoveryError::InvalidEventRecord);
+        }
+        let columns = approval_columns(&approval.record, approval.resolution_event_id)
+            .map_err(|_| RecoveryError::InvalidEventRecord)?;
+        let actual = tx.query_row(
+            "SELECT action_kind,object_kind,object_id,object_version,object_digest,actor_id,actor_kind,resolution_event_id,status,created_at_ms,expires_at_ms,resolved_at_ms,resolution_kind,resolution_actor_kind,resolution_actor_id,approval_id FROM approval_records WHERE approval_id=?1",
+            [approval_id.to_string()],
+            |row| -> rusqlite::Result<ApprovalColumns> { Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?,row.get(10)?,row.get(11)?,row.get(12)?,row.get(13)?,row.get(14)?,row.get(15)?)) },
+        ).optional().map_err(|_| RecoveryError::QueryFailed)?;
+        match actual {
+            None => {
+                tx.execute("INSERT INTO approval_records (approval_id,action_kind,object_kind,object_id,object_version,object_digest,actor_kind,actor_id,status,created_at_ms,expires_at_ms,resolved_at_ms,resolution_kind,resolution_event_id,resolution_actor_kind,resolution_actor_id) VALUES (?16,?1,?2,?3,?4,?5,?7,?6,?9,?10,?11,?12,?13,?8,?14,?15)", params![columns.0,columns.1,columns.2,columns.3,columns.4,columns.5,columns.6,columns.7,columns.8,columns.9,columns.10,columns.11,columns.12,columns.13,columns.14,columns.15]).map_err(|_| RecoveryError::QueryFailed)?;
+            }
+            Some(stored) if approval_columns_equal(&stored, &columns) => {}
+            Some(_) => return Err(RecoveryError::InvalidEventRecord),
+        }
+    }
+    for (sequence, proposal) in expected.proposals.values() {
+        let row =
+            proposal_row(proposal, *sequence).map_err(|_| RecoveryError::InvalidEventRecord)?;
+        let found: Option<ProposalRow> = tx
+            .query_row(
+                "SELECT proposal_id,version,proposer_profile_id,proposer_profile_version_id,proposer_profile_version,proposer_profile_digest,memory_namespace_id,operation,display_key,normalized_key,expected_kind,expected_entry_id,expected_entry_version_id,expected_entry_version,expected_entry_digest,candidate_value,candidate_value_bytes,candidate_purpose_tags_json,rationale,plaintext_validation_version,created_at_ms,creation_event_sequence,creation_event_id,approval_id,content_digest,record_digest,record_json FROM memory_proposals WHERE proposal_id=?1",
+                [row.proposal_id.clone()],
+                decode_proposal_stored_row,
+            )
+            .optional()
+            .map_err(|_| RecoveryError::QueryFailed)?;
+        match found {
+            None => {
+                tx.execute("INSERT INTO memory_proposals (proposal_id,version,proposer_profile_id,proposer_profile_version_id,proposer_profile_version,proposer_profile_digest,memory_namespace_id,operation,display_key,normalized_key,expected_kind,expected_entry_id,expected_entry_version_id,expected_entry_version,expected_entry_digest,candidate_value,candidate_value_bytes,candidate_purpose_tags_json,rationale,plaintext_validation_version,created_at_ms,creation_event_sequence,creation_event_id,approval_id,content_digest,record_digest,record_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)",params![row.proposal_id,row.version,row.profile_id,row.profile_version_id,row.profile_version,row.profile_digest,row.namespace,row.operation,row.display_key,row.normalized_key,row.expected_kind,row.expected_id,row.expected_version_id,row.expected_version,row.expected_digest,row.candidate_value,row.candidate_value_bytes,row.candidate_tags,row.rationale,row.plaintext,row.created_at,row.creation_sequence,row.creation_event_id,row.approval_id,row.content_digest,row.record_digest,row.record_json]).map_err(|_| RecoveryError::QueryFailed)?;
+            }
+            Some(stored) if stored == row => {}
+            Some(_) => return Err(RecoveryError::InvalidEventRecord),
+        }
+    }
+    for (sequence, resolution) in expected.resolutions.values() {
+        let row =
+            resolution_row(resolution, *sequence).map_err(|_| RecoveryError::InvalidEventRecord)?;
+        let stored = tx
+            .query_row(
+                "SELECT proposal_id,proposal_version,proposal_content_digest,status,approval_id,resolved_by_kind,resolved_by_id,resolved_at_ms,resolution_event_sequence,resolution_event_id,resolution_json FROM memory_proposal_resolutions WHERE proposal_id=?1",
+                [row.proposal_id.clone()],
+                |record| Ok(ResolutionRow { proposal_id: record.get(0)?, proposal_version: record.get(1)?, proposal_digest: record.get(2)?, status: record.get(3)?, approval_id: record.get(4)?, resolved_by_kind: record.get(5)?, resolved_by_id: record.get(6)?, resolved_at: record.get(7)?, resolution_sequence: record.get(8)?, resolution_event_id: record.get(9)?, resolution_json: record.get(10)? }),
+            )
+            .optional()
+            .map_err(|_| RecoveryError::QueryFailed)?;
+        match stored {
+            None => {
+                tx.execute("INSERT INTO memory_proposal_resolutions (proposal_id,proposal_version,proposal_content_digest,status,approval_id,resolved_by_kind,resolved_by_id,resolved_at_ms,resolution_event_sequence,resolution_event_id,resolution_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)", params![row.proposal_id,row.proposal_version,row.proposal_digest,row.status,row.approval_id,row.resolved_by_kind,row.resolved_by_id,row.resolved_at,row.resolution_sequence,row.resolution_event_id,row.resolution_json]).map_err(|_| RecoveryError::QueryFailed)?;
+            }
+            Some(stored) if stored == row => {}
+            Some(_) => return Err(RecoveryError::InvalidEventRecord),
+        }
+    }
+    for (_sequence, summary) in expected.summaries.values() {
+        let row = summary_row(summary).map_err(|_| RecoveryError::InvalidEventRecord)?;
+        let found: Option<SummaryRow> = tx
+            .query_row(
+                "SELECT summary_id,version,memory_namespace_id,profile_id,profile_version_id,profile_version,profile_content_digest,label,body,purpose_tags_json,source_count,plaintext_validation_version,created_at_ms,creation_event_sequence,creation_event_id,source_set_digest,content_digest,record_digest,record_json FROM episodic_summaries WHERE summary_id=?1",
+                [row.summary_id.clone()],
+                decode_summary_stored_row,
+            )
+            .optional()
+            .map_err(|_| RecoveryError::QueryFailed)?;
+        match found {
+            None => {
+                tx.execute("INSERT INTO episodic_summaries (summary_id,version,memory_namespace_id,profile_id,profile_version_id,profile_version,profile_content_digest,label,body,purpose_tags_json,source_count,plaintext_validation_version,created_at_ms,creation_event_sequence,creation_event_id,source_set_digest,content_digest,record_digest,record_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)", params![row.summary_id,row.version,row.namespace,row.profile_id,row.profile_version_id,row.profile_version,row.profile_digest,row.label,row.body,row.tags,row.source_count,row.plaintext,row.created_at,row.creation_sequence,row.creation_event_id,row.source_digest,row.content_digest,row.record_digest,row.record_json]).map_err(|_| RecoveryError::QueryFailed)?;
+            }
+            Some(stored) if stored == row => {}
+            Some(_) => return Err(RecoveryError::InvalidEventRecord),
+        }
+        for (ordinal, source) in summary.sources().iter().enumerate() {
+            let ordinal = to_i64(ordinal as u64).map_err(|_| RecoveryError::InvalidEventRecord)?;
+            let source_id = summary.reference().summary_id().to_string();
+            let actual = tx.query_row("SELECT event_sequence,event_id,event_type,event_digest FROM episodic_summary_sources WHERE summary_id=?1 AND source_ordinal=?2", params![source_id, ordinal], |record| -> rusqlite::Result<(i64,String,String,String)> { Ok((record.get(0)?,record.get(1)?,record.get(2)?,record.get(3)?)) }).optional().map_err(|_| RecoveryError::QueryFailed)?;
+            let wanted = (
+                to_i64(source.sequence()).map_err(|_| RecoveryError::InvalidEventRecord)?,
+                source.event_id().to_string(),
+                source.event_type().to_owned(),
+                source.event_digest().as_str().to_owned(),
+            );
+            match actual {
+                None => {
+                    tx.execute("INSERT INTO episodic_summary_sources (summary_id,source_ordinal,event_sequence,event_id,event_type,event_digest) VALUES (?1,?2,?3,?4,?5,?6)", params![summary.reference().summary_id().to_string(),ordinal,wanted.0,wanted.1,wanted.2,wanted.3]).map_err(|_| RecoveryError::QueryFailed)?;
+                }
+                Some(stored) if stored == wanted => {}
+                Some(_) => return Err(RecoveryError::InvalidEventRecord),
+            }
+            let event_match: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM event_stream WHERE sequence=?1 AND event_id=?2 AND event_type=?3 AND event_digest=?4)",
+                    params![wanted.0, wanted.1, wanted.2, wanted.3],
+                    |row| row.get(0),
+                )
+                .map_err(|_| RecoveryError::QueryFailed)?;
+            if !event_match {
+                return Err(RecoveryError::InvalidEventRecord);
+            }
+        }
+        let source_count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM episodic_summary_sources WHERE summary_id=?1",
+                [summary.reference().summary_id().to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|_| RecoveryError::QueryFailed)?;
+        if source_count
+            != i64::try_from(summary.sources().len())
+                .map_err(|_| RecoveryError::InvalidEventRecord)?
+        {
+            return Err(RecoveryError::InvalidEventRecord);
+        }
+    }
+    let mut entries = expected.entries.values().collect::<Vec<_>>();
+    entries.sort_by_key(|(sequence, entry)| (*sequence, entry.reference().version().get()));
+    for (sequence, entry) in entries {
+        let row = entry_row(entry, *sequence).map_err(|_| RecoveryError::InvalidEventRecord)?;
+        match load_entry_rows_matching(tx, &row)
+            .map_err(|_| RecoveryError::InvalidEventRecord)?
+            .as_slice()
+        {
+            [] => insert_entry_row(tx, &row).map_err(|_| RecoveryError::InvalidEventRecord)?,
+            [stored] if stored == &row => {}
+            _ => return Err(RecoveryError::InvalidEventRecord),
+        }
+    }
+    let actual: i64 = tx
+        .query_row("SELECT COUNT(*) FROM memory_entry_versions", [], |row| {
+            row.get(0)
+        })
+        .map_err(|_| RecoveryError::QueryFailed)?;
+    if u64::try_from(actual).map_err(|_| RecoveryError::InvalidEventRecord)?
+        != u64::try_from(expected.entries.len()).map_err(|_| RecoveryError::InvalidEventRecord)?
+    {
+        return Err(RecoveryError::InvalidEventRecord);
+    }
+    let proposal_count: i64 = tx
+        .query_row("SELECT COUNT(*) FROM memory_proposals", [], |row| {
+            row.get(0)
+        })
+        .map_err(|_| RecoveryError::QueryFailed)?;
+    if proposal_count
+        != i64::try_from(expected.proposals.len()).map_err(|_| RecoveryError::InvalidEventRecord)?
+    {
+        return Err(RecoveryError::InvalidEventRecord);
+    }
+    let resolution_count: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM memory_proposal_resolutions",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| RecoveryError::QueryFailed)?;
+    if resolution_count
+        != i64::try_from(expected.resolutions.len())
+            .map_err(|_| RecoveryError::InvalidEventRecord)?
+    {
+        return Err(RecoveryError::InvalidEventRecord);
+    }
+    let summary_count: i64 = tx
+        .query_row("SELECT COUNT(*) FROM episodic_summaries", [], |row| {
+            row.get(0)
+        })
+        .map_err(|_| RecoveryError::QueryFailed)?;
+    if summary_count
+        != i64::try_from(expected.summaries.len()).map_err(|_| RecoveryError::InvalidEventRecord)?
+    {
+        return Err(RecoveryError::InvalidEventRecord);
+    }
+    let memory_approval_count: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM approval_records WHERE action_kind='memory_mutation'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| RecoveryError::QueryFailed)?;
+    if memory_approval_count
+        != i64::try_from(expected.approvals.len()).map_err(|_| RecoveryError::InvalidEventRecord)?
+    {
+        return Err(RecoveryError::InvalidEventRecord);
+    }
+    for ((_namespace, _key), current) in expected_projection.current_entries() {
+        if !expected
+            .entries
+            .values()
+            .any(|(_, entry)| entry.reference() == *current)
+        {
+            return Err(RecoveryError::InvalidEventRecord);
+        }
+    }
+    for (proposal_id, projected) in expected_projection.proposals() {
+        let (_, proposal) = expected
+            .proposals
+            .get(proposal_id)
+            .ok_or(RecoveryError::InvalidEventRecord)?;
+        if proposal.reference() != *projected.proposal()
+            || proposal.approval_id() != projected.approval_id()
+            || expected
+                .resolutions
+                .get(proposal_id)
+                .map(|(_, resolution)| resolution.resolution_event_id())
+                != projected.resolution_event_id()
+        {
+            return Err(RecoveryError::InvalidEventRecord);
+        }
+    }
+    Ok(())
+}
+
+fn reject_unexpected_ids(
+    tx: &Connection,
+    query: &str,
+    expected: BTreeSet<String>,
+) -> Result<(), RecoveryError> {
+    let mut statement = tx.prepare(query).map_err(|_| RecoveryError::QueryFailed)?;
+    let actual = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|_| RecoveryError::QueryFailed)?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|_| RecoveryError::QueryFailed)?;
+    if actual.is_subset(&expected) {
+        Ok(())
+    } else {
+        Err(RecoveryError::InvalidEventRecord)
+    }
+}
+
+fn reject_unexpected_source_keys(
+    tx: &Connection,
+    expected: &ExpectedMemoryRecords,
+) -> Result<(), RecoveryError> {
+    let mut expected_keys = BTreeSet::new();
+    for (_, summary) in expected.summaries.values() {
+        for (ordinal, _) in summary.sources().iter().enumerate() {
+            expected_keys.insert((
+                summary.reference().summary_id().to_string(),
+                i64::try_from(ordinal).map_err(|_| RecoveryError::InvalidEventRecord)?,
+            ));
+        }
+    }
+    let mut statement = tx
+        .prepare("SELECT summary_id,source_ordinal FROM episodic_summary_sources")
+        .map_err(|_| RecoveryError::QueryFailed)?;
+    let actual = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|_| RecoveryError::QueryFailed)?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|_| RecoveryError::QueryFailed)?;
+    if actual.is_subset(&expected_keys) {
+        Ok(())
+    } else {
+        Err(RecoveryError::InvalidEventRecord)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryEntryHistoryPage {
@@ -98,6 +589,75 @@ pub struct EpisodicSummariesPage {
 }
 
 impl MemoryRepository {
+    /// Rebuilds only the mutable memory projection rows after the authoritative
+    /// event stream has been verified and reduced.  Immutable records are never
+    /// synthesized here: every pointer/status must resolve to its exact stored
+    /// immutable record before replacement begins.
+    pub(crate) fn replace_current_projection(
+        tx: &rusqlite::Transaction<'_>,
+        projection: &MemoryProjection,
+    ) -> Result<(), PersistenceError> {
+        for ((namespace, key), reference) in projection.current_entries() {
+            let matches: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM memory_entry_versions WHERE memory_namespace_id=?1 AND normalized_key=?2 AND entry_id=?3 AND entry_version_id=?4 AND version=?5 AND state=?6 AND content_digest=?7",
+                    params![
+                        namespace.to_string(), key.as_str(), reference.entry_id().to_string(),
+                        reference.entry_version_id().to_string(), to_i64(reference.version().get())?,
+                        entry_state(reference.state()), reference.content_digest().as_str(),
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(query)?;
+            if matches != 1 {
+                return Err(PersistenceError::MemoryRowMismatch);
+            }
+        }
+        for (_id, projected) in projection.proposals() {
+            let reference = projected.proposal();
+            let matches: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM memory_proposals WHERE proposal_id=?1 AND version=?2 AND content_digest=?3 AND memory_namespace_id=?4 AND normalized_key=?5 AND approval_id=?6",
+                    params![
+                        reference.proposal_id().to_string(), to_i64(reference.version().get())?,
+                        reference.content_digest().as_str(), projected.namespace_id().to_string(),
+                        projected.normalized_key().as_str(), projected.approval_id().to_string(),
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(query)?;
+            if matches != 1 {
+                return Err(PersistenceError::MemoryRowMismatch);
+            }
+        }
+
+        tx.execute("DELETE FROM current_memory_entries", [])
+            .map_err(query)?;
+        tx.execute("DELETE FROM current_memory_proposal_status", [])
+            .map_err(query)?;
+        for ((namespace, key), reference) in projection.current_entries() {
+            tx.execute(
+                "INSERT INTO current_memory_entries (memory_namespace_id,normalized_key,entry_id,entry_version_id,version,state,content_digest) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    namespace.to_string(), key.as_str(), reference.entry_id().to_string(),
+                    reference.entry_version_id().to_string(), to_i64(reference.version().get())?,
+                    entry_state(reference.state()), reference.content_digest().as_str(),
+                ],
+            ).map_err(query)?;
+        }
+        for (_id, projected) in projection.proposals() {
+            let reference = projected.proposal();
+            tx.execute(
+                "INSERT INTO current_memory_proposal_status (proposal_id,proposal_version,proposal_content_digest,memory_namespace_id,normalized_key,status,resolution_event_id,created_at_ms) SELECT proposal_id,version,content_digest,memory_namespace_id,normalized_key,?2,?3,created_at_ms FROM memory_proposals WHERE proposal_id=?1",
+                params![
+                    reference.proposal_id().to_string(), proposal_status(projected.status()),
+                    projected.resolution_event_id().map(|id| id.to_string()),
+                ],
+            ).map_err(query)?;
+        }
+        Ok(())
+    }
+
     pub fn insert_entry_version(
         tx: &ImmediateTransaction<'_>,
         creation_sequence: u64,
@@ -106,9 +666,9 @@ impl MemoryRepository {
         validate_event(tx, creation_sequence, entry.creation_event_id())?;
         Self::validate_entry_context(tx, entry)?;
         let expected = entry_row(entry, creation_sequence)?;
-        let existing = load_entry_rows_matching(tx, &expected)?;
+        let existing = load_entry_rows_matching(tx.transaction(), &expected)?;
         match existing.as_slice() {
-            [] => insert_entry_row(tx, &expected),
+            [] => insert_entry_row(tx.transaction(), &expected),
             [row] if row == &expected => Ok(()),
             _ => Err(PersistenceError::MemoryRowMismatch),
         }
@@ -741,8 +1301,8 @@ impl MemoryRepository {
         Ok(())
     }
 
-    #[allow(dead_code)] // Wired by the later application-service memory task.
-    pub(crate) fn insert_episodic_summary(
+    #[doc(hidden)]
+    pub fn insert_episodic_summary(
         tx: &ImmediateTransaction<'_>,
         creation_sequence: u64,
         summary: &EpisodicSummary,
@@ -1045,6 +1605,25 @@ type ApprovalColumns = (
     String,
 );
 
+fn approval_columns_equal(left: &ApprovalColumns, right: &ApprovalColumns) -> bool {
+    left.0 == right.0
+        && left.1 == right.1
+        && left.2 == right.2
+        && left.3 == right.3
+        && left.4 == right.4
+        && left.5 == right.5
+        && left.6 == right.6
+        && left.7 == right.7
+        && left.8 == right.8
+        && left.9 == right.9
+        && left.10 == right.10
+        && left.11 == right.11
+        && left.12 == right.12
+        && left.13 == right.13
+        && left.14 == right.14
+        && left.15 == right.15
+}
+
 fn entry_row(
     entry: &MemoryEntryVersion,
     creation_sequence: u64,
@@ -1186,14 +1765,14 @@ fn summary_row(s: &EpisodicSummary) -> Result<SummaryRow, PersistenceError> {
     })
 }
 
-fn insert_entry_row(tx: &ImmediateTransaction<'_>, r: &EntryRow) -> Result<(), PersistenceError> {
-    tx.transaction().execute("INSERT INTO memory_entry_versions (memory_namespace_id,entry_id,entry_version_id,version,predecessor_version_id,display_key,normalized_key,state,value_text,value_bytes,purpose_tags_json,created_by_kind,created_by_id,created_at_ms,accepted_proposal_id,accepted_proposal_version,accepted_proposal_digest,plaintext_validation_version,creation_event_sequence,creation_event_id,content_digest,record_digest,record_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",params![r.namespace,r.entry_id,r.entry_version_id,r.version,r.predecessor,r.display_key,r.normalized_key,r.state,r.value,r.value_bytes,r.tags,r.created_by_kind,r.created_by_id,r.created_at,r.accepted_id,r.accepted_version,r.accepted_digest,r.plaintext,r.creation_sequence,r.creation_event_id,r.content_digest,r.record_digest,r.record_json]).map(|_|()).map_err(query)
+fn insert_entry_row(tx: &Connection, r: &EntryRow) -> Result<(), PersistenceError> {
+    tx.execute("INSERT INTO memory_entry_versions (memory_namespace_id,entry_id,entry_version_id,version,predecessor_version_id,display_key,normalized_key,state,value_text,value_bytes,purpose_tags_json,created_by_kind,created_by_id,created_at_ms,accepted_proposal_id,accepted_proposal_version,accepted_proposal_digest,plaintext_validation_version,creation_event_sequence,creation_event_id,content_digest,record_digest,record_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",params![r.namespace,r.entry_id,r.entry_version_id,r.version,r.predecessor,r.display_key,r.normalized_key,r.state,r.value,r.value_bytes,r.tags,r.created_by_kind,r.created_by_id,r.created_at,r.accepted_id,r.accepted_version,r.accepted_digest,r.plaintext,r.creation_sequence,r.creation_event_id,r.content_digest,r.record_digest,r.record_json]).map(|_|()).map_err(query)
 }
 fn load_entry_rows_matching(
-    tx: &ImmediateTransaction<'_>,
+    tx: &Connection,
     e: &EntryRow,
 ) -> Result<Vec<EntryRow>, PersistenceError> {
-    let mut s=tx.transaction().prepare("SELECT memory_namespace_id,entry_id,entry_version_id,version,predecessor_version_id,display_key,normalized_key,state,value_text,value_bytes,purpose_tags_json,created_by_kind,created_by_id,created_at_ms,accepted_proposal_id,accepted_proposal_version,accepted_proposal_digest,plaintext_validation_version,creation_event_sequence,creation_event_id,content_digest,record_digest,record_json FROM memory_entry_versions WHERE (entry_id=?1 AND version=?2) OR entry_version_id=?3 OR (memory_namespace_id=?4 AND normalized_key=?5 AND entry_id<>?1) ORDER BY entry_id,version").map_err(query)?;
+    let mut s=tx.prepare("SELECT memory_namespace_id,entry_id,entry_version_id,version,predecessor_version_id,display_key,normalized_key,state,value_text,value_bytes,purpose_tags_json,created_by_kind,created_by_id,created_at_ms,accepted_proposal_id,accepted_proposal_version,accepted_proposal_digest,plaintext_validation_version,creation_event_sequence,creation_event_id,content_digest,record_digest,record_json FROM memory_entry_versions WHERE (entry_id=?1 AND version=?2) OR entry_version_id=?3 OR (memory_namespace_id=?4 AND normalized_key=?5 AND entry_id<>?1) ORDER BY entry_id,version").map_err(query)?;
     s.query_map(
         params![
             e.entry_id,

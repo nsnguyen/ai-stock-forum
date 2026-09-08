@@ -14,8 +14,8 @@ fn fresh_database_reaches_schema_version_four_with_strict_profile_storage() {
     let database = Database::open(&AppPaths::for_test(temp.path())).unwrap();
     let connection = database.connection();
 
-    assert_eq!(LATEST_SCHEMA_VERSION, 4);
-    assert_eq!(database.schema_version(), 4);
+    assert_eq!(LATEST_SCHEMA_VERSION, 5);
+    assert_eq!(database.schema_version(), 5);
     assert_eq!(
         database
             .applied_migrations()
@@ -23,7 +23,7 @@ fn fresh_database_reaches_schema_version_four_with_strict_profile_storage() {
             .iter()
             .map(|migration| migration.version())
             .collect::<Vec<_>>(),
-        vec![1, 2, 3, 4]
+        vec![1, 2, 3, 4, 5]
     );
     for table in ["agent_profile_versions", "active_agent_profiles"] {
         assert!(database.has_table(table).unwrap(), "missing {table}");
@@ -68,7 +68,7 @@ fn schema_v1_fixture_upgrades_without_changing_legacy_rows() {
 
     let database = Database::open(&paths).unwrap();
 
-    assert_eq!(database.schema_version(), 4);
+    assert_eq!(database.schema_version(), 5);
     assert!(database.has_table("agent_profile_versions").unwrap());
     assert!(database.has_table("active_agent_profiles").unwrap());
     assert_eq!(legacy_snapshot(database.connection()), before);
@@ -392,8 +392,8 @@ fn startup_is_idempotent_after_version_three_is_applied() {
     drop(Database::open(&paths).unwrap());
     let database = Database::open(&paths).unwrap();
 
-    assert_eq!(database.schema_version(), 4);
-    assert_eq!(database.applied_migrations().unwrap().len(), 4);
+    assert_eq!(database.schema_version(), 5);
+    assert_eq!(database.applied_migrations().unwrap().len(), 5);
 }
 
 fn create_schema_v1_fixture(paths: &AppPaths) {

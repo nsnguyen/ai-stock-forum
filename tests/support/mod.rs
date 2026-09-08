@@ -6,14 +6,17 @@ use ai_stock_forum::{
         CommandPolicy, CommandTransactionHook, EVENT_SCHEMA_VERSION, PendingEvent, ShutdownReason,
     },
     config::AppPaths,
-    domain::{Actor, Clock, CorrelationId, EventId, IdGenerator},
+    domain::{
+        Actor, Clock, CorrelationId, Digest, EpisodicSummaryId, EventId, IdGenerator, ObjectRef,
+    },
+    memory::{EpisodicSourceRef, EpisodicSummary},
     persistence::{
         Database, EventRepository, PersistenceError, ProjectionRepository, RecoveryError,
     },
     policy::Capability,
     runtime::{ApplicationRuntime, RuntimeClient},
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::{
     ops::{Deref, DerefMut},
     sync::{
@@ -84,6 +87,41 @@ pub struct PersistentFixture {
 }
 
 impl PersistentFixture {
+    pub fn service(&self) -> ApplicationService {
+        ApplicationService::bootstrap(&self.paths, self.clock.clone(), self.ids.clone()).unwrap()
+    }
+
+    pub fn service_with_policy(&self, policy: Arc<dyn CommandPolicy>) -> ApplicationService {
+        ApplicationService::bootstrap_with_policy(
+            &self.paths,
+            self.clock.clone(),
+            self.ids.clone(),
+            policy,
+        )
+        .unwrap()
+    }
+
+    pub fn open_database(&self) -> Database {
+        Database::open(&self.paths).unwrap()
+    }
+
+    pub fn side_effect_calls(&self) -> (usize, usize) {
+        (self.ids.calls(), self.clock.calls())
+    }
+
+    pub fn active_profile(
+        &self,
+        profile_id: ai_stock_forum::domain::AgentProfileId,
+    ) -> ai_stock_forum::agents::AgentProfileVersion {
+        ProjectionRepository::load(self.open_database().connection())
+            .unwrap()
+            .agent_profiles
+            .active_profiles()
+            .into_iter()
+            .find(|profile| profile.profile_id() == profile_id)
+            .unwrap()
+    }
+
     pub fn runtime(&self) -> ApplicationRuntime {
         let service =
             ApplicationService::bootstrap(&self.paths, self.clock.clone(), self.ids.clone())
@@ -156,6 +194,8 @@ impl PersistentFixture {
                 | "setup_step_outcomes"
                 | "capability_readiness"
                 | "approval_records"
+                | "command_receipts"
+                | "command_event_refs"
                 | "memory_entry_versions"
                 | "current_memory_entries"
                 | "memory_proposals"
@@ -1058,6 +1098,151 @@ impl TestApp {
     pub fn peer(&self) -> ApplicationWorker {
         self.service.worker().unwrap()
     }
+}
+
+pub fn record_test_episodic_summary(
+    fixture: &mut PersistentFixture,
+    profile: ai_stock_forum::agents::AgentProfileVersionRef,
+    label: String,
+    body: String,
+    purpose_tags: Vec<String>,
+    source_event_ids: Vec<EventId>,
+) -> Result<ai_stock_forum::memory::EpisodicSummaryRef, ai_stock_forum::app::AppError> {
+    use ai_stock_forum::{
+        app::AppError,
+        persistence::{MemoryRepository, load_exact_profile_version},
+        recovery::reduce,
+    };
+    let connection = Connection::open(fixture.paths.database_path())
+        .map_err(|_| PersistenceError::QueryFailed)?;
+    let profile =
+        load_exact_profile_version(&connection, &profile)?.ok_or(AppError::AgentProfileNotFound)?;
+
+    let placeholder_event_id = EventId::from_uuid(Uuid::nil());
+    let placeholder_source = EpisodicSourceRef::new(
+        1,
+        placeholder_event_id,
+        "placeholder".into(),
+        Digest::parse(&"0".repeat(64)).map_err(|_| RecoveryError::InvalidEventRecord)?,
+    )?;
+    let placeholder_sources = (0..source_event_ids.len())
+        .map(|index| {
+            EpisodicSourceRef::new(
+                u64::try_from(index + 1).map_err(|_| RecoveryError::InvalidEventRecord)?,
+                EventId::from_uuid(Uuid::from_u128(
+                    u128::try_from(index + 1).map_err(|_| RecoveryError::InvalidEventRecord)?,
+                )),
+                placeholder_source.event_type().to_owned(),
+                placeholder_source.event_digest().clone(),
+            )
+            .map_err(AppError::Domain)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let placeholder_creation_sequence = u64::try_from(source_event_ids.len())
+        .map_err(|_| RecoveryError::InvalidEventRecord)?
+        .checked_add(1)
+        .ok_or(RecoveryError::InvalidEventRecord)?;
+    EpisodicSummary::new(
+        EpisodicSummaryId::from_uuid(Uuid::nil()),
+        &profile,
+        label.clone(),
+        body.clone(),
+        purpose_tags.clone(),
+        placeholder_sources,
+        0,
+        placeholder_creation_sequence,
+        placeholder_event_id,
+    )?;
+
+    drop(connection);
+    let mut database = Database::open(&fixture.paths).map_err(|_| PersistenceError::QueryFailed)?;
+    let tx = database.immediate_transaction()?;
+    let mut sources = Vec::with_capacity(source_event_ids.len());
+    for event_id in source_event_ids {
+        let row: Option<(i64, String, String)> = tx
+            .transaction()
+            .query_row(
+                "SELECT sequence,event_type,event_digest FROM event_stream WHERE event_id=?1",
+                [event_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|_| PersistenceError::QueryFailed)?;
+        let (sequence, kind, digest) =
+            row.ok_or(AppError::Recovery(RecoveryError::InvalidEventRecord))?;
+        sources.push(EpisodicSourceRef::new(
+            u64::try_from(sequence).map_err(|_| RecoveryError::InvalidEventRecord)?,
+            event_id,
+            kind,
+            Digest::parse(&digest).map_err(|_| RecoveryError::InvalidEventRecord)?,
+        )?);
+    }
+    let tail: i64 = tx
+        .transaction()
+        .query_row(
+            "SELECT COALESCE(MAX(sequence),0) FROM event_stream",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| PersistenceError::QueryFailed)?;
+    let sequence = u64::try_from(tail)
+        .map_err(|_| RecoveryError::InvalidEventRecord)?
+        .checked_add(1)
+        .ok_or(RecoveryError::InvalidEventRecord)?;
+    EpisodicSummary::new(
+        EpisodicSummaryId::from_uuid(Uuid::nil()),
+        &profile,
+        label.clone(),
+        body.clone(),
+        purpose_tags.clone(),
+        sources.clone(),
+        0,
+        sequence,
+        placeholder_event_id,
+    )?;
+    let summary_id = EpisodicSummaryId::from_uuid(fixture.ids.next_uuid());
+    let event_id = EventId::from_uuid(fixture.ids.next_uuid());
+    let occurred_at_ms = fixture.clock.now_millis();
+    let summary = EpisodicSummary::new(
+        summary_id,
+        &profile,
+        label,
+        body,
+        purpose_tags,
+        sources,
+        occurred_at_ms,
+        sequence,
+        event_id,
+    )?;
+    let mut projection = ProjectionRepository::load_in(&tx)?;
+    let committed = EventRepository::append(
+        &tx,
+        PendingEvent {
+            event_id,
+            event_schema_version: EVENT_SCHEMA_VERSION,
+            actor: Actor::System,
+            occurred_at_ms,
+            correlation_id: CorrelationId::from_uuid(event_id.as_uuid()),
+            causation_id: None,
+            object: Some(ObjectRef::new(
+                "episodic_summary",
+                summary.reference().summary_id().to_string(),
+                summary.reference().version(),
+                summary.reference().content_digest().clone(),
+            )?),
+            event: ApplicationEvent::EpisodicSummaryRecorded {
+                summary: summary.clone(),
+            },
+        },
+    )?;
+    if committed.sequence != sequence {
+        return Err(AppError::Recovery(RecoveryError::InvalidEventRecord));
+    }
+    reduce(&mut projection, &committed)?;
+    MemoryRepository::insert_episodic_summary(&tx, committed.sequence, &summary)?;
+    ProjectionRepository::store(&tx, &projection)?;
+    tx.commit()?;
+    Ok(summary.reference())
 }
 
 pub fn app() -> TestApp {

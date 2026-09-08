@@ -1721,15 +1721,22 @@ mod memory_reduction {
 
         let mut expected = ProjectionState::default();
         reduce(&mut expected, &committed).unwrap();
+        let rebuilt = ProjectionRepository::rebuild(
+            database.connection_mut(),
+            std::slice::from_ref(&committed),
+        )
+        .unwrap();
+        assert_eq!(rebuilt.memory, expected.memory);
+
         let transaction = database.immediate_transaction().unwrap();
         ProjectionRepository::store(&transaction, &expected).unwrap();
         transaction.commit().unwrap();
         let loaded = ProjectionRepository::load(database.connection()).unwrap();
         assert_eq!(loaded.memory, expected.memory);
 
-        let rebuilt =
+        let rebuilt_again =
             ProjectionRepository::rebuild(database.connection_mut(), &[committed]).unwrap();
-        assert_eq!(rebuilt.memory, expected.memory);
+        assert_eq!(rebuilt_again.memory, expected.memory);
         assert_eq!(
             ProjectionRepository::load(database.connection())
                 .unwrap()

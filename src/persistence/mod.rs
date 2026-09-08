@@ -16,6 +16,7 @@ pub use agent_profile_repository::{
 pub use command_receipt_repository::{CommandReceiptRecord, CommandReceiptRepository};
 pub use database::{Database, ImmediateTransaction, PersistenceError};
 pub use event_repository::{EventRepository, RecoveryError};
+pub(crate) use memory_repository::reconcile_verified_memory;
 pub use memory_repository::{
     EpisodicSummariesPage, EpisodicSummaryListRecord, MemoryEntriesPage, MemoryEntryHistoryPage,
     MemoryEntryListRecord, MemoryProposalListRecord, MemoryProposalsPage, MemoryRepository,

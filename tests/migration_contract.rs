@@ -123,7 +123,7 @@ fn migration_records_ahead_of_user_version_are_rejected() {
     let raw = rusqlite::Connection::open(paths.database_path()).unwrap();
     raw.execute(
         "INSERT INTO schema_migrations (version, checksum) VALUES (?1, ?2)",
-        (5_i64, "0".repeat(64)),
+        (6_i64, "0".repeat(64)),
     )
     .unwrap();
     drop(raw);
@@ -168,7 +168,7 @@ fn migration_records_and_complete_schema_are_exact() {
     let connection = database.connection();
 
     let migration = database.applied_migrations().unwrap();
-    assert_eq!(migration.len(), 4);
+    assert_eq!(migration.len(), 5);
     assert_eq!(migration[0].version(), 1);
     assert_eq!(
         migration[0].checksum().as_str(),
@@ -188,6 +188,22 @@ fn migration_records_and_complete_schema_are_exact() {
         migration[2].checksum().as_str(),
         ai_stock_forum::domain::sha256(
             include_str!("../migrations/0003_declarative_skills.sql").as_bytes()
+        )
+        .as_str()
+    );
+    assert_eq!(migration[3].version(), 4);
+    assert_eq!(
+        migration[3].checksum().as_str(),
+        ai_stock_forum::domain::sha256(
+            include_str!("../migrations/0004_hybrid_memory.sql").as_bytes()
+        )
+        .as_str()
+    );
+    assert_eq!(migration[4].version(), 5);
+    assert_eq!(
+        migration[4].checksum().as_str(),
+        ai_stock_forum::domain::sha256(
+            include_str!("../migrations/0005_episodic_source_recovery.sql").as_bytes()
         )
         .as_str()
     );
@@ -2643,7 +2659,7 @@ fn assert_v4_sql_definitions(connection: &rusqlite::Connection) {
             .unwrap();
         assert_eq!(
             normalize_sql(&actual),
-            normalize_sql(&v4_object_sql("CREATE TRIGGER", trigger)),
+            normalize_sql(&live_trigger_sql(trigger)),
             "exact trigger definition for {trigger}"
         );
     }
@@ -2661,6 +2677,23 @@ fn v4_object_sql(kind: &str, name: &str) -> String {
         .unwrap()
         .trim_end_matches(';')
         .to_owned()
+}
+
+fn live_trigger_sql(name: &str) -> String {
+    if name == "episodic_summary_sources_order_guard" {
+        let migration = include_str!("../migrations/0005_episodic_source_recovery.sql");
+        let needle = format!("CREATE TRIGGER {name}");
+        let start = migration
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing {needle} in v5 migration"));
+        return migration[start..]
+            .split("\n-- migration-boundary:")
+            .next()
+            .unwrap()
+            .trim_end_matches(';')
+            .to_owned();
+    }
+    v4_object_sql("CREATE TRIGGER", name)
 }
 
 fn assert_composite_foreign_key(

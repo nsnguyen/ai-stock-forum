@@ -25,8 +25,8 @@ fn schema_v2_migrates_to_exactly_v4_without_changing_agent_rows() {
 
     let database = Database::open(&paths).unwrap();
 
-    assert_eq!(LATEST_SCHEMA_VERSION, 4);
-    assert_eq!(database.schema_version(), 4);
+    assert_eq!(LATEST_SCHEMA_VERSION, 5);
+    assert_eq!(database.schema_version(), 5);
     assert_eq!(
         database
             .applied_migrations()
@@ -34,7 +34,7 @@ fn schema_v2_migrates_to_exactly_v4_without_changing_agent_rows() {
             .iter()
             .map(|migration| migration.version())
             .collect::<Vec<_>>(),
-        vec![1, 2, 3, 4]
+        vec![1, 2, 3, 4, 5]
     );
     assert_eq!(agent_rows(database.connection()), before);
     assert_eq!(

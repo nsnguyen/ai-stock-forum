@@ -6,11 +6,11 @@ use rusqlite::{Connection, params};
 const LEGACY_APPROVAL_ID: &str = "legacy-terminal-approval";
 
 #[test]
-fn fresh_database_reaches_v4_and_registers_hybrid_memory_storage() {
+fn fresh_database_reaches_v5_and_registers_hybrid_memory_storage() {
     let temp = tempfile::tempdir().unwrap();
     let database = Database::open(&AppPaths::for_test(temp.path())).unwrap();
 
-    assert_eq!(database.schema_version(), 4);
+    assert_eq!(database.schema_version(), 5);
     for table in [
         "memory_entry_versions",
         "current_memory_entries",
@@ -37,11 +37,11 @@ fn v3_terminal_non_memory_approval_keeps_null_resolution_event() {
 
     let database = Database::open(&paths).unwrap();
 
-    assert_eq!(database.schema_version(), 4);
+    assert_eq!(database.schema_version(), 5);
     assert_eq!(v3_snapshot(database.connection()), before);
-    assert_eq!(migration_records(database.connection()).len(), 4);
+    assert_eq!(migration_records(database.connection()).len(), 5);
     assert_eq!(pragma(database.connection(), "application_id"), 0x4149_4653);
-    assert_eq!(pragma(database.connection(), "user_version"), 4);
+    assert_eq!(pragma(database.connection(), "user_version"), 5);
     let (event_id, kind, actor_id): (Option<String>, Option<String>, Option<String>) = database
         .connection()
         .query_row(
@@ -159,6 +159,204 @@ fn migration_failure_at_every_v4_boundary_rolls_back() {
     }
 }
 
+#[test]
+fn migration_failure_at_every_v5_boundary_rolls_back_to_the_exact_v4_guard() {
+    let expected_boundaries = vec![
+        "drop_episodic_summary_sources_order_guard_v4",
+        "create_episodic_summary_sources_recovery_order_guard",
+        "schema_migration_record",
+    ];
+    assert_eq!(Database::v5_migration_boundaries(), expected_boundaries);
+
+    for boundary in expected_boundaries {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::for_test(temp.path());
+        create_schema_v4_fixture(&paths);
+
+        assert!(Database::open_with_migration_fault(&paths, 5, boundary).is_err());
+
+        let after = Connection::open(paths.database_path()).unwrap();
+        assert_eq!(pragma(&after, "user_version"), 4, "boundary {boundary}");
+        assert_eq!(migration_records(&after).len(), 4, "boundary {boundary}");
+        let v4_guard: String = after
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='episodic_summary_sources_order_guard'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(v4_guard.contains("SELECT COUNT(*)"), "boundary {boundary}");
+        assert!(
+            !v4_guard.contains("source_ordinal - 1"),
+            "boundary {boundary}"
+        );
+        drop(after);
+
+        let migrated = Database::open(&paths).unwrap();
+        assert_eq!(migrated.schema_version(), 5, "boundary {boundary}");
+        assert_eq!(
+            migrated.applied_migrations().unwrap().len(),
+            5,
+            "boundary {boundary}"
+        );
+        let v5_guard: String = migrated
+            .connection()
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='episodic_summary_sources_order_guard'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            v5_guard.contains("source_ordinal - 1"),
+            "boundary {boundary}"
+        );
+        assert!(!v5_guard.contains("SELECT COUNT(*)"), "boundary {boundary}");
+    }
+}
+
+#[test]
+fn v5_guard_permits_only_an_ordered_authenticated_middle_source_hole_fill() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::for_test(temp.path());
+    create_schema_v4_fixture(&paths);
+    let connection = Connection::open(paths.database_path()).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO event_stream (
+                 sequence,event_id,event_schema_version,event_type,actor_kind,occurred_at_ms,
+                 correlation_id,payload_json,event_digest
+             ) VALUES
+                 (2,'source-event-1',1,'source.one','system',2,'source-correlation-1','{}',
+                  'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'),
+                 (3,'source-event-2',1,'source.two','system',3,'source-correlation-2','{}',
+                  'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'),
+                 (4,'source-event-3',1,'source.three','system',4,'source-correlation-3','{}',
+                  'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'),
+                 (5,'summary-event',1,'episodic_summary_recorded','system',5,
+                  'summary-correlation','{}',
+                  'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee');
+             INSERT INTO episodic_summaries (
+                 summary_id,version,memory_namespace_id,profile_id,profile_version_id,
+                 profile_version,profile_content_digest,label,body,purpose_tags_json,
+                 source_count,plaintext_validation_version,created_at_ms,
+                 creation_event_sequence,creation_event_id,source_set_digest,content_digest,
+                 record_digest,record_json
+             ) VALUES (
+                 '00000000-0000-0000-0000-000000000099',1,
+                 '00000000-0000-0000-0000-000000000003',
+                 '00000000-0000-0000-0000-000000000001',
+                 '00000000-0000-0000-0000-000000000002',1,
+                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 'Recovery hole','Recovery body',CAST('[]' AS BLOB),3,1,5,5,
+                 'summary-event',
+                 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+                 '9999999999999999999999999999999999999999999999999999999999999999',
+                 '8888888888888888888888888888888888888888888888888888888888888888',
+                 CAST('{}' AS BLOB));
+             INSERT INTO episodic_summary_sources VALUES
+                 ('00000000-0000-0000-0000-000000000099',0,2,'source-event-1',
+                  'source.one','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'),
+                 ('00000000-0000-0000-0000-000000000099',1,3,'source-event-2',
+                  'source.two','cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'),
+                 ('00000000-0000-0000-0000-000000000099',2,4,'source-event-3',
+                  'source.three','dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd');
+             DROP TRIGGER episodic_summary_sources_no_delete;
+             DELETE FROM episodic_summary_sources
+             WHERE summary_id='00000000-0000-0000-0000-000000000099' AND source_ordinal=1;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let database = Database::open(&paths).unwrap();
+    assert_eq!(database.schema_version(), 5);
+    for (sequence, event_id, event_type, digest) in [
+        (
+            2,
+            "source-event-1",
+            "source.one",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
+        (
+            4,
+            "source-event-3",
+            "source.three",
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        ),
+    ] {
+        assert!(
+            database
+                .connection()
+                .execute(
+                    "INSERT INTO episodic_summary_sources VALUES (
+                         '00000000-0000-0000-0000-000000000099',1,?1,?2,?3,?4
+                     )",
+                    params![sequence, event_id, event_type, digest],
+                )
+                .is_err(),
+            "middle source event sequence {sequence} must be bounded by both neighbours"
+        );
+    }
+    database
+        .connection()
+        .execute(
+            "INSERT INTO episodic_summary_sources VALUES (
+                 '00000000-0000-0000-0000-000000000099',1,3,'source-event-2',
+                 'source.two','cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+             )",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        database
+            .connection()
+            .query_row(
+                "SELECT group_concat(source_ordinal||':'||event_sequence,',')
+                 FROM episodic_summary_sources
+                 WHERE summary_id='00000000-0000-0000-0000-000000000099'
+                 ORDER BY source_ordinal",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "0:2,1:3,2:4"
+    );
+    database
+        .connection()
+        .execute(
+            "DELETE FROM episodic_summary_sources
+             WHERE summary_id='00000000-0000-0000-0000-000000000099'",
+            [],
+        )
+        .unwrap();
+    assert!(
+        database
+            .connection()
+            .execute(
+                "INSERT INTO episodic_summary_sources VALUES (
+                     '00000000-0000-0000-0000-000000000099',1,3,'source-event-2',
+                     'source.two','cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+                 )",
+                [],
+            )
+            .is_err(),
+        "a missing immediate predecessor must be rejected"
+    );
+    for statement in [
+        "INSERT INTO episodic_summary_sources VALUES (
+             '00000000-0000-0000-0000-000000000099',0,2,'source-event-1',
+             'source.one','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')",
+        "INSERT INTO episodic_summary_sources VALUES (
+             '00000000-0000-0000-0000-000000000099',1,3,'source-event-2',
+             'source.two','cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc')",
+        "INSERT INTO episodic_summary_sources VALUES (
+             '00000000-0000-0000-0000-000000000099',2,4,'source-event-3',
+             'source.three','dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd')",
+    ] {
+        database.connection().execute(statement, []).unwrap();
+    }
+}
+
 fn create_schema_v3_fixture(paths: &AppPaths) {
     let connection = Connection::open(paths.database_path()).unwrap();
     for migration in [
@@ -238,6 +436,20 @@ fn create_schema_v3_fixture(paths: &AppPaths) {
          VALUES ('00000000-0000-0000-0000-000000000011', '00000000-0000-0000-0000-000000000012', 1, 'legacy skill', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc');",
     )
     .unwrap();
+}
+
+fn create_schema_v4_fixture(paths: &AppPaths) {
+    create_schema_v3_fixture(paths);
+    let connection = Connection::open(paths.database_path()).unwrap();
+    let sql = include_str!("../migrations/0004_hybrid_memory.sql");
+    connection.execute_batch(sql).unwrap();
+    connection
+        .execute(
+            "INSERT INTO schema_migrations (version,checksum) VALUES (4,?1)",
+            [ai_stock_forum::domain::sha256(sql.as_bytes()).as_str()],
+        )
+        .unwrap();
+    connection.pragma_update(None, "user_version", 4).unwrap();
 }
 
 fn v3_snapshot(connection: &Connection) -> BTreeMap<String, Vec<String>> {
