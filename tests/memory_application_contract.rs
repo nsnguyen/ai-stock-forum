@@ -689,7 +689,24 @@ fn all_twelve_memory_views_are_strict_safe_and_navigation_neutral() {
             "private summary label",
             "private summary body",
         ] {
-            assert!(!rendered.contains(private), "view {index}");
+            let deliberately_visible = match private {
+                "private thesis" => matches!(
+                    &view,
+                    CommandView::MemoryEntry(_) | CommandView::MemoryEntryVersion(_)
+                ),
+                "private proposed value" | "private rationale" => {
+                    matches!(&view, CommandView::MemoryProposal(_))
+                }
+                "private summary label" => matches!(
+                    &view,
+                    CommandView::EpisodicSummaries(_) | CommandView::EpisodicSummary(_)
+                ),
+                "private summary body" => matches!(&view, CommandView::EpisodicSummary(_)),
+                _ => false,
+            };
+            if !deliberately_visible {
+                assert!(!rendered.contains(private), "view {index}");
+            }
         }
 
         let mut model = tui_model();

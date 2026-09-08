@@ -26,7 +26,8 @@ use ai_stock_forum::{
     skills::{SkillDraft, SkillEditPreview, SkillProvenance, SkillVersion, SkillVersionRef},
     ui::command::{
         BoundedLineReader, CancellableLineSource, FallbackHost, FallbackParsedLine, FallbackRunner,
-        LineSourceCancellation, LineSourceEvent, UiError, parse_fallback_line,
+        LineSourceCancellation, LineSourceEvent, MemoryWorkflowCommand, UiError,
+        parse_fallback_line,
     },
 };
 use crossbeam_channel::{Sender, bounded, never};
@@ -38,8 +39,17 @@ fn direct_command(input: &[u8]) -> ApplicationCommand {
         FallbackParsedLine::Command(command) => command,
         FallbackParsedLine::AgentWorkflow(_) => panic!("expected direct command"),
         FallbackParsedLine::SkillWorkflow(_) => panic!("expected direct command"),
+        FallbackParsedLine::MemoryWorkflow(_) => panic!("expected direct command"),
         FallbackParsedLine::Ignored => panic!("expected command"),
     }
+}
+
+#[test]
+fn memory_workflow_is_not_classified_as_a_skill_or_direct_command() {
+    assert!(matches!(
+        parse_fallback_line(b"/memory delete analyst thesis"),
+        FallbackParsedLine::MemoryWorkflow(MemoryWorkflowCommand::Delete { .. })
+    ));
 }
 
 fn profile(name: &str) -> AgentProfileDraft {

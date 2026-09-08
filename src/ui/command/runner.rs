@@ -836,6 +836,7 @@ impl FallbackRunner {
                 self.start_skill_workflow(command, writer)?;
                 Ok(None)
             }
+            FallbackParsedLine::MemoryWorkflow(_) => Ok(None),
         }
     }
 

@@ -726,6 +726,13 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
             model.set_focus(Focus::Workspace);
             ControllerEffect::StartSkillWorkflow(workflow)
         }
+        ParsedLine::MemoryWorkflow(_) => {
+            model.set_message(
+                Severity::Info,
+                "Open Agents → Memory to edit or resolve memory.",
+            );
+            ControllerEffect::Redraw
+        }
     }
 }
 
