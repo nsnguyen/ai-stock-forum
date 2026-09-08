@@ -14,7 +14,10 @@ use ai_stock_forum::{
     persistence::{MemoryRepository, PersistenceError},
     policy::ApprovalStatus,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use uuid::Uuid;
 
 struct MemoryHookSurface;
@@ -116,6 +119,141 @@ impl MemoryFaultBoundary {
 struct MemoryFaultHook {
     next: Mutex<Option<(MemoryFaultBoundary, usize)>>,
     restore_page_limit: Mutex<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MemoryWriteKind {
+    Approval,
+    Proposal,
+    Resolution,
+    Entry,
+    Current,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MemoryWriteTrace {
+    kind: MemoryWriteKind,
+    approvals: i64,
+    terminal_approvals: i64,
+    proposals: i64,
+    resolutions: i64,
+    proposal_statuses: i64,
+    terminal_proposal_statuses: i64,
+    entries: i64,
+    current_entries: i64,
+}
+
+struct MemoryWriteTraceHook {
+    enabled: AtomicBool,
+    trace: Mutex<Vec<MemoryWriteTrace>>,
+}
+
+impl MemoryWriteTraceHook {
+    fn new() -> Self {
+        Self {
+            enabled: AtomicBool::new(false),
+            trace: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn enable(&self) {
+        self.trace.lock().unwrap().clear();
+        self.enabled.store(true, Ordering::SeqCst);
+    }
+
+    fn trace(&self) -> Vec<MemoryWriteTrace> {
+        self.trace.lock().unwrap().clone()
+    }
+
+    fn record(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+        kind: MemoryWriteKind,
+    ) -> Result<(), PersistenceError> {
+        if !self.enabled.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let counts = transaction
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM approval_records WHERE action_kind='memory_mutation'),
+                    (SELECT COUNT(*) FROM approval_records WHERE action_kind='memory_mutation' AND status<>'pending'),
+                    (SELECT COUNT(*) FROM memory_proposals),
+                    (SELECT COUNT(*) FROM memory_proposal_resolutions),
+                    (SELECT COUNT(*) FROM current_memory_proposal_status),
+                    (SELECT COUNT(*) FROM current_memory_proposal_status WHERE status<>'pending'),
+                    (SELECT COUNT(*) FROM memory_entry_versions),
+                    (SELECT COUNT(*) FROM current_memory_entries)",
+                [],
+                |row| {
+                    Ok(MemoryWriteTrace {
+                        kind,
+                        approvals: row.get(0)?,
+                        terminal_approvals: row.get(1)?,
+                        proposals: row.get(2)?,
+                        resolutions: row.get(3)?,
+                        proposal_statuses: row.get(4)?,
+                        terminal_proposal_statuses: row.get(5)?,
+                        entries: row.get(6)?,
+                        current_entries: row.get(7)?,
+                    })
+                },
+            )
+            .map_err(|_| PersistenceError::QueryFailed)?;
+        self.trace.lock().unwrap().push(counts);
+        Ok(())
+    }
+}
+
+impl CommandTransactionHook for MemoryWriteTraceHook {
+    fn after_memory_proposal_insert(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        self.record(transaction, MemoryWriteKind::Proposal)
+    }
+
+    fn after_memory_approval_write(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        self.record(transaction, MemoryWriteKind::Approval)
+    }
+
+    fn after_memory_entry_insert(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        self.record(transaction, MemoryWriteKind::Entry)
+    }
+
+    fn after_memory_resolution_insert(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        self.record(transaction, MemoryWriteKind::Resolution)
+    }
+
+    fn after_memory_current_update(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        self.record(transaction, MemoryWriteKind::Current)
+    }
+
+    fn before_outcome_materialization(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    fn before_receipt_write(
+        &self,
+        _transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
 }
 
 impl MemoryFaultHook {
@@ -365,6 +503,119 @@ fn proposal_from(outcome: ai_stock_forum::app::CommandOutcome) -> MemoryProposal
         CommandView::MemoryProposalCreated(view) => view.proposal,
         other => panic!("expected proposal view, got {other:?}"),
     }
+}
+
+fn trace(
+    kind: MemoryWriteKind,
+    [
+        approvals,
+        terminal_approvals,
+        proposals,
+        resolutions,
+        proposal_statuses,
+        terminal_proposal_statuses,
+        entries,
+        current_entries,
+    ]: [i64; 8],
+) -> MemoryWriteTrace {
+    MemoryWriteTrace {
+        kind,
+        approvals,
+        terminal_approvals,
+        proposals,
+        resolutions,
+        proposal_statuses,
+        terminal_proposal_statuses,
+        entries,
+        current_entries,
+    }
+}
+
+#[test]
+fn proposal_creation_hooks_trace_each_actual_sql_subwrite() {
+    let policy = Arc::new(support::RecordingPolicy::new(
+        AuthorizationDecision::Granted,
+    ));
+    let hook = Arc::new(MemoryWriteTraceHook::new());
+    let mut app = support::app_with_policy_and_hook(policy, hook.clone());
+    let profile = create_profile(&mut app, 880_000);
+
+    hook.enable();
+    app.execute(envelope_as(
+        880_100,
+        Actor::Agent(profile.profile_id()),
+        proposal_command(&profile, "Proposed value."),
+    ))
+    .unwrap();
+
+    assert_eq!(
+        hook.trace(),
+        vec![
+            trace(MemoryWriteKind::Approval, [1, 0, 0, 0, 0, 0, 0, 0]),
+            trace(MemoryWriteKind::Proposal, [1, 0, 1, 0, 0, 0, 0, 0]),
+            trace(MemoryWriteKind::Current, [1, 0, 1, 0, 1, 0, 0, 0]),
+        ]
+    );
+}
+
+#[test]
+fn accepted_primary_and_every_sibling_hook_trace_matches_sql_write_order() {
+    let policy = Arc::new(support::RecordingPolicy::new(
+        AuthorizationDecision::Granted,
+    ));
+    let hook = Arc::new(MemoryWriteTraceHook::new());
+    let mut app = support::app_with_policy_and_hook(policy, hook.clone());
+    let profile = create_profile(&mut app, 890_000);
+    let selected = proposal_from(
+        app.execute(envelope_as(
+            890_100,
+            Actor::Agent(profile.profile_id()),
+            proposal_command_for(&profile, "Shared key", "Selected value."),
+        ))
+        .unwrap(),
+    );
+    for (id, value) in [(890_101, "Sibling one."), (890_102, "Sibling two.")] {
+        app.execute(envelope_as(
+            id,
+            Actor::Agent(profile.profile_id()),
+            proposal_command_for(&profile, "Shared key", value),
+        ))
+        .unwrap();
+    }
+    let review = app
+        .preview_memory_proposal_approval(selected.clone())
+        .unwrap();
+
+    hook.enable();
+    app.execute(envelope(
+        890_200,
+        ApplicationCommand::ApproveMemoryProposal {
+            proposal: selected,
+            approval_id: review.approval_id,
+            expected_approval_status: review.expected_approval_status,
+            expected_entry: review.expected_entry,
+            review_token: review.review_token,
+            review_digest: review.review_digest,
+        },
+    ))
+    .unwrap();
+
+    assert_eq!(
+        hook.trace(),
+        vec![
+            trace(MemoryWriteKind::Approval, [3, 1, 3, 0, 3, 0, 0, 0]),
+            trace(MemoryWriteKind::Resolution, [3, 1, 3, 1, 3, 0, 0, 0]),
+            trace(MemoryWriteKind::Current, [3, 1, 3, 1, 3, 1, 0, 0]),
+            trace(MemoryWriteKind::Entry, [3, 1, 3, 1, 3, 1, 1, 0]),
+            trace(MemoryWriteKind::Current, [3, 1, 3, 1, 3, 1, 1, 1]),
+            trace(MemoryWriteKind::Approval, [3, 2, 3, 1, 3, 1, 1, 1]),
+            trace(MemoryWriteKind::Resolution, [3, 2, 3, 2, 3, 1, 1, 1]),
+            trace(MemoryWriteKind::Current, [3, 2, 3, 2, 3, 2, 1, 1]),
+            trace(MemoryWriteKind::Approval, [3, 3, 3, 2, 3, 2, 1, 1]),
+            trace(MemoryWriteKind::Resolution, [3, 3, 3, 3, 3, 2, 1, 1]),
+            trace(MemoryWriteKind::Current, [3, 3, 3, 3, 3, 3, 1, 1]),
+        ]
+    );
 }
 
 #[test]

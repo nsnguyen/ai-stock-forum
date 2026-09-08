@@ -2741,15 +2741,15 @@ fn persist_memory_mutation_event(
     hook: &dyn CommandTransactionHook,
 ) -> Result<(), AppError> {
     if let ApplicationEvent::MemoryProposalCreated { proposal, approval } = &committed.event {
-        MemoryRepository::insert_proposal_with_approval(
+        MemoryRepository::insert_proposal_with_approval_observed(
             tx,
             committed.sequence,
             proposal,
             approval,
+            |transaction| hook.after_memory_approval_write(transaction),
+            |transaction| hook.after_memory_proposal_insert(transaction),
+            |transaction| hook.after_memory_current_update(transaction),
         )?;
-        hook.after_memory_proposal_insert(tx.transaction())?;
-        hook.after_memory_approval_write(tx.transaction())?;
-        hook.after_memory_current_update(tx.transaction())?;
         return Ok(());
     }
     if let ApplicationEvent::MemoryProposalRejected { resolution } = &committed.event {
@@ -2762,10 +2762,15 @@ fn persist_memory_mutation_event(
                 resolution.resolved_at_ms(),
             )
             .map_err(|_| PersistenceError::MemoryRowMismatch)?;
-        MemoryRepository::resolve_proposal(tx, committed.sequence, resolution, &resolved)?;
-        hook.after_memory_approval_write(tx.transaction())?;
-        hook.after_memory_resolution_insert(tx.transaction())?;
-        hook.after_memory_current_update(tx.transaction())?;
+        MemoryRepository::resolve_proposal_observed(
+            tx,
+            committed.sequence,
+            resolution,
+            &resolved,
+            |transaction| hook.after_memory_approval_write(transaction),
+            |transaction| hook.after_memory_resolution_insert(transaction),
+            |transaction| hook.after_memory_current_update(transaction),
+        )?;
         return Ok(());
     }
     if let ApplicationEvent::MemoryProposalAccepted {
@@ -2783,10 +2788,15 @@ fn persist_memory_mutation_event(
                 resolution.resolved_at_ms(),
             )
             .map_err(|_| PersistenceError::MemoryRowMismatch)?;
-        MemoryRepository::resolve_proposal(tx, committed.sequence, resolution, &resolved)?;
-        hook.after_memory_approval_write(tx.transaction())?;
-        hook.after_memory_resolution_insert(tx.transaction())?;
-        hook.after_memory_current_update(tx.transaction())?;
+        MemoryRepository::resolve_proposal_observed(
+            tx,
+            committed.sequence,
+            resolution,
+            &resolved,
+            |transaction| hook.after_memory_approval_write(transaction),
+            |transaction| hook.after_memory_resolution_insert(transaction),
+            |transaction| hook.after_memory_current_update(transaction),
+        )?;
         MemoryRepository::insert_entry_version(tx, committed.sequence, entry)?;
         hook.after_memory_entry_insert(tx.transaction())?;
         MemoryRepository::replace_current_entry(tx, entry)?;
@@ -2801,10 +2811,15 @@ fn persist_memory_mutation_event(
                     sibling.resolved_at_ms(),
                 )
                 .map_err(|_| PersistenceError::MemoryRowMismatch)?;
-            MemoryRepository::resolve_proposal(tx, committed.sequence, sibling, &expired)?;
-            hook.after_memory_approval_write(tx.transaction())?;
-            hook.after_memory_resolution_insert(tx.transaction())?;
-            hook.after_memory_current_update(tx.transaction())?;
+            MemoryRepository::resolve_proposal_observed(
+                tx,
+                committed.sequence,
+                sibling,
+                &expired,
+                |transaction| hook.after_memory_approval_write(transaction),
+                |transaction| hook.after_memory_resolution_insert(transaction),
+                |transaction| hook.after_memory_current_update(transaction),
+            )?;
         }
         return Ok(());
     }
@@ -2833,10 +2848,15 @@ fn persist_memory_mutation_event(
                 resolution.resolved_at_ms(),
             )
             .map_err(|_| PersistenceError::MemoryRowMismatch)?;
-        MemoryRepository::resolve_proposal(tx, committed.sequence, resolution, &resolved)?;
-        hook.after_memory_approval_write(tx.transaction())?;
-        hook.after_memory_resolution_insert(tx.transaction())?;
-        hook.after_memory_current_update(tx.transaction())?;
+        MemoryRepository::resolve_proposal_observed(
+            tx,
+            committed.sequence,
+            resolution,
+            &resolved,
+            |transaction| hook.after_memory_approval_write(transaction),
+            |transaction| hook.after_memory_resolution_insert(transaction),
+            |transaction| hook.after_memory_current_update(transaction),
+        )?;
     }
     Ok(())
 }

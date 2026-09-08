@@ -881,17 +881,58 @@ impl MemoryRepository {
         proposal: &MemoryProposal,
         approval: &ApprovalRecord,
     ) -> Result<(), PersistenceError> {
-        with_operation_savepoint(tx, || {
-            Self::insert_proposal_with_approval_inner(tx, creation_sequence, proposal, approval)
-        })
+        Self::insert_proposal_with_approval_observed(
+            tx,
+            creation_sequence,
+            proposal,
+            approval,
+            |_| Ok(()),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
     }
 
-    fn insert_proposal_with_approval_inner(
+    pub(crate) fn insert_proposal_with_approval_observed<A, P, C>(
         tx: &ImmediateTransaction<'_>,
         creation_sequence: u64,
         proposal: &MemoryProposal,
         approval: &ApprovalRecord,
-    ) -> Result<(), PersistenceError> {
+        mut after_approval: A,
+        mut after_proposal: P,
+        mut after_current: C,
+    ) -> Result<(), PersistenceError>
+    where
+        A: FnMut(&rusqlite::Transaction<'_>) -> Result<(), PersistenceError>,
+        P: FnMut(&rusqlite::Transaction<'_>) -> Result<(), PersistenceError>,
+        C: FnMut(&rusqlite::Transaction<'_>) -> Result<(), PersistenceError>,
+    {
+        with_operation_savepoint(tx, || {
+            Self::insert_proposal_with_approval_inner(
+                tx,
+                creation_sequence,
+                proposal,
+                approval,
+                &mut after_approval,
+                &mut after_proposal,
+                &mut after_current,
+            )
+        })
+    }
+
+    fn insert_proposal_with_approval_inner<A, P, C>(
+        tx: &ImmediateTransaction<'_>,
+        creation_sequence: u64,
+        proposal: &MemoryProposal,
+        approval: &ApprovalRecord,
+        after_approval: &mut A,
+        after_proposal: &mut P,
+        after_current: &mut C,
+    ) -> Result<(), PersistenceError>
+    where
+        A: FnMut(&rusqlite::Transaction<'_>) -> Result<(), PersistenceError>,
+        P: FnMut(&rusqlite::Transaction<'_>) -> Result<(), PersistenceError>,
+        C: FnMut(&rusqlite::Transaction<'_>) -> Result<(), PersistenceError>,
+    {
         validate_event(tx, creation_sequence, proposal.creation_event_id())?;
         let expected = proposal_row(proposal, creation_sequence)?;
         let existing = load_proposal_rows_matching(tx, &expected)?;
@@ -907,11 +948,15 @@ impl MemoryRepository {
         }
         validate_memory_approval(proposal, approval, None)?;
         Self::validate_proposal_base_context(tx, proposal)?;
-        insert_approval(tx, approval, None)?;
+        if insert_approval(tx, approval, None)? {
+            after_approval(tx.transaction())?;
+        }
         match existing.as_slice() {
             [] => {
                 insert_proposal_row(tx, &expected)?;
-                insert_proposal_status(tx, proposal, MemoryProposalStatus::Pending, None)
+                after_proposal(tx.transaction())?;
+                insert_proposal_status(tx, proposal, MemoryProposalStatus::Pending, None)?;
+                after_current(tx.transaction())
             }
             [row] if row == &expected => {
                 validate_proposal_status(tx, proposal, MemoryProposalStatus::Pending, None)
@@ -926,17 +971,58 @@ impl MemoryRepository {
         resolution: &MemoryProposalResolution,
         approval: &ApprovalRecord,
     ) -> Result<(), PersistenceError> {
-        with_operation_savepoint(tx, || {
-            Self::resolve_proposal_inner(tx, resolution_sequence, resolution, approval)
-        })
+        Self::resolve_proposal_observed(
+            tx,
+            resolution_sequence,
+            resolution,
+            approval,
+            |_| Ok(()),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
     }
 
-    fn resolve_proposal_inner(
+    pub(crate) fn resolve_proposal_observed<A, R, C>(
         tx: &ImmediateTransaction<'_>,
         resolution_sequence: u64,
         resolution: &MemoryProposalResolution,
         approval: &ApprovalRecord,
-    ) -> Result<(), PersistenceError> {
+        mut after_approval: A,
+        mut after_resolution: R,
+        mut after_current: C,
+    ) -> Result<(), PersistenceError>
+    where
+        A: FnMut(&rusqlite::Transaction<'_>) -> Result<(), PersistenceError>,
+        R: FnMut(&rusqlite::Transaction<'_>) -> Result<(), PersistenceError>,
+        C: FnMut(&rusqlite::Transaction<'_>) -> Result<(), PersistenceError>,
+    {
+        with_operation_savepoint(tx, || {
+            Self::resolve_proposal_inner(
+                tx,
+                resolution_sequence,
+                resolution,
+                approval,
+                &mut after_approval,
+                &mut after_resolution,
+                &mut after_current,
+            )
+        })
+    }
+
+    fn resolve_proposal_inner<A, R, C>(
+        tx: &ImmediateTransaction<'_>,
+        resolution_sequence: u64,
+        resolution: &MemoryProposalResolution,
+        approval: &ApprovalRecord,
+        after_approval: &mut A,
+        after_resolution: &mut R,
+        after_current: &mut C,
+    ) -> Result<(), PersistenceError>
+    where
+        A: FnMut(&rusqlite::Transaction<'_>) -> Result<(), PersistenceError>,
+        R: FnMut(&rusqlite::Transaction<'_>) -> Result<(), PersistenceError>,
+        C: FnMut(&rusqlite::Transaction<'_>) -> Result<(), PersistenceError>,
+    {
         validate_event(tx, resolution_sequence, resolution.resolution_event_id())?;
         let (proposal, status, stored_resolution) =
             Self::load_proposal(tx, resolution.proposal().proposal_id())?
@@ -964,16 +1050,19 @@ impl MemoryRepository {
         }
         validate_memory_approval(&proposal, approval, Some(resolution))?;
         update_approval_resolution(tx, approval, resolution)?;
+        after_approval(tx.transaction())?;
         let existing = load_resolution(tx, resolution.proposal().proposal_id())?;
         match existing {
             None => {
                 insert_resolution_row(tx, &expected)?;
+                after_resolution(tx.transaction())?;
                 insert_proposal_status(
                     tx,
                     &proposal,
                     resolution.status(),
                     Some(resolution.resolution_event_id()),
-                )
+                )?;
+                after_current(tx.transaction())
             }
             Some(row) if row == expected => validate_proposal_status(
                 tx,
@@ -1465,18 +1554,14 @@ fn with_operation_savepoint<T>(
         .execute_batch("SAVEPOINT memory_repository_operation")
         .map_err(query)?;
     match operation() {
-        Ok(value) => match tx
-            .transaction()
-            .execute_batch("RELEASE memory_repository_operation")
-        {
-            Ok(()) => Ok(value),
-            Err(_) => {
-                let _ = tx.transaction().execute_batch(
-                    "ROLLBACK TO memory_repository_operation; RELEASE memory_repository_operation",
-                );
-                Err(PersistenceError::QueryFailed)
-            }
-        },
+        Ok(value) => {
+            release_operation_savepoint(
+                tx.transaction(),
+                tx.transaction()
+                    .execute_batch("RELEASE memory_repository_operation"),
+            )?;
+            Ok(value)
+        }
         Err(error) => {
             tx.transaction()
                 .execute_batch(
@@ -1484,6 +1569,22 @@ fn with_operation_savepoint<T>(
                 )
                 .map_err(query)?;
             Err(error)
+        }
+    }
+}
+
+fn release_operation_savepoint(
+    transaction: &rusqlite::Transaction<'_>,
+    release: rusqlite::Result<()>,
+) -> Result<(), PersistenceError> {
+    match release {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let mapped = query(error);
+            let _ = transaction.execute_batch(
+                "ROLLBACK TO memory_repository_operation; RELEASE memory_repository_operation",
+            );
+            Err(mapped)
         }
     }
 }
@@ -2774,10 +2875,10 @@ fn insert_approval(
     tx: &ImmediateTransaction<'_>,
     record: &ApprovalRecord,
     resolution_event: Option<EventId>,
-) -> Result<(), PersistenceError> {
+) -> Result<bool, PersistenceError> {
     let c = approval_columns(record, resolution_event)?;
     let existing = load_approval(tx, record.approval_id())?;
-    match existing{None=>tx.transaction().execute("INSERT INTO approval_records (approval_id,action_kind,object_kind,object_id,object_version,object_digest,actor_kind,actor_id,status,created_at_ms,expires_at_ms,resolved_at_ms,resolution_kind,resolution_event_id,resolution_actor_kind,resolution_actor_id) VALUES (?16,?1,?2,?3,?4,?5,?7,?6,?9,?10,?11,?12,?13,?8,?14,?15)",params![c.0,c.1,c.2,c.3,c.4,c.5,c.6,c.7,c.8,c.9,c.10,c.11,c.12,c.13,c.14,c.15]).map(|_|()).map_err(query),Some(stored) if approval_equal(&stored,record,resolution_event)=>Ok(()),_=>Err(PersistenceError::MemoryRowMismatch)}
+    match existing{None=>tx.transaction().execute("INSERT INTO approval_records (approval_id,action_kind,object_kind,object_id,object_version,object_digest,actor_kind,actor_id,status,created_at_ms,expires_at_ms,resolved_at_ms,resolution_kind,resolution_event_id,resolution_actor_kind,resolution_actor_id) VALUES (?16,?1,?2,?3,?4,?5,?7,?6,?9,?10,?11,?12,?13,?8,?14,?15)",params![c.0,c.1,c.2,c.3,c.4,c.5,c.6,c.7,c.8,c.9,c.10,c.11,c.12,c.13,c.14,c.15]).map(|_|true).map_err(query),Some(stored) if approval_equal(&stored,record,resolution_event)=>Ok(false),_=>Err(PersistenceError::MemoryRowMismatch)}
 }
 fn update_approval_resolution(
     tx: &ImmediateTransaction<'_>,
@@ -3650,7 +3751,7 @@ fn actor_json(actor: Actor) -> serde_json::Value {
 
 #[cfg(test)]
 mod task_13_tests {
-    use rusqlite::{Error as SqliteError, ffi};
+    use rusqlite::{Connection, Error as SqliteError, ffi};
 
     use super::*;
 
@@ -3664,6 +3765,44 @@ mod task_13_tests {
             assert_eq!(mapped, PersistenceError::Capacity);
             assert_eq!(mapped.code(), "memory_proposal_capacity_reached");
             assert!(!mapped.to_string().contains("sensitive"));
+        }
+    }
+
+    #[test]
+    fn operation_release_maps_capacity_and_rolls_back_the_savepoint() {
+        for code in [ffi::SQLITE_FULL, ffi::SQLITE_TOOBIG] {
+            let mut connection = Connection::open_in_memory().unwrap();
+            connection
+                .execute_batch("CREATE TABLE marker (value INTEGER NOT NULL)")
+                .unwrap();
+            let transaction = connection.transaction().unwrap();
+            transaction
+                .execute_batch(
+                    "SAVEPOINT memory_repository_operation;
+                     INSERT INTO marker(value) VALUES(1)",
+                )
+                .unwrap();
+
+            let error = release_operation_savepoint(
+                &transaction,
+                Err(SqliteError::SqliteFailure(
+                    ffi::Error::new(code),
+                    Some("sensitive release detail".to_owned()),
+                )),
+            )
+            .unwrap_err();
+
+            assert_eq!(error, PersistenceError::Capacity);
+            assert_eq!(error.code(), "memory_proposal_capacity_reached");
+            assert!(!error.to_string().contains("sensitive"));
+            transaction.commit().unwrap();
+            assert_eq!(
+                connection
+                    .query_row("SELECT COUNT(*) FROM marker", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
         }
     }
 }
