@@ -676,6 +676,13 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
         model.set_message(Severity::Warning, PROTECTED_SKILLS_MESSAGE);
         return ControllerEffect::Redraw;
     }
+    if matches!(&parsed, ParsedLine::MemoryWorkflow(_)) {
+        model.set_message(
+            Severity::Info,
+            "Open Agents → Memory to edit or resolve memory.",
+        );
+        return ControllerEffect::Redraw;
+    }
 
     let input = model.command.take_text();
     match parsed {
@@ -726,13 +733,7 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
             model.set_focus(Focus::Workspace);
             ControllerEffect::StartSkillWorkflow(workflow)
         }
-        ParsedLine::MemoryWorkflow(_) => {
-            model.set_message(
-                Severity::Info,
-                "Open Agents → Memory to edit or resolve memory.",
-            );
-            ControllerEffect::Redraw
-        }
+        ParsedLine::MemoryWorkflow(_) => unreachable!("memory workflow handled before consumption"),
     }
 }
 

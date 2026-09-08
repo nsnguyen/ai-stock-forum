@@ -9,16 +9,16 @@ use crate::{
         AgentSkillAssignmentOperation, AgentSkillAssignmentPreview, AppError, ApplicationCommand,
         CommandOutcome, CommandView, EpisodicSummariesView, EpisodicSummaryView,
         InputRejectionCategory, MemoryEntriesView, MemoryEntryHistoryView, MemoryEntryMutationView,
-        MemoryEntryVersionView, MemoryEntryView, MemoryProposalCreatedView,
-        MemoryProposalResolutionView, MemoryProposalView, MemoryProposalsView, SafeToken,
-        ShutdownDisposition, ShutdownReason,
+        MemoryEntryVersionView, MemoryEntryView, MemoryProfileIdentityView,
+        MemoryProposalCreatedView, MemoryProposalResolutionView, MemoryProposalView,
+        MemoryProposalsView, SafeToken, ShutdownDisposition, ShutdownReason,
     },
     cli::CliError,
     config::StartupError,
     domain::Actor,
     memory::{
-        ExpectedMemoryEntryState, MemoryEntryDraft, MemoryEntryRef, MemoryProposalOperation,
-        MemoryProposalRef,
+        EpisodicQualification, ExpectedMemoryEntryState, MemoryEntryDraft, MemoryEntryRef,
+        MemoryProposalOperation, MemoryProposalRef,
     },
     runtime::RuntimeError,
     setup::SetupStatus,
@@ -889,33 +889,30 @@ fn render_memory_proposal<W: Write>(view: &MemoryProposalView, writer: &mut W) -
     writeln!(writer, "Digest: {}", proposal_ref.content_digest())?;
     writeln!(writer, "Approval ID: {}", view.proposal.approval_id())?;
     writeln!(writer, "Namespace: {}", view.proposal.namespace_id())?;
-    writeln!(
+    render_memory_profile_identity(
+        "Proposer",
+        &view.proposer_identity,
+        view.proposer_is_historical,
         writer,
-        "Proposer: {} ({}){}",
-        escaped_bounded_bytes(
-            &view.proposer_identity.display_name,
-            MAX_EPISODIC_LABEL_RENDER_BYTES,
-        ),
-        view.proposer_identity.profile.profile_id(),
-        if view.proposer_is_historical {
-            " - historical profile version"
-        } else {
-            ""
-        },
     )?;
-    writeln!(
+    render_memory_profile_identity(
+        "Namespace owner",
+        &view.namespace_owner_identity,
+        false,
         writer,
-        "Namespace owner: {} ({})",
-        escaped_bounded_bytes(
-            &view.namespace_owner_identity.display_name,
-            MAX_EPISODIC_LABEL_RENDER_BYTES,
-        ),
-        view.namespace_owner_identity.profile.profile_id(),
     )?;
     writeln!(
         writer,
         "Display key: {}",
         escaped_bounded_bytes(view.proposal.display_key(), MAX_MEMORY_KEY_RENDER_BYTES),
+    )?;
+    writeln!(
+        writer,
+        "Normalized key: {}",
+        escaped_bounded_bytes(
+            view.proposal.normalized_key().as_str(),
+            MAX_MEMORY_KEY_RENDER_BYTES,
+        ),
     )?;
     render_expected_entry("Expected entry", view.proposal.expected(), writer)?;
     render_expected_entry("Current entry", &view.current_entry, writer)?;
@@ -960,11 +957,13 @@ fn render_episodic_summaries<W: Write>(
         view.total_count,
         omitted_count,
     )?;
-    writer.write_all(b"LABEL | TAGS | SOURCES | CREATED | SUMMARY ID | DIGEST\n")?;
+    writer
+        .write_all(b"QUALIFICATION | LABEL | TAGS | SOURCES | CREATED | SUMMARY ID | DIGEST\n")?;
     for item in view.summaries.iter().take(MAX_MEMORY_LIST_ROWS) {
         writeln!(
             writer,
-            "{} | {} | {} | {} | {} | {}",
+            "{} | {} | {} | {} | {} | {} | {}",
+            EpisodicQualification::SummaryVerifySources.label(),
             escaped_bounded_bytes(&item.label, MAX_EPISODIC_LABEL_RENDER_BYTES),
             escaped_memory_list(&item.purpose_tags, MAX_MEMORY_TAG_RENDER_BYTES),
             item.source_count,
@@ -981,9 +980,24 @@ fn render_episodic_summary<W: Write>(view: &EpisodicSummaryView, writer: &mut W)
     writeln!(writer, "Episodic summary: {}", reference.summary_id())?;
     writeln!(writer, "Qualification: {}", view.qualification.label())?;
     writeln!(writer, "Version: {}", reference.version().get())?;
-    writeln!(writer, "Profile: {}", reference.profile().profile_id())?;
+    render_memory_profile_ref("Profile", reference.profile(), writer)?;
     writeln!(writer, "Namespace: {}", reference.namespace_id())?;
     writeln!(writer, "Digest: {}", reference.content_digest())?;
+    writeln!(
+        writer,
+        "Creation event sequence: {}",
+        reference.creation_event_sequence()
+    )?;
+    writeln!(
+        writer,
+        "Creation event ID: {}",
+        reference.creation_event_id()
+    )?;
+    writeln!(
+        writer,
+        "Source set digest: {}",
+        reference.source_set_digest()
+    )?;
     writeln!(
         writer,
         "Label: {}",
@@ -1011,6 +1025,43 @@ fn render_episodic_summary<W: Write>(view: &EpisodicSummaryView, writer: &mut W)
         )?;
     }
     writeln!(writer, "Created: {}", view.summary.created_at_ms())
+}
+
+fn render_memory_profile_identity<W: Write>(
+    label: &str,
+    identity: &MemoryProfileIdentityView,
+    historical: bool,
+    writer: &mut W,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "{label}: {}",
+        escaped_bounded_bytes(&identity.display_name, MAX_EPISODIC_LABEL_RENDER_BYTES,),
+    )?;
+    render_memory_profile_ref(&format!("{label} profile"), &identity.profile, writer)?;
+    if historical {
+        writeln!(writer, "{label} warning: historical profile version")?;
+    }
+    Ok(())
+}
+
+fn render_memory_profile_ref<W: Write>(
+    label: &str,
+    profile: &crate::agents::AgentProfileVersionRef,
+    writer: &mut W,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "{label}: {}@{}",
+        profile.profile_id(),
+        profile.version().get()
+    )?;
+    writeln!(
+        writer,
+        "{label} version ID: {}",
+        profile.profile_version_id()
+    )?;
+    writeln!(writer, "{label} digest: {}", profile.content_digest())
 }
 
 fn render_memory_mutation<W: Write>(

@@ -25,7 +25,7 @@ use ai_stock_forum::{
         command::{MemoryWorkflowCommand, ParsedLine, TextRenderer, parse_line},
         tui::{
             ControllerEffect, TuiEvent, handle_event,
-            model::{AgentsPane, Focus, Severity, TuiModel, View},
+            model::{AgentsPane, Focus, Severity, TuiModel, UiMessage, View},
         },
     },
 };
@@ -230,6 +230,28 @@ fn profile() -> AgentProfileVersion {
     .unwrap()
 }
 
+fn current_profile(historical: &AgentProfileVersion) -> AgentProfileVersion {
+    AgentProfileVersion::next_version(
+        historical,
+        AgentProfileVersionId::from_uuid(Uuid::from_u128(120)),
+        1_700_000_000_001,
+        AgentProfileDraft::new(
+            "Memory Agent Current".into(),
+            "Current fallback renderer fixture.".into(),
+            AgentRole::Custom,
+            "research".into(),
+            vec!["analysis".into()],
+            "Careful.".into(),
+            "Use current evidence.".into(),
+            AgentBindings::default(),
+            vec![],
+            vec![],
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
 fn entry(profile: &AgentProfileVersion) -> MemoryEntryVersion {
     MemoryEntryVersion::create_present(
         profile.memory_namespace_id(),
@@ -299,6 +321,13 @@ fn render(view: CommandView) -> String {
     let mut bytes = Vec::new();
     TextRenderer::render_view(&view, &mut bytes).unwrap();
     String::from_utf8(bytes).unwrap()
+}
+
+fn assert_exact_line(text: &str, expected: &str) {
+    assert!(
+        text.lines().any(|line| line == expected),
+        "missing exact line `{expected}` in:\n{text}"
+    );
 }
 
 #[test]
@@ -430,25 +459,28 @@ fn memory_list_renderers_cap_rows_escape_terminal_text_and_omit_detail_prose() {
     }));
     assert!(summaries_text.contains("returned 100 of 101 (1 omitted)"));
     assert!(summaries_text.contains("1 summaries omitted"));
+    assert_eq!(
+        summaries_text.matches("Summary — verify sources").count(),
+        100,
+        "each visible episodic list item must carry the verification qualification"
+    );
     assert!(!summaries_text.contains("SUMMARY_SENTINEL_MUST_NOT_RENDER"));
     assert!(!summaries_text.contains("private summary body"));
     assert!(!summaries_text.contains("memory_entry_set"));
 }
 
 #[test]
-fn deliberate_memory_details_render_escaped_plaintext_and_source_provenance() {
-    let profile = profile();
-    let entry = entry(&profile);
-    let proposal = proposal(&profile);
-    let summary = episodic_summary(&profile);
+fn memory_entry_details_render_deliberate_escaped_plaintext() {
+    let historical_profile = profile();
+    let entry = entry(&historical_profile);
 
     for view in [
         CommandView::MemoryEntry(MemoryEntryView {
-            profile: profile.reference(),
+            profile: historical_profile.reference(),
             entry: entry.clone(),
         }),
         CommandView::MemoryEntryVersion(MemoryEntryVersionView {
-            profile: profile.reference(),
+            profile: historical_profile.reference(),
             entry: entry.clone(),
         }),
     ] {
@@ -459,7 +491,13 @@ fn deliberate_memory_details_render_escaped_plaintext_and_source_provenance() {
         assert!(text.contains(entry.reference().content_digest().as_str()));
         assert!(!text.contains("private thesis\nsecond line"));
     }
+}
 
+#[test]
+fn proposal_detail_renders_canonical_key_and_complete_historical_profile_provenance() {
+    let historical_profile = profile();
+    let current_profile = current_profile(&historical_profile);
+    let proposal = proposal(&historical_profile);
     let proposal_text = render(CommandView::MemoryProposal(MemoryProposalView {
         proposal: proposal.clone(),
         status: MemoryProposalStatus::Pending,
@@ -467,20 +505,82 @@ fn deliberate_memory_details_render_escaped_plaintext_and_source_provenance() {
         current_entry: ExpectedMemoryEntryState::Absent,
         proposer_is_historical: true,
         proposer_identity: MemoryProfileIdentityView {
-            profile: profile.reference(),
+            profile: historical_profile.reference(),
             display_name: "\u{1b}[31mHistorical Proposer".into(),
         },
         namespace_owner_identity: MemoryProfileIdentityView {
-            profile: profile.reference(),
+            profile: current_profile.reference(),
             display_name: "Memory Owner".into(),
         },
     }));
+    assert_exact_line(&proposal_text, "Normalized key: earnings thesis");
+    assert_exact_line(
+        &proposal_text,
+        &format!(
+            "Proposer profile: {}@{}",
+            historical_profile.profile_id(),
+            historical_profile.version().get()
+        ),
+    );
+    assert_exact_line(
+        &proposal_text,
+        &format!(
+            "Proposer profile version ID: {}",
+            historical_profile.profile_version_id()
+        ),
+    );
+    assert_exact_line(
+        &proposal_text,
+        &format!(
+            "Proposer profile digest: {}",
+            historical_profile.content_digest()
+        ),
+    );
+    assert_exact_line(
+        &proposal_text,
+        "Proposer warning: historical profile version",
+    );
+    assert_exact_line(
+        &proposal_text,
+        &format!(
+            "Namespace owner profile: {}@{}",
+            current_profile.profile_id(),
+            current_profile.version().get()
+        ),
+    );
+    assert_exact_line(
+        &proposal_text,
+        &format!(
+            "Namespace owner profile version ID: {}",
+            current_profile.profile_version_id()
+        ),
+    );
+    assert_exact_line(
+        &proposal_text,
+        &format!(
+            "Namespace owner profile digest: {}",
+            current_profile.content_digest()
+        ),
+    );
+    assert_ne!(
+        historical_profile.profile_version_id(),
+        current_profile.profile_version_id()
+    );
+    assert_ne!(
+        historical_profile.content_digest(),
+        current_profile.content_digest()
+    );
     assert!(proposal_text.contains("private proposed value\\nsecond line"));
     assert!(proposal_text.contains("private rationale\\nsecond line"));
     assert!(proposal_text.contains("historical"));
     assert!(proposal_text.contains("\\u{1b}[31mHistorical Proposer"));
     assert!(!proposal_text.contains('\u{1b}'));
+}
 
+#[test]
+fn episodic_detail_renders_pinned_profile_creation_and_source_provenance() {
+    let historical_profile = profile();
+    let summary = episodic_summary(&historical_profile);
     let summary_text = render(CommandView::EpisodicSummary(EpisodicSummaryView {
         summary: summary.clone(),
         qualification: EpisodicQualification::SummaryVerifySources,
@@ -488,10 +588,50 @@ fn deliberate_memory_details_render_escaped_plaintext_and_source_provenance() {
     assert!(summary_text.contains("Summary — verify sources"));
     assert!(summary_text.contains("Quarterly synthesis"));
     assert!(summary_text.contains("private summary body\\nverify each source"));
-    assert!(summary_text.contains("memory_entry_set"));
-    assert!(summary_text.contains("17"));
-    assert!(summary_text.contains(&summary.sources()[0].event_id().to_string()));
-    assert!(summary_text.contains(summary.sources()[0].event_digest().as_str()));
+    assert_exact_line(
+        &summary_text,
+        &format!(
+            "Profile: {}@{}",
+            historical_profile.profile_id(),
+            historical_profile.version().get()
+        ),
+    );
+    assert_exact_line(
+        &summary_text,
+        &format!(
+            "Profile version ID: {}",
+            historical_profile.profile_version_id()
+        ),
+    );
+    assert_exact_line(
+        &summary_text,
+        &format!("Profile digest: {}", historical_profile.content_digest()),
+    );
+    assert_exact_line(
+        &summary_text,
+        &format!(
+            "Creation event sequence: {}",
+            summary.creation_event_sequence()
+        ),
+    );
+    assert_exact_line(
+        &summary_text,
+        &format!("Creation event ID: {}", summary.creation_event_id()),
+    );
+    assert_exact_line(
+        &summary_text,
+        &format!("Source set digest: {}", summary.source_set_digest()),
+    );
+    assert_exact_line(
+        &summary_text,
+        &format!(
+            "  sequence {} event {} type {} digest {}",
+            summary.sources()[0].sequence(),
+            summary.sources()[0].event_id(),
+            summary.sources()[0].event_type(),
+            summary.sources()[0].event_digest()
+        ),
+    );
     assert!(!summary_text.contains("private summary body\nverify each source"));
 }
 
@@ -598,7 +738,14 @@ fn tui_memory_workflow_only_shows_guidance_without_navigation_or_history_mutatio
     model.agents.detail_scroll = 6;
     model.agents.history_scroll = 8;
     model.workspace_scroll = 11;
+    model.command.remember("/help".into());
     model.command.ingest("/memory delete analyst thesis");
+    model.command.move_left();
+    let mut expected = model.clone();
+    expected.message = Some(UiMessage {
+        severity: Severity::Info,
+        text: "Open Agents → Memory to edit or resolve memory.".into(),
+    });
 
     let effect = handle_event(
         &mut model,
@@ -606,21 +753,5 @@ fn tui_memory_workflow_only_shows_guidance_without_navigation_or_history_mutatio
     );
 
     assert_eq!(effect, ControllerEffect::Redraw);
-    assert_eq!(model.active_view, View::Help);
-    assert_eq!(model.focus, Focus::Command);
-    assert_eq!(model.agents.pane, AgentsPane::History);
-    assert_eq!(model.agents.selected_profile, 7);
-    assert_eq!(model.agents.selected_history_version, 9);
-    assert_eq!(model.agents.list_scroll, 5);
-    assert_eq!(model.agents.detail_scroll, 6);
-    assert_eq!(model.agents.history_scroll, 8);
-    assert_eq!(model.workspace_scroll, 11);
-    assert_eq!(model.command.text(), "");
-    assert_eq!(model.command.history_len(), 0);
-    let message = model.message.expect("guidance message");
-    assert_eq!(message.severity, Severity::Info);
-    assert_eq!(
-        message.text,
-        "Open Agents → Memory to edit or resolve memory."
-    );
+    assert_eq!(model, expected);
 }
