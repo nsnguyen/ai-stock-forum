@@ -29,12 +29,19 @@ fn v3_terminal_non_memory_approval_keeps_null_resolution_event() {
     let temp = tempfile::tempdir().unwrap();
     let paths = AppPaths::for_test(temp.path());
     create_schema_v3_fixture(&paths);
-    let before = legacy_rows(&Connection::open(paths.database_path()).unwrap());
+    let before_connection = Connection::open(paths.database_path()).unwrap();
+    let before = v3_snapshot(&before_connection);
+    assert_eq!(migration_records(&before_connection).len(), 3);
+    assert_eq!(pragma(&before_connection, "application_id"), 0x4149_4653);
+    assert_eq!(pragma(&before_connection, "user_version"), 3);
 
     let database = Database::open(&paths).unwrap();
 
     assert_eq!(database.schema_version(), 4);
-    assert_eq!(legacy_rows(database.connection()), before);
+    assert_eq!(v3_snapshot(database.connection()), before);
+    assert_eq!(migration_records(database.connection()).len(), 4);
+    assert_eq!(pragma(database.connection(), "application_id"), 0x4149_4653);
+    assert_eq!(pragma(database.connection(), "user_version"), 4);
     let (event_id, kind, actor_id): (Option<String>, Option<String>, Option<String>) = database
         .connection()
         .query_row(
@@ -125,7 +132,7 @@ fn migration_failure_at_every_v4_boundary_rolls_back() {
         let before = (
             schema_inventory(&before_connection),
             migration_records(&before_connection),
-            legacy_rows(&before_connection),
+            v3_snapshot(&before_connection),
             pragma(&before_connection, "application_id"),
             pragma(&before_connection, "user_version"),
         );
@@ -136,7 +143,7 @@ fn migration_failure_at_every_v4_boundary_rolls_back() {
         let after = Connection::open(paths.database_path()).unwrap();
         assert_eq!(schema_inventory(&after), before.0, "boundary {boundary}");
         assert_eq!(migration_records(&after), before.1, "boundary {boundary}");
-        assert_eq!(legacy_rows(&after), before.2, "boundary {boundary}");
+        assert_eq!(v3_snapshot(&after), before.2, "boundary {boundary}");
         assert_eq!(
             pragma(&after, "application_id"),
             before.3,
@@ -204,47 +211,108 @@ fn create_schema_v3_fixture(paths: &AppPaths) {
              expires_at_ms, resolved_at_ms, resolution_kind, resolution_event_id
          ) VALUES ('legacy-terminal-approval', 'legacy_action', 'legacy_object',
                    'legacy-object-id', 1, 'legacy-object-digest', 'system', NULL,
-                   'accepted', 1, NULL, 2, 'accepted', NULL);",
+                   'accepted', 1, NULL, 2, 'accepted', NULL);
+         INSERT INTO installation_projection (singleton, installation_id, created_event_id, created_at_ms)
+         VALUES (1, 'legacy-installation', 'legacy-event', 1);
+         INSERT INTO process_session_projection (session_id, started_event_id, started_at_ms)
+         VALUES ('legacy-session', 'legacy-event', 1);
+         INSERT INTO projection_metadata (singleton, last_event_sequence, last_event_digest, projection_digest)
+         VALUES (1, 1, 'legacy-digest', 'legacy-projection-digest');
+         INSERT INTO setup_drafts (draft_id, schema_version, state, path, payload_json, created_at_ms, updated_at_ms)
+         VALUES ('legacy-draft', 1, 'drafting', 'quick_start', '{\"draft\":true}', 1, 2);
+         INSERT INTO installation_configuration_versions (configuration_id, version, source_draft_id, review_digest, object_digest, payload_json, created_event_id, created_at_ms)
+         VALUES ('legacy-configuration', 1, 'legacy-draft', 'legacy-review', 'legacy-config-digest', '{\"config\":true}', 'legacy-event', 2);
+         INSERT INTO active_installation_configuration (singleton, configuration_id, activated_event_id, activated_at_ms)
+         VALUES (1, 'legacy-configuration', 'legacy-event', 2);
+         INSERT INTO setup_step_outcomes (draft_id, step_key, attempt, status, safe_code, occurred_at_ms)
+         VALUES ('legacy-draft', 'review', 1, 'passed', 'ok', 2);
+         INSERT INTO capability_readiness (configuration_id, capability, status, reason_code, checked_at_ms, projection_digest)
+         VALUES ('legacy-configuration', 'audit_read', 'ready', NULL, 2, 'legacy-projection-digest');
+         INSERT INTO agent_profile_versions (profile_id, profile_version_id, version, supersedes_version_id, template_id, template_version, template_digest, role, display_name, normalized_name, memory_namespace_id, policy_profile_ref, content_digest, payload_json, source_event_sequence, created_at_ms)
+         VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002', 1, NULL, NULL, NULL, NULL, 'custom', 'Legacy Profile', 'legacy profile', '00000000-0000-0000-0000-000000000003', 'legacy-policy', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', CAST('{\"profile\":true}' AS BLOB), 1, 2);
+         INSERT INTO active_agent_profiles (profile_id, profile_version_id, version, normalized_name, content_digest)
+         VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002', 1, 'legacy profile', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+         INSERT INTO skill_versions (skill_id, skill_version_id, version, predecessor_version_id, display_name, normalized_name, content_digest, content_json, provenance_json, created_at_ms, record_digest, record_json)
+         VALUES ('00000000-0000-0000-0000-000000000011', '00000000-0000-0000-0000-000000000012', 1, NULL, 'Legacy Skill', 'legacy skill', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', CAST('{\"skill\":true}' AS BLOB), CAST('{\"source\":\"legacy\"}' AS BLOB), 2, 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', CAST('{\"record\":true}' AS BLOB));
+         INSERT INTO active_skills (skill_id, skill_version_id, version, normalized_name, content_digest, record_digest)
+         VALUES ('00000000-0000-0000-0000-000000000011', '00000000-0000-0000-0000-000000000012', 1, 'legacy skill', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc');",
     )
     .unwrap();
 }
 
-fn legacy_rows(connection: &Connection) -> BTreeMap<&'static str, Vec<String>> {
-    [
-        (
-            "approval_records",
-            "SELECT json_object('approval_id', approval_id, 'action_kind', action_kind,
-                'object_kind', object_kind, 'object_id', object_id,
-                'object_version', object_version, 'object_digest', object_digest,
-                'actor_kind', actor_kind, 'actor_id', actor_id, 'status', status,
-                'created_at_ms', created_at_ms, 'expires_at_ms', expires_at_ms,
-                'resolved_at_ms', resolved_at_ms, 'resolution_kind', resolution_kind,
-                'resolution_event_id', resolution_event_id) FROM approval_records ORDER BY approval_id",
-        ),
-        (
-            "command_receipts",
-            "SELECT json_object('command_id', command_id, 'command_fingerprint', command_fingerprint,
-                'request_json', request_json, 'capability', capability,
-                'policy_decision', policy_decision, 'outcome_json', outcome_json)
-             FROM command_receipts ORDER BY command_id",
-        ),
-        (
-            "command_event_refs",
-            "SELECT json_object('command_id', command_id, 'event_ordinal', event_ordinal,
-                'event_id', event_id) FROM command_event_refs ORDER BY command_id, event_ordinal",
-        ),
-    ]
-    .into_iter()
-    .map(|(table, query)| {
-        let mut statement = connection.prepare(query).unwrap();
-        let rows = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        (table, rows)
-    })
-    .collect()
+fn v3_snapshot(connection: &Connection) -> BTreeMap<String, Vec<String>> {
+    let tables = [
+        "event_stream",
+        "command_receipts",
+        "command_event_refs",
+        "installation_projection",
+        "process_session_projection",
+        "projection_metadata",
+        "setup_drafts",
+        "installation_configuration_versions",
+        "active_installation_configuration",
+        "setup_step_outcomes",
+        "capability_readiness",
+        "approval_records",
+        "agent_profile_versions",
+        "active_agent_profiles",
+        "skill_versions",
+        "active_skills",
+    ];
+    tables
+        .into_iter()
+        .map(|table| {
+            let columns = table_columns(connection, table);
+            let quoted = columns
+                .iter()
+                .map(|column| format!("quote(\"{column}\")"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut statement = connection
+                .prepare(&format!(
+                    "SELECT json_array({quoted}) FROM \"{table}\" ORDER BY rowid"
+                ))
+                .unwrap();
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            (table.to_owned(), rows)
+        })
+        .collect()
+}
+
+fn table_columns(connection: &Connection, table: &str) -> Vec<String> {
+    if table == "approval_records" {
+        return [
+            "approval_id",
+            "action_kind",
+            "object_kind",
+            "object_id",
+            "object_version",
+            "object_digest",
+            "actor_kind",
+            "actor_id",
+            "status",
+            "created_at_ms",
+            "expires_at_ms",
+            "resolved_at_ms",
+            "resolution_kind",
+            "resolution_event_id",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    }
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_xinfo(\"{table}\")"))
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(1))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
 }
 
 fn schema_inventory(connection: &Connection) -> Vec<(String, String, String, Option<String>)> {
