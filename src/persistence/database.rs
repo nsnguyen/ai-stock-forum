@@ -192,6 +192,18 @@ impl Database {
     }
 
     #[doc(hidden)]
+    pub fn v4_migration_boundaries() -> Vec<&'static str> {
+        let migrations = ordered();
+        let migration = migrations
+            .iter()
+            .find(|migration| migration.version == 4)
+            .expect("schema v4 migration is registered");
+        let mut boundaries = migration_boundary_names(migration.sql);
+        boundaries.push("schema_migration_record");
+        boundaries
+    }
+
+    #[doc(hidden)]
     pub fn open_with_migration_fault(
         paths: &AppPaths,
         migration_version: u32,

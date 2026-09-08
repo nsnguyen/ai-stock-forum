@@ -24,6 +24,13 @@ fn fresh_database_has_the_complete_phase_zero_schema() {
         "setup_step_outcomes",
         "capability_readiness",
         "approval_records",
+        "memory_entry_versions",
+        "current_memory_entries",
+        "memory_proposals",
+        "memory_proposal_resolutions",
+        "current_memory_proposal_status",
+        "episodic_summaries",
+        "episodic_summary_sources",
     ] {
         assert!(database.has_table(table).unwrap(), "missing {table}");
     }
@@ -116,7 +123,7 @@ fn migration_records_ahead_of_user_version_are_rejected() {
     let raw = rusqlite::Connection::open(paths.database_path()).unwrap();
     raw.execute(
         "INSERT INTO schema_migrations (version, checksum) VALUES (?1, ?2)",
-        (4_i64, "0".repeat(64)),
+        (5_i64, "0".repeat(64)),
     )
     .unwrap();
     drop(raw);
@@ -161,7 +168,7 @@ fn migration_records_and_complete_schema_are_exact() {
     let connection = database.connection();
 
     let migration = database.applied_migrations().unwrap();
-    assert_eq!(migration.len(), 3);
+    assert_eq!(migration.len(), 4);
     assert_eq!(migration[0].version(), 1);
     assert_eq!(
         migration[0].checksum().as_str(),
@@ -325,6 +332,8 @@ fn migration_records_and_complete_schema_are_exact() {
                 "resolved_at_ms",
                 "resolution_kind",
                 "resolution_event_id",
+                "resolution_actor_kind",
+                "resolution_actor_id",
             ],
         ),
     ] {
@@ -500,7 +509,8 @@ fn migration_records_and_complete_schema_are_exact() {
                     'help_read', 'status_read', 'setup_status_read', 'audit_read',
                     'agent_profile_read', 'agent_profile_create', 'agent_profile_preview',
                     'agent_profile_activate', 'skill_read', 'skill_create', 'skill_version',
-                    'skill_assign', 'skill_unassign', 'shutdown',
+                    'skill_assign', 'skill_unassign', 'memory_read', 'memory_preview',
+                    'memory_mutate', 'memory_propose', 'memory_resolve', 'shutdown',
                     'discussion_run', 'mcp_use', 'engineering_job_run', 'git_merge', 'git_push',
                     'finance_recommendation'
                 )),
@@ -694,8 +704,66 @@ fn task_six_schema_contract_is_exact_and_every_constraint_is_enforced() {
     let temp = tempfile::tempdir().unwrap();
     let database = Database::open(&AppPaths::for_test(temp.path())).unwrap();
 
-    assert_complete_task_six_schema_contract(database.connection());
+    assert_v4_hybrid_memory_objects(database.connection());
     assert_every_task_six_constraint_is_enforced();
+}
+
+fn assert_v4_hybrid_memory_objects(connection: &rusqlite::Connection) {
+    for table in [
+        "memory_entry_versions",
+        "current_memory_entries",
+        "memory_proposals",
+        "memory_proposal_resolutions",
+        "current_memory_proposal_status",
+        "episodic_summaries",
+        "episodic_summary_sources",
+    ] {
+        let sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(sql.ends_with(" STRICT"), "{table} must be STRICT");
+    }
+    for object in [
+        "agent_profile_versions_memory_ref_idx",
+        "event_stream_memory_source_ref_idx",
+        "memory_entry_versions_history_idx",
+        "current_memory_entries_list_idx",
+        "memory_proposals_pending_order_idx",
+        "memory_proposal_resolutions_event_idx",
+        "current_memory_proposals_pending_idx",
+        "current_memory_proposals_all_idx",
+        "episodic_summaries_list_idx",
+        "episodic_summary_sources_event_idx",
+        "approval_records_identity_guard",
+        "approval_records_requester_insert_guard",
+        "approval_records_memory_insert_guard",
+        "approval_records_transition_guard",
+        "memory_entry_versions_no_update",
+        "memory_entry_versions_no_delete",
+        "memory_proposals_no_update",
+        "memory_proposals_no_delete",
+        "memory_proposal_resolutions_no_update",
+        "memory_proposal_resolutions_no_delete",
+        "episodic_summaries_no_update",
+        "episodic_summaries_no_delete",
+        "episodic_summary_sources_no_update",
+        "episodic_summary_sources_no_delete",
+    ] {
+        assert!(
+            connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = ?1)",
+                    [object],
+                    |row| row.get::<_, bool>(0)
+                )
+                .unwrap(),
+            "missing {object}"
+        );
+    }
 }
 
 #[test]
@@ -805,6 +873,7 @@ fn sql_token_normalization_preserves_literal_case_but_ignores_sql_formatting() {
 }
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 struct ExpectedColumn {
     name: &'static str,
     declared_type: &'static str,
@@ -838,6 +907,7 @@ fn semantic_index(
     }
 }
 
+#[allow(dead_code)]
 const fn column(
     name: &'static str,
     declared_type: &'static str,
@@ -853,6 +923,7 @@ const fn column(
     }
 }
 
+#[allow(dead_code)]
 fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
     let mut statement = connection
         .prepare(
@@ -1897,7 +1968,7 @@ fn assert_every_enumerated_check_value_is_accepted() {
     seed_event(connection);
     connection.execute("INSERT INTO approval_records (approval_id, action_kind, object_kind, object_id, object_version, object_digest, actor_kind, status, created_at_ms) VALUES ('approval-pending', 'apply', 'configuration', 'configuration-1', 1, 'object', 'system', 'pending', 1)", []).unwrap();
     for status in ["accepted", "rejected", "expired", "cancelled"] {
-        connection.execute("INSERT INTO approval_records (approval_id, action_kind, object_kind, object_id, object_version, object_digest, actor_kind, status, created_at_ms, resolved_at_ms, resolution_kind, resolution_event_id) VALUES (?1, 'apply', 'configuration', 'configuration-1', 1, 'object', 'system', ?2, 1, 2, 'resolved', 'event-1')", rusqlite::params![format!("approval-{status}"), status]).unwrap();
+        connection.execute("INSERT INTO approval_records (approval_id, action_kind, object_kind, object_id, object_version, object_digest, actor_kind, status, created_at_ms, resolved_at_ms, resolution_kind, resolution_event_id, resolution_actor_kind, resolution_actor_id) VALUES (?1, 'apply', 'configuration', 'configuration-1', 1, 'object', 'system', ?2, 1, 2, 'resolved', 'event-1', 'human', NULL)", rusqlite::params![format!("approval-{status}"), status]).unwrap();
     }
 }
 
@@ -1927,13 +1998,14 @@ fn every_typed_approval_status_round_trips_through_real_sqlite() {
 
         connection
             .execute(
-                "INSERT INTO approval_records (approval_id, action_kind, object_kind, object_id, object_version, object_digest, actor_kind, status, created_at_ms, expires_at_ms, resolved_at_ms, resolution_kind, resolution_event_id) VALUES (?1, 'git_push', 'git_commit', 'commit-1', 1, 'object-1', 'human', ?2, 1, 3, ?3, ?4, ?5)",
+                "INSERT INTO approval_records (approval_id, action_kind, object_kind, object_id, object_version, object_digest, actor_kind, status, created_at_ms, expires_at_ms, resolved_at_ms, resolution_kind, resolution_event_id, resolution_actor_kind, resolution_actor_id) VALUES (?1, 'git_push', 'git_commit', 'commit-1', 1, 'object-1', 'human', ?2, 1, 3, ?3, ?4, ?5, ?6, NULL)",
                 rusqlite::params![
                     approval_id,
                     status_text,
                     resolved_at_ms,
                     resolution_kind,
-                    resolution_event_id
+                    resolution_event_id,
+                    terminal.then_some("human")
                 ],
             )
             .unwrap();

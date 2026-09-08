@@ -156,6 +156,13 @@ impl PersistentFixture {
                 | "setup_step_outcomes"
                 | "capability_readiness"
                 | "approval_records"
+                | "memory_entry_versions"
+                | "current_memory_entries"
+                | "memory_proposals"
+                | "memory_proposal_resolutions"
+                | "current_memory_proposal_status"
+                | "episodic_summaries"
+                | "episodic_summary_sources"
         ));
         Database::open(&self.paths)
             .unwrap()
@@ -646,6 +653,13 @@ impl TestApp {
                 | "command_event_refs"
                 | "agent_profile_versions"
                 | "active_agent_profiles"
+                | "memory_entry_versions"
+                | "current_memory_entries"
+                | "memory_proposals"
+                | "memory_proposal_resolutions"
+                | "current_memory_proposal_status"
+                | "episodic_summaries"
+                | "episodic_summary_sources"
         ));
         Connection::open(self.paths.database_path())
             .unwrap()
