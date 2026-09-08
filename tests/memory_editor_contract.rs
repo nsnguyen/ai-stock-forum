@@ -61,6 +61,20 @@ fn present_entry() -> MemoryEntryVersion {
     .unwrap()
 }
 
+fn present_entry_with_tags(tags: &[&str]) -> MemoryEntryVersion {
+    MemoryEntryVersion::create_present(
+        MemoryNamespaceId::from_uuid(uuid(12)),
+        MemoryEntryId::from_uuid(uuid(13)),
+        MemoryEntryVersionId::from_uuid(uuid(14)),
+        draft("Escaped Tags", "Retain exact tags", tags),
+        Actor::Human,
+        12,
+        None,
+        EventId::from_uuid(uuid(15)),
+    )
+    .unwrap()
+}
+
 fn set_review(candidate: MemoryEntryDraft) -> MemoryEditPreview {
     MemoryEditPreview::Review(MemoryEditReview {
         profile: profile(),
@@ -200,6 +214,57 @@ fn direct_multiline_value_and_canonical_tags_advance_the_exact_steps() {
     };
     assert_eq!(request.candidate.purpose_tags(), ["analysis", "research"]);
     assert_eq!(editor.tags_input(), "analysis, research");
+}
+
+#[test]
+fn seeded_and_replaced_values_preserve_comma_and_backslash_tags_exactly() {
+    let expected_tags = ["alpha", "beta, alpha", r"path\segment"];
+    let mut editor = MemoryEditor::for_set(selector(), present_entry_with_tags(&expected_tags))
+        .expect("valid present seed");
+
+    assert_eq!(editor.draft().unwrap().purpose_tags(), expected_tags);
+    assert_eq!(editor.tags_input(), r"alpha, beta\, alpha, path\\segment");
+
+    editor.replace_value("Updated value".to_owned()).unwrap();
+    assert_eq!(editor.draft().unwrap().purpose_tags(), expected_tags);
+    assert_eq!(editor.tags_input(), r"alpha, beta\, alpha, path\\segment");
+}
+
+#[test]
+fn create_tags_parse_escaped_delimiters_and_reject_malformed_escapes_without_mutation() {
+    let mut editor = MemoryEditor::for_create(selector());
+    editor.submit_line("thesis".to_owned()).unwrap();
+    editor.submit_line("value".to_owned()).unwrap();
+
+    let before_bad_escape = editor.clone();
+    assert_eq!(
+        editor
+            .submit_line(format!("alpha{}", char::from_u32(92).unwrap()))
+            .unwrap_err()
+            .code(),
+        "invalid_memory_editor_transition"
+    );
+    assert_eq!(editor, before_bad_escape);
+    assert_eq!(
+        editor
+            .submit_line(r"alpha\x".to_owned())
+            .unwrap_err()
+            .code(),
+        "invalid_memory_editor_transition"
+    );
+    assert_eq!(editor, before_bad_escape);
+
+    let MemoryEditorEffect::Preview(request) = editor
+        .submit_line(r"beta\, alpha, path\\segment".to_owned())
+        .unwrap()
+    else {
+        panic!("escaped tags must request a preview");
+    };
+    assert_eq!(
+        request.candidate.purpose_tags(),
+        ["beta, alpha", r"path\segment"]
+    );
+    assert_eq!(editor.tags_input(), r"beta\, alpha, path\\segment");
 }
 
 #[test]

@@ -78,7 +78,7 @@ impl MemoryEditor {
             selector,
             key: entry.display_key().to_owned(),
             value: value.to_owned(),
-            tags: entry.purpose_tags().join(", "),
+            tags: format_tags(entry.purpose_tags()),
             seed: Some(entry),
             step: MemoryEditorStep::Value,
             generation: 0,
@@ -111,11 +111,14 @@ impl MemoryEditor {
                 Ok(MemoryEditorEffect::None)
             }
             MemoryEditorStep::PurposeTags => {
-                let canonical =
-                    MemoryEntryDraft::new(self.key.clone(), self.value.clone(), parse_tags(&line))?;
+                let canonical = MemoryEntryDraft::new(
+                    self.key.clone(),
+                    self.value.clone(),
+                    parse_tags(&line)?,
+                )?;
                 self.key = canonical.display_key().to_owned();
                 self.value = canonical.value().to_owned();
-                self.tags = canonical.purpose_tags().join(", ");
+                self.tags = format_tags(canonical.purpose_tags());
                 self.invalidate_draft();
                 Ok(MemoryEditorEffect::Preview(self.preview_request()?))
             }
@@ -156,9 +159,9 @@ impl MemoryEditor {
     }
 
     pub fn replace_value(&mut self, value: String) -> Result<(), DomainError> {
-        let canonical = MemoryEntryDraft::new(self.key.clone(), value, parse_tags(&self.tags))?;
+        let canonical = MemoryEntryDraft::new(self.key.clone(), value, parse_tags(&self.tags)?)?;
         self.value = canonical.value().to_owned();
-        self.tags = canonical.purpose_tags().join(", ");
+        self.tags = format_tags(canonical.purpose_tags());
         self.invalidate_draft();
         self.step = MemoryEditorStep::PurposeTags;
         Ok(())
@@ -190,7 +193,11 @@ impl MemoryEditor {
     }
 
     pub fn draft(&self) -> Result<MemoryEntryDraft, DomainError> {
-        MemoryEntryDraft::new(self.key.clone(), self.value.clone(), parse_tags(&self.tags))
+        MemoryEntryDraft::new(
+            self.key.clone(),
+            self.value.clone(),
+            parse_tags(&self.tags)?,
+        )
     }
 
     pub fn confirm(&self) -> Result<MemoryEditorEffect, DomainError> {
@@ -263,11 +270,53 @@ impl MemoryEditor {
     }
 }
 
-fn parse_tags(input: &str) -> Vec<String> {
-    input
-        .split(',')
-        .map(str::trim)
-        .filter(|tag| !tag.is_empty())
-        .map(str::to_owned)
-        .collect()
+fn parse_tags(input: &str) -> Result<Vec<String>, DomainError> {
+    let mut tags = Vec::new();
+    let mut tag = String::new();
+    let mut escaped = false;
+
+    for character in input.chars() {
+        if escaped {
+            if !matches!(character, ',' | '\\') {
+                return Err(DomainError::InvalidMemoryEditorTransition);
+            }
+            tag.push(character);
+            escaped = false;
+        } else {
+            match character {
+                '\\' => escaped = true,
+                ',' => push_tag(&mut tags, &mut tag),
+                _ => tag.push(character),
+            }
+        }
+    }
+    if escaped {
+        return Err(DomainError::InvalidMemoryEditorTransition);
+    }
+    push_tag(&mut tags, &mut tag);
+    Ok(tags)
+}
+
+fn push_tag(tags: &mut Vec<String>, tag: &mut String) {
+    let trimmed = tag.trim();
+    if !trimmed.is_empty() {
+        tags.push(trimmed.to_owned());
+    }
+    tag.clear();
+}
+
+fn format_tags(tags: &[String]) -> String {
+    let mut output = String::new();
+    for (index, tag) in tags.iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        for character in tag.chars() {
+            if matches!(character, ',' | '\\') {
+                output.push('\\');
+            }
+            output.push(character);
+        }
+    }
+    output
 }
