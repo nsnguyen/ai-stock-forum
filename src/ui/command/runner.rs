@@ -22,7 +22,7 @@ use crate::{
     memory::{
         ExpectedMemoryEntryState, MemoryEditReview, MemoryEntryDraft, MemoryEntryState,
         MemoryEntryVersion, MemoryField, MemoryFieldDiff, MemoryFieldValue, MemoryMutationKind,
-        NormalizedMemoryKey,
+        MemoryNoChange, NormalizedMemoryKey,
     },
     panic_boundary::catch_sensitive_unwind,
     persistence::PersistenceError,
@@ -1049,8 +1049,12 @@ impl FallbackRunner {
             }
         };
         match self.client.preview_memory_delete(agent.clone(), key) {
-            Ok(MemoryEditPreview::NoChange(no_change)) => {
-                TextRenderer::render_memory_no_change(no_change, writer).map_err(|_| UiError::Write)
+            Ok(MemoryEditPreview::NoChange(MemoryNoChange::AlreadyAbsent)) => {
+                TextRenderer::render_memory_no_change(MemoryNoChange::AlreadyAbsent, writer)
+                    .map_err(|_| UiError::Write)
+            }
+            Ok(MemoryEditPreview::NoChange(MemoryNoChange::IdenticalContent)) => {
+                Err(UiError::Panicked)
             }
             Ok(MemoryEditPreview::Review(review)) => {
                 if !memory_delete_review_matches_request(&review, &agent, &normalized_key) {
@@ -1238,13 +1242,19 @@ impl FallbackRunner {
                             Err(error) => return Err(UiError::Runtime(error)),
                         };
                         match preview {
-                            MemoryEditPreview::NoChange(no_change) => {
+                            MemoryEditPreview::NoChange(MemoryNoChange::IdenticalContent) => {
                                 editor.clear_review();
                                 *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? =
                                     Some(MemoryWorkflow::Editing { editor, seed });
-                                TextRenderer::render_memory_no_change(no_change, writer)
-                                    .map_err(|_| UiError::Write)?;
+                                TextRenderer::render_memory_no_change(
+                                    MemoryNoChange::IdenticalContent,
+                                    writer,
+                                )
+                                .map_err(|_| UiError::Write)?;
                                 self.render_memory_workflow(writer)
+                            }
+                            MemoryEditPreview::NoChange(MemoryNoChange::AlreadyAbsent) => {
+                                Err(UiError::Panicked)
                             }
                             MemoryEditPreview::Review(review) => {
                                 if !memory_set_review_matches_request(

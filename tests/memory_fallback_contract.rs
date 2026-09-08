@@ -816,6 +816,86 @@ fn fallback_no_change_previews_are_passive_and_never_register_or_submit() {
     }
 }
 
+fn assert_incompatible_no_change_fails_closed(
+    current: Option<MemoryEntryVersion>,
+    input: Vec<u8>,
+    no_change: MemoryNoChange,
+) -> (Arc<Mutex<WorkflowExecutorState>>, Vec<ApplicationCommand>) {
+    let (runtime, state) = workflow_runtime(
+        current,
+        None,
+        Some(Ok(MemoryEditPreview::NoChange(no_change))),
+        None,
+    );
+    let runner = FallbackRunner::new(runtime.client(), false);
+    let mut output = Vec::new();
+    let error = runner.run(Cursor::new(input), &mut output).unwrap_err();
+
+    assert!(matches!(error, UiError::Panicked), "{error:?}");
+    assert!(mutation_commands(&state).is_empty());
+    assert_eq!(state.lock().unwrap().preview_count, 0);
+    assert_eq!(state.lock().unwrap().cancel_count, 0);
+    let output = String::from_utf8(output).unwrap();
+    assert!(!output.contains("Memory edit has no effect:"));
+    assert!(!output.contains("Memory set review"));
+    assert!(!output.contains("Memory delete review"));
+    let commands_before_teardown = state.lock().unwrap().commands.clone();
+
+    let mut teardown_output = Vec::new();
+    assert_eq!(
+        runner
+            .run(Cursor::new(b":cancel\n".to_vec()), &mut teardown_output)
+            .unwrap(),
+        ShutdownReason::InputClosed
+    );
+    let teardown_output = String::from_utf8(teardown_output).unwrap();
+    assert!(!teardown_output.contains("Memory workflow cancelled"));
+    assert!(!teardown_output.contains("Memory edit has no effect:"));
+    assert!(!teardown_output.contains("Memory set review"));
+    assert!(!teardown_output.contains("Memory delete review"));
+    assert_eq!(state.lock().unwrap().cancel_count, 0);
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
+    (state, commands_before_teardown)
+}
+
+#[test]
+fn fallback_set_rejects_already_absent_no_change_without_render_registration_or_submission() {
+    let current = entry(&profile());
+    let (_state, commands_before_teardown) = assert_incompatible_no_change_fails_closed(
+        Some(current.clone()),
+        format!(
+            "/memory set {} \"{}\"\nprivate thesis\nCatalyst\n",
+            profile().profile_id(),
+            current.display_key(),
+        )
+        .into_bytes(),
+        MemoryNoChange::AlreadyAbsent,
+    );
+
+    assert_eq!(commands_before_teardown.len(), 1);
+    assert!(matches!(
+        commands_before_teardown[0],
+        ApplicationCommand::ShowMemoryEntry { .. }
+    ));
+}
+
+#[test]
+fn fallback_delete_rejects_identical_content_no_change_without_render_registration_or_submission() {
+    let (_state, commands_before_teardown) = assert_incompatible_no_change_fails_closed(
+        None,
+        format!(
+            "/memory delete {} \"Missing Key\"\n",
+            profile().profile_id()
+        )
+        .into_bytes(),
+        MemoryNoChange::IdenticalContent,
+    );
+
+    assert!(commands_before_teardown.is_empty());
+}
+
 #[test]
 fn fallback_delete_review_shows_detail_and_submits_the_exact_bound_command() {
     let current = entry(&profile());
