@@ -413,4 +413,30 @@ fn snapshot_streams_tagged_matches_once_before_untagged_fallback() {
         PersistenceError::MemoryRowMismatch
     );
     tx.rollback().unwrap();
+    database
+        .connection()
+        .execute(
+            "UPDATE current_memory_entries SET content_digest=?1 WHERE entry_version_id=?2",
+            [
+                tagged.reference().content_digest().as_str().to_owned(),
+                tagged.reference().entry_version_id().to_string(),
+            ],
+        )
+        .unwrap();
+    database
+        .connection()
+        .execute(
+            "UPDATE current_memory_entries SET entry_id=?1 WHERE entry_version_id=?2",
+            [
+                MemoryEntryId::from_uuid(Uuid::from_u128(8_999)).to_string(),
+                tagged.reference().entry_version_id().to_string(),
+            ],
+        )
+        .unwrap();
+    let tx = database.immediate_transaction().unwrap();
+    assert_eq!(
+        MemoryRepository::build_snapshot(&tx, &request).unwrap_err(),
+        PersistenceError::MemoryRowMismatch
+    );
+    tx.rollback().unwrap();
 }

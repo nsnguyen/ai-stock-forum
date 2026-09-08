@@ -227,6 +227,7 @@ impl MemoryRepository {
         namespace: MemoryNamespaceId,
         limit: u16,
     ) -> Result<MemoryEntriesPage, PersistenceError> {
+        validate_current_entry_pointers(tx, namespace)?;
         let total_count = checked_count(
             tx,
             "SELECT COUNT(*) FROM current_memory_entries c JOIN memory_entry_versions v
@@ -503,6 +504,7 @@ impl MemoryRepository {
         tx: &ImmediateTransaction<'_>,
         namespace: MemoryNamespaceId,
     ) -> Result<u64, PersistenceError> {
+        validate_current_entry_pointers(tx, namespace)?;
         checked_count(
             tx,
             "SELECT COUNT(*) FROM current_memory_entries WHERE memory_namespace_id=?1 AND state='present'",
@@ -534,7 +536,21 @@ impl MemoryRepository {
         tx: &ImmediateTransaction<'_>,
         approval_id: ApprovalId,
     ) -> Result<Option<ApprovalRecord>, PersistenceError> {
-        load_approval(tx, approval_id).map(|row| row.map(|x| x.record))
+        let Some(stored) = load_approval(tx, approval_id)? else {
+            return Ok(None);
+        };
+        if stored.record.action() != ApprovalAction::MemoryMutation
+            || stored.record.object().kind != "memory_proposal"
+        {
+            return Err(PersistenceError::MemoryRowMismatch);
+        }
+        let proposal_id: MemoryProposalId = parse_id(&stored.record.object().id)?;
+        let (proposal, _, _) =
+            Self::load_proposal(tx, proposal_id)?.ok_or(PersistenceError::MemoryRowMismatch)?;
+        if proposal.approval_id() != approval_id {
+            return Err(PersistenceError::MemoryRowMismatch);
+        }
+        Ok(Some(stored.record))
     }
 
     pub fn validate_projection(
@@ -623,24 +639,16 @@ impl MemoryRepository {
                 }
             }
         }
-        let approval = Self::load_memory_approval(tx, proposal.approval_id())?
+        let approval = load_approval(tx, proposal.approval_id())?
             .ok_or(PersistenceError::MemoryRowMismatch)?;
-        validate_proposal_approval_binding(proposal, &approval)
+        validate_proposal_approval_binding(proposal, &approval.record)
     }
 
     pub(crate) fn validate_summary_context(
         tx: &ImmediateTransaction<'_>,
         summary: &EpisodicSummary,
     ) -> Result<(), PersistenceError> {
-        let profile = load_exact_profile(tx, summary.reference().profile())?;
-        if profile.memory_namespace_id() != summary.reference().namespace_id() {
-            return Err(PersistenceError::MemoryRowMismatch);
-        }
-        validate_event(
-            tx,
-            summary.creation_event_sequence(),
-            summary.creation_event_id(),
-        )?;
+        Self::validate_summary_base_context(tx, summary)?;
         for source in summary.sources() {
             validate_event_source(
                 tx,
@@ -653,6 +661,22 @@ impl MemoryRepository {
                 return Err(PersistenceError::MemoryRowMismatch);
             }
         }
+        Ok(())
+    }
+
+    fn validate_summary_base_context(
+        tx: &ImmediateTransaction<'_>,
+        summary: &EpisodicSummary,
+    ) -> Result<(), PersistenceError> {
+        let profile = load_exact_profile(tx, summary.reference().profile())?;
+        if profile.memory_namespace_id() != summary.reference().namespace_id() {
+            return Err(PersistenceError::MemoryRowMismatch);
+        }
+        validate_event(
+            tx,
+            summary.creation_event_sequence(),
+            summary.creation_event_id(),
+        )?;
         Ok(())
     }
 
@@ -739,6 +763,7 @@ impl MemoryRepository {
         scope.validate_against(&profile).map_err(integrity)?;
         let mut builder = MemorySnapshotBuilder::new(request.clone()).map_err(integrity)?;
         let namespace = scope.namespace_id();
+        validate_current_entry_pointers(tx, namespace)?;
         match scope.purpose() {
             MemoryPurposeScope::General => {
                 stream_entries(
@@ -1312,7 +1337,7 @@ fn validate_summary_sources(
     tx: &ImmediateTransaction<'_>,
     summary: &EpisodicSummary,
 ) -> Result<(), PersistenceError> {
-    let mut statement=tx.transaction().prepare("SELECT source_ordinal,event_sequence,event_id,event_type,event_digest FROM episodic_summary_sources WHERE summary_id=?1 ORDER BY source_ordinal ASC").map_err(query)?;
+    let mut statement=tx.transaction().prepare("SELECT s.source_ordinal,s.event_sequence,s.event_id,s.event_type,s.event_digest,e.sequence,e.event_id,e.event_type,e.event_digest FROM episodic_summary_sources AS s LEFT JOIN event_stream AS e ON e.sequence=s.event_sequence AND e.event_id=s.event_id WHERE s.summary_id=?1 ORDER BY s.source_ordinal ASC").map_err(query)?;
     let rows = statement
         .query_map([summary.reference().summary_id().to_string()], |r| {
             Ok((
@@ -1321,6 +1346,10 @@ fn validate_summary_sources(
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, Option<String>>(7)?,
+                r.get::<_, Option<String>>(8)?,
             ))
         })
         .map_err(query)?
@@ -1329,19 +1358,39 @@ fn validate_summary_sources(
     if rows.len() != summary.sources().len() {
         return Err(PersistenceError::MemoryRowMismatch);
     };
-    for (ordinal, ((stored_ordinal, sequence, event_id, event_type, event_digest), source)) in
-        rows.into_iter().zip(summary.sources()).enumerate()
+    for (
+        ordinal,
+        (
+            (
+                stored_ordinal,
+                sequence,
+                event_id,
+                event_type,
+                event_digest,
+                event_sequence,
+                event_id_exact,
+                event_type_exact,
+                event_digest_exact,
+            ),
+            source,
+        ),
+    ) in rows.into_iter().zip(summary.sources()).enumerate()
     {
         if stored_ordinal != to_i64(ordinal as u64)?
             || to_u64(sequence)? != source.sequence()
             || event_id != source.event_id().to_string()
             || event_type != source.event_type()
             || event_digest != source.event_digest().as_str()
+            || event_sequence != Some(sequence)
+            || event_id_exact.as_deref() != Some(event_id.as_str())
+            || event_type_exact.as_deref() != Some(event_type.as_str())
+            || event_digest_exact.as_deref() != Some(event_digest.as_str())
+            || to_u64(sequence)? >= summary.creation_event_sequence()
         {
             return Err(PersistenceError::MemoryRowMismatch);
         }
     }
-    MemoryRepository::validate_summary_context(tx, summary)
+    MemoryRepository::validate_summary_base_context(tx, summary)
 }
 
 fn approval_columns(
@@ -1605,6 +1654,42 @@ fn validate_current_pointer_columns(
         || state != entry_state(reference.state())
         || digest != reference.content_digest().as_str()
     {
+        Err(PersistenceError::MemoryRowMismatch)
+    } else {
+        Ok(())
+    }
+}
+
+/// Authenticate pointer rows before an immutable-row join can turn a corrupt
+/// pointer identity into a silently omitted current record.  The join only uses
+/// the immutable version id to resolve the target; every mirrored pointer field
+/// is then compared explicitly.
+fn validate_current_entry_pointers(
+    tx: &ImmediateTransaction<'_>,
+    namespace: MemoryNamespaceId,
+) -> Result<(), PersistenceError> {
+    let mismatch: bool = tx
+        .transaction()
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1
+                   FROM current_memory_entries AS c
+              LEFT JOIN memory_entry_versions AS v
+                     ON v.entry_version_id=c.entry_version_id
+                  WHERE c.memory_namespace_id=?1
+                    AND (v.entry_version_id IS NULL
+                      OR v.memory_namespace_id<>c.memory_namespace_id
+                      OR v.normalized_key<>c.normalized_key
+                      OR v.entry_id<>c.entry_id
+                      OR v.version<>c.version
+                      OR v.state<>c.state
+                      OR v.content_digest<>c.content_digest)
+             )",
+            [namespace.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(query)?;
+    if mismatch {
         Err(PersistenceError::MemoryRowMismatch)
     } else {
         Ok(())
