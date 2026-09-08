@@ -343,8 +343,8 @@ impl MemoryRepository {
             return Err(PersistenceError::Capacity);
         }
         validate_memory_approval(proposal, approval, None)?;
+        Self::validate_proposal_base_context(tx, proposal)?;
         insert_approval(tx, approval, None)?;
-        Self::validate_proposal_context(tx, proposal)?;
         match existing.as_slice() {
             [] => {
                 insert_proposal_row(tx, &expected)?;
@@ -417,6 +417,7 @@ impl MemoryRepository {
         filter: MemoryProposalFilter,
         limit: u16,
     ) -> Result<MemoryProposalsPage, PersistenceError> {
+        validate_proposal_status_rows(tx, namespace)?;
         let filter_text = proposal_filter(filter);
         let total_count = checked_count(
             tx,
@@ -619,6 +620,16 @@ impl MemoryRepository {
         tx: &ImmediateTransaction<'_>,
         proposal: &MemoryProposal,
     ) -> Result<(), PersistenceError> {
+        Self::validate_proposal_base_context(tx, proposal)?;
+        let approval = load_approval(tx, proposal.approval_id())?
+            .ok_or(PersistenceError::MemoryRowMismatch)?;
+        validate_proposal_approval_binding(proposal, &approval.record)
+    }
+
+    fn validate_proposal_base_context(
+        tx: &ImmediateTransaction<'_>,
+        proposal: &MemoryProposal,
+    ) -> Result<(), PersistenceError> {
         let profile = load_exact_profile(tx, proposal.proposer())?;
         if profile.memory_namespace_id() != proposal.namespace_id() {
             return Err(PersistenceError::MemoryRowMismatch);
@@ -639,9 +650,7 @@ impl MemoryRepository {
                 }
             }
         }
-        let approval = load_approval(tx, proposal.approval_id())?
-            .ok_or(PersistenceError::MemoryRowMismatch)?;
-        validate_proposal_approval_binding(proposal, &approval.record)
+        Ok(())
     }
 
     pub(crate) fn validate_summary_context(
@@ -750,7 +759,6 @@ impl MemoryRepository {
             return Ok(None);
         };
         let summary = decode_summary_row(tx, row)?;
-        Self::validate_summary_context(tx, &summary)?;
         Ok(Some(summary))
     }
 
@@ -1676,7 +1684,7 @@ fn validate_current_entry_pointers(
                    FROM current_memory_entries AS c
               LEFT JOIN memory_entry_versions AS v
                      ON v.entry_version_id=c.entry_version_id
-                  WHERE c.memory_namespace_id=?1
+                  WHERE (c.memory_namespace_id=?1 OR v.memory_namespace_id=?1)
                     AND (v.entry_version_id IS NULL
                       OR v.memory_namespace_id<>c.memory_namespace_id
                       OR v.normalized_key<>c.normalized_key
@@ -1685,6 +1693,54 @@ fn validate_current_entry_pointers(
                       OR v.state<>c.state
                       OR v.content_digest<>c.content_digest)
              )",
+            [namespace.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(query)?;
+    if mismatch {
+        Err(PersistenceError::MemoryRowMismatch)
+    } else {
+        Ok(())
+    }
+}
+
+/// Authenticate every current proposal status in the requested namespace before
+/// a pending/all SQL filter is allowed to suppress a malformed status row.
+fn validate_proposal_status_rows(
+    tx: &ImmediateTransaction<'_>,
+    namespace: MemoryNamespaceId,
+) -> Result<(), PersistenceError> {
+    let mismatch: bool = tx
+        .transaction()
+        .query_row(
+            "SELECT EXISTS(
+             SELECT 1
+               FROM current_memory_proposal_status AS c
+          LEFT JOIN memory_proposals AS p ON p.proposal_id=c.proposal_id
+          LEFT JOIN memory_proposal_resolutions AS r ON r.proposal_id=c.proposal_id
+          LEFT JOIN approval_records AS a ON a.approval_id=p.approval_id
+          LEFT JOIN event_stream AS e
+                 ON e.sequence=r.resolution_event_sequence AND e.event_id=r.resolution_event_id
+              WHERE c.memory_namespace_id=?1
+                AND (p.proposal_id IS NULL
+                  OR c.proposal_version<>p.version
+                  OR c.proposal_content_digest<>p.content_digest
+                  OR c.memory_namespace_id<>p.memory_namespace_id
+                  OR c.normalized_key<>p.normalized_key
+                  OR c.created_at_ms<>p.created_at_ms
+                  OR c.status NOT IN ('pending','accepted','rejected','expired')
+                  OR (c.status='pending' AND (c.resolution_event_id IS NOT NULL
+                       OR r.proposal_id IS NOT NULL OR a.approval_id IS NULL
+                       OR a.status<>'pending' OR a.resolution_event_id IS NOT NULL))
+                  OR (c.status<>'pending' AND (c.resolution_event_id IS NULL
+                       OR r.proposal_id IS NULL OR r.status<>c.status
+                       OR r.resolution_event_id<>c.resolution_event_id
+                       OR e.sequence IS NULL OR a.approval_id IS NULL
+                       OR a.status<>c.status OR a.resolution_kind<>c.status
+                       OR a.resolution_event_id<>c.resolution_event_id
+                       OR a.resolved_at_ms IS NULL OR a.resolution_actor_kind IS NULL))
+                )
+           )",
             [namespace.to_string()],
             |row| row.get(0),
         )
