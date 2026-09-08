@@ -276,13 +276,14 @@ fn staged_errors_are_content_free_and_have_exact_codes() {
 }
 
 #[test]
-fn five_fresh_memory_mutations_remain_deliberately_staged_through_the_service() {
+fn proposal_and_resolution_mutations_remain_deliberately_staged_through_the_service() {
     let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
     let mut app = support::app_with_policy(Arc::new(policy.clone()));
     let event_count = app.max_event_sequence();
     let clock_calls = app.clock.calls();
     let id_calls = app.ids.calls();
-    for (index, (actor, command, capability)) in commands().into_iter().take(5).enumerate() {
+    for (index, (actor, command, capability)) in commands().into_iter().skip(2).take(3).enumerate()
+    {
         let envelope = CommandEnvelope {
             command_id: CommandId::from_uuid(uuid(1_000 + index as u128)),
             correlation_id: CorrelationId::from_uuid(uuid(2_000 + index as u128)),

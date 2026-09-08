@@ -35,14 +35,19 @@ use crate::{
     config::{AppPaths, StartupError},
     domain::{
         Actor, AgentProfileId, AgentProfileVersionId, CausationId, Clock, CommandId, CorrelationId,
-        EventId, IdGenerator, InstallationId, MemoryNamespaceId, ObjectVersion, ProfileReviewToken,
+        EventId, IdGenerator, InstallationId, MemoryEntryId, MemoryEntryVersionId,
+        MemoryNamespaceId, MemoryReviewToken, ObjectRef, ObjectVersion, ProfileReviewToken,
         SessionId, Sha256Digest, SkillId, SkillReviewToken, SkillVersionId, canonical_json_bytes,
         sha256,
     },
     memory::{
-        EpisodicContextItem, EpisodicQualification, ExpectedMemoryEntryState, MemoryEntryState,
-        MemoryKvContextItem, MemoryProposalOperation, MemoryProposalOperationKind,
-        MemoryProposalStatus, MemoryRetrievalRequest, MemorySnapshot, NormalizedMemoryKey,
+        EpisodicContextItem, EpisodicQualification, ExpectedMemoryEntryState,
+        MemoryEditPreviewOutcome, MemoryEditReview, MemoryEditReviewBinding, MemoryEntryDraft,
+        MemoryEntryState, MemoryEntryVersion, MemoryKvContextItem, MemoryMutationKind,
+        MemoryNoChange, MemoryPlaintextAcknowledgement, MemoryProposalOperation,
+        MemoryProposalOperationKind, MemoryProposalResolution, MemoryProposalStatus,
+        MemoryRetrievalRequest, MemoryReviewRegistry, MemorySnapshot, NormalizedMemoryKey,
+        ReservedMemoryReview, prepare_direct_memory_edit,
     },
     persistence::{
         CommandReceiptRecord, CommandReceiptRepository, Database, EventRepository,
@@ -340,11 +345,19 @@ pub struct PresentationSnapshot {
     pub selected_agent_profile_history: Option<AgentProfileHistoryView>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::large_enum_variant)] // Contract variants intentionally retain exact typed payloads.
+pub enum MemoryEditPreview {
+    NoChange(MemoryNoChange),
+    Review(MemoryEditReview),
+}
+
 pub struct ApplicationWorker {
     executor: CommandExecutor,
 }
 
 struct CommandExecutor {
+    paths: AppPaths,
     database: Database,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGenerator>,
@@ -353,6 +366,7 @@ struct CommandExecutor {
     lifecycle: Arc<SharedLifecycle>,
     reviews: Arc<ProfileReviewRegistry>,
     skill_reviews: Arc<SkillReviewRegistry>,
+    memory_reviews: Arc<MemoryReviewRegistry>,
     binding_catalog: Arc<AgentBindingCatalogSnapshot>,
 }
 
@@ -377,6 +391,7 @@ impl ApplicationService {
         let mut executor = worker.executor;
         executor.reviews = Arc::new(ProfileReviewRegistry::default());
         executor.skill_reviews = Arc::new(SkillReviewRegistry::default());
+        executor.memory_reviews = Arc::new(MemoryReviewRegistry::default());
         Ok(IndependentApplicationService { executor })
     }
 
@@ -457,10 +472,12 @@ impl ApplicationService {
         });
         let reviews = Arc::new(ProfileReviewRegistry::default());
         let skill_reviews = Arc::new(SkillReviewRegistry::default());
+        let memory_reviews = Arc::new(MemoryReviewRegistry::default());
         Ok(Self {
             paths: paths.clone(),
             state,
             executor: CommandExecutor {
+                paths: paths.clone(),
                 database,
                 clock,
                 ids,
@@ -469,6 +486,7 @@ impl ApplicationService {
                 lifecycle,
                 reviews,
                 skill_reviews,
+                memory_reviews,
                 binding_catalog: Arc::new(binding_catalog),
             },
         })
@@ -477,6 +495,7 @@ impl ApplicationService {
     pub fn worker(&self) -> Result<ApplicationWorker, StartupError> {
         Ok(ApplicationWorker {
             executor: CommandExecutor {
+                paths: self.paths.clone(),
                 database: Database::open(&self.paths)?,
                 clock: self.executor.clock.clone(),
                 ids: self.executor.ids.clone(),
@@ -485,6 +504,7 @@ impl ApplicationService {
                 lifecycle: self.executor.lifecycle.clone(),
                 reviews: self.executor.reviews.clone(),
                 skill_reviews: self.executor.skill_reviews.clone(),
+                memory_reviews: self.executor.memory_reviews.clone(),
                 binding_catalog: self.executor.binding_catalog.clone(),
             },
         })
@@ -589,6 +609,29 @@ impl ApplicationService {
         Ok(())
     }
 
+    pub fn preview_memory_set(
+        &self,
+        selector: AgentProfileSelector,
+        candidate: MemoryEntryDraft,
+    ) -> Result<MemoryEditPreview, AppError> {
+        self.executor.preview_memory_set(selector, candidate)
+    }
+
+    pub fn preview_memory_delete(
+        &self,
+        selector: AgentProfileSelector,
+        display_key: String,
+    ) -> Result<MemoryEditPreview, AppError> {
+        self.executor.preview_memory_delete(selector, display_key)
+    }
+
+    pub fn cancel_memory_review(&self) -> Result<(), AppError> {
+        self.executor
+            .memory_reviews
+            .cancel()
+            .map_err(AppError::from)
+    }
+
     pub fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
         self.executor.hook.before_finish_lifecycle_write();
         let lifecycle = self.executor.lifecycle.clone();
@@ -601,6 +644,7 @@ impl ApplicationService {
         }
         self.executor.reviews.cancel();
         self.executor.skill_reviews.cancel();
+        self.executor.memory_reviews.finish();
         RecoveryCoordinator::finish_session(
             &mut self.executor.database,
             &mut self.state,
@@ -760,6 +804,29 @@ impl IndependentApplicationService {
             AgentSkillAssignmentOperation::Unassign { expected },
         )
     }
+
+    pub fn preview_memory_set(
+        &self,
+        selector: AgentProfileSelector,
+        candidate: MemoryEntryDraft,
+    ) -> Result<MemoryEditPreview, AppError> {
+        self.executor.preview_memory_set(selector, candidate)
+    }
+
+    pub fn preview_memory_delete(
+        &self,
+        selector: AgentProfileSelector,
+        display_key: String,
+    ) -> Result<MemoryEditPreview, AppError> {
+        self.executor.preview_memory_delete(selector, display_key)
+    }
+
+    pub fn cancel_memory_review(&self) -> Result<(), AppError> {
+        self.executor
+            .memory_reviews
+            .cancel()
+            .map_err(AppError::from)
+    }
 }
 
 impl ApplicationWorker {
@@ -801,6 +868,78 @@ impl ApplicationWorker {
 }
 
 impl CommandExecutor {
+    fn preview_memory_set(
+        &self,
+        selector: AgentProfileSelector,
+        candidate: MemoryEntryDraft,
+    ) -> Result<MemoryEditPreview, AppError> {
+        self.preview_memory_edit(selector, candidate.normalized_key(), Some(candidate))
+    }
+
+    fn preview_memory_delete(
+        &self,
+        selector: AgentProfileSelector,
+        display_key: String,
+    ) -> Result<MemoryEditPreview, AppError> {
+        self.preview_memory_edit(selector, NormalizedMemoryKey::new(&display_key)?, None)
+    }
+
+    fn preview_memory_edit(
+        &self,
+        selector: AgentProfileSelector,
+        key: NormalizedMemoryKey,
+        candidate: Option<MemoryEntryDraft>,
+    ) -> Result<MemoryEditPreview, AppError> {
+        self.ensure_passive_open(Capability::MemoryPreview)?;
+        let mut database =
+            Database::open(&self.paths).map_err(|_| PersistenceError::QueryFailed)?;
+        let transaction = database.immediate_transaction()?;
+        let projection = ProjectionRepository::load_in(&transaction)?;
+        let profile = resolve_memory_profile(&projection.agent_profiles, &selector)?;
+        let current = MemoryRepository::load_current_entry(
+            &transaction,
+            profile.memory_namespace_id(),
+            &key,
+        )?;
+        let expected = match current.as_ref() {
+            None => ExpectedMemoryEntryState::Absent,
+            Some(entry) if entry.reference().state() == MemoryEntryState::Present => {
+                ExpectedMemoryEntryState::Present(entry.reference())
+            }
+            Some(entry) => ExpectedMemoryEntryState::Deleted(entry.reference()),
+        };
+        let operation = if candidate.is_some() {
+            MemoryMutationKind::Set
+        } else {
+            MemoryMutationKind::Delete
+        };
+        let prepared = prepare_direct_memory_edit(
+            Actor::Human,
+            profile.reference(),
+            profile.memory_namespace_id(),
+            current.as_ref(),
+            expected,
+            operation,
+            candidate,
+            MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1,
+        )?;
+        transaction.commit()?;
+        match prepared {
+            MemoryEditPreviewOutcome::NoChange(no_change) => {
+                Ok(MemoryEditPreview::NoChange(no_change))
+            }
+            MemoryEditPreviewOutcome::Prepared(prepared) => {
+                let review_token =
+                    crate::domain::MemoryReviewToken::from_uuid(self.ids.next_uuid());
+                self.memory_reviews
+                    .replace_direct(review_token, prepared.binding.clone());
+                Ok(MemoryEditPreview::Review(
+                    prepared.into_review(review_token),
+                ))
+            }
+        }
+    }
+
     fn preview_skill_creation(&self, candidate: SkillDraft) -> Result<SkillEditPreview, AppError> {
         self.ensure_passive_open(Capability::SkillCreate)?;
         let candidate = candidate.canonicalized()?;
@@ -987,7 +1126,10 @@ impl CommandExecutor {
             actor: Actor::Human,
             command,
         };
-        self.execute_locked(envelope, lifecycle.session_id, phase)
+        let direct_memory_mutation = is_direct_memory_mutation(&envelope.command);
+        let result = self.execute_locked(envelope, lifecycle.session_id, phase);
+        self.invalidate_memory_review_after_terminal_failure(direct_memory_mutation, &result);
+        result
     }
 
     fn execute(&mut self, envelope: CommandEnvelope) -> Result<CommandOutcome, AppError> {
@@ -999,7 +1141,25 @@ impl CommandExecutor {
         if *phase == LifecyclePhase::Closed {
             return Err(AppError::LifecycleFinished);
         }
-        self.execute_locked(envelope, lifecycle.session_id, phase)
+        let direct_memory_mutation = is_direct_memory_mutation(&envelope.command);
+        let result = self.execute_locked(envelope, lifecycle.session_id, phase);
+        self.invalidate_memory_review_after_terminal_failure(direct_memory_mutation, &result);
+        result
+    }
+
+    fn invalidate_memory_review_after_terminal_failure(
+        &self,
+        direct_memory_mutation: bool,
+        result: &Result<CommandOutcome, AppError>,
+    ) {
+        if direct_memory_mutation
+            && result.as_ref().is_err_and(|error| {
+                memory_review_failure_disposition(error)
+                    == MemoryReviewFailureDisposition::Invalidate
+            })
+        {
+            self.memory_reviews.finish();
+        }
     }
 
     fn execute_locked(
@@ -1020,6 +1180,8 @@ impl CommandExecutor {
                 | ApplicationCommand::AssignAgentSkill { .. }
                 | ApplicationCommand::UpgradeAgentSkill { .. }
                 | ApplicationCommand::UnassignAgentSkill { .. }
+                | ApplicationCommand::SetMemoryEntry { .. }
+                | ApplicationCommand::DeleteMemoryEntry { .. }
         );
         if reviewed_mutation {
             let replay_transaction = self.database.immediate_transaction()?;
@@ -1054,6 +1216,7 @@ impl CommandExecutor {
                 | ApplicationCommand::UnassignAgentSkill { .. }
         )
         .then(|| self.skill_reviews.operation());
+        let memory_reviews = self.memory_reviews.clone();
         if matches!(
             &request.command,
             ApplicationCommand::CreateAgentProfile { .. }
@@ -1137,6 +1300,7 @@ impl CommandExecutor {
 
         let mut profile_reserved = false;
         let mut skill_reserved = false;
+        let mut memory_reserved = None;
         let precommit =
             (|| -> Result<(StoredExecution, Vec<crate::app::EventEnvelope>), AppError> {
                 let mut skill_event_object = None;
@@ -1424,6 +1588,27 @@ impl CommandExecutor {
                         prepared_memory_view = Some(view);
                         event
                     }
+                    command @ (ApplicationCommand::SetMemoryEntry { .. }
+                    | ApplicationCommand::DeleteMemoryEntry { .. }) => {
+                        let (review_token, binding) =
+                            direct_memory_review_binding(&projection, &request.actor, command)?;
+                        let reserved = memory_reviews
+                            .reserve_direct(envelope.command_id, review_token, &binding)
+                            .map_err(AppError::from)?;
+                        memory_reserved = Some(reserved);
+                        prepare_direct_memory_mutation(
+                            &transaction,
+                            &projection,
+                            self.ids.as_ref(),
+                            self.clock.as_ref(),
+                            &request.actor,
+                            envelope.command_id,
+                            command,
+                            memory_reserved
+                                .as_ref()
+                                .expect("direct mutation owns its memory review"),
+                        )?
+                    }
                     command => prepare_event(
                         command,
                         &projection,
@@ -1435,18 +1620,20 @@ impl CommandExecutor {
                     )?,
                 };
                 let pending = PendingEvent {
-                    event_id: EventId::from_uuid(self.ids.next_uuid()),
+                    event_id: direct_memory_event_id(&event)
+                        .unwrap_or_else(|| EventId::from_uuid(self.ids.next_uuid())),
                     event_schema_version: EVENT_SCHEMA_VERSION,
                     actor: request.actor.clone(),
                     occurred_at_ms: event_occurred_at(&event)
                         .unwrap_or_else(|| self.clock.now_millis()),
                     correlation_id: request.correlation_id,
                     causation_id: Some(CausationId::from_uuid(envelope.command_id.as_uuid())),
-                    object: skill_event_object,
+                    object: direct_memory_event_object(&event)?.or(skill_event_object),
                     event,
                 };
                 let committed = EventRepository::append(&transaction, pending)?;
                 self.hook.after_event_append(transaction.transaction())?;
+                persist_direct_memory_event(&transaction, &committed)?;
                 reduce(&mut projection, &committed)?;
                 if let ApplicationEvent::AgentProfileCreated { profile }
                 | ApplicationEvent::AgentProfileVersionActivated { profile, .. } =
@@ -1536,10 +1723,14 @@ impl CommandExecutor {
                         .expect("reserved skill review has an operation owner")
                         .release(envelope.command_id);
                 }
+                if let Some(reserved) = memory_reserved.take() {
+                    finish_failed_memory_review(reserved, &error);
+                }
                 return Err(error);
             }
         };
         if let Err(error) = transaction.commit() {
+            let app_error = AppError::Persistence(error);
             if profile_reserved {
                 profile_review_operation
                     .as_ref()
@@ -1552,7 +1743,10 @@ impl CommandExecutor {
                     .expect("reserved skill review has an operation owner")
                     .release(envelope.command_id);
             }
-            return Err(error.into());
+            if let Some(reserved) = memory_reserved.take() {
+                finish_failed_memory_review(reserved, &app_error);
+            }
+            return Err(app_error);
         }
         if profile_reserved {
             profile_review_operation
@@ -1566,9 +1760,13 @@ impl CommandExecutor {
                 .expect("reserved skill review has an operation owner")
                 .consume_reserved(envelope.command_id);
         }
+        if let Some(reserved) = memory_reserved.take() {
+            reserved.consume().map_err(AppError::from)?;
+        }
         if matches!(request.command, ApplicationCommand::RequestShutdown) {
             self.reviews.cancel();
             self.skill_reviews.cancel();
+            self.memory_reviews.finish();
         }
         stored.into_result()
     }
@@ -1637,6 +1835,308 @@ fn is_memory_command(command: &ApplicationCommand) -> bool {
             | ApplicationCommand::ShowEpisodicSummary { .. }
             | ApplicationCommand::BuildMemorySnapshot { .. }
     )
+}
+
+fn is_direct_memory_mutation(command: &ApplicationCommand) -> bool {
+    matches!(
+        command,
+        ApplicationCommand::SetMemoryEntry { .. } | ApplicationCommand::DeleteMemoryEntry { .. }
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MemoryReviewFailureDisposition {
+    Release,
+    Invalidate,
+}
+
+fn memory_review_failure_disposition(error: &AppError) -> MemoryReviewFailureDisposition {
+    match error {
+        AppError::Persistence(
+            PersistenceError::Contention
+            | PersistenceError::Capacity
+            | PersistenceError::QueryFailed,
+        ) => MemoryReviewFailureDisposition::Release,
+        _ => MemoryReviewFailureDisposition::Invalidate,
+    }
+}
+
+fn finish_failed_memory_review(reserved: ReservedMemoryReview<'_>, error: &AppError) {
+    match memory_review_failure_disposition(error) {
+        MemoryReviewFailureDisposition::Release => {
+            let _ = reserved.release();
+        }
+        MemoryReviewFailureDisposition::Invalidate => {
+            let _ = reserved.invalidate();
+        }
+    }
+}
+
+fn direct_memory_review_binding(
+    projection: &ProjectionState,
+    actor: &Actor,
+    command: &ApplicationCommand,
+) -> Result<(MemoryReviewToken, MemoryEditReviewBinding), AppError> {
+    let acknowledgement = MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1;
+    match command {
+        ApplicationCommand::SetMemoryEntry {
+            profile,
+            expected,
+            candidate,
+            review_token,
+            review_digest,
+        } => {
+            let exact = projection.agent_profiles.resolve_reference(profile)?;
+            let candidate_digest = sha256(&canonical_json_bytes(candidate)?);
+            Ok((
+                *review_token,
+                MemoryEditReviewBinding::new(
+                    actor.clone(),
+                    exact.reference(),
+                    exact.memory_namespace_id(),
+                    expected.clone(),
+                    MemoryMutationKind::Set,
+                    Some(candidate_digest),
+                    acknowledgement,
+                    review_digest.clone(),
+                )?,
+            ))
+        }
+        ApplicationCommand::DeleteMemoryEntry {
+            profile,
+            expected,
+            review_token,
+            review_digest,
+        } => {
+            let exact = projection.agent_profiles.resolve_reference(profile)?;
+            Ok((
+                *review_token,
+                MemoryEditReviewBinding::new(
+                    actor.clone(),
+                    exact.reference(),
+                    exact.memory_namespace_id(),
+                    ExpectedMemoryEntryState::Present(expected.clone()),
+                    MemoryMutationKind::Delete,
+                    None,
+                    acknowledgement,
+                    review_digest.clone(),
+                )?,
+            ))
+        }
+        _ => Err(AppError::WrongMemoryCommandDispatcher),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_direct_memory_mutation(
+    tx: &ImmediateTransaction<'_>,
+    projection: &ProjectionState,
+    ids: &dyn IdGenerator,
+    clock: &dyn Clock,
+    actor: &Actor,
+    command_id: CommandId,
+    command: &ApplicationCommand,
+    reserved: &ReservedMemoryReview<'_>,
+) -> Result<ApplicationEvent, AppError> {
+    if actor != &Actor::Human || reserved.command_id() != command_id {
+        return Err(crate::domain::DomainError::MemoryReviewUnavailable.into());
+    }
+    let _next_sequence = projection
+        .last_sequence
+        .checked_add(1)
+        .ok_or(PersistenceError::InvalidEventRecord)?;
+    let (profile_ref, expected, candidate, token) = match command {
+        ApplicationCommand::SetMemoryEntry {
+            profile,
+            expected,
+            candidate,
+            review_token,
+            ..
+        } => (profile, expected.clone(), Some(candidate), *review_token),
+        ApplicationCommand::DeleteMemoryEntry {
+            profile,
+            expected,
+            review_token,
+            ..
+        } => (
+            profile,
+            ExpectedMemoryEntryState::Present(expected.clone()),
+            None,
+            *review_token,
+        ),
+        _ => return Err(AppError::WrongMemoryCommandDispatcher),
+    };
+    if reserved.token() != token {
+        return Err(crate::domain::DomainError::MemoryReviewUnavailable.into());
+    }
+    let profile = projection.agent_profiles.resolve_reference(profile_ref)?;
+    let namespace_id = profile.memory_namespace_id();
+    let key = match candidate {
+        Some(candidate) => candidate.normalized_key(),
+        None => match &expected {
+            ExpectedMemoryEntryState::Present(reference) => reference.normalized_key().clone(),
+            _ => return Err(crate::domain::DomainError::MemoryExpectedStateMismatch.into()),
+        },
+    };
+    let current = MemoryRepository::load_current_entry(tx, namespace_id, &key)?;
+    let operation = if candidate.is_some() {
+        MemoryMutationKind::Set
+    } else {
+        MemoryMutationKind::Delete
+    };
+    match prepare_direct_memory_edit(
+        actor.clone(),
+        profile.reference(),
+        namespace_id,
+        current.as_ref(),
+        expected.clone(),
+        operation,
+        candidate.cloned(),
+        MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1,
+    )? {
+        MemoryEditPreviewOutcome::NoChange(_) => {
+            return Err(crate::domain::DomainError::MemoryExpectedStateMismatch.into());
+        }
+        MemoryEditPreviewOutcome::Prepared(_) => {}
+    }
+    let active_count = MemoryRepository::count_active_entries(tx, namespace_id)?;
+    let creates_active_key = candidate.is_some()
+        && current
+            .as_ref()
+            .is_none_or(|entry| entry.reference().state() == MemoryEntryState::Deleted);
+    if creates_active_key && active_count >= 1_024 {
+        return Err(PersistenceError::Capacity.into());
+    }
+
+    let entry = match (current.as_ref(), candidate) {
+        (None, Some(candidate)) => {
+            let entry_id = MemoryEntryId::from_uuid(ids.next_uuid());
+            let version_id = MemoryEntryVersionId::from_uuid(ids.next_uuid());
+            let event_id = EventId::from_uuid(ids.next_uuid());
+            let occurred_at_ms = clock.now_millis();
+            MemoryEntryVersion::create_present(
+                namespace_id,
+                entry_id,
+                version_id,
+                candidate.clone(),
+                Actor::Human,
+                occurred_at_ms,
+                None,
+                event_id,
+            )?
+        }
+        (Some(current), Some(candidate)) => {
+            let version_id = MemoryEntryVersionId::from_uuid(ids.next_uuid());
+            let event_id = EventId::from_uuid(ids.next_uuid());
+            let occurred_at_ms = clock.now_millis();
+            current.next_present(
+                version_id,
+                candidate.clone(),
+                Actor::Human,
+                occurred_at_ms,
+                None,
+                event_id,
+            )?
+        }
+        (Some(current), None) => {
+            let version_id = MemoryEntryVersionId::from_uuid(ids.next_uuid());
+            let event_id = EventId::from_uuid(ids.next_uuid());
+            let occurred_at_ms = clock.now_millis();
+            current.next_deleted(version_id, Actor::Human, occurred_at_ms, None, event_id)?
+        }
+        (None, None) => {
+            return Err(crate::domain::DomainError::MemoryExpectedStateMismatch.into());
+        }
+    };
+    let new_expected = match entry.reference().state() {
+        MemoryEntryState::Present => ExpectedMemoryEntryState::Present(entry.reference()),
+        MemoryEntryState::Deleted => ExpectedMemoryEntryState::Deleted(entry.reference()),
+    };
+    let mut expired_proposals = MemoryRepository::load_pending_proposals_for_key(
+        tx,
+        namespace_id,
+        entry.reference().normalized_key(),
+    )?
+    .into_iter()
+    .filter(|proposal| proposal.expected() != &new_expected)
+    .map(|proposal| {
+        MemoryProposalResolution::new(
+            proposal.reference(),
+            MemoryProposalStatus::Expired,
+            proposal.approval_id(),
+            Actor::Human,
+            entry.created_at_ms(),
+            entry.creation_event_id(),
+        )
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+    expired_proposals.sort_by_key(|resolution| resolution.proposal().proposal_id());
+    Ok(match entry.reference().state() {
+        MemoryEntryState::Present => ApplicationEvent::MemoryEntrySet {
+            entry,
+            expired_proposals,
+        },
+        MemoryEntryState::Deleted => ApplicationEvent::MemoryEntryDeleted {
+            entry,
+            expired_proposals,
+        },
+    })
+}
+
+fn direct_memory_event_id(event: &ApplicationEvent) -> Option<EventId> {
+    match event {
+        ApplicationEvent::MemoryEntrySet { entry, .. }
+        | ApplicationEvent::MemoryEntryDeleted { entry, .. } => Some(entry.creation_event_id()),
+        _ => None,
+    }
+}
+
+fn direct_memory_event_object(event: &ApplicationEvent) -> Result<Option<ObjectRef>, AppError> {
+    match event {
+        ApplicationEvent::MemoryEntrySet { entry, .. }
+        | ApplicationEvent::MemoryEntryDeleted { entry, .. } => {
+            let reference = entry.reference();
+            Ok(Some(ObjectRef::new(
+                "memory_entry_version",
+                reference.entry_version_id().to_string(),
+                reference.version(),
+                reference.content_digest().clone(),
+            )?))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn persist_direct_memory_event(
+    tx: &ImmediateTransaction<'_>,
+    committed: &crate::app::EventEnvelope,
+) -> Result<(), AppError> {
+    let (entry, expired_proposals) = match &committed.event {
+        ApplicationEvent::MemoryEntrySet {
+            entry,
+            expired_proposals,
+        }
+        | ApplicationEvent::MemoryEntryDeleted {
+            entry,
+            expired_proposals,
+        } => (entry, expired_proposals),
+        _ => return Ok(()),
+    };
+    MemoryRepository::insert_entry_version(tx, committed.sequence, entry)?;
+    MemoryRepository::replace_current_entry(tx, entry)?;
+    for resolution in expired_proposals {
+        let approval = MemoryRepository::load_memory_approval(tx, resolution.approval_id())?
+            .ok_or(PersistenceError::MemoryRowMismatch)?;
+        let resolved = approval
+            .resolve(
+                crate::policy::ApprovalStatus::Expired,
+                Actor::Human,
+                resolution.resolved_at_ms(),
+            )
+            .map_err(|_| PersistenceError::MemoryRowMismatch)?;
+        MemoryRepository::resolve_proposal(tx, committed.sequence, resolution, &resolved)?;
+    }
+    Ok(())
 }
 
 fn enforce_memory_actor_command(

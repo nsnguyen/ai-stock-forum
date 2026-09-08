@@ -41,7 +41,7 @@ pub use outcome::{
 };
 pub use service::{
     ApplicationService, ApplicationWorker, AuthorizationDecision, CommandPolicy,
-    CommandTransactionHook, DatabaseReadiness, IndependentApplicationService,
+    CommandTransactionHook, DatabaseReadiness, IndependentApplicationService, MemoryEditPreview,
     NoopCommandTransactionHook, PresentationSnapshot, ProcessGuardOwnership,
 };
 
