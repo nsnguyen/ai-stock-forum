@@ -974,6 +974,14 @@ impl FallbackRunner {
         key: String,
         writer: &mut W,
     ) -> Result<(), UiError> {
+        let normalized_key = match NormalizedMemoryKey::new(&key) {
+            Ok(normalized_key) => normalized_key,
+            Err(error) => {
+                TextRenderer::render_memory_editor_error(error.code(), writer)
+                    .map_err(|_| UiError::Write)?;
+                return Ok(());
+            }
+        };
         let editor = match self.client.submit(ApplicationCommand::ShowMemoryEntry {
             selector: agent.clone(),
             display_key: key.clone(),
@@ -982,6 +990,16 @@ impl FallbackRunner {
                 let CommandView::MemoryEntry(view) = outcome.view else {
                     return Err(UiError::Panicked);
                 };
+                if view.entry.reference().normalized_key() != &normalized_key
+                    || !profile_matches_selector(&view.profile, &agent)
+                {
+                    TextRenderer::render_memory_editor_error(
+                        crate::domain::DomainError::InvalidMemoryEditorSeed.code(),
+                        writer,
+                    )
+                    .map_err(|_| UiError::Write)?;
+                    return Ok(());
+                }
                 match MemoryEditor::for_set(agent, view.entry) {
                     Ok(editor) => editor,
                     Err(error) => {
@@ -1049,7 +1067,7 @@ impl FallbackRunner {
         requested_action: crate::memory::MemoryResolutionAction,
         writer: &mut W,
     ) -> Result<(), UiError> {
-        let proposal = match self
+        let proposal_view = match self
             .client
             .submit(ApplicationCommand::ShowMemoryProposal { proposal_id })
         {
@@ -1057,7 +1075,13 @@ impl FallbackRunner {
                 let CommandView::MemoryProposal(view) = outcome.view else {
                     return Err(UiError::Panicked);
                 };
-                view.proposal.reference()
+                if view.proposal.reference().proposal_id() != proposal_id
+                    || view.status != crate::memory::MemoryProposalStatus::Pending
+                    || view.resolution.is_some()
+                {
+                    return Err(UiError::Panicked);
+                }
+                view
             }
             Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
                 TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write)?;
@@ -1065,6 +1089,7 @@ impl FallbackRunner {
             }
             Err(error) => return Err(UiError::Runtime(error)),
         };
+        let proposal = proposal_view.proposal.reference();
         let preview = match requested_action {
             crate::memory::MemoryResolutionAction::Approve => {
                 self.client.preview_memory_proposal_approval(proposal)
@@ -1074,7 +1099,13 @@ impl FallbackRunner {
             }
         };
         match preview {
-            Ok(review) if review.action == requested_action => {
+            Ok(review)
+                if memory_resolution_review_matches_request(
+                    &review,
+                    requested_action,
+                    &proposal_view,
+                ) =>
+            {
                 self.register_memory_review()?;
                 self.install_memory_workflow(
                     MemoryWorkflow::ProposalResolutionReview { review },
@@ -2312,6 +2343,24 @@ fn memory_delete_review_matches_request(
         && delete_diff_matches(&review.diff)
 }
 
+fn memory_resolution_review_matches_request(
+    review: &MemoryProposalResolutionReview,
+    requested_action: crate::memory::MemoryResolutionAction,
+    proposal_view: &crate::app::MemoryProposalView,
+) -> bool {
+    review.action == requested_action
+        && review.proposal == proposal_view.proposal
+        && review.proposal.reference() == proposal_view.proposal.reference()
+        && review.approval_id == proposal_view.proposal.approval_id()
+        && review.expected_approval_status == crate::policy::ApprovalStatus::Pending
+        && review.expected_entry == proposal_view.current_entry
+        && review.proposer_is_historical == proposal_view.proposer_is_historical
+        && review.proposer_identity == proposal_view.proposer_identity
+        && review.namespace_owner_identity == proposal_view.namespace_owner_identity
+        && review.plaintext_acknowledgement
+            == crate::memory::MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1
+}
+
 fn profile_matches_selector(
     profile: &crate::agents::AgentProfileVersionRef,
     selector: &AgentProfileSelector,
@@ -2659,6 +2708,7 @@ mod tests {
 
     #[derive(Default)]
     struct InvalidDeleteState {
+        execute_calls: AtomicUsize,
         preview_calls: AtomicUsize,
         cancel_calls: AtomicUsize,
     }
@@ -2670,7 +2720,8 @@ mod tests {
             &mut self,
             _command: ApplicationCommand,
         ) -> Result<CommandOutcome, AppError> {
-            panic!("invalid delete-key handling must not execute a command")
+            self.0.execute_calls.fetch_add(1, Ordering::SeqCst);
+            Err(AppError::MemoryEntryNotFound)
         }
 
         fn preview_memory_delete(
@@ -2713,8 +2764,37 @@ mod tests {
         );
         assert_eq!(state.preview_calls.load(Ordering::SeqCst), 0);
         assert_eq!(state.cancel_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.execute_calls.load(Ordering::SeqCst), 0);
         assert!(runner.memory_workflow.lock().unwrap().is_none());
         assert!(!*runner.memory_review_registered.lock().unwrap());
+        let reason = runner.run(Cursor::new(Vec::new()), Vec::new()).unwrap();
+        assert_eq!(reason, ShutdownReason::InputClosed);
+        runtime.finish_and_join(reason).unwrap();
+    }
+
+    #[test]
+    fn invalid_set_key_renders_only_safe_code_without_read_preview_or_workflow() {
+        let state = Arc::new(InvalidDeleteState::default());
+        let runtime = ApplicationRuntime::spawn(InvalidDeleteExecutor(state.clone()), 1).unwrap();
+        let runner = FallbackRunner::new(runtime.client(), false);
+        let mut output = Vec::new();
+
+        runner
+            .start_memory_set(
+                AgentProfileSelector::Id(AgentProfileId::from_uuid(Uuid::from_u128(701))),
+                "api key".into(),
+                &mut output,
+            )
+            .unwrap();
+
+        assert_eq!(
+            output,
+            b"Memory editor input was rejected [invalid_memory_field].\n"
+        );
+        assert_eq!(state.execute_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.preview_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.cancel_calls.load(Ordering::SeqCst), 0);
+        assert!(runner.memory_workflow.lock().unwrap().is_none());
         let reason = runner.run(Cursor::new(Vec::new()), Vec::new()).unwrap();
         assert_eq!(reason, ShutdownReason::InputClosed);
         runtime.finish_and_join(reason).unwrap();

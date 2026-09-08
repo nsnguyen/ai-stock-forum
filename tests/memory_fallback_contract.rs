@@ -64,7 +64,7 @@ struct WorkflowExecutorState {
 
 struct WorkflowExecutor {
     state: Arc<Mutex<WorkflowExecutorState>>,
-    entry: Option<MemoryEntryVersion>,
+    entry: Option<MemoryEntryView>,
     proposal: Option<MemoryProposalView>,
     edit_preview: Option<Result<MemoryEditPreview, AppError>>,
     resolution_preview: Option<Result<MemoryProposalResolutionReview, AppError>>,
@@ -102,17 +102,11 @@ impl CommandExecutor for WorkflowExecutor {
                 }),
                 ShutdownDisposition::Requested,
             )),
-            ApplicationCommand::ShowMemoryEntry { .. } => self.entry.clone().map_or_else(
-                || Err(AppError::MemoryEntryNotFound),
-                |entry| {
-                    Ok(workflow_outcome(CommandView::MemoryEntry(
-                        MemoryEntryView {
-                            profile: profile().reference(),
-                            entry,
-                        },
-                    )))
-                },
-            ),
+            ApplicationCommand::ShowMemoryEntry { .. } => self
+                .entry
+                .clone()
+                .map(|view| workflow_outcome(CommandView::MemoryEntry(view)))
+                .ok_or(AppError::MemoryEntryNotFound),
             ApplicationCommand::ShowMemoryProposal { .. } => self
                 .proposal
                 .clone()
@@ -340,22 +334,24 @@ fn resolution_review(
     action: MemoryResolutionAction,
     digest_seed: &[u8],
 ) -> MemoryProposalResolutionReview {
-    let proposer = profile();
+    let view = proposal_view(proposal(&profile()));
+    resolution_review_for_view(action, &view, digest_seed)
+}
+
+fn resolution_review_for_view(
+    action: MemoryResolutionAction,
+    view: &MemoryProposalView,
+    digest_seed: &[u8],
+) -> MemoryProposalResolutionReview {
     MemoryProposalResolutionReview {
         action,
-        proposal: proposal(&proposer),
-        approval_id: ApprovalId::from_uuid(Uuid::from_u128(91_004)),
+        proposal: view.proposal.clone(),
+        approval_id: view.proposal.approval_id(),
         expected_approval_status: ApprovalStatus::Pending,
-        expected_entry: ExpectedMemoryEntryState::Absent,
-        proposer_is_historical: false,
-        proposer_identity: MemoryProfileIdentityView {
-            profile: proposer.reference(),
-            display_name: proposer.display_name().to_owned(),
-        },
-        namespace_owner_identity: MemoryProfileIdentityView {
-            profile: proposer.reference(),
-            display_name: proposer.display_name().to_owned(),
-        },
+        expected_entry: view.current_entry.clone(),
+        proposer_is_historical: view.proposer_is_historical,
+        proposer_identity: view.proposer_identity.clone(),
+        namespace_owner_identity: view.namespace_owner_identity.clone(),
         plaintext_acknowledgement: MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1,
         review_token: MemoryReviewToken::from_uuid(Uuid::from_u128(91_005)),
         review_digest: sha256(digest_seed),
@@ -364,6 +360,23 @@ fn resolution_review(
 
 fn workflow_runtime(
     entry: Option<MemoryEntryVersion>,
+    proposal: Option<MemoryProposalView>,
+    edit_preview: Option<Result<MemoryEditPreview, AppError>>,
+    resolution_preview: Option<Result<MemoryProposalResolutionReview, AppError>>,
+) -> (ApplicationRuntime, Arc<Mutex<WorkflowExecutorState>>) {
+    workflow_runtime_with_entry_view(
+        entry.map(|entry| MemoryEntryView {
+            profile: profile().reference(),
+            entry,
+        }),
+        proposal,
+        edit_preview,
+        resolution_preview,
+    )
+}
+
+fn workflow_runtime_with_entry_view(
+    entry: Option<MemoryEntryView>,
     proposal: Option<MemoryProposalView>,
     edit_preview: Option<Result<MemoryEditPreview, AppError>>,
     resolution_preview: Option<Result<MemoryProposalResolutionReview, AppError>>,
@@ -486,6 +499,64 @@ fn fallback_set_opens_a_seeded_editor_for_an_absent_key() {
     assert!(output.contains("Memory editor [Value]"));
     assert!(output.contains("Plaintext local memory"));
     fixture.finish_and_join(reason);
+}
+
+fn assert_invalid_set_seed(view: MemoryEntryView, selector: AgentProfileSelector, key: &str) {
+    let selector_input = match &selector {
+        AgentProfileSelector::Id(profile_id) => profile_id.to_string(),
+        AgentProfileSelector::Name(display_name) => format!("\"{display_name}\""),
+    };
+    let (runtime, state) = workflow_runtime_with_entry_view(Some(view), None, None, None);
+    let runner = FallbackRunner::new(runtime.client(), false);
+    let mut output = Vec::new();
+    let reason = runner
+        .run(
+            Cursor::new(format!("/memory set {selector_input} \"{key}\"\n").into_bytes()),
+            &mut output,
+        )
+        .unwrap();
+
+    assert_eq!(reason, ShutdownReason::InputClosed);
+    assert_eq!(
+        output,
+        b"Memory editor input was rejected [invalid_memory_editor_seed].\n"
+    );
+    let state = state.lock().unwrap();
+    assert_eq!(state.commands.len(), 1);
+    assert!(matches!(
+        state.commands[0],
+        ApplicationCommand::ShowMemoryEntry { .. }
+    ));
+    assert_eq!(state.preview_count, 0);
+    assert_eq!(state.cancel_count, 0);
+    drop(state);
+    runtime.finish_and_join(reason).unwrap();
+}
+
+#[test]
+fn fallback_seeded_set_rejects_a_returned_entry_for_another_normalized_key() {
+    let requested_profile = profile();
+    assert_invalid_set_seed(
+        MemoryEntryView {
+            profile: requested_profile.reference(),
+            entry: entry_with_key(&requested_profile, "Different Key"),
+        },
+        AgentProfileSelector::Id(requested_profile.profile_id()),
+        "Requested Key",
+    );
+}
+
+#[test]
+fn fallback_seeded_set_rejects_a_returned_entry_for_another_id_selected_profile() {
+    let requested_profile = profile();
+    assert_invalid_set_seed(
+        MemoryEntryView {
+            profile: different_profile().reference(),
+            entry: entry_with_key(&requested_profile, "Requested Key"),
+        },
+        AgentProfileSelector::Id(requested_profile.profile_id()),
+        "Requested Key",
+    );
 }
 
 #[test]
@@ -1188,6 +1259,180 @@ fn fallback_approve_and_reject_submit_only_the_requested_bound_action() {
         assert!(output.contains(MEMORY_PLAINTEXT_WARNING));
         assert_eq!(output.matches("Confirmation did not match").count(), 1);
         runtime.finish_and_join(reason).unwrap();
+    }
+}
+
+fn assert_rejected_proposal_detail(
+    requested_proposal_id: MemoryProposalId,
+    view: MemoryProposalView,
+) {
+    let review = resolution_review_for_view(MemoryResolutionAction::Approve, &view, b"detail");
+    let (runtime, state) = workflow_runtime(None, Some(view), None, Some(Ok(review)));
+    let runner = FallbackRunner::new(runtime.client(), false);
+    let mut output = Vec::new();
+    let error = runner
+        .run(
+            Cursor::new(format!("/memory approve {requested_proposal_id}\n").into_bytes()),
+            &mut output,
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, UiError::Panicked));
+    assert!(output.is_empty());
+    let state = state.lock().unwrap();
+    assert_eq!(state.commands.len(), 1);
+    assert!(matches!(
+        state.commands[0],
+        ApplicationCommand::ShowMemoryProposal { .. }
+    ));
+    assert_eq!(state.preview_count, 0);
+    assert_eq!(state.cancel_count, 0);
+    assert!(
+        mutation_commands(&Arc::new(Mutex::new(WorkflowExecutorState {
+            commands: state.commands.clone(),
+            ..WorkflowExecutorState::default()
+        })))
+        .is_empty()
+    );
+    drop(state);
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
+}
+
+#[test]
+fn fallback_resolution_rejects_substituted_or_nonpending_proposal_detail_before_preview() {
+    let authoritative = proposal(&profile());
+    let requested_id = authoritative.reference().proposal_id();
+
+    let substituted = proposal_with(
+        &profile(),
+        MemoryProposalId::from_uuid(Uuid::from_u128(701)),
+        "substituted proposal rationale",
+    );
+    assert_rejected_proposal_detail(requested_id, proposal_view(substituted));
+
+    let mut terminal_status = proposal_view(authoritative.clone());
+    terminal_status.status = MemoryProposalStatus::Accepted;
+    assert_rejected_proposal_detail(requested_id, terminal_status);
+
+    let mut resolved_pending = proposal_view(authoritative.clone());
+    resolved_pending.resolution = Some(
+        MemoryProposalResolution::new(
+            authoritative.reference(),
+            MemoryProposalStatus::Accepted,
+            authoritative.approval_id(),
+            Actor::Human,
+            1_700_000_000_030,
+            EventId::from_uuid(Uuid::from_u128(702)),
+        )
+        .unwrap(),
+    );
+    assert_rejected_proposal_detail(requested_id, resolved_pending);
+}
+
+fn assert_rejected_resolution_review(
+    action: MemoryResolutionAction,
+    view: MemoryProposalView,
+    review: MemoryProposalResolutionReview,
+) {
+    let proposal_id = view.proposal.reference().proposal_id();
+    let verb = match action {
+        MemoryResolutionAction::Approve => "approve",
+        MemoryResolutionAction::Reject => "reject",
+    };
+    let (runtime, state) = workflow_runtime(None, Some(view), None, Some(Ok(review)));
+    let runner = FallbackRunner::new(runtime.client(), false);
+    let mut output = Vec::new();
+    let error = runner
+        .run(
+            Cursor::new(format!("/memory {verb} {proposal_id}\n").into_bytes()),
+            &mut output,
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, UiError::Panicked));
+    assert!(mutation_commands(&state).is_empty());
+    assert_eq!(state.lock().unwrap().preview_count, 1);
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    assert!(
+        !String::from_utf8(output)
+            .unwrap()
+            .contains("Memory proposal")
+    );
+    assert_eq!(
+        runner
+            .run(Cursor::new(b":cancel\n".to_vec()), Vec::new())
+            .unwrap(),
+        ShutdownReason::InputClosed
+    );
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
+}
+
+#[test]
+fn fallback_resolution_rejects_every_same_action_identity_or_provenance_cross_wire() {
+    for action in [
+        MemoryResolutionAction::Approve,
+        MemoryResolutionAction::Reject,
+    ] {
+        let view = proposal_view(proposal(&profile()));
+        let base = resolution_review_for_view(action, &view, b"identity-base");
+        let mut cases = Vec::new();
+
+        let mut different_id = base.clone();
+        different_id.proposal = proposal_with(
+            &profile(),
+            MemoryProposalId::from_uuid(Uuid::from_u128(703)),
+            "another proposal",
+        );
+        different_id.approval_id = different_id.proposal.approval_id();
+        cases.push(different_id);
+
+        let mut inconsistent_content = base.clone();
+        inconsistent_content.proposal = proposal_with(
+            &profile(),
+            view.proposal.reference().proposal_id(),
+            "same id but different proposal content",
+        );
+        cases.push(inconsistent_content);
+
+        let mut wrong_approval = base.clone();
+        wrong_approval.approval_id = ApprovalId::from_uuid(Uuid::from_u128(704));
+        cases.push(wrong_approval);
+
+        let mut wrong_status = base.clone();
+        wrong_status.expected_approval_status = ApprovalStatus::Accepted;
+        cases.push(wrong_status);
+
+        let mut wrong_current = base.clone();
+        wrong_current.expected_entry =
+            ExpectedMemoryEntryState::Present(entry(&profile()).reference());
+        cases.push(wrong_current);
+
+        let mut wrong_history = base.clone();
+        wrong_history.proposer_is_historical = !view.proposer_is_historical;
+        cases.push(wrong_history);
+
+        let mut wrong_proposer = base.clone();
+        wrong_proposer.proposer_identity = MemoryProfileIdentityView {
+            profile: different_profile().reference(),
+            display_name: "Substituted proposer".into(),
+        };
+        cases.push(wrong_proposer);
+
+        let mut wrong_owner = base;
+        wrong_owner.namespace_owner_identity = MemoryProfileIdentityView {
+            profile: different_profile().reference(),
+            display_name: "Substituted namespace owner".into(),
+        };
+        cases.push(wrong_owner);
+
+        for review in cases {
+            assert_rejected_resolution_review(action, view.clone(), review);
+        }
     }
 }
 
@@ -2271,12 +2516,16 @@ fn current_profile(historical: &AgentProfileVersion) -> AgentProfileVersion {
 }
 
 fn entry(profile: &AgentProfileVersion) -> MemoryEntryVersion {
+    entry_with_key(profile, "Earnings Thesis")
+}
+
+fn entry_with_key(profile: &AgentProfileVersion, display_key: &str) -> MemoryEntryVersion {
     MemoryEntryVersion::create_present(
         profile.memory_namespace_id(),
         MemoryEntryId::from_uuid(Uuid::from_u128(104)),
         MemoryEntryVersionId::from_uuid(Uuid::from_u128(105)),
         MemoryEntryDraft::new(
-            "Earnings Thesis".into(),
+            display_key.into(),
             "private thesis\nsecond line".into(),
             vec!["Catalyst".into()],
         )
@@ -2290,8 +2539,20 @@ fn entry(profile: &AgentProfileVersion) -> MemoryEntryVersion {
 }
 
 fn proposal(profile: &AgentProfileVersion) -> MemoryProposal {
-    MemoryProposal::new(
+    proposal_with(
+        profile,
         MemoryProposalId::from_uuid(Uuid::from_u128(107)),
+        "private rationale\nsecond line",
+    )
+}
+
+fn proposal_with(
+    profile: &AgentProfileVersion,
+    proposal_id: MemoryProposalId,
+    rationale: &str,
+) -> MemoryProposal {
+    MemoryProposal::new(
+        proposal_id,
         profile,
         &Actor::Agent(profile.profile_id()),
         MemoryProposalOperation::Set {
@@ -2304,7 +2565,7 @@ fn proposal(profile: &AgentProfileVersion) -> MemoryProposal {
         },
         "Earnings Thesis".into(),
         ExpectedMemoryEntryState::Absent,
-        "private rationale\nsecond line".into(),
+        rationale.into(),
         1_700_000_000_020,
         EventId::from_uuid(Uuid::from_u128(108)),
         ApprovalId::from_uuid(Uuid::from_u128(109)),
