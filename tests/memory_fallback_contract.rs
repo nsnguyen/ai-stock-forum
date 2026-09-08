@@ -954,6 +954,93 @@ fn fallback_set_rejects_a_cross_wired_delete_preview_before_render_or_submission
         .unwrap();
 }
 
+fn assert_failed_cleanup_preserves_edit_integrity_failure(
+    current: Option<MemoryEntryVersion>,
+    review: MemoryEditReview,
+    input: Vec<u8>,
+) {
+    let (runtime, state) = workflow_runtime(
+        current,
+        None,
+        Some(Ok(MemoryEditPreview::Review(review))),
+        None,
+    );
+    state
+        .lock()
+        .unwrap()
+        .cancel_results
+        .push_back(Err(AppError::Persistence(PersistenceError::QueryFailed)));
+    let runner = FallbackRunner::new(runtime.client(), false);
+    let mut output = Vec::new();
+    let error = runner.run(Cursor::new(input), &mut output).unwrap_err();
+
+    assert!(matches!(error, UiError::Panicked), "{error:?}");
+    assert!(mutation_commands(&state).is_empty());
+    assert_eq!(state.lock().unwrap().preview_count, 1);
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    let output = String::from_utf8(output).unwrap();
+    assert!(!output.contains("Memory set review"));
+    assert!(!output.contains("Memory delete review"));
+
+    let mut followup_output = Vec::new();
+    assert_eq!(
+        runner
+            .run(Cursor::new(b":cancel\n".to_vec()), &mut followup_output)
+            .unwrap(),
+        ShutdownReason::InputClosed
+    );
+    let followup_output = String::from_utf8(followup_output).unwrap();
+    assert!(!followup_output.contains("Memory workflow cancelled"));
+    assert!(!followup_output.contains("Memory set review"));
+    assert!(!followup_output.contains("Memory delete review"));
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
+}
+
+#[test]
+fn fallback_set_integrity_failure_survives_failed_review_cancellation() {
+    let current = entry(&profile());
+    let review = edit_review(
+        MemoryMutationKind::Delete,
+        ExpectedMemoryEntryState::Present(current.reference()),
+        None,
+        b"set-failed-integrity-cleanup",
+    );
+    assert_failed_cleanup_preserves_edit_integrity_failure(
+        Some(current.clone()),
+        review,
+        format!(
+            "/memory set {} \"{}\"\nreplacement value\nfresh\n",
+            profile().profile_id(),
+            current.display_key(),
+        )
+        .into_bytes(),
+    );
+}
+
+#[test]
+fn fallback_delete_integrity_failure_survives_failed_review_cancellation() {
+    let candidate = MemoryEntryDraft::new(
+        "Fresh Key".into(),
+        "replacement value".into(),
+        vec!["fresh".into()],
+    )
+    .unwrap();
+    let review = edit_review(
+        MemoryMutationKind::Set,
+        ExpectedMemoryEntryState::Absent,
+        Some(candidate),
+        b"delete-failed-integrity-cleanup",
+    );
+    assert_failed_cleanup_preserves_edit_integrity_failure(
+        None,
+        review,
+        format!("/memory delete {} \"Fresh Key\"\n", profile().profile_id()).into_bytes(),
+    );
+}
+
 fn seeded_set_candidate() -> MemoryEntryDraft {
     MemoryEntryDraft::new(
         "Earnings Thesis".into(),
@@ -1584,6 +1671,78 @@ fn assert_rejected_resolution_review(
     runtime
         .finish_and_join(ShutdownReason::ApplicationError)
         .unwrap();
+}
+
+fn assert_failed_cleanup_preserves_resolution_integrity_failure(
+    requested_action: MemoryResolutionAction,
+    returned_action: MemoryResolutionAction,
+) {
+    let view = proposal_view(proposal(&profile()));
+    let proposal_id = view.proposal.reference().proposal_id();
+    let review = resolution_review_for_view(
+        returned_action,
+        &view,
+        b"resolution-failed-integrity-cleanup",
+    );
+    let verb = match requested_action {
+        MemoryResolutionAction::Approve => "approve",
+        MemoryResolutionAction::Reject => "reject",
+    };
+    let (runtime, state) = workflow_runtime(None, Some(view), None, Some(Ok(review)));
+    state
+        .lock()
+        .unwrap()
+        .cancel_results
+        .push_back(Err(AppError::Persistence(PersistenceError::QueryFailed)));
+    let runner = FallbackRunner::new(runtime.client(), false);
+    let mut output = Vec::new();
+    let error = runner
+        .run(
+            Cursor::new(format!("/memory {verb} {proposal_id}\n").into_bytes()),
+            &mut output,
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, UiError::Panicked), "{error:?}");
+    assert!(mutation_commands(&state).is_empty());
+    assert_eq!(state.lock().unwrap().preview_count, 1);
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    assert!(
+        !String::from_utf8(output)
+            .unwrap()
+            .contains("Memory proposal")
+    );
+
+    let mut followup_output = Vec::new();
+    assert_eq!(
+        runner
+            .run(Cursor::new(b":cancel\n".to_vec()), &mut followup_output)
+            .unwrap(),
+        ShutdownReason::InputClosed
+    );
+    let followup_output = String::from_utf8(followup_output).unwrap();
+    assert!(!followup_output.contains("Memory workflow cancelled"));
+    assert!(!followup_output.contains("Memory proposal"));
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
+}
+
+#[test]
+fn fallback_approve_integrity_failure_survives_failed_review_cancellation() {
+    assert_failed_cleanup_preserves_resolution_integrity_failure(
+        MemoryResolutionAction::Approve,
+        MemoryResolutionAction::Reject,
+    );
+}
+
+#[test]
+fn fallback_reject_integrity_failure_survives_failed_review_cancellation() {
+    assert_failed_cleanup_preserves_resolution_integrity_failure(
+        MemoryResolutionAction::Reject,
+        MemoryResolutionAction::Approve,
+    );
 }
 
 #[test]

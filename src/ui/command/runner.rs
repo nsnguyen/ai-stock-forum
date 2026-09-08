@@ -1054,7 +1054,7 @@ impl FallbackRunner {
             }
             Ok(MemoryEditPreview::Review(review)) => {
                 if !memory_delete_review_matches_request(&review, &agent, &normalized_key) {
-                    return self.reject_new_memory_edit_review();
+                    return self.reject_newly_registered_memory_review();
                 }
                 self.register_memory_review()?;
                 let workflow = MemoryWorkflow::DeleteReview { review };
@@ -1118,12 +1118,7 @@ impl FallbackRunner {
                     writer,
                 )
             }
-            Ok(_) => {
-                let mut registered = true;
-                cancel_registered_memory_review(&self.client, &mut registered)
-                    .map_err(UiError::Runtime)?;
-                Err(UiError::Panicked)
-            }
+            Ok(_) => self.reject_newly_registered_memory_review(),
             Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
                 TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write)
             }
@@ -1258,7 +1253,7 @@ impl FallbackRunner {
                                     &requested_candidate,
                                     seed.as_ref(),
                                 ) {
-                                    return self.reject_new_memory_edit_review();
+                                    return self.reject_newly_registered_memory_review();
                                 }
                                 if !editor.apply_preview(
                                     request.generation,
@@ -1526,9 +1521,9 @@ impl FallbackRunner {
         Ok(())
     }
 
-    fn reject_new_memory_edit_review(&self) -> Result<(), UiError> {
+    fn reject_newly_registered_memory_review(&self) -> Result<(), UiError> {
         let mut registered = true;
-        cancel_registered_memory_review(&self.client, &mut registered).map_err(UiError::Runtime)?;
+        let _ = cancel_registered_memory_review(&self.client, &mut registered);
         Err(UiError::Panicked)
     }
 
