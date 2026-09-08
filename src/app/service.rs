@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
     agents::{
-        AgentBindingCatalogSnapshot, AgentProfileDraft, AgentProfileVersion, AgentReadiness,
-        ProfileEditPreview, ProfileReviewRegistry, ProfileTemplate, ReviewReservationError,
-        builtin_profile_templates, candidate_digest, diff_profile, normalize_profile_name_key,
-        profile_template_from_provenance, review_digest,
+        AgentBindingCatalogSnapshot, AgentProfileDraft, AgentProfileVersion,
+        AgentProfilesProjection, AgentReadiness, ProfileEditPreview, ProfileReviewRegistry,
+        ProfileTemplate, ReviewReservationError, builtin_profile_templates, candidate_digest,
+        diff_profile, normalize_profile_name_key, profile_template_from_provenance, review_digest,
     },
     app::{
         AgentProfileCreatedView, AgentProfileHistoryEntry, AgentProfileHistoryView,
@@ -18,12 +18,18 @@ use crate::{
         AgentProfileVersionView, AgentProfileView, AgentProfilesView,
         AgentSkillAssignmentOperation, AgentSkillAssignmentPreview, AgentSkillMutationView,
         AppError, ApplicationCommand, ApplicationEvent, AuditTailView, CommandEnvelope,
-        CommandOutcome, CommandView, EVENT_SCHEMA_VERSION, HelpView, InputRejectedView,
+        CommandOutcome, CommandView, EVENT_SCHEMA_VERSION, EpisodicSummariesView,
+        EpisodicSummaryListItem, EpisodicSummaryView, HelpView, InputRejectedView,
         MAX_AGENT_PROFILE_HISTORY_RESULTS, MAX_AGENT_PROFILE_LIST_RESULTS,
-        MAX_SKILL_HISTORY_RESULTS, MAX_SKILL_LIST_RESULTS, PendingEvent, SetupStatusView,
-        ShutdownDisposition, ShutdownReason, ShutdownView, SkillCreatedView, SkillEventSummary,
-        SkillHistoryEntry, SkillHistoryEventEntry, SkillHistoryView, SkillSelector, SkillSummary,
-        SkillVersionActivatedView, SkillView, SkillsView, StatusView,
+        MAX_SKILL_HISTORY_RESULTS, MAX_SKILL_LIST_RESULTS, MemoryEntriesView,
+        MemoryEntryHistorySummary, MemoryEntryHistoryView, MemoryEntryMutationView,
+        MemoryEntrySummary, MemoryEntryVersionView, MemoryEntryView, MemoryProfileIdentityView,
+        MemoryProposalCreatedView, MemoryProposalResolutionView, MemoryProposalStatusRef,
+        MemoryProposalSummary, MemoryProposalView, MemoryProposalsView, MemorySnapshotView,
+        PendingEvent, SetupStatusView, ShutdownDisposition, ShutdownReason, ShutdownView,
+        SkillCreatedView, SkillEventSummary, SkillHistoryEntry, SkillHistoryEventEntry,
+        SkillHistoryView, SkillSelector, SkillSummary, SkillVersionActivatedView, SkillView,
+        SkillsView, StatusView,
     },
     audit::AuditEntry,
     config::{AppPaths, StartupError},
@@ -33,10 +39,15 @@ use crate::{
         SessionId, Sha256Digest, SkillId, SkillReviewToken, SkillVersionId, canonical_json_bytes,
         sha256,
     },
+    memory::{
+        EpisodicContextItem, EpisodicQualification, ExpectedMemoryEntryState, MemoryEntryState,
+        MemoryKvContextItem, MemoryProposalOperation, MemoryProposalOperationKind,
+        MemoryProposalStatus, MemoryRetrievalRequest, MemorySnapshot, NormalizedMemoryKey,
+    },
     persistence::{
         CommandReceiptRecord, CommandReceiptRepository, Database, EventRepository,
-        ImmediateTransaction, PersistenceError, ProjectionRepository, RecoveryError,
-        insert_expected_version, insert_skill_version, load_active_skill,
+        ImmediateTransaction, MemoryRepository, PersistenceError, ProjectionRepository,
+        RecoveryError, insert_expected_version, insert_skill_version, load_active_skill,
         load_active_skill_by_name, load_all_skill_versions, load_skill_history, load_skill_version,
         set_active_skill,
     },
@@ -166,7 +177,7 @@ impl CommandTransactionHook for NoopCommandTransactionHook {
 }
 
 struct PhaseZeroPolicy {
-    rules: [PolicyRule; 14],
+    rules: [PolicyRule; 19],
 }
 
 impl Default for PhaseZeroPolicy {
@@ -186,6 +197,11 @@ impl Default for PhaseZeroPolicy {
                 PolicyRule::new(Effect::Grant, Capability::SkillVersion),
                 PolicyRule::new(Effect::Grant, Capability::AgentSkillAssign),
                 PolicyRule::new(Effect::Grant, Capability::AgentSkillUnassign),
+                PolicyRule::new(Effect::Grant, Capability::MemoryRead),
+                PolicyRule::new(Effect::Grant, Capability::MemoryPreview),
+                PolicyRule::new(Effect::Grant, Capability::MemoryMutate),
+                PolicyRule::new(Effect::Grant, Capability::MemoryPropose),
+                PolicyRule::new(Effect::Grant, Capability::MemoryResolve),
                 PolicyRule::new(Effect::Grant, Capability::Shutdown),
             ],
         }
@@ -1071,6 +1087,10 @@ impl CommandExecutor {
             _ => return Err(AppError::LifecycleFinished),
         }
 
+        if is_memory_command(&request.command) {
+            enforce_memory_actor_command(&request.actor, &request.command)?;
+        }
+
         let capability = request.command.required_capability();
         let denied = match self.policy.authorize(capability) {
             AuthorizationDecision::Granted => None,
@@ -1120,6 +1140,7 @@ impl CommandExecutor {
         let precommit =
             (|| -> Result<(StoredExecution, Vec<crate::app::EventEnvelope>), AppError> {
                 let mut skill_event_object = None;
+                let mut prepared_memory_view = None;
                 let event = match &request.command {
                     ApplicationCommand::ActivateAgentProfileVersion {
                         profile_id,
@@ -1381,6 +1402,28 @@ impl CommandExecutor {
                             operation,
                         )?
                     }
+                    command @ (ApplicationCommand::ListMemoryEntries { .. }
+                    | ApplicationCommand::ShowMemoryEntry { .. }
+                    | ApplicationCommand::ShowMemoryEntryHistory { .. }
+                    | ApplicationCommand::ShowMemoryEntryVersion { .. }
+                    | ApplicationCommand::ListMemoryProposals { .. }
+                    | ApplicationCommand::ShowMemoryProposal { .. }
+                    | ApplicationCommand::ListEpisodicSummaries { .. }
+                    | ApplicationCommand::ShowEpisodicSummary { .. }) => {
+                        let (event, view) =
+                            prepare_memory_read(&transaction, &projection.agent_profiles, command)?;
+                        prepared_memory_view = Some(view);
+                        event
+                    }
+                    ApplicationCommand::BuildMemorySnapshot { request } => {
+                        let (event, view) = prepare_memory_snapshot(
+                            &transaction,
+                            &projection.agent_profiles,
+                            request,
+                        )?;
+                        prepared_memory_view = Some(view);
+                        event
+                    }
                     command => prepare_event(
                         command,
                         &projection,
@@ -1442,14 +1485,23 @@ impl CommandExecutor {
                 self.hook
                     .before_outcome_materialization(transaction.transaction())?;
                 let events = vec![committed];
-                let outcome = materialize_success(
-                    &transaction,
-                    envelope.command_id,
-                    &request,
-                    &events,
-                    &projection,
-                    self.binding_catalog.as_ref(),
-                )?;
+                let outcome = match prepared_memory_view {
+                    Some(view) => CommandOutcome {
+                        command_id: envelope.command_id,
+                        correlation_id: request.correlation_id,
+                        committed_events: events.clone(),
+                        view,
+                        shutdown: ShutdownDisposition::Continue,
+                    },
+                    None => materialize_success(
+                        &transaction,
+                        envelope.command_id,
+                        &request,
+                        &events,
+                        &projection,
+                        self.binding_catalog.as_ref(),
+                    )?,
+                };
                 self.hook.after_audit_append(transaction.transaction())?;
                 let stored = StoredExecution::Success { outcome };
                 let outcome_json = encode_canonical(&stored)?;
@@ -1565,6 +1617,390 @@ fn ensure_name_available(
     } else {
         Ok(())
     }
+}
+
+fn is_memory_command(command: &ApplicationCommand) -> bool {
+    matches!(
+        command,
+        ApplicationCommand::SetMemoryEntry { .. }
+            | ApplicationCommand::DeleteMemoryEntry { .. }
+            | ApplicationCommand::ProposeMemoryMutation { .. }
+            | ApplicationCommand::ApproveMemoryProposal { .. }
+            | ApplicationCommand::RejectMemoryProposal { .. }
+            | ApplicationCommand::ListMemoryEntries { .. }
+            | ApplicationCommand::ShowMemoryEntry { .. }
+            | ApplicationCommand::ShowMemoryEntryHistory { .. }
+            | ApplicationCommand::ShowMemoryEntryVersion { .. }
+            | ApplicationCommand::ListMemoryProposals { .. }
+            | ApplicationCommand::ShowMemoryProposal { .. }
+            | ApplicationCommand::ListEpisodicSummaries { .. }
+            | ApplicationCommand::ShowEpisodicSummary { .. }
+            | ApplicationCommand::BuildMemorySnapshot { .. }
+    )
+}
+
+fn enforce_memory_actor_command(
+    actor: &Actor,
+    command: &ApplicationCommand,
+) -> Result<(), AppError> {
+    let allowed = match (actor, command) {
+        (
+            Actor::Human,
+            ApplicationCommand::SetMemoryEntry { .. }
+            | ApplicationCommand::DeleteMemoryEntry { .. }
+            | ApplicationCommand::ApproveMemoryProposal { .. }
+            | ApplicationCommand::RejectMemoryProposal { .. }
+            | ApplicationCommand::ListMemoryEntries { .. }
+            | ApplicationCommand::ShowMemoryEntry { .. }
+            | ApplicationCommand::ShowMemoryEntryHistory { .. }
+            | ApplicationCommand::ShowMemoryEntryVersion { .. }
+            | ApplicationCommand::ListMemoryProposals { .. }
+            | ApplicationCommand::ShowMemoryProposal { .. }
+            | ApplicationCommand::ListEpisodicSummaries { .. }
+            | ApplicationCommand::ShowEpisodicSummary { .. }
+            | ApplicationCommand::BuildMemorySnapshot { .. },
+        ) => true,
+        (Actor::Agent(actor_id), ApplicationCommand::ProposeMemoryMutation { proposer, .. }) => {
+            *actor_id == proposer.profile_id()
+        }
+        _ => false,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(AppError::CapabilityDenied {
+            capability: command.required_capability(),
+            decision: PolicyDecision::Denied,
+        })
+    }
+}
+
+fn resolve_memory_profile<'a>(
+    profiles: &'a AgentProfilesProjection,
+    selector: &AgentProfileSelector,
+) -> Result<&'a AgentProfileVersion, AppError> {
+    match selector {
+        AgentProfileSelector::Id(profile_id) => profiles.active_profile(*profile_id),
+        AgentProfileSelector::Name(_) => selector
+            .normalized_name()
+            .as_ref()
+            .and_then(|name| profiles.active_profile_by_name(name)),
+    }
+    .ok_or(AppError::AgentProfileNotFound)
+}
+
+fn memory_profile_identity(profile: &AgentProfileVersion) -> MemoryProfileIdentityView {
+    MemoryProfileIdentityView {
+        profile: profile.reference(),
+        display_name: profile.display_name().to_owned(),
+    }
+}
+
+fn current_expected_memory_entry(
+    tx: &ImmediateTransaction<'_>,
+    namespace_id: MemoryNamespaceId,
+    key: &NormalizedMemoryKey,
+) -> Result<ExpectedMemoryEntryState, AppError> {
+    Ok(
+        match MemoryRepository::load_current_entry(tx, namespace_id, key)? {
+            None => ExpectedMemoryEntryState::Absent,
+            Some(entry) if entry.reference().state() == MemoryEntryState::Present => {
+                ExpectedMemoryEntryState::Present(entry.reference())
+            }
+            Some(entry) => ExpectedMemoryEntryState::Deleted(entry.reference()),
+        },
+    )
+}
+
+fn prepare_memory_read(
+    tx: &ImmediateTransaction<'_>,
+    profiles: &AgentProfilesProjection,
+    command: &ApplicationCommand,
+) -> Result<(ApplicationEvent, CommandView), AppError> {
+    match command {
+        ApplicationCommand::ListMemoryEntries { selector } => {
+            let profile = resolve_memory_profile(profiles, selector)?;
+            let page =
+                MemoryRepository::list_current_entries(tx, profile.memory_namespace_id(), 100)?;
+            let event = ApplicationEvent::MemoryEntriesListed {
+                profile: profile.reference(),
+                namespace_id: profile.memory_namespace_id(),
+                entries: page
+                    .records
+                    .iter()
+                    .map(|record| record.entry.clone())
+                    .collect(),
+                total_count: page.total_count,
+                returned_count: page.returned_count,
+                omitted_count: page.omitted_count,
+            };
+            let view = CommandView::MemoryEntries(MemoryEntriesView {
+                profile: profile.reference(),
+                namespace_id: profile.memory_namespace_id(),
+                entries: page
+                    .records
+                    .into_iter()
+                    .map(|record| MemoryEntrySummary {
+                        entry: record.entry,
+                        display_key: record.display_key,
+                        purpose_tags: record.purpose_tags,
+                        value_bytes: record.value_bytes,
+                        created_at_ms: record.created_at_ms,
+                    })
+                    .collect(),
+                total_count: page.total_count,
+                returned_count: page.returned_count,
+                omitted_count: page.omitted_count,
+            });
+            Ok((event, view))
+        }
+        ApplicationCommand::ShowMemoryEntry {
+            selector,
+            display_key,
+        } => {
+            let profile = resolve_memory_profile(profiles, selector)?;
+            let key = NormalizedMemoryKey::new(display_key)?;
+            let entry =
+                MemoryRepository::load_current_entry(tx, profile.memory_namespace_id(), &key)?
+                    .filter(|entry| entry.reference().state() == MemoryEntryState::Present)
+                    .ok_or(AppError::MemoryEntryNotFound)?;
+            Ok((
+                ApplicationEvent::MemoryEntryShown {
+                    profile: profile.reference(),
+                    entry: entry.reference(),
+                },
+                CommandView::MemoryEntry(MemoryEntryView {
+                    profile: profile.reference(),
+                    entry,
+                }),
+            ))
+        }
+        ApplicationCommand::ShowMemoryEntryHistory {
+            selector,
+            display_key,
+        } => {
+            let profile = resolve_memory_profile(profiles, selector)?;
+            let key = NormalizedMemoryKey::new(display_key)?;
+            let current =
+                MemoryRepository::load_current_entry(tx, profile.memory_namespace_id(), &key)?
+                    .ok_or(AppError::MemoryEntryNotFound)?;
+            let page =
+                MemoryRepository::load_entry_history(tx, profile.memory_namespace_id(), &key, 100)?;
+            let current = current.reference();
+            if page
+                .versions
+                .first()
+                .map(|entry| entry.reference())
+                .as_ref()
+                != Some(&current)
+            {
+                return Err(PersistenceError::MemoryRowMismatch.into());
+            }
+            let event = ApplicationEvent::MemoryEntryHistoryShown {
+                profile: profile.reference(),
+                current: current.clone(),
+                versions: page
+                    .versions
+                    .iter()
+                    .map(|entry| entry.reference())
+                    .collect(),
+                total_count: page.total_count,
+                returned_count: page.returned_count,
+                omitted_count: page.omitted_count,
+            };
+            let view = CommandView::MemoryEntryHistory(MemoryEntryHistoryView {
+                profile: profile.reference(),
+                current,
+                versions: page
+                    .versions
+                    .into_iter()
+                    .map(|entry| MemoryEntryHistorySummary {
+                        entry: entry.reference(),
+                        display_key: entry.display_key().to_owned(),
+                        created_at_ms: entry.created_at_ms(),
+                        accepted_proposal: entry.accepted_proposal().cloned(),
+                    })
+                    .collect(),
+                total_count: page.total_count,
+                returned_count: page.returned_count,
+                omitted_count: page.omitted_count,
+            });
+            Ok((event, view))
+        }
+        ApplicationCommand::ShowMemoryEntryVersion {
+            selector,
+            display_key,
+            version,
+        } => {
+            let profile = resolve_memory_profile(profiles, selector)?;
+            let key = NormalizedMemoryKey::new(display_key)?;
+            let entry = MemoryRepository::load_entry_version(
+                tx,
+                profile.memory_namespace_id(),
+                &key,
+                *version,
+            )?
+            .ok_or(AppError::MemoryEntryNotFound)?;
+            Ok((
+                ApplicationEvent::MemoryEntryVersionShown {
+                    profile: profile.reference(),
+                    entry: entry.reference(),
+                },
+                CommandView::MemoryEntryVersion(MemoryEntryVersionView {
+                    profile: profile.reference(),
+                    entry,
+                }),
+            ))
+        }
+        ApplicationCommand::ListMemoryProposals { selector, filter } => {
+            let profile = resolve_memory_profile(profiles, selector)?;
+            let page =
+                MemoryRepository::list_proposals(tx, profile.memory_namespace_id(), *filter, 100)?;
+            let event = ApplicationEvent::MemoryProposalsListed {
+                profile: profile.reference(),
+                filter: *filter,
+                proposals: page
+                    .records
+                    .iter()
+                    .map(|record| MemoryProposalStatusRef {
+                        proposal: record.proposal.clone(),
+                        status: record.status,
+                    })
+                    .collect(),
+                total_count: page.total_count,
+                returned_count: page.returned_count,
+                omitted_count: page.omitted_count,
+            };
+            let view = CommandView::MemoryProposals(MemoryProposalsView {
+                profile: profile.reference(),
+                namespace_id: profile.memory_namespace_id(),
+                filter: *filter,
+                proposals: page
+                    .records
+                    .into_iter()
+                    .map(|record| MemoryProposalSummary {
+                        proposal: record.proposal,
+                        proposer: record.proposer,
+                        operation: record.operation,
+                        display_key: record.display_key,
+                        status: record.status,
+                        created_at_ms: record.created_at_ms,
+                    })
+                    .collect(),
+                total_count: page.total_count,
+                returned_count: page.returned_count,
+                omitted_count: page.omitted_count,
+            });
+            Ok((event, view))
+        }
+        ApplicationCommand::ShowMemoryProposal { proposal_id } => {
+            let (proposal, status, resolution) = MemoryRepository::load_proposal(tx, *proposal_id)?
+                .ok_or(AppError::MemoryProposalNotFound)?;
+            let proposer = profiles
+                .resolve_reference(proposal.proposer())
+                .map_err(|_| PersistenceError::MemoryRowMismatch)?;
+            let owner = profiles
+                .active_profiles()
+                .into_iter()
+                .find(|profile| profile.memory_namespace_id() == proposal.namespace_id())
+                .ok_or(PersistenceError::MemoryRowMismatch)?;
+            let current_entry = current_expected_memory_entry(
+                tx,
+                proposal.namespace_id(),
+                proposal.normalized_key(),
+            )?;
+            let proposer_is_historical = profiles
+                .active_profile(proposer.profile_id())
+                .is_none_or(|active| active.reference() != *proposal.proposer());
+            let event = ApplicationEvent::MemoryProposalShown {
+                proposal: proposal.reference(),
+                status,
+                resolution: resolution.clone(),
+            };
+            let view = CommandView::MemoryProposal(MemoryProposalView {
+                proposal,
+                status,
+                resolution,
+                current_entry,
+                proposer_is_historical,
+                proposer_identity: memory_profile_identity(proposer),
+                namespace_owner_identity: memory_profile_identity(&owner),
+            });
+            Ok((event, view))
+        }
+        ApplicationCommand::ListEpisodicSummaries { selector } => {
+            let profile = resolve_memory_profile(profiles, selector)?;
+            let page =
+                MemoryRepository::list_episodic_summaries(tx, profile.memory_namespace_id(), 100)?;
+            let event = ApplicationEvent::EpisodicSummariesListed {
+                profile: profile.reference(),
+                summaries: page
+                    .records
+                    .iter()
+                    .map(|record| record.summary.clone())
+                    .collect(),
+                total_count: page.total_count,
+                returned_count: page.returned_count,
+                omitted_count: page.omitted_count,
+            };
+            let view = CommandView::EpisodicSummaries(EpisodicSummariesView {
+                profile: profile.reference(),
+                namespace_id: profile.memory_namespace_id(),
+                summaries: page
+                    .records
+                    .into_iter()
+                    .map(|record| EpisodicSummaryListItem {
+                        summary: record.summary,
+                        label: record.label,
+                        purpose_tags: record.purpose_tags,
+                        source_count: record.source_count,
+                        created_at_ms: record.created_at_ms,
+                    })
+                    .collect(),
+                total_count: page.total_count,
+                returned_count: page.returned_count,
+                omitted_count: page.omitted_count,
+            });
+            Ok((event, view))
+        }
+        ApplicationCommand::ShowEpisodicSummary { summary_id } => {
+            let summary = MemoryRepository::load_episodic_summary(tx, *summary_id)?
+                .ok_or(AppError::EpisodicSummaryNotFound)?;
+            let profile = profiles
+                .resolve_reference(summary.reference().profile())
+                .map_err(|_| PersistenceError::MemoryRowMismatch)?;
+            if profile.memory_namespace_id() != summary.reference().namespace_id() {
+                return Err(PersistenceError::MemoryRowMismatch.into());
+            }
+            Ok((
+                ApplicationEvent::EpisodicSummaryShown {
+                    summary: summary.reference(),
+                },
+                CommandView::EpisodicSummary(EpisodicSummaryView {
+                    summary,
+                    qualification: EpisodicQualification::SummaryVerifySources,
+                }),
+            ))
+        }
+        _ => Err(AppError::WrongMemoryCommandDispatcher),
+    }
+}
+
+fn prepare_memory_snapshot(
+    tx: &ImmediateTransaction<'_>,
+    profiles: &AgentProfilesProjection,
+    request: &MemoryRetrievalRequest,
+) -> Result<(ApplicationEvent, CommandView), AppError> {
+    let profile = profiles
+        .resolve_reference(request.scope().profile())
+        .map_err(AppError::from)?;
+    request.scope().validate_against(profile)?;
+    let snapshot = MemoryRepository::build_snapshot(tx, request)?;
+    let metadata = snapshot.metadata();
+    Ok((
+        ApplicationEvent::MemorySnapshotBuilt { metadata },
+        CommandView::MemorySnapshot(MemorySnapshotView { snapshot }),
+    ))
 }
 
 fn prepare_event(
@@ -2138,6 +2574,682 @@ fn normalize_catalog_readiness(view: &mut CommandView) {
     }
 }
 
+fn materialize_memory_view(
+    tx: &ImmediateTransaction<'_>,
+    command: &ApplicationCommand,
+    event: &crate::app::EventEnvelope,
+    projection_at_event: &ProjectionState,
+) -> Result<CommandView, AppError> {
+    fn load_exact_entry(
+        tx: &ImmediateTransaction<'_>,
+        reference: &crate::memory::MemoryEntryRef,
+    ) -> Result<crate::memory::MemoryEntryVersion, AppError> {
+        let entry = MemoryRepository::load_entry_version(
+            tx,
+            reference.namespace_id(),
+            reference.normalized_key(),
+            reference.version(),
+        )?
+        .ok_or_else(invalid_receipt)?;
+        if entry.reference() != *reference {
+            return Err(invalid_receipt());
+        }
+        Ok(entry)
+    }
+
+    fn validate_predecessor(
+        tx: &ImmediateTransaction<'_>,
+        entry: &crate::memory::MemoryEntryVersion,
+        expected: &ExpectedMemoryEntryState,
+    ) -> Result<(), AppError> {
+        match expected {
+            ExpectedMemoryEntryState::Absent
+                if entry.reference().version().get() == 1
+                    && entry.predecessor_version_id().is_none() => {}
+            ExpectedMemoryEntryState::Present(reference)
+            | ExpectedMemoryEntryState::Deleted(reference) => {
+                let predecessor = load_exact_entry(tx, reference)?;
+                if predecessor.reference().entry_id() != entry.reference().entry_id()
+                    || predecessor.reference().namespace_id() != entry.reference().namespace_id()
+                    || predecessor.reference().normalized_key()
+                        != entry.reference().normalized_key()
+                    || entry.predecessor_version_id()
+                        != Some(predecessor.reference().entry_version_id())
+                    || predecessor.reference().version().get().checked_add(1)
+                        != Some(entry.reference().version().get())
+                {
+                    return Err(invalid_receipt());
+                }
+            }
+            _ => return Err(invalid_receipt()),
+        }
+        Ok(())
+    }
+
+    match (command, &event.event) {
+        (
+            ApplicationCommand::ListMemoryEntries { selector },
+            ApplicationEvent::MemoryEntriesListed {
+                profile,
+                namespace_id,
+                entries,
+                total_count,
+                returned_count,
+                omitted_count,
+            },
+        ) => {
+            let selected = resolve_memory_profile(&projection_at_event.agent_profiles, selector)
+                .map_err(|_| invalid_receipt())?;
+            let exact = projection_at_event
+                .agent_profiles
+                .resolve_reference(profile)
+                .map_err(|_| invalid_receipt())?;
+            if selected != exact
+                || exact.memory_namespace_id() != *namespace_id
+                || u64::try_from(entries.len()).ok() != Some(*returned_count)
+                || returned_count.checked_add(*omitted_count) != Some(*total_count)
+            {
+                return Err(invalid_receipt());
+            }
+            let mut summaries = Vec::with_capacity(entries.len());
+            for reference in entries {
+                let entry = MemoryRepository::load_entry_version(
+                    tx,
+                    reference.namespace_id(),
+                    reference.normalized_key(),
+                    reference.version(),
+                )?
+                .ok_or_else(invalid_receipt)?;
+                if entry.reference() != *reference {
+                    return Err(invalid_receipt());
+                }
+                summaries.push(MemoryEntrySummary {
+                    entry: reference.clone(),
+                    display_key: entry.display_key().to_owned(),
+                    purpose_tags: entry.purpose_tags().to_vec(),
+                    value_bytes: u64::try_from(entry.value().ok_or_else(invalid_receipt)?.len())
+                        .map_err(|_| invalid_receipt())?,
+                    created_at_ms: entry.created_at_ms(),
+                });
+            }
+            Ok(CommandView::MemoryEntries(MemoryEntriesView {
+                profile: profile.clone(),
+                namespace_id: *namespace_id,
+                entries: summaries,
+                total_count: *total_count,
+                returned_count: *returned_count,
+                omitted_count: *omitted_count,
+            }))
+        }
+        (
+            ApplicationCommand::ShowMemoryEntry {
+                selector,
+                display_key,
+            },
+            ApplicationEvent::MemoryEntryShown { profile, entry },
+        ) => {
+            let selected = resolve_memory_profile(&projection_at_event.agent_profiles, selector)
+                .map_err(|_| invalid_receipt())?;
+            let exact = projection_at_event
+                .agent_profiles
+                .resolve_reference(profile)
+                .map_err(|_| invalid_receipt())?;
+            let key = NormalizedMemoryKey::new(display_key).map_err(|_| invalid_receipt())?;
+            if selected != exact
+                || exact.memory_namespace_id() != entry.namespace_id()
+                || &key != entry.normalized_key()
+                || entry.state() != MemoryEntryState::Present
+            {
+                return Err(invalid_receipt());
+            }
+            let stored = MemoryRepository::load_entry_version(
+                tx,
+                entry.namespace_id(),
+                entry.normalized_key(),
+                entry.version(),
+            )?
+            .ok_or_else(invalid_receipt)?;
+            if stored.reference() != *entry {
+                return Err(invalid_receipt());
+            }
+            Ok(CommandView::MemoryEntry(MemoryEntryView {
+                profile: profile.clone(),
+                entry: stored,
+            }))
+        }
+        (
+            ApplicationCommand::ShowMemoryEntryHistory {
+                selector,
+                display_key,
+            },
+            ApplicationEvent::MemoryEntryHistoryShown {
+                profile,
+                current,
+                versions,
+                total_count,
+                returned_count,
+                omitted_count,
+            },
+        ) => {
+            let selected = resolve_memory_profile(&projection_at_event.agent_profiles, selector)
+                .map_err(|_| invalid_receipt())?;
+            let exact = projection_at_event
+                .agent_profiles
+                .resolve_reference(profile)
+                .map_err(|_| invalid_receipt())?;
+            let key = NormalizedMemoryKey::new(display_key).map_err(|_| invalid_receipt())?;
+            if selected != exact
+                || exact.memory_namespace_id() != current.namespace_id()
+                || &key != current.normalized_key()
+                || versions.first() != Some(current)
+                || u64::try_from(versions.len()).ok() != Some(*returned_count)
+                || returned_count.checked_add(*omitted_count) != Some(*total_count)
+            {
+                return Err(invalid_receipt());
+            }
+            let mut summaries = Vec::with_capacity(versions.len());
+            for reference in versions {
+                let entry = MemoryRepository::load_entry_version(
+                    tx,
+                    reference.namespace_id(),
+                    reference.normalized_key(),
+                    reference.version(),
+                )?
+                .ok_or_else(invalid_receipt)?;
+                if entry.reference() != *reference {
+                    return Err(invalid_receipt());
+                }
+                summaries.push(MemoryEntryHistorySummary {
+                    entry: reference.clone(),
+                    display_key: entry.display_key().to_owned(),
+                    created_at_ms: entry.created_at_ms(),
+                    accepted_proposal: entry.accepted_proposal().cloned(),
+                });
+            }
+            Ok(CommandView::MemoryEntryHistory(MemoryEntryHistoryView {
+                profile: profile.clone(),
+                current: current.clone(),
+                versions: summaries,
+                total_count: *total_count,
+                returned_count: *returned_count,
+                omitted_count: *omitted_count,
+            }))
+        }
+        (
+            ApplicationCommand::ShowMemoryEntryVersion {
+                selector,
+                display_key,
+                version,
+            },
+            ApplicationEvent::MemoryEntryVersionShown { profile, entry },
+        ) => {
+            let selected = resolve_memory_profile(&projection_at_event.agent_profiles, selector)
+                .map_err(|_| invalid_receipt())?;
+            let exact = projection_at_event
+                .agent_profiles
+                .resolve_reference(profile)
+                .map_err(|_| invalid_receipt())?;
+            let key = NormalizedMemoryKey::new(display_key).map_err(|_| invalid_receipt())?;
+            if selected != exact
+                || exact.memory_namespace_id() != entry.namespace_id()
+                || &key != entry.normalized_key()
+                || *version != entry.version()
+            {
+                return Err(invalid_receipt());
+            }
+            let stored = MemoryRepository::load_entry_version(
+                tx,
+                entry.namespace_id(),
+                entry.normalized_key(),
+                entry.version(),
+            )?
+            .ok_or_else(invalid_receipt)?;
+            if stored.reference() != *entry {
+                return Err(invalid_receipt());
+            }
+            Ok(CommandView::MemoryEntryVersion(MemoryEntryVersionView {
+                profile: profile.clone(),
+                entry: stored,
+            }))
+        }
+        (
+            ApplicationCommand::ListMemoryProposals { selector, filter },
+            ApplicationEvent::MemoryProposalsListed {
+                profile,
+                filter: event_filter,
+                proposals,
+                total_count,
+                returned_count,
+                omitted_count,
+            },
+        ) => {
+            let selected = resolve_memory_profile(&projection_at_event.agent_profiles, selector)
+                .map_err(|_| invalid_receipt())?;
+            let exact = projection_at_event
+                .agent_profiles
+                .resolve_reference(profile)
+                .map_err(|_| invalid_receipt())?;
+            if selected != exact
+                || filter != event_filter
+                || u64::try_from(proposals.len()).ok() != Some(*returned_count)
+                || returned_count.checked_add(*omitted_count) != Some(*total_count)
+            {
+                return Err(invalid_receipt());
+            }
+            let mut summaries = Vec::with_capacity(proposals.len());
+            for reference in proposals {
+                let (proposal, _, _) =
+                    MemoryRepository::load_proposal(tx, reference.proposal.proposal_id())?
+                        .ok_or_else(invalid_receipt)?;
+                if proposal.reference() != reference.proposal
+                    || proposal.namespace_id() != exact.memory_namespace_id()
+                    || (*event_filter == crate::memory::MemoryProposalFilter::Pending
+                        && reference.status != MemoryProposalStatus::Pending)
+                {
+                    return Err(invalid_receipt());
+                }
+                summaries.push(MemoryProposalSummary {
+                    proposal: proposal.reference(),
+                    proposer: proposal.proposer().clone(),
+                    operation: match proposal.operation() {
+                        MemoryProposalOperation::Set { .. } => MemoryProposalOperationKind::Set,
+                        MemoryProposalOperation::Delete => MemoryProposalOperationKind::Delete,
+                    },
+                    display_key: proposal.display_key().to_owned(),
+                    status: reference.status,
+                    created_at_ms: proposal.created_at_ms(),
+                });
+            }
+            Ok(CommandView::MemoryProposals(MemoryProposalsView {
+                profile: profile.clone(),
+                namespace_id: exact.memory_namespace_id(),
+                filter: *event_filter,
+                proposals: summaries,
+                total_count: *total_count,
+                returned_count: *returned_count,
+                omitted_count: *omitted_count,
+            }))
+        }
+        (
+            ApplicationCommand::ShowMemoryProposal { proposal_id },
+            ApplicationEvent::MemoryProposalShown {
+                proposal: proposal_ref,
+                status,
+                resolution,
+            },
+        ) => {
+            if *proposal_id != proposal_ref.proposal_id() {
+                return Err(invalid_receipt());
+            }
+            let (proposal, _, _) =
+                MemoryRepository::load_proposal(tx, *proposal_id)?.ok_or_else(invalid_receipt)?;
+            if proposal.reference() != *proposal_ref {
+                return Err(invalid_receipt());
+            }
+            let proposer = projection_at_event
+                .agent_profiles
+                .resolve_reference(proposal.proposer())
+                .map_err(|_| invalid_receipt())?;
+            let owner = projection_at_event
+                .agent_profiles
+                .active_profiles()
+                .into_iter()
+                .find(|profile| profile.memory_namespace_id() == proposal.namespace_id())
+                .ok_or_else(invalid_receipt)?;
+            let current_entry = match projection_at_event
+                .memory
+                .current_entry(proposal.namespace_id(), proposal.normalized_key())
+            {
+                None => ExpectedMemoryEntryState::Absent,
+                Some(entry) if entry.state() == MemoryEntryState::Present => {
+                    ExpectedMemoryEntryState::Present(entry.clone())
+                }
+                Some(entry) => ExpectedMemoryEntryState::Deleted(entry.clone()),
+            };
+            let proposer_is_historical = projection_at_event
+                .agent_profiles
+                .active_profile(proposer.profile_id())
+                .is_none_or(|active| active.reference() != *proposal.proposer());
+            Ok(CommandView::MemoryProposal(MemoryProposalView {
+                proposal,
+                status: *status,
+                resolution: resolution.clone(),
+                current_entry,
+                proposer_is_historical,
+                proposer_identity: memory_profile_identity(proposer),
+                namespace_owner_identity: memory_profile_identity(&owner),
+            }))
+        }
+        (
+            ApplicationCommand::ListEpisodicSummaries { selector },
+            ApplicationEvent::EpisodicSummariesListed {
+                profile,
+                summaries,
+                total_count,
+                returned_count,
+                omitted_count,
+            },
+        ) => {
+            let selected = resolve_memory_profile(&projection_at_event.agent_profiles, selector)
+                .map_err(|_| invalid_receipt())?;
+            let exact = projection_at_event
+                .agent_profiles
+                .resolve_reference(profile)
+                .map_err(|_| invalid_receipt())?;
+            if selected != exact
+                || u64::try_from(summaries.len()).ok() != Some(*returned_count)
+                || returned_count.checked_add(*omitted_count) != Some(*total_count)
+            {
+                return Err(invalid_receipt());
+            }
+            let mut items = Vec::with_capacity(summaries.len());
+            for reference in summaries {
+                let summary = MemoryRepository::load_episodic_summary(tx, reference.summary_id())?
+                    .ok_or_else(invalid_receipt)?;
+                if summary.reference() != *reference
+                    || reference.profile() != profile
+                    || reference.namespace_id() != exact.memory_namespace_id()
+                {
+                    return Err(invalid_receipt());
+                }
+                items.push(EpisodicSummaryListItem {
+                    summary: reference.clone(),
+                    label: summary.label().to_owned(),
+                    purpose_tags: summary.purpose_tags().to_vec(),
+                    source_count: u64::try_from(summary.sources().len())
+                        .map_err(|_| invalid_receipt())?,
+                    created_at_ms: summary.created_at_ms(),
+                });
+            }
+            Ok(CommandView::EpisodicSummaries(EpisodicSummariesView {
+                profile: profile.clone(),
+                namespace_id: exact.memory_namespace_id(),
+                summaries: items,
+                total_count: *total_count,
+                returned_count: *returned_count,
+                omitted_count: *omitted_count,
+            }))
+        }
+        (
+            ApplicationCommand::ShowEpisodicSummary { summary_id },
+            ApplicationEvent::EpisodicSummaryShown { summary: reference },
+        ) => {
+            if *summary_id != reference.summary_id() {
+                return Err(invalid_receipt());
+            }
+            projection_at_event
+                .agent_profiles
+                .resolve_reference(reference.profile())
+                .map_err(|_| invalid_receipt())?;
+            let summary = MemoryRepository::load_episodic_summary(tx, *summary_id)?
+                .ok_or_else(invalid_receipt)?;
+            if summary.reference() != *reference {
+                return Err(invalid_receipt());
+            }
+            Ok(CommandView::EpisodicSummary(EpisodicSummaryView {
+                summary,
+                qualification: EpisodicQualification::SummaryVerifySources,
+            }))
+        }
+        (
+            ApplicationCommand::BuildMemorySnapshot { request },
+            ApplicationEvent::MemorySnapshotBuilt { metadata },
+        ) => {
+            if request.scope() != metadata.scope() || request.budget() != metadata.budget() {
+                return Err(invalid_receipt());
+            }
+            let profile = projection_at_event
+                .agent_profiles
+                .resolve_reference(metadata.scope().profile())
+                .map_err(|_| invalid_receipt())?;
+            metadata
+                .scope()
+                .validate_against(profile)
+                .map_err(|_| invalid_receipt())?;
+            let mut entries = Vec::with_capacity(metadata.entry_refs().len());
+            for reference in metadata.entry_refs() {
+                let entry = MemoryRepository::load_entry_version(
+                    tx,
+                    reference.namespace_id(),
+                    reference.normalized_key(),
+                    reference.version(),
+                )?
+                .ok_or_else(invalid_receipt)?;
+                if entry.reference() != *reference {
+                    return Err(invalid_receipt());
+                }
+                entries.push(MemoryKvContextItem::from_entry(&entry)?);
+            }
+            let mut summaries = Vec::with_capacity(metadata.summary_refs().len());
+            for reference in metadata.summary_refs() {
+                let summary = MemoryRepository::load_episodic_summary(tx, reference.summary_id())?
+                    .ok_or_else(invalid_receipt)?;
+                if summary.reference() != *reference {
+                    return Err(invalid_receipt());
+                }
+                summaries.push(EpisodicContextItem::from_summary(&summary)?);
+            }
+            let snapshot = MemorySnapshot::replay(metadata.clone(), entries, summaries)
+                .map_err(|_| invalid_receipt())?;
+            Ok(CommandView::MemorySnapshot(MemorySnapshotView { snapshot }))
+        }
+        (
+            ApplicationCommand::ProposeMemoryMutation {
+                proposer,
+                expected,
+                operation,
+                rationale,
+            },
+            ApplicationEvent::MemoryProposalCreated { proposal, approval },
+        ) => {
+            let exact = projection_at_event
+                .agent_profiles
+                .resolve_reference(proposer)
+                .map_err(|_| invalid_receipt())?;
+            if proposal.proposer() != proposer
+                || proposal.namespace_id() != exact.memory_namespace_id()
+                || proposal.expected() != expected
+                || proposal.operation() != operation
+                || proposal.rationale() != rationale
+                || approval.approval_id() != proposal.approval_id()
+                || approval.status() != crate::policy::ApprovalStatus::Pending
+            {
+                return Err(invalid_receipt());
+            }
+            let (stored, _, _) =
+                MemoryRepository::load_proposal(tx, proposal.reference().proposal_id())?
+                    .ok_or_else(invalid_receipt)?;
+            if stored != *proposal {
+                return Err(invalid_receipt());
+            }
+            Ok(CommandView::MemoryProposalCreated(
+                MemoryProposalCreatedView {
+                    proposal: proposal.reference(),
+                    approval_id: approval.approval_id(),
+                    status: MemoryProposalStatus::Pending,
+                },
+            ))
+        }
+        (
+            ApplicationCommand::SetMemoryEntry {
+                profile,
+                expected,
+                candidate,
+                ..
+            },
+            ApplicationEvent::MemoryEntrySet {
+                entry,
+                expired_proposals,
+            },
+        ) => {
+            let exact = projection_at_event
+                .agent_profiles
+                .resolve_reference(profile)
+                .map_err(|_| invalid_receipt())?;
+            if exact.memory_namespace_id() != entry.reference().namespace_id()
+                || entry.reference().state() != MemoryEntryState::Present
+                || entry.display_key() != candidate.display_key()
+                || entry.value() != Some(candidate.value())
+                || entry.purpose_tags() != candidate.purpose_tags()
+                || entry.reference().normalized_key() != &candidate.normalized_key()
+            {
+                return Err(invalid_receipt());
+            }
+            validate_predecessor(tx, entry, expected)?;
+            let stored = load_exact_entry(tx, &entry.reference())?;
+            if stored != *entry {
+                return Err(invalid_receipt());
+            }
+            Ok(CommandView::MemoryEntryMutation(MemoryEntryMutationView {
+                entry: entry.reference(),
+                expired_proposals: expired_proposals
+                    .iter()
+                    .map(|resolution| resolution.proposal().clone())
+                    .collect(),
+            }))
+        }
+        (
+            ApplicationCommand::DeleteMemoryEntry {
+                profile, expected, ..
+            },
+            ApplicationEvent::MemoryEntryDeleted {
+                entry,
+                expired_proposals,
+            },
+        ) => {
+            let exact = projection_at_event
+                .agent_profiles
+                .resolve_reference(profile)
+                .map_err(|_| invalid_receipt())?;
+            if exact.memory_namespace_id() != entry.reference().namespace_id()
+                || entry.reference().state() != MemoryEntryState::Deleted
+            {
+                return Err(invalid_receipt());
+            }
+            validate_predecessor(
+                tx,
+                entry,
+                &ExpectedMemoryEntryState::Present(expected.clone()),
+            )?;
+            let stored = load_exact_entry(tx, &entry.reference())?;
+            if stored != *entry {
+                return Err(invalid_receipt());
+            }
+            Ok(CommandView::MemoryEntryMutation(MemoryEntryMutationView {
+                entry: entry.reference(),
+                expired_proposals: expired_proposals
+                    .iter()
+                    .map(|resolution| resolution.proposal().clone())
+                    .collect(),
+            }))
+        }
+        (
+            ApplicationCommand::ApproveMemoryProposal {
+                proposal: command_proposal,
+                approval_id,
+                expected_approval_status,
+                expected_entry,
+                ..
+            },
+            ApplicationEvent::MemoryProposalAccepted {
+                resolution,
+                entry,
+                expired_proposals,
+            },
+        ) => {
+            if *expected_approval_status != crate::policy::ApprovalStatus::Pending
+                || resolution.proposal() != command_proposal
+                || resolution.approval_id() != *approval_id
+                || resolution.status() != MemoryProposalStatus::Accepted
+                || entry.accepted_proposal() != Some(command_proposal)
+            {
+                return Err(invalid_receipt());
+            }
+            let (proposal, status, stored_resolution) =
+                MemoryRepository::load_proposal(tx, command_proposal.proposal_id())?
+                    .ok_or_else(invalid_receipt)?;
+            if proposal.reference() != *command_proposal
+                || proposal.approval_id() != *approval_id
+                || proposal.expected() != expected_entry
+                || status != MemoryProposalStatus::Accepted
+                || stored_resolution.as_ref() != Some(resolution)
+            {
+                return Err(invalid_receipt());
+            }
+            projection_at_event
+                .agent_profiles
+                .resolve_reference(proposal.proposer())
+                .map_err(|_| invalid_receipt())?;
+            validate_predecessor(tx, entry, expected_entry)?;
+            match proposal.operation() {
+                MemoryProposalOperation::Set { candidate }
+                    if entry.reference().state() == MemoryEntryState::Present
+                        && entry.display_key() == candidate.display_key()
+                        && entry.value() == Some(candidate.value())
+                        && entry.purpose_tags() == candidate.purpose_tags() => {}
+                MemoryProposalOperation::Delete
+                    if entry.reference().state() == MemoryEntryState::Deleted => {}
+                _ => return Err(invalid_receipt()),
+            }
+            let stored_entry = load_exact_entry(tx, &entry.reference())?;
+            if stored_entry != *entry {
+                return Err(invalid_receipt());
+            }
+            Ok(CommandView::MemoryProposalResolution(
+                MemoryProposalResolutionView {
+                    resolution: resolution.clone(),
+                    entry: Some(entry.reference()),
+                    expired_proposals: expired_proposals
+                        .iter()
+                        .map(|expired| expired.proposal().clone())
+                        .collect(),
+                },
+            ))
+        }
+        (
+            ApplicationCommand::RejectMemoryProposal {
+                proposal: command_proposal,
+                approval_id,
+                expected_approval_status,
+                expected_entry,
+                ..
+            },
+            ApplicationEvent::MemoryProposalRejected { resolution },
+        ) => {
+            if *expected_approval_status != crate::policy::ApprovalStatus::Pending
+                || resolution.proposal() != command_proposal
+                || resolution.approval_id() != *approval_id
+                || resolution.status() != MemoryProposalStatus::Rejected
+            {
+                return Err(invalid_receipt());
+            }
+            let (proposal, status, stored_resolution) =
+                MemoryRepository::load_proposal(tx, command_proposal.proposal_id())?
+                    .ok_or_else(invalid_receipt)?;
+            if proposal.reference() != *command_proposal
+                || proposal.approval_id() != *approval_id
+                || proposal.expected() != expected_entry
+                || status != MemoryProposalStatus::Rejected
+                || stored_resolution.as_ref() != Some(resolution)
+            {
+                return Err(invalid_receipt());
+            }
+            projection_at_event
+                .agent_profiles
+                .resolve_reference(proposal.proposer())
+                .map_err(|_| invalid_receipt())?;
+            Ok(CommandView::MemoryProposalResolution(
+                MemoryProposalResolutionView {
+                    resolution: resolution.clone(),
+                    entry: None,
+                    expired_proposals: vec![],
+                },
+            ))
+        }
+        _ => Err(invalid_receipt()),
+    }
+}
+
 fn materialize_success(
     transaction: &ImmediateTransaction<'_>,
     command_id: CommandId,
@@ -2154,6 +3266,16 @@ fn materialize_success(
         || event.causation_id != Some(CausationId::from_uuid(command_id.as_uuid()))
     {
         return Err(invalid_receipt());
+    }
+    if is_memory_command(&request.command) {
+        let view = materialize_memory_view(transaction, &request.command, event, projection)?;
+        return Ok(CommandOutcome {
+            command_id,
+            correlation_id: request.correlation_id,
+            committed_events: events.to_vec(),
+            view,
+            shutdown: ShutdownDisposition::Continue,
+        });
     }
     match &event.event {
         ApplicationEvent::SkillCreated { skill, .. }

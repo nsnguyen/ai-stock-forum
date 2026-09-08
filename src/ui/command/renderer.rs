@@ -1025,9 +1025,11 @@ fn app_error_message(error: &AppError) -> &'static str {
         | AppError::SkillAlreadyAssigned
         | AppError::SkillNotAssigned
         | AppError::AgentSkillLimitExceeded => "Skill operation could not be completed.",
-        AppError::MemoryCommandNotImplemented | AppError::WrongMemoryCommandDispatcher => {
-            "Memory operation could not be completed."
-        }
+        AppError::MemoryEntryNotFound
+        | AppError::MemoryProposalNotFound
+        | AppError::EpisodicSummaryNotFound
+        | AppError::MemoryCommandNotImplemented
+        | AppError::WrongMemoryCommandDispatcher => "Memory operation could not be completed.",
         AppError::LifecycleFinished => "Application is shutting down.",
     }
 }

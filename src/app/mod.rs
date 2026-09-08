@@ -96,6 +96,12 @@ pub enum AppError {
     BindingReferenceUnavailable,
     #[error("application lifecycle is already finished")]
     LifecycleFinished,
+    #[error("memory entry was not found")]
+    MemoryEntryNotFound,
+    #[error("memory proposal was not found")]
+    MemoryProposalNotFound,
+    #[error("episodic summary was not found")]
+    EpisodicSummaryNotFound,
     #[error("memory command is not implemented")]
     MemoryCommandNotImplemented,
     #[error("wrong memory command dispatcher")]
@@ -128,6 +134,9 @@ impl AppError {
             Self::AgentProfileHistoryMismatch => "agent_profile_history_mismatch",
             Self::BindingReferenceUnavailable => "binding_reference_unavailable",
             Self::LifecycleFinished => "lifecycle_finished",
+            Self::MemoryEntryNotFound => "memory_entry_not_found",
+            Self::MemoryProposalNotFound => "memory_proposal_not_found",
+            Self::EpisodicSummaryNotFound => "episodic_summary_not_found",
             Self::MemoryCommandNotImplemented => "memory_command_not_implemented",
             Self::WrongMemoryCommandDispatcher => "wrong_memory_command_dispatcher",
         }

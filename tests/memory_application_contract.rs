@@ -27,7 +27,7 @@ use ai_stock_forum::{
         MemoryProposalResolution, MemoryProposalStatus, MemoryPurposeScope, MemoryRetrievalBudget,
         MemoryRetrievalRequest, MemoryRetrievalScope, select_snapshot,
     },
-    policy::{ApprovalStatus, Capability, PolicyDecision},
+    policy::{ApprovalStatus, Capability},
     setup::SetupStatus,
     ui::{
         command::TextRenderer,
@@ -276,13 +276,13 @@ fn staged_errors_are_content_free_and_have_exact_codes() {
 }
 
 #[test]
-fn every_memory_command_is_deliberately_staged_through_the_service() {
+fn five_fresh_memory_mutations_remain_deliberately_staged_through_the_service() {
     let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
     let mut app = support::app_with_policy(Arc::new(policy.clone()));
     let event_count = app.max_event_sequence();
     let clock_calls = app.clock.calls();
     let id_calls = app.ids.calls();
-    for (index, (actor, command, capability)) in commands().into_iter().enumerate() {
+    for (index, (actor, command, capability)) in commands().into_iter().take(5).enumerate() {
         let envelope = CommandEnvelope {
             command_id: CommandId::from_uuid(uuid(1_000 + index as u128)),
             correlation_id: CorrelationId::from_uuid(uuid(2_000 + index as u128)),
@@ -303,17 +303,88 @@ fn every_memory_command_is_deliberately_staged_through_the_service() {
 }
 
 #[test]
-fn default_policy_remains_unexpanded_until_task_nine() {
+fn default_policy_grants_memory_read_before_profile_resolution() {
     let mut app = support::app();
     assert_eq!(
         app.execute_user(ApplicationCommand::ListMemoryEntries {
             selector: AgentProfileSelector::from(profile().profile_id()),
         }),
-        Err(AppError::CapabilityDenied {
-            capability: Capability::MemoryRead,
-            decision: PolicyDecision::DeniedByDefault,
-        })
+        Err(AppError::AgentProfileNotFound)
     );
+}
+
+#[test]
+fn memory_actor_matrix_is_exhaustive_and_runs_before_policy() {
+    let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
+    let mut app = support::app_with_policy(Arc::new(policy.clone()));
+    let examples = commands();
+
+    for (index, (_, command, capability)) in examples.iter().cloned().enumerate() {
+        let calls = policy.calls();
+        assert_eq!(
+            app.execute(CommandEnvelope {
+                command_id: CommandId::from_uuid(uuid(10_000 + index as u128)),
+                correlation_id: CorrelationId::from_uuid(uuid(11_000 + index as u128)),
+                actor: Actor::System,
+                command,
+            }),
+            Err(AppError::CapabilityDenied {
+                capability,
+                decision: ai_stock_forum::policy::PolicyDecision::Denied,
+            })
+        );
+        assert_eq!(policy.calls(), calls);
+    }
+
+    for (index, (_, command, capability)) in examples.iter().cloned().enumerate() {
+        let calls = policy.calls();
+        let result = app.execute(CommandEnvelope {
+            command_id: CommandId::from_uuid(uuid(12_000 + index as u128)),
+            correlation_id: CorrelationId::from_uuid(uuid(13_000 + index as u128)),
+            actor: Actor::Human,
+            command,
+        });
+        if index == 2 {
+            assert_eq!(
+                result,
+                Err(AppError::CapabilityDenied {
+                    capability,
+                    decision: ai_stock_forum::policy::PolicyDecision::Denied,
+                })
+            );
+            assert_eq!(policy.calls(), calls);
+        } else {
+            assert!(!matches!(result, Err(AppError::CapabilityDenied { .. })));
+            assert_eq!(policy.calls(), calls + 1);
+        }
+    }
+
+    for (index, (valid_actor, command, capability)) in examples.into_iter().enumerate() {
+        let actor = match &valid_actor {
+            Actor::Agent(id) => Actor::Agent(*id),
+            _ => Actor::Agent(AgentProfileId::from_uuid(uuid(99_999))),
+        };
+        let calls = policy.calls();
+        let result = app.execute(CommandEnvelope {
+            command_id: CommandId::from_uuid(uuid(14_000 + index as u128)),
+            correlation_id: CorrelationId::from_uuid(uuid(15_000 + index as u128)),
+            actor,
+            command,
+        });
+        if index == 2 {
+            assert_eq!(result, Err(AppError::MemoryCommandNotImplemented));
+            assert_eq!(policy.calls(), calls + 1);
+        } else {
+            assert_eq!(
+                result,
+                Err(AppError::CapabilityDenied {
+                    capability,
+                    decision: ai_stock_forum::policy::PolicyDecision::Denied,
+                })
+            );
+            assert_eq!(policy.calls(), calls);
+        }
+    }
 }
 
 #[test]

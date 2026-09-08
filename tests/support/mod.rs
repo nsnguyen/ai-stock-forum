@@ -641,6 +641,15 @@ impl DerefMut for TestApp {
 }
 
 impl TestApp {
+    pub fn open_database(&self) -> Database {
+        Database::open(&self.paths).unwrap()
+    }
+
+    pub fn projection(&self) -> ai_stock_forum::recovery::ProjectionState {
+        let database = Database::open(&self.paths).unwrap();
+        ProjectionRepository::load(database.connection()).unwrap()
+    }
+
     pub fn count_rows(&self, table: &str) -> i64 {
         assert!(matches!(
             table,

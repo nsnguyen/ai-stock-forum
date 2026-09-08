@@ -620,6 +620,24 @@ impl MemorySnapshot {
             snapshot_digest: self.snapshot_digest.clone(),
         }
     }
+    pub(crate) fn replay(
+        metadata: MemorySnapshotMetadata,
+        entries: Vec<MemoryKvContextItem>,
+        summaries: Vec<EpisodicContextItem>,
+    ) -> Result<Self, DomainError> {
+        let snapshot = Self::from_parts(
+            metadata.scope.clone(),
+            metadata.budget.clone(),
+            entries,
+            summaries,
+            metadata.accounting.clone(),
+            metadata.snapshot_digest.clone(),
+        )?;
+        if snapshot.metadata() != metadata {
+            return Err(DomainError::InvalidMemorySnapshot);
+        }
+        Ok(snapshot)
+    }
     fn from_parts(
         scope: MemoryRetrievalScope,
         budget: MemoryRetrievalBudget,
