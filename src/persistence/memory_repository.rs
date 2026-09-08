@@ -1349,7 +1349,14 @@ fn validate_entry_batch_context(
             _ => return Err(PersistenceError::MemoryRowMismatch),
         }
     }
-    validate_accepted_proposal_refs(tx, entries)
+    validate_accepted_proposal_refs(tx, entries)?;
+    if entries
+        .iter()
+        .any(|entry| entry.accepted_proposal().is_some())
+    {
+        validate_entry_dependency_graph(tx, entries)?;
+    }
+    Ok(())
 }
 
 fn validate_accepted_proposal_refs(
@@ -1380,6 +1387,8 @@ fn validate_accepted_proposal_refs(
               WHERE p.proposal_id IS NULL
                  OR p.version<>json_extract(wanted.value,'$.version')
                  OR p.content_digest<>json_extract(wanted.value,'$.digest')
+                 OR c.proposal_id IS NULL
+                 OR c.status IS NULL
                  OR c.status<>'accepted'
          )",
             [references_json],
@@ -1392,6 +1401,443 @@ fn validate_accepted_proposal_refs(
         Ok(())
     }
 }
+
+const MAX_MEMORY_DEPENDENCY_NODES: usize = 4_096;
+
+/// Authenticates the complete entry/proposal dependency graph in a fixed set of
+/// bulk phases. `UNION` makes discovery cycle-safe and de-duplicates shared
+/// dependencies; no phase issues SQL per record.
+fn validate_entry_dependency_graph(
+    tx: &ImmediateTransaction<'_>,
+    roots: &[MemoryEntryVersion],
+) -> Result<(), PersistenceError> {
+    let root_ids = roots
+        .iter()
+        .map(|entry| entry.reference().entry_version_id().to_string())
+        .collect::<Vec<_>>();
+    let root_ids_json = canonical_json_bytes(&root_ids).map_err(integrity)?;
+    let mut statement = tx
+        .transaction()
+        .prepare(
+            "WITH RECURSIVE dependency(kind,id) AS (
+                 SELECT 'entry', CAST(value AS TEXT)
+                   FROM json_each(CAST(?1 AS TEXT))
+                 UNION
+                 SELECT 'entry', v.predecessor_version_id
+                   FROM dependency d
+                   JOIN memory_entry_versions v
+                     ON d.kind='entry' AND v.entry_version_id=d.id
+                  WHERE v.predecessor_version_id IS NOT NULL
+                 UNION
+                 SELECT 'proposal', v.accepted_proposal_id
+                   FROM dependency d
+                   JOIN memory_entry_versions v
+                     ON d.kind='entry' AND v.entry_version_id=d.id
+                  WHERE v.accepted_proposal_id IS NOT NULL
+                 UNION
+                 SELECT 'entry', p.expected_entry_version_id
+                   FROM dependency d
+                   JOIN memory_proposals p
+                     ON d.kind='proposal' AND p.proposal_id=d.id
+                  WHERE p.expected_entry_version_id IS NOT NULL
+             )
+             SELECT kind,id FROM dependency ORDER BY kind,id LIMIT ?2",
+        )
+        .map_err(query)?;
+    let nodes = statement
+        .query_map(
+            params![
+                root_ids_json,
+                to_i64((MAX_MEMORY_DEPENDENCY_NODES + 1) as u64)?
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(query)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(query)?;
+    if nodes.len() > MAX_MEMORY_DEPENDENCY_NODES {
+        return Err(PersistenceError::MemoryRowMismatch);
+    }
+    let entry_ids = nodes
+        .iter()
+        .filter(|(kind, _)| kind == "entry")
+        .map(|(_, id)| id.clone())
+        .collect::<Vec<_>>();
+    let proposal_ids = nodes
+        .iter()
+        .filter(|(kind, _)| kind == "proposal")
+        .map(|(_, id)| id.clone())
+        .collect::<Vec<_>>();
+    if entry_ids.len() + proposal_ids.len() != nodes.len() {
+        return Err(PersistenceError::MemoryRowMismatch);
+    }
+
+    let entries = load_dependency_entries(tx, &entry_ids)?;
+    let proposals = load_dependency_proposals(tx, &proposal_ids)?;
+
+    for root in roots {
+        let id = root.reference().entry_version_id().to_string();
+        if entries.get(&id) != Some(root) {
+            return Err(PersistenceError::MemoryRowMismatch);
+        }
+    }
+    for entry in entries.values() {
+        let reference = entry.reference();
+        match entry.predecessor_version_id() {
+            None if reference.version().get() == 1 => {}
+            Some(id) => {
+                let predecessor = entries
+                    .get(&id.to_string())
+                    .ok_or(PersistenceError::MemoryRowMismatch)?;
+                let predecessor_ref = predecessor.reference();
+                if predecessor_ref.namespace_id() != reference.namespace_id()
+                    || predecessor_ref.normalized_key() != reference.normalized_key()
+                    || predecessor_ref.entry_id() != reference.entry_id()
+                    || predecessor_ref.version().get().checked_add(1)
+                        != Some(reference.version().get())
+                {
+                    return Err(PersistenceError::MemoryRowMismatch);
+                }
+            }
+            _ => return Err(PersistenceError::MemoryRowMismatch),
+        }
+        if let Some(accepted) = entry.accepted_proposal() {
+            let (proposal, status) = proposals
+                .get(&accepted.proposal_id().to_string())
+                .ok_or(PersistenceError::MemoryRowMismatch)?;
+            if proposal.reference() != *accepted
+                || proposal.namespace_id() != reference.namespace_id()
+                || proposal.normalized_key() != reference.normalized_key()
+                || *status != MemoryProposalStatus::Accepted
+            {
+                return Err(PersistenceError::MemoryRowMismatch);
+            }
+        }
+    }
+    for (proposal, _) in proposals.values() {
+        if let ExpectedMemoryEntryState::Present(reference)
+        | ExpectedMemoryEntryState::Deleted(reference) = proposal.expected()
+        {
+            let entry = entries
+                .get(&reference.entry_version_id().to_string())
+                .ok_or(PersistenceError::MemoryRowMismatch)?;
+            if entry.reference() != *reference {
+                return Err(PersistenceError::MemoryRowMismatch);
+            }
+        }
+    }
+    validate_dependency_graph_acyclic(&entries, &proposals)?;
+    Ok(())
+}
+
+fn validate_dependency_graph_acyclic(
+    entries: &BTreeMap<String, MemoryEntryVersion>,
+    proposals: &BTreeMap<String, (MemoryProposal, MemoryProposalStatus)>,
+) -> Result<(), PersistenceError> {
+    let mut outgoing = BTreeMap::<String, Vec<String>>::new();
+    let mut indegree = BTreeMap::<String, usize>::new();
+    for id in entries.keys() {
+        indegree.insert(format!("entry:{id}"), 0);
+    }
+    for id in proposals.keys() {
+        indegree.insert(format!("proposal:{id}"), 0);
+    }
+    for (id, entry) in entries {
+        let source = format!("entry:{id}");
+        if let Some(predecessor) = entry.predecessor_version_id() {
+            add_dependency_edge(
+                &mut outgoing,
+                &mut indegree,
+                &source,
+                format!("entry:{predecessor}"),
+            )?;
+        }
+        if let Some(accepted) = entry.accepted_proposal() {
+            add_dependency_edge(
+                &mut outgoing,
+                &mut indegree,
+                &source,
+                format!("proposal:{}", accepted.proposal_id()),
+            )?;
+        }
+    }
+    for (id, (proposal, _)) in proposals {
+        if let ExpectedMemoryEntryState::Present(reference)
+        | ExpectedMemoryEntryState::Deleted(reference) = proposal.expected()
+        {
+            add_dependency_edge(
+                &mut outgoing,
+                &mut indegree,
+                &format!("proposal:{id}"),
+                format!("entry:{}", reference.entry_version_id()),
+            )?;
+        }
+    }
+
+    let mut ready = indegree
+        .iter()
+        .filter(|(_, degree)| **degree == 0)
+        .map(|(node, _)| node.clone())
+        .collect::<Vec<_>>();
+    let mut visited = 0usize;
+    while let Some(node) = ready.pop() {
+        visited += 1;
+        if let Some(targets) = outgoing.get(&node) {
+            for target in targets {
+                let degree = indegree
+                    .get_mut(target)
+                    .ok_or(PersistenceError::MemoryRowMismatch)?;
+                *degree = degree
+                    .checked_sub(1)
+                    .ok_or(PersistenceError::MemoryRowMismatch)?;
+                if *degree == 0 {
+                    ready.push(target.clone());
+                }
+            }
+        }
+    }
+    if visited == indegree.len() {
+        Ok(())
+    } else {
+        Err(PersistenceError::MemoryRowMismatch)
+    }
+}
+
+fn add_dependency_edge(
+    outgoing: &mut BTreeMap<String, Vec<String>>,
+    indegree: &mut BTreeMap<String, usize>,
+    source: &str,
+    target: String,
+) -> Result<(), PersistenceError> {
+    let degree = indegree
+        .get_mut(&target)
+        .ok_or(PersistenceError::MemoryRowMismatch)?;
+    *degree = degree
+        .checked_add(1)
+        .ok_or(PersistenceError::MemoryRowMismatch)?;
+    outgoing.entry(source.to_owned()).or_default().push(target);
+    Ok(())
+}
+
+fn load_dependency_entries(
+    tx: &ImmediateTransaction<'_>,
+    ids: &[String],
+) -> Result<BTreeMap<String, MemoryEntryVersion>, PersistenceError> {
+    let ids_json = canonical_json_bytes(&ids.to_vec()).map_err(integrity)?;
+    let mut statement = tx
+        .transaction()
+        .prepare(
+            "SELECT v.memory_namespace_id,v.entry_id,v.entry_version_id,v.version,
+                v.predecessor_version_id,v.display_key,v.normalized_key,v.state,v.value_text,
+                v.value_bytes,v.purpose_tags_json,v.created_by_kind,v.created_by_id,v.created_at_ms,
+                v.accepted_proposal_id,v.accepted_proposal_version,v.accepted_proposal_digest,
+                v.plaintext_validation_version,v.creation_event_sequence,v.creation_event_id,
+                v.content_digest,v.record_digest,v.record_json,
+                EXISTS(SELECT 1 FROM event_stream e
+                        WHERE e.sequence=v.creation_event_sequence AND e.event_id=v.creation_event_id)
+           FROM memory_entry_versions v
+          WHERE v.entry_version_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
+          ORDER BY v.entry_version_id",
+        )
+        .map_err(query)?;
+    let mut rows = statement.query([ids_json]).map_err(query)?;
+    let mut entries = BTreeMap::new();
+    while let Some(row) = rows.next().map_err(query)? {
+        if !row.get::<_, bool>(23).map_err(query)? {
+            return Err(PersistenceError::MemoryRowMismatch);
+        }
+        let entry = decode_entry_row_value(decode_entry_row(row).map_err(query)?)?;
+        let id = entry.reference().entry_version_id().to_string();
+        if entries.insert(id, entry).is_some() {
+            return Err(PersistenceError::MemoryRowMismatch);
+        }
+    }
+    if entries.len() != ids.len() {
+        return Err(PersistenceError::MemoryRowMismatch);
+    }
+    Ok(entries)
+}
+
+fn load_dependency_proposals(
+    tx: &ImmediateTransaction<'_>,
+    ids: &[String],
+) -> Result<BTreeMap<String, (MemoryProposal, MemoryProposalStatus)>, PersistenceError> {
+    validate_dependency_proposal_coherence(tx, ids)?;
+    let ids_json = canonical_json_bytes(&ids.to_vec()).map_err(integrity)?;
+    let mut statement = tx
+        .transaction()
+        .prepare(
+            "SELECT p.proposal_id,p.version,p.proposer_profile_id,p.proposer_profile_version_id,
+                p.proposer_profile_version,p.proposer_profile_digest,p.memory_namespace_id,
+                p.operation,p.display_key,p.normalized_key,p.expected_kind,p.expected_entry_id,
+                p.expected_entry_version_id,p.expected_entry_version,p.expected_entry_digest,
+                p.candidate_value,p.candidate_value_bytes,p.candidate_purpose_tags_json,
+                p.rationale,p.plaintext_validation_version,p.created_at_ms,
+                p.creation_event_sequence,p.creation_event_id,p.approval_id,p.content_digest,
+                p.record_digest,p.record_json,
+                r.proposal_id,r.proposal_version,r.proposal_content_digest,r.status,r.approval_id,
+                r.resolved_by_kind,r.resolved_by_id,r.resolved_at_ms,r.resolution_event_sequence,
+                r.resolution_event_id,r.resolution_json,c.status,c.resolution_event_id
+           FROM memory_proposals p
+      LEFT JOIN current_memory_proposal_status c ON c.proposal_id=p.proposal_id
+      LEFT JOIN memory_proposal_resolutions r ON r.proposal_id=p.proposal_id
+          WHERE p.proposal_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
+          ORDER BY p.proposal_id",
+        )
+        .map_err(query)?;
+    let mut rows = statement.query([ids_json]).map_err(query)?;
+    let mut proposals = BTreeMap::new();
+    let mut profile_contexts = Vec::new();
+    while let Some(row) = rows.next().map_err(query)? {
+        let proposal = decode_proposal_row_value(decode_proposal_stored_row(row).map_err(query)?)?;
+        let status_text = row
+            .get::<_, Option<String>>(38)
+            .map_err(query)?
+            .ok_or(PersistenceError::MemoryRowMismatch)?;
+        let status = parse_proposal_status(&status_text)?;
+        let status_event = row
+            .get::<_, Option<String>>(39)
+            .map_err(query)?
+            .map(|value| parse_id(&value))
+            .transpose()?;
+        match (status, row.get::<_, Option<String>>(27).map_err(query)?) {
+            (MemoryProposalStatus::Pending, None) if status_event.is_none() => {}
+            (MemoryProposalStatus::Pending, _) => {
+                return Err(PersistenceError::MemoryRowMismatch);
+            }
+            (_, Some(proposal_id)) => {
+                let resolution = decode_resolution_row_value(
+                    &proposal,
+                    ResolutionRow {
+                        proposal_id,
+                        proposal_version: row.get(28).map_err(query)?,
+                        proposal_digest: row.get(29).map_err(query)?,
+                        status: row.get(30).map_err(query)?,
+                        approval_id: row.get(31).map_err(query)?,
+                        resolved_by_kind: row.get(32).map_err(query)?,
+                        resolved_by_id: row.get(33).map_err(query)?,
+                        resolved_at: row.get(34).map_err(query)?,
+                        resolution_sequence: row.get(35).map_err(query)?,
+                        resolution_event_id: row.get(36).map_err(query)?,
+                        resolution_json: row.get(37).map_err(query)?,
+                    },
+                )?;
+                if resolution.status() != status
+                    || Some(resolution.resolution_event_id()) != status_event
+                {
+                    return Err(PersistenceError::MemoryRowMismatch);
+                }
+            }
+            _ => return Err(PersistenceError::MemoryRowMismatch),
+        }
+        profile_contexts.push((proposal.proposer().clone(), proposal.namespace_id()));
+        let id = proposal.reference().proposal_id().to_string();
+        if proposals.insert(id, (proposal, status)).is_some() {
+            return Err(PersistenceError::MemoryRowMismatch);
+        }
+    }
+    drop(rows);
+    drop(statement);
+    if proposals.len() != ids.len() {
+        return Err(PersistenceError::MemoryRowMismatch);
+    }
+
+    let references = profile_contexts
+        .iter()
+        .map(|(reference, _)| reference.clone())
+        .collect::<Vec<_>>();
+    let profiles = load_exact_profile_versions_batch(tx.transaction(), &references)
+        .map_err(|_| PersistenceError::MemoryRowMismatch)?;
+    for (reference, namespace) in profile_contexts {
+        let profile = profiles
+            .iter()
+            .find(|profile| profile.reference() == reference)
+            .ok_or(PersistenceError::MemoryRowMismatch)?;
+        if profile.memory_namespace_id() != namespace {
+            return Err(PersistenceError::MemoryRowMismatch);
+        }
+    }
+    Ok(proposals)
+}
+
+fn validate_dependency_proposal_coherence(
+    tx: &ImmediateTransaction<'_>,
+    ids: &[String],
+) -> Result<(), PersistenceError> {
+    let ids_json = canonical_json_bytes(&ids.to_vec()).map_err(integrity)?;
+    let mismatch: bool = tx
+        .transaction()
+        .query_row(
+            "SELECT EXISTS(
+             SELECT 1
+               FROM json_each(CAST(?1 AS TEXT)) wanted
+          LEFT JOIN memory_proposals p ON p.proposal_id=CAST(wanted.value AS TEXT)
+          LEFT JOIN current_memory_proposal_status c ON c.proposal_id=p.proposal_id
+          LEFT JOIN memory_proposal_resolutions r ON r.proposal_id=p.proposal_id
+          LEFT JOIN approval_records a ON a.approval_id=p.approval_id
+          LEFT JOIN event_stream creation_event
+                 ON creation_event.sequence=p.creation_event_sequence
+                AND creation_event.event_id=p.creation_event_id
+          LEFT JOIN event_stream resolution_event
+                 ON resolution_event.sequence=r.resolution_event_sequence
+                AND resolution_event.event_id=r.resolution_event_id
+          LEFT JOIN memory_entry_versions expected
+                 ON expected.memory_namespace_id=p.memory_namespace_id
+                AND expected.normalized_key=p.normalized_key
+                AND expected.entry_id=p.expected_entry_id
+                AND expected.entry_version_id=p.expected_entry_version_id
+                AND expected.version=p.expected_entry_version
+                AND expected.state=p.expected_kind
+                AND expected.content_digest=p.expected_entry_digest
+              WHERE p.proposal_id IS NULL OR c.proposal_id IS NULL
+                 OR c.proposal_version IS NOT p.version
+                 OR c.proposal_content_digest IS NOT p.content_digest
+                 OR c.memory_namespace_id IS NOT p.memory_namespace_id
+                 OR c.normalized_key IS NOT p.normalized_key
+                 OR c.created_at_ms IS NOT p.created_at_ms
+                 OR creation_event.sequence IS NULL
+                 OR (p.expected_kind='absent' AND (p.expected_entry_id IS NOT NULL
+                      OR p.expected_entry_version_id IS NOT NULL
+                      OR p.expected_entry_version IS NOT NULL OR p.expected_entry_digest IS NOT NULL))
+                 OR (p.expected_kind<>'absent' AND expected.entry_version_id IS NULL)
+                 OR a.approval_id IS NULL OR a.approval_id IS NOT p.approval_id
+                 OR a.action_kind IS NOT 'memory_mutation'
+                 OR a.object_kind IS NOT 'memory_proposal'
+                 OR a.object_id IS NOT p.proposal_id OR a.object_version IS NOT p.version
+                 OR a.object_digest IS NOT p.content_digest OR a.actor_kind IS NOT 'agent'
+                 OR a.actor_id IS NOT p.proposer_profile_id
+                 OR a.created_at_ms IS NOT p.created_at_ms OR a.expires_at_ms IS NOT NULL
+                 OR c.status IS NULL OR c.status NOT IN ('pending','accepted','rejected','expired')
+                 OR (c.status='pending' AND (c.resolution_event_id IS NOT NULL
+                      OR r.proposal_id IS NOT NULL OR a.status IS NOT 'pending'
+                      OR a.resolved_at_ms IS NOT NULL OR a.resolution_kind IS NOT NULL
+                      OR a.resolution_event_id IS NOT NULL OR a.resolution_actor_kind IS NOT NULL
+                      OR a.resolution_actor_id IS NOT NULL))
+                 OR (c.status<>'pending' AND (c.resolution_event_id IS NULL
+                      OR r.proposal_id IS NULL OR r.status IS NOT c.status
+                      OR r.proposal_version IS NOT p.version
+                      OR r.proposal_content_digest IS NOT p.content_digest
+                      OR r.approval_id IS NOT p.approval_id
+                      OR r.resolved_by_kind IS NOT 'human' OR r.resolved_by_id IS NOT NULL
+                      OR r.resolution_event_id IS NOT c.resolution_event_id
+                      OR resolution_event.sequence IS NULL OR a.status IS NOT c.status
+                      OR a.resolution_kind IS NOT c.status
+                      OR a.resolution_event_id IS NOT c.resolution_event_id
+                      OR a.resolved_at_ms IS NOT r.resolved_at_ms
+                      OR a.resolution_actor_kind IS NOT 'human'
+                      OR a.resolution_actor_id IS NOT NULL))
+         )",
+            [ids_json],
+            |row| row.get(0),
+        )
+        .map_err(query)?;
+    if mismatch {
+        Err(PersistenceError::MemoryRowMismatch)
+    } else {
+        Ok(())
+    }
+}
+
 fn load_current_pointer(
     tx: &ImmediateTransaction<'_>,
     namespace: MemoryNamespaceId,
@@ -2013,6 +2459,7 @@ fn validate_current_entry_rows(
         )
         .map_err(query)?;
     let mut rows = statement.query([namespace.to_string()]).map_err(query)?;
+    let mut entries = Vec::new();
     while let Some(row) = rows.next().map_err(query)? {
         if row.get::<_, Option<String>>(2).map_err(query)?.is_none() {
             return Err(PersistenceError::MemoryRowMismatch);
@@ -2032,6 +2479,15 @@ fn validate_current_entry_rows(
         {
             return Err(PersistenceError::MemoryRowMismatch);
         }
+        entries.push(entry);
+    }
+    drop(rows);
+    drop(statement);
+    if entries
+        .iter()
+        .any(|entry| entry.accepted_proposal().is_some())
+    {
+        validate_entry_dependency_graph(tx, &entries)?;
     }
     Ok(())
 }
@@ -2285,15 +2741,17 @@ fn validate_expected_entry_refs(
         .into_iter()
         .map(decode_entry_row_value)
         .collect::<Result<Vec<_>, _>>()?;
-    if references.iter().all(|reference| {
+    if !references.iter().all(|reference| {
         authenticated
             .iter()
             .any(|entry| entry.reference() == *reference)
     }) {
-        Ok(())
-    } else {
-        Err(PersistenceError::MemoryRowMismatch)
+        return Err(PersistenceError::MemoryRowMismatch);
     }
+    if !authenticated.is_empty() {
+        validate_entry_dependency_graph(tx, &authenticated)?;
+    }
+    Ok(())
 }
 
 fn validate_summary_rows(

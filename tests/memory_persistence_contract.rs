@@ -16,9 +16,10 @@ use ai_stock_forum::{
         MemoryProposalId, canonical_json_bytes,
     },
     memory::{
-        EpisodicSourceRef, EpisodicSummary, MemoryEntryDraft, MemoryEntryVersion, MemoryProposal,
-        MemoryProposalOperation, MemoryProposalResolution, MemoryProposalStatus,
-        MemoryPurposeScope, MemoryRetrievalRequest, MemoryRetrievalScope, NormalizedMemoryKey,
+        EpisodicSourceRef, EpisodicSummary, ExpectedMemoryEntryState, MemoryEntryDraft,
+        MemoryEntryVersion, MemoryProposal, MemoryProposalFilter, MemoryProposalOperation,
+        MemoryProposalResolution, MemoryProposalStatus, MemoryPurposeScope, MemoryRetrievalRequest,
+        MemoryRetrievalScope, NormalizedMemoryKey,
     },
     persistence::{
         Database, EventRepository, MemoryRepository, PersistenceError, insert_expected_version,
@@ -96,6 +97,17 @@ fn append_help(database: &mut Database, number: u128) -> EventId {
     .unwrap();
     tx.commit().unwrap();
     event_id
+}
+
+fn event_sequence(database: &Database, event_id: EventId) -> u64 {
+    database
+        .connection()
+        .query_row(
+            "SELECT sequence FROM event_stream WHERE event_id=?1",
+            [event_id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap() as u64
 }
 
 fn entry(event_id: EventId) -> MemoryEntryVersion {
@@ -948,6 +960,166 @@ fn database_with_summary_sources(count: u128) -> (Database, EpisodicSummaryId) {
     (database, summary_id)
 }
 
+fn database_with_accepted_dependency_chain(
+    count: u64,
+) -> (Database, AgentProfileVersion, MemoryEntryVersion) {
+    let mut database = database();
+    let profile = profile();
+    let tx = database.connection_mut().transaction().unwrap();
+    insert_expected_version(&tx, 1, &profile).unwrap();
+    tx.commit().unwrap();
+
+    let mut accepted_proposals = Vec::new();
+    for index in 0..count {
+        let base = 200_000 + u128::from(index) * 20;
+        let proposal_event = append_help(&mut database, base);
+        let proposal = MemoryProposal::new(
+            MemoryProposalId::from_uuid(Uuid::from_u128(base + 2)),
+            &profile,
+            &Actor::Agent(profile.profile_id()),
+            MemoryProposalOperation::Set {
+                candidate: MemoryEntryDraft::new(
+                    "Dependency key".into(),
+                    format!("value {index}"),
+                    vec![],
+                )
+                .unwrap(),
+            },
+            "Dependency key".into(),
+            ExpectedMemoryEntryState::Absent,
+            "bounded dependency graph".into(),
+            100 + index as i64 * 10,
+            proposal_event,
+            ApprovalId::from_uuid(Uuid::from_u128(base + 3)),
+        )
+        .unwrap();
+        let approval = ApprovalRecord::builder(ApprovalAction::MemoryMutation)
+            .approval_id(proposal.approval_id())
+            .object(proposal.object_ref().unwrap())
+            .actor(Actor::Agent(profile.profile_id()))
+            .created_at_millis(proposal.created_at_ms())
+            .build()
+            .unwrap();
+        let proposal_sequence = event_sequence(&database, proposal_event);
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::insert_proposal_with_approval(
+            &tx,
+            proposal_sequence,
+            &proposal,
+            &approval,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let resolution_event = append_help(&mut database, base + 4);
+        let resolution = MemoryProposalResolution::new(
+            proposal.reference(),
+            MemoryProposalStatus::Accepted,
+            proposal.approval_id(),
+            Actor::Human,
+            101 + index as i64 * 10,
+            resolution_event,
+        )
+        .unwrap();
+        let resolved_approval = approval
+            .resolve(
+                ApprovalStatus::Accepted,
+                Actor::Human,
+                101 + index as i64 * 10,
+            )
+            .unwrap();
+        let resolution_sequence = event_sequence(&database, resolution_event);
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::resolve_proposal(
+            &tx,
+            resolution_sequence,
+            &resolution,
+            &resolved_approval,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        accepted_proposals.push(proposal);
+    }
+
+    let mut prior: Option<MemoryEntryVersion> = None;
+    let mut entries = Vec::new();
+    for (index, proposal) in accepted_proposals.iter().enumerate() {
+        let index = index as u64;
+        let base = 200_000 + u128::from(index) * 20;
+        let entry_event = append_help(&mut database, base + 6);
+        let next = match prior.as_ref() {
+            None => MemoryEntryVersion::create_present(
+                profile.memory_namespace_id(),
+                MemoryEntryId::from_uuid(Uuid::from_u128(400_000)),
+                MemoryEntryVersionId::from_uuid(Uuid::from_u128(base + 7)),
+                MemoryEntryDraft::new("Dependency key".into(), format!("value {index}"), vec![])
+                    .unwrap(),
+                Actor::Human,
+                102 + index as i64 * 10,
+                Some(proposal.reference()),
+                entry_event,
+            ),
+            Some(entry) => entry.next_present(
+                MemoryEntryVersionId::from_uuid(Uuid::from_u128(base + 7)),
+                MemoryEntryDraft::new("Dependency key".into(), format!("value {index}"), vec![])
+                    .unwrap(),
+                Actor::Human,
+                102 + index as i64 * 10,
+                Some(proposal.reference()),
+                entry_event,
+            ),
+        }
+        .unwrap();
+        let entry_sequence = event_sequence(&database, entry_event);
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::insert_entry_version(&tx, entry_sequence, &next).unwrap();
+        MemoryRepository::replace_current_entry(&tx, &next).unwrap();
+        tx.commit().unwrap();
+        prior = Some(next.clone());
+        entries.push(next);
+    }
+
+    for (index, entry) in entries.iter().enumerate() {
+        let index = index as u64;
+        let base = 200_000 + u128::from(index) * 20;
+        let event_id = append_help(&mut database, base + 8);
+        let proposal = MemoryProposal::new(
+            MemoryProposalId::from_uuid(Uuid::from_u128(base + 9)),
+            &profile,
+            &Actor::Agent(profile.profile_id()),
+            MemoryProposalOperation::Set {
+                candidate: MemoryEntryDraft::new(
+                    "Dependency key".into(),
+                    format!("pending {index}"),
+                    vec![],
+                )
+                .unwrap(),
+            },
+            "Dependency key".into(),
+            ExpectedMemoryEntryState::Present(entry.reference()),
+            "bounded expected-entry graph".into(),
+            103 + index as i64 * 10,
+            event_id,
+            ApprovalId::from_uuid(Uuid::from_u128(base + 10)),
+        )
+        .unwrap();
+        let approval = ApprovalRecord::builder(ApprovalAction::MemoryMutation)
+            .approval_id(proposal.approval_id())
+            .object(proposal.object_ref().unwrap())
+            .actor(Actor::Agent(profile.profile_id()))
+            .created_at_millis(proposal.created_at_ms())
+            .build()
+            .unwrap();
+        let sequence = event_sequence(&database, event_id);
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::insert_proposal_with_approval(&tx, sequence, &proposal, &approval)
+            .unwrap();
+        tx.commit().unwrap();
+    }
+    (database, profile, prior.unwrap())
+}
+
 #[test]
 fn bounded_repository_pages_execute_constant_select_statement_counts() {
     let mut one_current = database_with_current_entries(1);
@@ -1112,6 +1284,142 @@ fn bounded_repository_pages_execute_constant_select_statement_counts() {
         tx.rollback().unwrap();
     });
     assert_eq!((one_snapshot_count, max_snapshot_count), (11, 11));
+}
+
+#[test]
+fn accepted_dependency_graph_statement_counts_are_constant_for_small_and_large_sets() {
+    let (mut one_entry, one_profile, one_current) = database_with_accepted_dependency_chain(1);
+    let (mut many_entries, many_profile, many_current) =
+        database_with_accepted_dependency_chain(32);
+    let key = one_current.reference().normalized_key().clone();
+    let many_key = many_current.reference().normalized_key().clone();
+
+    let (_, one_current_count) = measured_statements(&mut one_entry, |database| {
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::list_current_entries(&tx, one_profile.memory_namespace_id(), 100)
+            .unwrap();
+        tx.rollback().unwrap();
+    });
+    let (_, many_current_count) = measured_statements(&mut many_entries, |database| {
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::list_current_entries(&tx, many_profile.memory_namespace_id(), 100)
+            .unwrap();
+        tx.rollback().unwrap();
+    });
+    assert_eq!((one_current_count, many_current_count), (12, 12));
+
+    let (_, one_active_count) = measured_statements(&mut one_entry, |database| {
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::count_active_entries(&tx, one_profile.memory_namespace_id()).unwrap();
+        tx.rollback().unwrap();
+    });
+    let (_, many_active_count) = measured_statements(&mut many_entries, |database| {
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::count_active_entries(&tx, many_profile.memory_namespace_id()).unwrap();
+        tx.rollback().unwrap();
+    });
+    assert_eq!((one_active_count, many_active_count), (11, 11));
+
+    let (_, one_history_count) = measured_statements(&mut one_entry, |database| {
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::load_entry_history(&tx, one_profile.memory_namespace_id(), &key, 100)
+            .unwrap();
+        tx.rollback().unwrap();
+    });
+    let (_, many_history_count) = measured_statements(&mut many_entries, |database| {
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::load_entry_history(
+            &tx,
+            many_profile.memory_namespace_id(),
+            &many_key,
+            100,
+        )
+        .unwrap();
+        tx.rollback().unwrap();
+    });
+    assert_eq!((one_history_count, many_history_count), (13, 13));
+
+    let one_request = MemoryRetrievalRequest::new(
+        MemoryRetrievalScope::new(&one_profile, MemoryPurposeScope::General).unwrap(),
+        Default::default(),
+    )
+    .unwrap();
+    let many_request = MemoryRetrievalRequest::new(
+        MemoryRetrievalScope::new(&many_profile, MemoryPurposeScope::General).unwrap(),
+        Default::default(),
+    )
+    .unwrap();
+    let (_, one_snapshot_count) = measured_statements(&mut one_entry, |database| {
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::build_snapshot(&tx, &one_request).unwrap();
+        tx.rollback().unwrap();
+    });
+    let (_, many_snapshot_count) = measured_statements(&mut many_entries, |database| {
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::build_snapshot(&tx, &many_request).unwrap();
+        tx.rollback().unwrap();
+    });
+    assert_eq!((one_snapshot_count, many_snapshot_count), (17, 17));
+
+    let (mut two_proposals, two_profile, two_current) = database_with_accepted_dependency_chain(2);
+    let proposal_key = two_current.reference().normalized_key().clone();
+    let (_, two_list_count) = measured_statements(&mut two_proposals, |database| {
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::list_proposals(
+            &tx,
+            two_profile.memory_namespace_id(),
+            MemoryProposalFilter::All,
+            100,
+        )
+        .unwrap();
+        tx.rollback().unwrap();
+    });
+    let (_, many_list_count) = measured_statements(&mut many_entries, |database| {
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::list_proposals(
+            &tx,
+            many_profile.memory_namespace_id(),
+            MemoryProposalFilter::All,
+            100,
+        )
+        .unwrap();
+        tx.rollback().unwrap();
+    });
+    assert_eq!((two_list_count, many_list_count), (15, 15));
+
+    let (_, two_pending_count) = measured_statements(&mut two_proposals, |database| {
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::count_pending_proposals(&tx, two_profile.memory_namespace_id()).unwrap();
+        tx.rollback().unwrap();
+    });
+    let (_, many_pending_count) = measured_statements(&mut many_entries, |database| {
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::count_pending_proposals(&tx, many_profile.memory_namespace_id()).unwrap();
+        tx.rollback().unwrap();
+    });
+    assert_eq!((two_pending_count, many_pending_count), (14, 14));
+
+    let (_, two_key_count) = measured_statements(&mut two_proposals, |database| {
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::load_pending_proposals_for_key(
+            &tx,
+            two_profile.memory_namespace_id(),
+            &proposal_key,
+        )
+        .unwrap();
+        tx.rollback().unwrap();
+    });
+    let (_, many_key_count) = measured_statements(&mut many_entries, |database| {
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::load_pending_proposals_for_key(
+            &tx,
+            many_profile.memory_namespace_id(),
+            &many_key,
+        )
+        .unwrap();
+        tx.rollback().unwrap();
+    });
+    assert_eq!((two_key_count, many_key_count), (14, 14));
 }
 
 #[test]

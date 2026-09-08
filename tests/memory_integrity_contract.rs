@@ -9,7 +9,8 @@ use ai_stock_forum::{
     memory::{
         ExpectedMemoryEntryState, MemoryEntryDraft, MemoryEntryVersion, MemoryProposal,
         MemoryProposalFilter, MemoryProposalOperation, MemoryProposalResolution,
-        MemoryProposalStatus, NormalizedMemoryKey,
+        MemoryProposalStatus, MemoryPurposeScope, MemoryRetrievalBudget, MemoryRetrievalRequest,
+        MemoryRetrievalScope, NormalizedMemoryKey,
     },
     persistence::{
         Database, EventRepository, MemoryRepository, PersistenceError, insert_expected_version,
@@ -768,6 +769,295 @@ fn resolved_proposal_database() -> (
     MemoryRepository::resolve_proposal(&tx, 2, &resolution, &resolved_approval).unwrap();
     tx.commit().unwrap();
     (database, profile, proposal, approval, resolution)
+}
+
+fn append_help_event(database: &mut Database, number: u128, occurred_at_ms: i64) -> EventId {
+    let event_id = EventId::from_uuid(Uuid::from_u128(number));
+    let tx = database.immediate_transaction().unwrap();
+    EventRepository::append(
+        &tx,
+        PendingEvent {
+            event_id,
+            event_schema_version: EVENT_SCHEMA_VERSION,
+            actor: Actor::Human,
+            occurred_at_ms,
+            correlation_id: CorrelationId::from_uuid(Uuid::from_u128(number + 1)),
+            causation_id: None,
+            object: None,
+            event: ApplicationEvent::HelpViewed,
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    event_id
+}
+
+fn event_sequence(database: &Database, event_id: EventId) -> u64 {
+    database
+        .connection()
+        .query_row(
+            "SELECT sequence FROM event_stream WHERE event_id=?1",
+            [event_id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap() as u64
+}
+
+fn accepted_proposal_entry_database(
+    deleted: bool,
+) -> (
+    Database,
+    AgentProfileVersion,
+    MemoryProposal,
+    MemoryEntryVersion,
+) {
+    let (mut database, profile, accepted_proposal, _, _) = resolved_proposal_database();
+    let present_event = append_help_event(&mut database, 1_020, 30);
+    let present = MemoryEntryVersion::create_present(
+        profile.memory_namespace_id(),
+        MemoryEntryId::from_uuid(Uuid::from_u128(1_021)),
+        MemoryEntryVersionId::from_uuid(Uuid::from_u128(1_022)),
+        MemoryEntryDraft::new(
+            accepted_proposal.display_key().into(),
+            "accepted value".into(),
+            vec![],
+        )
+        .unwrap(),
+        Actor::Human,
+        30,
+        Some(accepted_proposal.reference()),
+        present_event,
+    )
+    .unwrap();
+    let present_event_sequence = event_sequence(&database, present_event);
+    let tx = database.immediate_transaction().unwrap();
+    MemoryRepository::insert_entry_version(&tx, present_event_sequence, &present).unwrap();
+    MemoryRepository::replace_current_entry(&tx, &present).unwrap();
+    tx.commit().unwrap();
+    if !deleted {
+        return (database, profile, accepted_proposal, present);
+    }
+
+    let deleted_event = append_help_event(&mut database, 1_023, 40);
+    let deleted = present
+        .next_deleted(
+            MemoryEntryVersionId::from_uuid(Uuid::from_u128(1_024)),
+            Actor::Human,
+            40,
+            Some(accepted_proposal.reference()),
+            deleted_event,
+        )
+        .unwrap();
+    let deleted_event_sequence = event_sequence(&database, deleted_event);
+    let tx = database.immediate_transaction().unwrap();
+    MemoryRepository::insert_entry_version(&tx, deleted_event_sequence, &deleted).unwrap();
+    MemoryRepository::replace_current_entry(&tx, &deleted).unwrap();
+    tx.commit().unwrap();
+    (database, profile, accepted_proposal, deleted)
+}
+
+fn insert_pending_proposal_for_expected_entry(
+    database: &mut Database,
+    profile: &AgentProfileVersion,
+    entry: &MemoryEntryVersion,
+    deleted: bool,
+) -> MemoryProposal {
+    let event_id = append_help_event(database, 1_030, 50);
+    let expected = if deleted {
+        ExpectedMemoryEntryState::Deleted(entry.reference())
+    } else {
+        ExpectedMemoryEntryState::Present(entry.reference())
+    };
+    let proposal = MemoryProposal::new(
+        MemoryProposalId::from_uuid(Uuid::from_u128(1_031)),
+        profile,
+        &Actor::Agent(profile.profile_id()),
+        MemoryProposalOperation::Set {
+            candidate: MemoryEntryDraft::new(
+                entry.display_key().into(),
+                "next candidate".into(),
+                vec![],
+            )
+            .unwrap(),
+        },
+        entry.display_key().into(),
+        expected,
+        "expected-entry dependency test".into(),
+        50,
+        event_id,
+        ApprovalId::from_uuid(Uuid::from_u128(1_032)),
+    )
+    .unwrap();
+    let approval = ApprovalRecord::builder(ApprovalAction::MemoryMutation)
+        .approval_id(proposal.approval_id())
+        .object(proposal.object_ref().unwrap())
+        .actor(Actor::Agent(profile.profile_id()))
+        .created_at_millis(50)
+        .build()
+        .unwrap();
+    let creation_event_sequence = event_sequence(database, event_id);
+    let tx = database.immediate_transaction().unwrap();
+    MemoryRepository::insert_proposal_with_approval(
+        &tx,
+        creation_event_sequence,
+        &proposal,
+        &approval,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    proposal
+}
+
+fn assert_all_entry_batch_paths_fail(
+    database: &mut Database,
+    profile: &AgentProfileVersion,
+    entry: &MemoryEntryVersion,
+) {
+    let request = MemoryRetrievalRequest::new(
+        MemoryRetrievalScope::new(profile, MemoryPurposeScope::General).unwrap(),
+        MemoryRetrievalBudget::default(),
+    )
+    .unwrap();
+    let tx = database.immediate_transaction().unwrap();
+    assert_eq!(
+        MemoryRepository::load_current_entry(
+            &tx,
+            profile.memory_namespace_id(),
+            entry.reference().normalized_key(),
+        )
+        .unwrap_err(),
+        PersistenceError::MemoryRowMismatch,
+        "direct entry detail",
+    );
+    assert_eq!(
+        MemoryRepository::list_current_entries(&tx, profile.memory_namespace_id(), 100)
+            .unwrap_err(),
+        PersistenceError::MemoryRowMismatch,
+        "current entry list",
+    );
+    assert_eq!(
+        MemoryRepository::count_active_entries(&tx, profile.memory_namespace_id()).unwrap_err(),
+        PersistenceError::MemoryRowMismatch,
+        "active entry count",
+    );
+    assert_eq!(
+        MemoryRepository::load_entry_history(
+            &tx,
+            profile.memory_namespace_id(),
+            entry.reference().normalized_key(),
+            100,
+        )
+        .unwrap_err(),
+        PersistenceError::MemoryRowMismatch,
+        "entry history",
+    );
+    assert_eq!(
+        MemoryRepository::build_snapshot(&tx, &request).unwrap_err(),
+        PersistenceError::MemoryRowMismatch,
+        "snapshot",
+    );
+    tx.rollback().unwrap();
+}
+
+fn assert_all_proposal_batch_paths_fail(
+    database: &mut Database,
+    profile: &AgentProfileVersion,
+    proposal: &MemoryProposal,
+) {
+    let tx = database.immediate_transaction().unwrap();
+    assert_eq!(
+        MemoryRepository::load_proposal(&tx, proposal.reference().proposal_id()).unwrap_err(),
+        PersistenceError::MemoryRowMismatch,
+        "direct proposal detail",
+    );
+    for filter in [MemoryProposalFilter::All, MemoryProposalFilter::Pending] {
+        assert_eq!(
+            MemoryRepository::list_proposals(&tx, profile.memory_namespace_id(), filter, 100)
+                .unwrap_err(),
+            PersistenceError::MemoryRowMismatch,
+            "proposal list {filter:?}",
+        );
+    }
+    assert_eq!(
+        MemoryRepository::count_pending_proposals(&tx, profile.memory_namespace_id()).unwrap_err(),
+        PersistenceError::MemoryRowMismatch,
+        "pending count",
+    );
+    assert_eq!(
+        MemoryRepository::load_pending_proposals_for_key(
+            &tx,
+            profile.memory_namespace_id(),
+            proposal.normalized_key(),
+        )
+        .unwrap_err(),
+        PersistenceError::MemoryRowMismatch,
+        "pending proposals for key",
+    );
+    tx.rollback().unwrap();
+}
+
+#[test]
+fn accepted_proposal_dependency_tampering_fails_every_entry_batch_path() {
+    for (case, mutation) in [
+        (
+            "terminal approval actor",
+            "UPDATE approval_records SET resolution_actor_kind='system', resolution_actor_id=NULL",
+        ),
+        (
+            "terminal resolution coherence",
+            "UPDATE memory_proposal_resolutions SET resolved_at_ms=resolved_at_ms+1",
+        ),
+        (
+            "missing status row",
+            "DELETE FROM current_memory_proposal_status",
+        ),
+    ] {
+        let (mut database, profile, _, entry) = accepted_proposal_entry_database(false);
+        database
+            .connection()
+            .execute_batch(
+                "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON;
+                 DROP TRIGGER approval_records_transition_guard;
+                 DROP TRIGGER memory_proposal_resolutions_no_update;",
+            )
+            .unwrap();
+        database.connection().execute(mutation, []).unwrap();
+        assert_all_entry_batch_paths_fail(&mut database, &profile, &entry);
+        eprintln!("verified accepted proposal dependency tamper: {case}");
+    }
+}
+
+#[test]
+fn expected_entry_dependency_tampering_fails_every_proposal_batch_path() {
+    for (case, deleted, mutation) in [
+        (
+            "present creation event relationship",
+            false,
+            "UPDATE memory_entry_versions SET creation_event_sequence=creation_event_sequence+100",
+        ),
+        (
+            "deleted accepted proposal dependency",
+            true,
+            "UPDATE memory_proposals SET memory_namespace_id='00000000-0000-0000-0000-000000009998';
+             UPDATE current_memory_proposal_status SET memory_namespace_id='00000000-0000-0000-0000-000000009998'
+              WHERE proposal_id='00000000-0000-0000-0000-0000000003ed'",
+        ),
+    ] {
+        let (mut database, profile, _, entry) = accepted_proposal_entry_database(deleted);
+        let pending =
+            insert_pending_proposal_for_expected_entry(&mut database, &profile, &entry, deleted);
+        database
+            .connection()
+            .execute_batch(
+                "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON;
+                 DROP TRIGGER memory_entry_versions_no_update;
+                 DROP TRIGGER memory_proposals_no_update;",
+            )
+            .unwrap();
+        database.connection().execute_batch(mutation).unwrap();
+        assert_all_proposal_batch_paths_fail(&mut database, &profile, &pending);
+        eprintln!("verified expected entry dependency tamper: {case}");
+    }
 }
 
 #[test]
