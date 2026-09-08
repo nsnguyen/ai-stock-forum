@@ -9,7 +9,7 @@ use crate::{
 };
 
 use super::PersistenceError;
-use super::skill_repository::validate_skill_version_ref;
+use super::skill_repository::{validate_skill_version_ref, validate_skill_version_refs_batch};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredAgentProfileVersion {
@@ -114,6 +114,55 @@ pub fn load_exact_profile_version(
         Ok(profile)
     })
     .transpose()
+}
+
+pub(crate) fn load_exact_profile_versions_batch(
+    connection: &Connection,
+    references: &[AgentProfileVersionRef],
+) -> Result<Vec<AgentProfileVersion>, PersistenceError> {
+    let version_ids = references
+        .iter()
+        .map(|reference| reference.profile_version_id().to_string())
+        .collect::<Vec<_>>();
+    let ids_json = canonical_json_bytes(&version_ids)
+        .map_err(|_| PersistenceError::InvalidAgentProfilePayload)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT profile_id, profile_version_id, version, supersedes_version_id,
+                    template_id, template_version, template_digest, role, display_name,
+                    normalized_name, memory_namespace_id, policy_profile_ref, content_digest,
+                    payload_json, source_event_sequence, created_at_ms
+               FROM agent_profile_versions
+              WHERE profile_version_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
+              ORDER BY profile_version_id",
+        )
+        .map_err(|_| PersistenceError::QueryFailed)?;
+    let rows = statement
+        .query_map([ids_json], decode_row)
+        .map_err(|_| PersistenceError::QueryFailed)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PersistenceError::QueryFailed)?;
+    let mut profiles = Vec::with_capacity(rows.len());
+    let mut skills = Vec::new();
+    for stored in rows {
+        let profile = serde_json::from_slice::<AgentProfileVersion>(&stored.payload_json)
+            .map_err(|_| PersistenceError::InvalidAgentProfilePayload)?;
+        if expected_row(stored.source_event_sequence, &profile)? != stored {
+            return Err(PersistenceError::AgentProfileHistoryMismatch);
+        }
+        skills.extend(profile.skill_refs().iter().cloned());
+        profiles.push(profile);
+    }
+    validate_skill_version_refs_batch(connection, &skills)?;
+    if references.iter().all(|reference| {
+        profiles
+            .iter()
+            .any(|profile| profile.reference() == *reference)
+    }) {
+        Ok(profiles)
+    } else {
+        Err(PersistenceError::AgentProfileHistoryMismatch)
+    }
 }
 
 pub fn replace_active_profiles(
