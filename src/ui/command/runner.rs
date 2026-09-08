@@ -1243,6 +1243,12 @@ impl FallbackRunner {
                         };
                         match preview {
                             MemoryEditPreview::NoChange(MemoryNoChange::IdenticalContent) => {
+                                if !memory_identical_content_matches_request(
+                                    seed.as_ref(),
+                                    &requested_candidate,
+                                ) {
+                                    return Err(UiError::Panicked);
+                                }
                                 editor.clear_review();
                                 *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? =
                                     Some(MemoryWorkflow::Editing { editor, seed });
@@ -2460,6 +2466,14 @@ fn seeded_present_set_diff(
     )
 }
 
+fn memory_identical_content_matches_request(
+    seed: Option<&MemoryEntryVersion>,
+    candidate: &MemoryEntryDraft,
+) -> bool {
+    seed.and_then(|seed| seeded_present_set_diff(seed, candidate))
+        .is_some_and(|diff| diff.is_empty())
+}
+
 fn deleted_set_diff_matches(diff: &[MemoryFieldDiff], candidate: &MemoryEntryDraft) -> bool {
     let required = if diff.first().is_some_and(|item| {
         item.field == MemoryField::DisplayKey
@@ -2757,7 +2771,9 @@ mod tests {
     use super::*;
     use crate::{
         app::{CommandOutcome, MemoryEditPreview},
-        domain::AgentProfileId,
+        domain::{
+            Actor, AgentProfileId, EventId, MemoryEntryId, MemoryEntryVersionId, MemoryNamespaceId,
+        },
         runtime::CommandExecutor,
     };
 
@@ -2853,5 +2869,60 @@ mod tests {
         let reason = runner.run(Cursor::new(Vec::new()), Vec::new()).unwrap();
         assert_eq!(reason, ShutdownReason::InputClosed);
         runtime.finish_and_join(reason).unwrap();
+    }
+
+    #[test]
+    fn identical_content_requires_an_exact_valid_present_seed_candidate() {
+        let seed = MemoryEntryVersion::create_present(
+            MemoryNamespaceId::from_uuid(Uuid::from_u128(711)),
+            MemoryEntryId::from_uuid(Uuid::from_u128(712)),
+            MemoryEntryVersionId::from_uuid(Uuid::from_u128(713)),
+            MemoryEntryDraft::new(
+                "Earnings Thesis".into(),
+                "original value".into(),
+                vec!["Catalyst".into()],
+            )
+            .unwrap(),
+            Actor::Human,
+            1_700_000_000_000,
+            None,
+            EventId::from_uuid(Uuid::from_u128(714)),
+        )
+        .unwrap();
+        let exact = MemoryEntryDraft::new(
+            "Earnings Thesis".into(),
+            "original value".into(),
+            vec!["Catalyst".into()],
+        )
+        .unwrap();
+        let changed = MemoryEntryDraft::new(
+            "earnings thesis".into(),
+            "changed value".into(),
+            vec!["Changed".into()],
+        )
+        .unwrap();
+        let deleted = seed
+            .next_deleted(
+                MemoryEntryVersionId::from_uuid(Uuid::from_u128(715)),
+                Actor::Human,
+                1_700_000_000_001,
+                None,
+                EventId::from_uuid(Uuid::from_u128(716)),
+            )
+            .unwrap();
+
+        assert!(memory_identical_content_matches_request(
+            Some(&seed),
+            &exact
+        ));
+        assert!(!memory_identical_content_matches_request(
+            Some(&seed),
+            &changed
+        ));
+        assert!(!memory_identical_content_matches_request(None, &exact));
+        assert!(!memory_identical_content_matches_request(
+            Some(&deleted),
+            &exact
+        ));
     }
 }

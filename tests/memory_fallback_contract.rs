@@ -797,11 +797,38 @@ fn fallback_no_change_previews_are_passive_and_never_register_or_submit() {
             MemoryEditPreview::NoChange(MemoryNoChange::AlreadyAbsent),
         ),
     ] {
-        let current = matches!(
-            preview,
+        let identical_content = matches!(
+            &preview,
             MemoryEditPreview::NoChange(MemoryNoChange::IdenticalContent)
-        )
-        .then(|| entry(&profile()));
+        );
+        let current = identical_content.then(|| {
+            entry(&profile())
+                .next_present(
+                    MemoryEntryVersionId::from_uuid(Uuid::from_u128(307)),
+                    MemoryEntryDraft::new(
+                        "Earnings Thesis".into(),
+                        "private thesis".into(),
+                        vec!["Catalyst".into()],
+                    )
+                    .unwrap(),
+                    Actor::Human,
+                    1_700_000_000_015,
+                    None,
+                    EventId::from_uuid(Uuid::from_u128(308)),
+                )
+                .unwrap()
+        });
+        if let Some(current) = &current {
+            let exact_candidate = MemoryEntryDraft::new(
+                "Earnings Thesis".into(),
+                "private thesis".into(),
+                vec!["Catalyst".into()],
+            )
+            .unwrap();
+            assert_eq!(current.display_key(), exact_candidate.display_key());
+            assert_eq!(current.value(), Some(exact_candidate.value()));
+            assert_eq!(current.purpose_tags(), exact_candidate.purpose_tags());
+        }
         let (runtime, state) = workflow_runtime(current, None, Some(Ok(preview)), None);
         let mut output = Vec::new();
         let reason = FallbackRunner::new(runtime.client(), false)
@@ -812,6 +839,9 @@ fn fallback_no_change_previews_are_passive_and_never_register_or_submit() {
         assert_eq!(state.lock().unwrap().cancel_count, 0);
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("Memory edit has no effect:"));
+        if identical_content {
+            assert!(output.contains("IdenticalContent"));
+        }
         runtime.finish_and_join(reason).unwrap();
     }
 }
@@ -820,7 +850,11 @@ fn assert_incompatible_no_change_fails_closed(
     current: Option<MemoryEntryVersion>,
     input: Vec<u8>,
     no_change: MemoryNoChange,
-) -> (Arc<Mutex<WorkflowExecutorState>>, Vec<ApplicationCommand>) {
+) -> (
+    Arc<Mutex<WorkflowExecutorState>>,
+    Vec<ApplicationCommand>,
+    String,
+) {
     let (runtime, state) = workflow_runtime(
         current,
         None,
@@ -857,13 +891,13 @@ fn assert_incompatible_no_change_fails_closed(
     runtime
         .finish_and_join(ShutdownReason::ApplicationError)
         .unwrap();
-    (state, commands_before_teardown)
+    (state, commands_before_teardown, output)
 }
 
 #[test]
 fn fallback_set_rejects_already_absent_no_change_without_render_registration_or_submission() {
     let current = entry(&profile());
-    let (_state, commands_before_teardown) = assert_incompatible_no_change_fails_closed(
+    let (_state, commands_before_teardown, _output) = assert_incompatible_no_change_fails_closed(
         Some(current.clone()),
         format!(
             "/memory set {} \"{}\"\nprivate thesis\nCatalyst\n",
@@ -883,7 +917,7 @@ fn fallback_set_rejects_already_absent_no_change_without_render_registration_or_
 
 #[test]
 fn fallback_delete_rejects_identical_content_no_change_without_render_registration_or_submission() {
-    let (_state, commands_before_teardown) = assert_incompatible_no_change_fails_closed(
+    let (_state, commands_before_teardown, _output) = assert_incompatible_no_change_fails_closed(
         None,
         format!(
             "/memory delete {} \"Missing Key\"\n",
@@ -894,6 +928,48 @@ fn fallback_delete_rejects_identical_content_no_change_without_render_registrati
     );
 
     assert!(commands_before_teardown.is_empty());
+}
+
+#[test]
+fn fallback_seeded_set_rejects_false_identical_content_for_a_changed_candidate() {
+    let current = entry(&profile());
+    let (_state, commands_before_teardown, output) = assert_incompatible_no_change_fails_closed(
+        Some(current.clone()),
+        seeded_set_input(),
+        MemoryNoChange::IdenticalContent,
+    );
+
+    assert_eq!(commands_before_teardown.len(), 1);
+    assert!(matches!(
+        commands_before_teardown[0],
+        ApplicationCommand::ShowMemoryEntry { .. }
+    ));
+    assert!(!output.contains(current.value().unwrap()));
+    assert!(!output.contains("replacement value"));
+    assert!(!output.contains("Catalyst"));
+    assert!(!output.contains("fresh"));
+}
+
+#[test]
+fn fallback_unseeded_create_rejects_false_identical_content() {
+    let (_state, commands_before_teardown, output) = assert_incompatible_no_change_fails_closed(
+        None,
+        format!(
+            "/memory set {} \"Fresh Key\"\nfresh value\nfresh-tag\n",
+            profile().profile_id()
+        )
+        .into_bytes(),
+        MemoryNoChange::IdenticalContent,
+    );
+
+    assert_eq!(commands_before_teardown.len(), 1);
+    assert!(matches!(
+        commands_before_teardown[0],
+        ApplicationCommand::ShowMemoryEntry { .. }
+    ));
+    assert!(!output.contains("Fresh Key"));
+    assert!(!output.contains("fresh value"));
+    assert!(!output.contains("fresh-tag"));
 }
 
 #[test]
