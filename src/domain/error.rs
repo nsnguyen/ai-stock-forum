@@ -74,6 +74,20 @@ pub enum DomainError {
     MemoryProposalCapacityReached,
     #[error("memory projection is structurally invalid")]
     InvalidMemoryProjection,
+    #[error("episodic source ordering is invalid")]
+    EpisodicSourcesNotOrdered,
+    #[error("episodic sources must be unique")]
+    EpisodicSourcesNotUnique,
+    #[error("episodic summary is structurally invalid")]
+    InvalidEpisodicSummary,
+    #[error("memory retrieval scope is structurally invalid")]
+    InvalidMemoryRetrievalScope,
+    #[error("memory retrieval budget is invalid")]
+    InvalidMemoryRetrievalBudget,
+    #[error("memory snapshot is structurally invalid")]
+    InvalidMemorySnapshot,
+    #[error("memory retrieval accounting overflowed")]
+    MemoryRetrievalOverflow,
 }
 
 impl DomainError {
@@ -115,6 +129,13 @@ impl DomainError {
             Self::MemoryProposalReviewUnavailable => "memory_proposal_review_unavailable",
             Self::MemoryProposalCapacityReached => "memory_proposal_capacity_reached",
             Self::InvalidMemoryProjection => "invalid_memory_projection",
+            Self::EpisodicSourcesNotOrdered => "episodic_sources_not_ordered",
+            Self::EpisodicSourcesNotUnique => "episodic_sources_not_unique",
+            Self::InvalidEpisodicSummary => "invalid_episodic_summary",
+            Self::InvalidMemoryRetrievalScope => "invalid_memory_retrieval_scope",
+            Self::InvalidMemoryRetrievalBudget => "invalid_memory_retrieval_budget",
+            Self::InvalidMemorySnapshot => "invalid_memory_snapshot",
+            Self::MemoryRetrievalOverflow => "memory_retrieval_overflow",
         }
     }
 }
