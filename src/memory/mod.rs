@@ -21,9 +21,10 @@ pub use projection::MemoryProjection;
 pub use proposal::{MemoryProposal, MemoryProposalOperation, MemoryProposalRef};
 pub use retrieval::{
     EpisodicContextItem, MAX_MEMORY_RETRIEVAL_BYTES, MAX_MEMORY_RETRIEVAL_ENTRIES,
-    MAX_MEMORY_RETRIEVAL_SOURCES, MAX_MEMORY_RETRIEVAL_SUMMARIES, MemoryKvContextItem,
-    MemoryPurposeScope, MemoryRetrievalBudget, MemoryRetrievalRequest, MemoryRetrievalScope,
-    MemorySnapshot, MemorySnapshotAccounting, MemorySnapshotMetadata, select_snapshot,
+    MAX_MEMORY_RETRIEVAL_SOURCES, MAX_MEMORY_RETRIEVAL_SUMMARIES, MemoryEntryMetadataOrder,
+    MemoryKvContextItem, MemoryPurposeScope, MemoryRetrievalBudget, MemoryRetrievalRequest,
+    MemoryRetrievalScope, MemorySnapshot, MemorySnapshotAccounting, MemorySnapshotMetadata,
+    MemorySummaryMetadataOrder, select_snapshot,
 };
 pub use review::{
     ExpectedMemoryEntryState, MEMORY_PLAINTEXT_WARNING, MemoryEditReview, MemoryField,

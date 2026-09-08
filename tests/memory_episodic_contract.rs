@@ -348,6 +348,164 @@ fn summary_accepts_exact_source_limit_and_rejects_fixed_version_and_source_tampe
 }
 
 #[test]
+fn summary_enforces_exact_tag_and_event_type_byte_and_count_boundaries() {
+    let profile = profile_version_fixture();
+    let tags = (0..8)
+        .map(|index| format!("tag-{index}"))
+        .collect::<Vec<_>>();
+    assert!(
+        EpisodicSummary::new(
+            summary_id(40),
+            &profile,
+            "label".to_owned(),
+            "body".to_owned(),
+            tags,
+            source_refs_fixture(),
+            30,
+            10,
+            event_id(10),
+        )
+        .is_ok()
+    );
+    let too_many = (0..9)
+        .map(|index| format!("tag-{index}"))
+        .collect::<Vec<_>>();
+    assert!(
+        EpisodicSummary::new(
+            summary_id(41),
+            &profile,
+            "label".to_owned(),
+            "body".to_owned(),
+            too_many,
+            source_refs_fixture(),
+            30,
+            10,
+            event_id(10),
+        )
+        .is_err()
+    );
+    assert!(
+        EpisodicSummary::new(
+            summary_id(42),
+            &profile,
+            "label".to_owned(),
+            "body".to_owned(),
+            vec!["é".repeat(16)],
+            source_refs_fixture(),
+            30,
+            10,
+            event_id(10),
+        )
+        .is_ok()
+    );
+    assert!(
+        EpisodicSummary::new(
+            summary_id(43),
+            &profile,
+            "label".to_owned(),
+            "body".to_owned(),
+            vec![format!("{}a", "é".repeat(16))],
+            source_refs_fixture(),
+            30,
+            10,
+            event_id(10),
+        )
+        .is_err()
+    );
+    assert!(EpisodicSourceRef::new(1, event_id(1), "é".repeat(64), sha256(b"event")).is_ok());
+    assert!(
+        EpisodicSourceRef::new(
+            1,
+            event_id(1),
+            format!("{}a", "é".repeat(64)),
+            sha256(b"event")
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn summary_rejects_each_digest_and_source_provenance_mutation() {
+    let summary = summary_fixture();
+    let encoded: Value = serde_json::from_slice(&canonical_json_bytes(&summary).unwrap()).unwrap();
+    for field in ["source_set_digest", "content_digest"] {
+        let mut tampered = encoded.clone();
+        tampered[field] = serde_json::json!(sha256(field.as_bytes()).as_str());
+        assert!(serde_json::from_value::<EpisodicSummary>(tampered).is_err());
+    }
+    let profile = profile_version_fixture();
+    let source = EpisodicSourceRef::new(4, event_id(4), "Event".to_owned(), sha256(b"4")).unwrap();
+    assert!(
+        EpisodicSummary::new(
+            summary_id(50),
+            &profile,
+            "label".to_owned(),
+            "body".to_owned(),
+            vec![],
+            vec![
+                EpisodicSourceRef::new(5, event_id(5), "Event".to_owned(), sha256(b"5")).unwrap(),
+                source.clone()
+            ],
+            30,
+            10,
+            event_id(10),
+        )
+        .is_err()
+    );
+    assert!(
+        EpisodicSummary::new(
+            summary_id(51),
+            &profile,
+            "label".to_owned(),
+            "body".to_owned(),
+            vec![],
+            vec![
+                source.clone(),
+                EpisodicSourceRef::new(5, event_id(4), "Event".to_owned(), sha256(b"5")).unwrap()
+            ],
+            30,
+            10,
+            event_id(10),
+        )
+        .is_err()
+    );
+    assert!(
+        EpisodicSummary::new(
+            summary_id(52),
+            &profile,
+            "label".to_owned(),
+            "body".to_owned(),
+            vec![],
+            vec![
+                EpisodicSourceRef::new(4, event_id(10), "Event".to_owned(), sha256(b"self"))
+                    .unwrap()
+            ],
+            30,
+            10,
+            event_id(10),
+        )
+        .is_err()
+    );
+    assert!(
+        EpisodicSummary::new(
+            summary_id(53),
+            &profile,
+            "label".to_owned(),
+            "body".to_owned(),
+            vec![],
+            vec![
+                EpisodicSourceRef::new(10, event_id(11), "Event".to_owned(), sha256(b"future"))
+                    .unwrap()
+            ],
+            30,
+            10,
+            event_id(10),
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn summary_exposes_the_required_verify_sources_qualification() {
     let qualification = EpisodicQualification::SummaryVerifySources;
     assert_eq!(qualification.label(), "Summary — verify sources");

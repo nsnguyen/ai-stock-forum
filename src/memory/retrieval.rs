@@ -4,7 +4,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
     agents::{AgentProfileVersion, AgentProfileVersionRef},
-    domain::{Digest, DomainError, MemoryNamespaceId, canonical_json_bytes, sha256},
+    domain::{
+        Digest, DomainError, EpisodicSummaryId, MemoryEntryId, MemoryEntryVersionId,
+        MemoryNamespaceId, canonical_json_bytes, sha256,
+    },
 };
 
 use super::{
@@ -600,6 +603,8 @@ impl MemorySnapshot {
         &self.snapshot_digest
     }
     pub fn metadata(&self) -> MemorySnapshotMetadata {
+        let (entry_order, summary_order) =
+            metadata_order_from_context(&self.scope, &self.entries, &self.summaries);
         MemorySnapshotMetadata {
             scope: self.scope.clone(),
             budget: self.budget.clone(),
@@ -609,6 +614,8 @@ impl MemorySnapshot {
                 .iter()
                 .map(|item| item.summary.clone())
                 .collect(),
+            entry_order,
+            summary_order,
             accounting: self.accounting.clone(),
             snapshot_digest: self.snapshot_digest.clone(),
         }
@@ -646,11 +653,15 @@ impl MemorySnapshot {
         Ok(())
     }
     fn compute_digest(&self) -> Result<Digest, DomainError> {
+        let (entry_order, summary_order) =
+            metadata_order_from_context(&self.scope, &self.entries, &self.summaries);
         snapshot_digest(
             &self.scope,
             &self.budget,
             self.entries.iter().map(|item| &item.entry).collect(),
             self.summaries.iter().map(|item| &item.summary).collect(),
+            &entry_order,
+            &summary_order,
             &self.accounting,
         )
     }
@@ -680,8 +691,50 @@ pub struct MemorySnapshotMetadata {
     budget: MemoryRetrievalBudget,
     entry_refs: Vec<MemoryEntryRef>,
     summary_refs: Vec<EpisodicSummaryRef>,
+    entry_order: Vec<MemoryEntryMetadataOrder>,
+    summary_order: Vec<MemorySummaryMetadataOrder>,
     accounting: MemorySnapshotAccounting,
     snapshot_digest: Digest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryEntryMetadataOrder {
+    entry_id: MemoryEntryId,
+    entry_version_id: MemoryEntryVersionId,
+    purpose_rank: u8,
+}
+
+impl MemoryEntryMetadataOrder {
+    pub fn entry_id(&self) -> MemoryEntryId {
+        self.entry_id
+    }
+    pub fn entry_version_id(&self) -> MemoryEntryVersionId {
+        self.entry_version_id
+    }
+    pub fn purpose_rank(&self) -> u8 {
+        self.purpose_rank
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemorySummaryMetadataOrder {
+    summary_id: EpisodicSummaryId,
+    purpose_rank: u8,
+    created_at_ms: i64,
+}
+
+impl MemorySummaryMetadataOrder {
+    pub fn summary_id(&self) -> EpisodicSummaryId {
+        self.summary_id
+    }
+    pub fn purpose_rank(&self) -> u8 {
+        self.purpose_rank
+    }
+    pub fn created_at_ms(&self) -> i64 {
+        self.created_at_ms
+    }
 }
 
 #[derive(Deserialize)]
@@ -691,6 +744,8 @@ struct MemorySnapshotMetadataWire {
     budget: MemoryRetrievalBudget,
     entry_refs: Vec<MemoryEntryRef>,
     summary_refs: Vec<EpisodicSummaryRef>,
+    entry_order: Vec<MemoryEntryMetadataOrder>,
+    summary_order: Vec<MemorySummaryMetadataOrder>,
     accounting: MemorySnapshotAccounting,
     snapshot_digest: Digest,
 }
@@ -708,6 +763,12 @@ impl MemorySnapshotMetadata {
     pub fn summary_refs(&self) -> &[EpisodicSummaryRef] {
         &self.summary_refs
     }
+    pub fn entry_order(&self) -> &[MemoryEntryMetadataOrder] {
+        &self.entry_order
+    }
+    pub fn summary_order(&self) -> &[MemorySummaryMetadataOrder] {
+        &self.summary_order
+    }
     pub fn accounting(&self) -> &MemorySnapshotAccounting {
         &self.accounting
     }
@@ -720,6 +781,8 @@ impl MemorySnapshotMetadata {
             &self.budget,
             &self.entry_refs,
             &self.summary_refs,
+            &self.entry_order,
+            &self.summary_order,
             &self.accounting,
         )?;
         if snapshot_digest(
@@ -727,6 +790,8 @@ impl MemorySnapshotMetadata {
             &self.budget,
             self.entry_refs.iter().collect(),
             self.summary_refs.iter().collect(),
+            &self.entry_order,
+            &self.summary_order,
             &self.accounting,
         )? != self.snapshot_digest
         {
@@ -747,6 +812,8 @@ impl<'de> Deserialize<'de> for MemorySnapshotMetadata {
             budget: wire.budget,
             entry_refs: wire.entry_refs,
             summary_refs: wire.summary_refs,
+            entry_order: wire.entry_order,
+            summary_order: wire.summary_order,
             accounting: wire.accounting,
             snapshot_digest: wire.snapshot_digest,
         };
@@ -881,11 +948,15 @@ impl MemorySnapshotBuilder {
         Ok(())
     }
     pub(crate) fn finish(self) -> Result<MemorySnapshot, DomainError> {
+        let (entry_order, summary_order) =
+            metadata_order_from_context(&self.request.scope, &self.entries, &self.summaries);
         let digest = snapshot_digest(
             &self.request.scope,
             &self.request.budget,
             self.entries.iter().map(|item| &item.entry).collect(),
             self.summaries.iter().map(|item| &item.summary).collect(),
+            &entry_order,
+            &summary_order,
             &self.accounting,
         )?;
         MemorySnapshot::from_parts(
@@ -927,6 +998,111 @@ fn purpose_rank(purpose: &MemoryPurposeScope, tags: &[String]) -> u8 {
         MemoryPurposeScope::Tagged(wanted) if tags.iter().any(|tag| wanted.contains(tag)) => 0,
         MemoryPurposeScope::Tagged(_) => 1,
     }
+}
+fn metadata_order_from_context(
+    scope: &MemoryRetrievalScope,
+    entries: &[MemoryKvContextItem],
+    summaries: &[EpisodicContextItem],
+) -> (
+    Vec<MemoryEntryMetadataOrder>,
+    Vec<MemorySummaryMetadataOrder>,
+) {
+    let entry_order = entries
+        .iter()
+        .map(|item| MemoryEntryMetadataOrder {
+            entry_id: item.entry.entry_id(),
+            entry_version_id: item.entry.entry_version_id(),
+            purpose_rank: purpose_rank(scope.purpose(), item.purpose_tags()),
+        })
+        .collect();
+    let summary_order = summaries
+        .iter()
+        .map(|item| MemorySummaryMetadataOrder {
+            summary_id: item.summary.summary_id(),
+            purpose_rank: purpose_rank(scope.purpose(), item.purpose_tags()),
+            created_at_ms: item.created_at_ms,
+        })
+        .collect();
+    (entry_order, summary_order)
+}
+fn validate_metadata_order(
+    scope: &MemoryRetrievalScope,
+    entries: &[MemoryEntryRef],
+    summaries: &[EpisodicSummaryRef],
+    entry_order: &[MemoryEntryMetadataOrder],
+    summary_order: &[MemorySummaryMetadataOrder],
+) -> Result<(), DomainError> {
+    if entries.len() != entry_order.len() || summaries.len() != summary_order.len() {
+        return Err(DomainError::InvalidMemorySnapshot);
+    }
+    let require_general_rank = matches!(scope.purpose(), MemoryPurposeScope::General);
+    for (entry, order) in entries.iter().zip(entry_order) {
+        if entry.entry_id() != order.entry_id
+            || entry.entry_version_id() != order.entry_version_id
+            || !matches!(order.purpose_rank, 0 | 1)
+            || (require_general_rank && order.purpose_rank != 0)
+        {
+            return Err(DomainError::InvalidMemorySnapshot);
+        }
+    }
+    for (summary, order) in summaries.iter().zip(summary_order) {
+        if summary.summary_id() != order.summary_id
+            || !matches!(order.purpose_rank, 0 | 1)
+            || (require_general_rank && order.purpose_rank != 0)
+        {
+            return Err(DomainError::InvalidMemorySnapshot);
+        }
+    }
+    for ((left_ref, right_ref), (left_order, right_order)) in entries
+        .windows(2)
+        .map(|window| (&window[0], &window[1]))
+        .zip(
+            entry_order
+                .windows(2)
+                .map(|window| (&window[0], &window[1])),
+        )
+    {
+        if left_order.purpose_rank > right_order.purpose_rank
+            || (left_order.purpose_rank == right_order.purpose_rank
+                && entry_sort_key(left_ref) > entry_sort_key(right_ref))
+        {
+            return Err(DomainError::InvalidMemorySnapshot);
+        }
+    }
+    for ((left_ref, right_ref), (left_order, right_order)) in summaries
+        .windows(2)
+        .map(|window| (&window[0], &window[1]))
+        .zip(
+            summary_order
+                .windows(2)
+                .map(|window| (&window[0], &window[1])),
+        )
+    {
+        if left_order.purpose_rank > right_order.purpose_rank
+            || (left_order.purpose_rank == right_order.purpose_rank
+                && (left_order.created_at_ms < right_order.created_at_ms
+                    || (left_order.created_at_ms == right_order.created_at_ms
+                        && left_ref.summary_id() > right_ref.summary_id())))
+        {
+            return Err(DomainError::InvalidMemorySnapshot);
+        }
+    }
+    Ok(())
+}
+fn entry_sort_key(
+    entry: &MemoryEntryRef,
+) -> (
+    super::NormalizedMemoryKey,
+    crate::domain::ObjectVersion,
+    MemoryEntryId,
+    MemoryEntryVersionId,
+) {
+    (
+        entry.normalized_key().clone(),
+        entry.version(),
+        entry.entry_id(),
+        entry.entry_version_id(),
+    )
 }
 fn byte_cost<T: Serialize>(item: &T) -> Result<u64, DomainError> {
     u64::try_from(canonical_json_bytes(item)?.len())
@@ -1021,6 +1197,8 @@ fn validate_metadata_shape(
     budget: &MemoryRetrievalBudget,
     entries: &[MemoryEntryRef],
     summaries: &[EpisodicSummaryRef],
+    entry_order: &[MemoryEntryMetadataOrder],
+    summary_order: &[MemorySummaryMetadataOrder],
     accounting: &MemorySnapshotAccounting,
 ) -> Result<(), DomainError> {
     if entries.len() > budget.max_entries as usize
@@ -1051,20 +1229,7 @@ fn validate_metadata_shape(
     {
         return Err(DomainError::InvalidMemorySnapshot);
     }
-    if matches!(scope.purpose(), MemoryPurposeScope::General) {
-        let mut sorted_entries = entries.to_vec();
-        sorted_entries.sort_by_key(|entry| {
-            (
-                entry.normalized_key().clone(),
-                entry.version(),
-                entry.entry_id(),
-                entry.entry_version_id(),
-            )
-        });
-        if sorted_entries != entries {
-            return Err(DomainError::InvalidMemorySnapshot);
-        }
-    }
+    validate_metadata_order(scope, entries, summaries, entry_order, summary_order)?;
     if accounting.accepted_entry_count
         != u64::try_from(entries.len()).map_err(|_| DomainError::MemoryRetrievalOverflow)?
         || accounting.accepted_summary_count
@@ -1134,6 +1299,8 @@ fn snapshot_digest(
     budget: &MemoryRetrievalBudget,
     entries: Vec<&MemoryEntryRef>,
     summaries: Vec<&EpisodicSummaryRef>,
+    entry_order: &[MemoryEntryMetadataOrder],
+    summary_order: &[MemorySummaryMetadataOrder],
     accounting: &MemorySnapshotAccounting,
 ) -> Result<Digest, DomainError> {
     Ok(sha256(&canonical_json_bytes(&SnapshotDigestMaterial {
@@ -1141,6 +1308,8 @@ fn snapshot_digest(
         budget,
         entries,
         summaries,
+        entry_order,
+        summary_order,
         accounting,
     })?))
 }
@@ -1150,6 +1319,8 @@ struct SnapshotDigestMaterial<'a> {
     budget: &'a MemoryRetrievalBudget,
     entries: Vec<&'a MemoryEntryRef>,
     summaries: Vec<&'a EpisodicSummaryRef>,
+    entry_order: &'a [MemoryEntryMetadataOrder],
+    summary_order: &'a [MemorySummaryMetadataOrder],
     accounting: &'a MemorySnapshotAccounting,
 }
 

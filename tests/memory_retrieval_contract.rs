@@ -230,6 +230,8 @@ fn recompute_metadata_digest(value: &mut Value) {
         "budget": value["budget"].clone(),
         "entries": value["entry_refs"].clone(),
         "summaries": value["summary_refs"].clone(),
+        "entry_order": value["entry_order"].clone(),
+        "summary_order": value["summary_order"].clone(),
         "accounting": value["accounting"].clone(),
     });
     value["snapshot_digest"] = json!(sha256(&canonical_json_bytes(&material).unwrap()).as_str());
@@ -446,6 +448,7 @@ fn metadata_rejects_reordered_references_and_over_budget_accounting_even_with_re
     let metadata = snapshot.metadata();
     let mut reordered = serde_json::to_value(&metadata).unwrap();
     reordered["entry_refs"].as_array_mut().unwrap().swap(0, 1);
+    reordered["entry_order"].as_array_mut().unwrap().swap(0, 1);
     recompute_metadata_digest(&mut reordered);
     assert!(serde_json::from_value::<MemorySnapshotMetadata>(reordered).is_err());
 
@@ -458,6 +461,74 @@ fn metadata_rejects_reordered_references_and_over_budget_accounting_even_with_re
     excessive_sources["accounting"]["accepted_source_count"] = json!(129_u64);
     recompute_metadata_digest(&mut excessive_sources);
     assert!(serde_json::from_value::<MemorySnapshotMetadata>(excessive_sources).is_err());
+}
+
+#[test]
+fn metadata_rejects_reordered_general_summaries_and_tagged_groups_with_recomputed_digest() {
+    let general = select_snapshot(
+        &request_with_byte_budget(32_768),
+        Vec::<Result<MemoryKvContextItem, _>>::new(),
+        vec![
+            Ok(summary_item_at("older", 10, 2, 104)),
+            Ok(summary_item_at("newer", 20, 3, 105)),
+        ],
+    )
+    .unwrap()
+    .metadata();
+    let mut reordered_summaries = serde_json::to_value(general).unwrap();
+    reordered_summaries["summary_refs"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    reordered_summaries["summary_order"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    recompute_metadata_digest(&mut reordered_summaries);
+    assert!(serde_json::from_value::<MemorySnapshotMetadata>(reordered_summaries).is_err());
+
+    let local = profile();
+    let tagged_request = MemoryRetrievalRequest::new(
+        MemoryRetrievalScope::new(
+            &local,
+            MemoryPurposeScope::tagged(vec!["research".to_owned()]).unwrap(),
+        )
+        .unwrap(),
+        MemoryRetrievalBudget::default(),
+    )
+    .unwrap();
+    let tagged = select_snapshot(
+        &tagged_request,
+        vec![
+            Ok(MemoryKvContextItem::from_entry(&entry("matched", vec!["research"], 106)).unwrap()),
+            Ok(MemoryKvContextItem::from_entry(&entry("fallback", vec![], 107)).unwrap()),
+        ],
+        vec![
+            Ok(summary_item(vec!["research"], 108)),
+            Ok(summary_item(vec![], 109)),
+        ],
+    )
+    .unwrap()
+    .metadata();
+    let mut reordered_tagged = serde_json::to_value(tagged).unwrap();
+    reordered_tagged["entry_refs"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    reordered_tagged["summary_refs"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    reordered_tagged["entry_order"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    reordered_tagged["summary_order"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    recompute_metadata_digest(&mut reordered_tagged);
+    assert!(serde_json::from_value::<MemorySnapshotMetadata>(reordered_tagged).is_err());
 }
 
 #[test]
@@ -750,6 +821,179 @@ fn scope_validation_requires_the_exact_profile_and_namespace_provenance() {
     let scope = MemoryRetrievalScope::new(&local, MemoryPurposeScope::General).unwrap();
     assert!(scope.validate_against(&local).is_ok());
     assert!(scope.validate_against(&foreign).is_err());
+}
+
+#[test]
+fn scope_deserialization_rejects_a_tampered_format_version() {
+    let scope = MemoryRetrievalScope::new(&profile(), MemoryPurposeScope::General).unwrap();
+    let mut value = serde_json::to_value(scope).unwrap();
+    value["format_version"] = json!(2);
+    assert!(serde_json::from_value::<MemoryRetrievalScope>(value).is_err());
+}
+
+#[test]
+fn kv_ordering_uses_normalized_key_entry_id_and_entry_version_id_ties() {
+    let local = profile();
+    let request = MemoryRetrievalRequest::new(
+        MemoryRetrievalScope::new(&local, MemoryPurposeScope::General).unwrap(),
+        MemoryRetrievalBudget::new(1, 8, 32_768, 128).unwrap(),
+    )
+    .unwrap();
+    let alpha = MemoryEntryVersion::create_present(
+        local.memory_namespace_id(),
+        MemoryEntryId::from_uuid(uuid(220)),
+        MemoryEntryVersionId::from_uuid(uuid(221)),
+        MemoryEntryDraft::new("Alpha".to_owned(), "alpha".to_owned(), vec![]).unwrap(),
+        Actor::Human,
+        1,
+        None,
+        event_id(222),
+    )
+    .unwrap();
+    let zebra = MemoryEntryVersion::create_present(
+        local.memory_namespace_id(),
+        MemoryEntryId::from_uuid(uuid(223)),
+        MemoryEntryVersionId::from_uuid(uuid(224)),
+        MemoryEntryDraft::new("Zebra".to_owned(), "zebra".to_owned(), vec![]).unwrap(),
+        Actor::Human,
+        1,
+        None,
+        event_id(225),
+    )
+    .unwrap();
+    let snapshot = select_snapshot(
+        &request,
+        vec![
+            Ok(MemoryKvContextItem::from_entry(&zebra).unwrap()),
+            Ok(MemoryKvContextItem::from_entry(&alpha).unwrap()),
+        ],
+        Vec::<Result<EpisodicContextItem, _>>::new(),
+    )
+    .unwrap();
+    assert_eq!(snapshot.entries()[0].value(), "alpha");
+
+    let low_version_id = MemoryEntryVersion::create_present(
+        local.memory_namespace_id(),
+        MemoryEntryId::from_uuid(uuid(230)),
+        MemoryEntryVersionId::from_uuid(uuid(231)),
+        MemoryEntryDraft::new("Same".to_owned(), "low version id".to_owned(), vec![]).unwrap(),
+        Actor::Human,
+        1,
+        None,
+        event_id(232),
+    )
+    .unwrap();
+    let high_version_id = MemoryEntryVersion::create_present(
+        local.memory_namespace_id(),
+        MemoryEntryId::from_uuid(uuid(230)),
+        MemoryEntryVersionId::from_uuid(uuid(233)),
+        MemoryEntryDraft::new("Same".to_owned(), "high version id".to_owned(), vec![]).unwrap(),
+        Actor::Human,
+        1,
+        None,
+        event_id(234),
+    )
+    .unwrap();
+    let snapshot = select_snapshot(
+        &request,
+        vec![
+            Ok(MemoryKvContextItem::from_entry(&high_version_id).unwrap()),
+            Ok(MemoryKvContextItem::from_entry(&low_version_id).unwrap()),
+        ],
+        Vec::<Result<EpisodicContextItem, _>>::new(),
+    )
+    .unwrap();
+    assert_eq!(snapshot.entries()[0].value(), "low version id");
+
+    let low_entry_id = MemoryEntryVersion::create_present(
+        local.memory_namespace_id(),
+        MemoryEntryId::from_uuid(uuid(235)),
+        MemoryEntryVersionId::from_uuid(uuid(237)),
+        MemoryEntryDraft::new("Entry tie".to_owned(), "low entry id".to_owned(), vec![]).unwrap(),
+        Actor::Human,
+        1,
+        None,
+        event_id(238),
+    )
+    .unwrap();
+    let high_entry_id = MemoryEntryVersion::create_present(
+        local.memory_namespace_id(),
+        MemoryEntryId::from_uuid(uuid(236)),
+        MemoryEntryVersionId::from_uuid(uuid(239)),
+        MemoryEntryDraft::new("Entry tie".to_owned(), "high entry id".to_owned(), vec![]).unwrap(),
+        Actor::Human,
+        1,
+        None,
+        event_id(240),
+    )
+    .unwrap();
+    let snapshot = select_snapshot(
+        &request,
+        vec![
+            Ok(MemoryKvContextItem::from_entry(&high_entry_id).unwrap()),
+            Ok(MemoryKvContextItem::from_entry(&low_entry_id).unwrap()),
+        ],
+        Vec::<Result<EpisodicContextItem, _>>::new(),
+    )
+    .unwrap();
+    assert_eq!(snapshot.entries()[0].value(), "low entry id");
+}
+
+#[test]
+fn zero_budgets_count_eligible_candidates_and_summary_omissions_exactly() {
+    let entry = MemoryKvContextItem::from_entry(&entry("value", vec![], 240)).unwrap();
+    let summary = summary_item_with_body("summary", "Body".to_owned(), 10, 241);
+    let entry_cost = u64::try_from(canonical_json_bytes(&entry).unwrap().len()).unwrap();
+    let summary_cost = u64::try_from(canonical_json_bytes(&summary).unwrap().len()).unwrap();
+    let request = MemoryRetrievalRequest::new(
+        MemoryRetrievalScope::new(&profile(), MemoryPurposeScope::General).unwrap(),
+        MemoryRetrievalBudget::new(0, 0, 0, 0).unwrap(),
+    )
+    .unwrap();
+    let snapshot = select_snapshot(&request, vec![Ok(entry)], vec![Ok(summary)]).unwrap();
+    assert_eq!(snapshot.accounting().eligible_entry_count(), 1);
+    assert_eq!(snapshot.accounting().omitted_entry_count(), 1);
+    assert_eq!(snapshot.accounting().eligible_summary_count(), 1);
+    assert_eq!(snapshot.accounting().omitted_summary_count(), 1);
+    assert_eq!(snapshot.accounting().omitted_source_count(), 1);
+    assert_eq!(
+        snapshot.accounting().omitted_byte_count(),
+        entry_cost + summary_cost
+    );
+}
+
+#[test]
+fn metadata_is_reference_only_for_summary_prose_and_source_text() {
+    let summary = EpisodicSummary::new(
+        EpisodicSummaryId::from_uuid(uuid(250)),
+        &profile(),
+        "Private label".to_owned(),
+        "very private summary prose".to_owned(),
+        vec![],
+        vec![
+            EpisodicSourceRef::new(
+                1,
+                event_id(251),
+                "PrivateSourceEvent".to_owned(),
+                sha256(b"event"),
+            )
+            .unwrap(),
+        ],
+        10,
+        2,
+        event_id(252),
+    )
+    .unwrap();
+    let snapshot = select_snapshot(
+        &request_with_byte_budget(32_768),
+        Vec::<Result<MemoryKvContextItem, _>>::new(),
+        vec![Ok(EpisodicContextItem::from_summary(&summary).unwrap())],
+    )
+    .unwrap();
+    let metadata = serde_json::to_string(&snapshot.metadata()).unwrap();
+    assert!(!metadata.contains("Private label"));
+    assert!(!metadata.contains("very private summary prose"));
+    assert!(!metadata.contains("PrivateSourceEvent"));
 }
 
 #[test]
