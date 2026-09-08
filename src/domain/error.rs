@@ -54,6 +54,10 @@ pub enum DomainError {
     InvalidMemoryField { field: &'static str },
     #[error("memory text contains unsafe characters")]
     UnsafeMemoryText { field: &'static str },
+    #[error("memory editor seed is invalid")]
+    InvalidMemoryEditorSeed,
+    #[error("memory editor transition is invalid")]
+    InvalidMemoryEditorTransition,
     #[error("plaintext validation version is unknown")]
     UnknownPlaintextValidationVersion,
     #[error("memory entry is structurally invalid")]
@@ -119,6 +123,8 @@ impl DomainError {
             Self::InvalidSkillReviewToken => "invalid_skill_review_token",
             Self::InvalidMemoryField { .. } => "invalid_memory_field",
             Self::UnsafeMemoryText { .. } => "unsafe_memory_text",
+            Self::InvalidMemoryEditorSeed => "invalid_memory_editor_seed",
+            Self::InvalidMemoryEditorTransition => "invalid_memory_editor_transition",
             Self::UnknownPlaintextValidationVersion => "unknown_plaintext_validation_version",
             Self::InvalidMemoryEntry => "invalid_memory_entry",
             Self::MemoryReviewUnavailable => "memory_review_unavailable",
