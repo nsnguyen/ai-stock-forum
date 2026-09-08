@@ -1020,3 +1020,35 @@ fn snapshot_digest_is_deterministic_and_metadata_is_reference_only() {
             .contains("12345678")
     );
 }
+
+#[test]
+fn metadata_redacts_selected_kv_value_and_purpose_tags() {
+    let profile = profile();
+    let request = MemoryRetrievalRequest::new(
+        MemoryRetrievalScope::new(
+            &profile,
+            MemoryPurposeScope::tagged(vec!["retrieval-scope".to_owned()]).unwrap(),
+        )
+        .unwrap(),
+        MemoryRetrievalBudget::default(),
+    )
+    .unwrap();
+    let snapshot = select_snapshot(
+        &request,
+        vec![Ok(MemoryKvContextItem::from_entry(&entry(
+            "12345678",
+            vec!["retrieval-scope", "distinctive-private-purpose-tag"],
+            990,
+        ))
+        .unwrap())],
+        Vec::<Result<EpisodicContextItem, _>>::new(),
+    )
+    .unwrap();
+    assert_eq!(snapshot.entries().len(), 1);
+    assert_eq!(snapshot.entries()[0].value(), "12345678");
+
+    let metadata = serde_json::to_string(&snapshot.metadata()).unwrap();
+    assert!(!metadata.contains("12345678"));
+    assert!(!metadata.contains("distinctive-private-purpose-tag"));
+    assert!(!metadata.contains("purpose_tags"));
+}
