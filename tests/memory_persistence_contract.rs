@@ -1146,7 +1146,7 @@ fn bounded_repository_pages_execute_constant_select_statement_counts() {
         tx.rollback().unwrap();
         assert_eq!(page.returned_count, 100);
     });
-    assert_eq!((one_current_count, max_current_count), (6, 6));
+    assert_eq!((one_current_count, max_current_count), (12, 12));
 
     let (mut one_history, one_entry) = database_with_entry_history(1);
     let (mut max_history, max_entry) = database_with_entry_history(100);
@@ -1172,7 +1172,7 @@ fn bounded_repository_pages_execute_constant_select_statement_counts() {
         .unwrap();
         tx.rollback().unwrap();
     });
-    assert_eq!((one_history_count, max_history_count), (7, 7));
+    assert_eq!((one_history_count, max_history_count), (13, 13));
 
     let (mut one_proposal, one_profile) = database_with_pending_proposals(1);
     let (mut max_proposal, max_profile) = database_with_pending_proposals(100);
@@ -1252,8 +1252,8 @@ fn bounded_repository_pages_execute_constant_select_statement_counts() {
             tx.rollback().unwrap();
         });
         let expected = match purpose {
-            MemoryPurposeScope::General => 11,
-            MemoryPurposeScope::Tagged(_) => 13,
+            MemoryPurposeScope::General => 17,
+            MemoryPurposeScope::Tagged(_) => 19,
         };
         assert_eq!(
             (one_snapshot_count, max_snapshot_count),

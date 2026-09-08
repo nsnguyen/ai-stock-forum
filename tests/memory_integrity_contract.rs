@@ -1028,6 +1028,91 @@ fn accepted_proposal_dependency_tampering_fails_every_entry_batch_path() {
 }
 
 #[test]
+fn unaccepted_current_successor_still_authenticates_accepted_predecessor_graph() {
+    for (case, mutation) in [
+        (
+            "terminal approval actor",
+            "UPDATE approval_records SET resolution_actor_kind='system', resolution_actor_id=NULL",
+        ),
+        (
+            "terminal resolution coherence",
+            "UPDATE memory_proposal_resolutions SET resolved_at_ms=resolved_at_ms+1",
+        ),
+        (
+            "missing status row",
+            "DELETE FROM current_memory_proposal_status",
+        ),
+    ] {
+        let (mut database, profile, _, predecessor) = accepted_proposal_entry_database(false);
+        let successor_event = append_help_event(&mut database, 1_025, 40);
+        let successor = predecessor
+            .next_present(
+                MemoryEntryVersionId::from_uuid(Uuid::from_u128(1_026)),
+                MemoryEntryDraft::new(
+                    predecessor.display_key().into(),
+                    "direct successor".into(),
+                    vec![],
+                )
+                .unwrap(),
+                Actor::Human,
+                40,
+                None,
+                successor_event,
+            )
+            .unwrap();
+        let successor_sequence = event_sequence(&database, successor_event);
+        let tx = database.immediate_transaction().unwrap();
+        MemoryRepository::insert_entry_version(&tx, successor_sequence, &successor).unwrap();
+        MemoryRepository::replace_current_entry(&tx, &successor).unwrap();
+        tx.commit().unwrap();
+
+        database
+            .connection()
+            .execute_batch(
+                "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON;
+                 DROP TRIGGER approval_records_transition_guard;
+                 DROP TRIGGER memory_proposal_resolutions_no_update;",
+            )
+            .unwrap();
+        database.connection().execute(mutation, []).unwrap();
+        let request = MemoryRetrievalRequest::new(
+            MemoryRetrievalScope::new(&profile, MemoryPurposeScope::General).unwrap(),
+            MemoryRetrievalBudget::default(),
+        )
+        .unwrap();
+        let tx = database.immediate_transaction().unwrap();
+        assert_eq!(
+            MemoryRepository::list_current_entries(&tx, profile.memory_namespace_id(), 100)
+                .unwrap_err(),
+            PersistenceError::MemoryRowMismatch,
+            "current list: {case}",
+        );
+        assert_eq!(
+            MemoryRepository::count_active_entries(&tx, profile.memory_namespace_id()).unwrap_err(),
+            PersistenceError::MemoryRowMismatch,
+            "active count: {case}",
+        );
+        assert_eq!(
+            MemoryRepository::build_snapshot(&tx, &request).unwrap_err(),
+            PersistenceError::MemoryRowMismatch,
+            "snapshot: {case}",
+        );
+        assert_eq!(
+            MemoryRepository::load_entry_history(
+                &tx,
+                profile.memory_namespace_id(),
+                successor.reference().normalized_key(),
+                1,
+            )
+            .unwrap_err(),
+            PersistenceError::MemoryRowMismatch,
+            "history limit one: {case}",
+        );
+        tx.rollback().unwrap();
+    }
+}
+
+#[test]
 fn expected_entry_dependency_tampering_fails_every_proposal_batch_path() {
     for (case, deleted, mutation) in [
         (

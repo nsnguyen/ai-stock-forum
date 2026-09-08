@@ -1350,10 +1350,7 @@ fn validate_entry_batch_context(
         }
     }
     validate_accepted_proposal_refs(tx, entries)?;
-    if entries
-        .iter()
-        .any(|entry| entry.accepted_proposal().is_some())
-    {
+    if !entries.is_empty() {
         validate_entry_dependency_graph(tx, entries)?;
     }
     Ok(())
@@ -2483,10 +2480,7 @@ fn validate_current_entry_rows(
     }
     drop(rows);
     drop(statement);
-    if entries
-        .iter()
-        .any(|entry| entry.accepted_proposal().is_some())
-    {
+    if !entries.is_empty() {
         validate_entry_dependency_graph(tx, &entries)?;
     }
     Ok(())
