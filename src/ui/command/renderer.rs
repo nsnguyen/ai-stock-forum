@@ -10,20 +10,22 @@ use crate::{
         CommandOutcome, CommandView, EpisodicSummariesView, EpisodicSummaryView,
         InputRejectionCategory, MemoryEntriesView, MemoryEntryHistoryView, MemoryEntryMutationView,
         MemoryEntryVersionView, MemoryEntryView, MemoryProfileIdentityView,
-        MemoryProposalCreatedView, MemoryProposalResolutionView, MemoryProposalView,
-        MemoryProposalsView, SafeToken, ShutdownDisposition, ShutdownReason,
+        MemoryProposalCreatedView, MemoryProposalResolutionReview, MemoryProposalResolutionView,
+        MemoryProposalView, MemoryProposalsView, SafeToken, ShutdownDisposition, ShutdownReason,
     },
     cli::CliError,
     config::StartupError,
     domain::Actor,
     memory::{
-        EpisodicQualification, ExpectedMemoryEntryState, MemoryEntryDraft, MemoryEntryRef,
+        EpisodicQualification, ExpectedMemoryEntryState, MemoryEditReview, MemoryEntryDraft,
+        MemoryEntryRef, MemoryField, MemoryFieldDiff, MemoryFieldValue, MemoryNoChange,
         MemoryProposalOperation, MemoryProposalRef,
     },
     runtime::RuntimeError,
     setup::SetupStatus,
     skills::{SkillDraft, SkillEditPreview, SkillVersionRef},
     ui::{
+        memory_editor::{MEMORY_PLAINTEXT_WARNING, MemoryEditor},
         profile_editor::{ProfileEditor, ProfileEditorMode, ProfileEditorStep},
         tui::TuiError,
     },
@@ -44,6 +46,148 @@ const MEMORY_USAGE: &[u8] = b"Usage:\n  /memory list <agent>\n  /memory get <age
 pub struct TextRenderer;
 
 impl TextRenderer {
+    pub fn render_memory_editor<W: Write>(editor: &MemoryEditor, writer: &mut W) -> io::Result<()> {
+        writeln!(writer, "Memory editor [{:?}]", editor.step())?;
+        writeln!(writer, "{MEMORY_PLAINTEXT_WARNING}")?;
+        writer.write_all(b"Controls: :back :cancel\n")
+    }
+
+    pub fn render_memory_editor_error<W: Write>(code: &str, writer: &mut W) -> io::Result<()> {
+        writeln!(writer, "Memory editor input was rejected [{code}].")
+    }
+
+    pub fn render_memory_cancelled<W: Write>(writer: &mut W) -> io::Result<()> {
+        writer.write_all(b"Memory workflow cancelled.\n")
+    }
+
+    pub fn render_memory_no_change<W: Write>(
+        no_change: MemoryNoChange,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writeln!(writer, "Memory edit has no effect: {no_change:?}.")
+    }
+
+    pub fn render_memory_edit_review<W: Write>(
+        review: &MemoryEditReview,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        let action = match review.operation {
+            crate::memory::MemoryMutationKind::Set => "set",
+            crate::memory::MemoryMutationKind::Delete => "delete",
+        };
+        writeln!(writer, "Memory {action} review")?;
+        writeln!(writer, "{MEMORY_PLAINTEXT_WARNING}")?;
+        writeln!(
+            writer,
+            "Profile: {}@{} version-id {} digest {}",
+            review.profile.profile_id(),
+            review.profile.version().get(),
+            review.profile.profile_version_id(),
+            review.profile.content_digest(),
+        )?;
+        writeln!(writer, "Namespace: {}", review.namespace_id)?;
+        render_expected_entry("Expected entry", &review.expected, writer)?;
+        if let ExpectedMemoryEntryState::Present(entry) | ExpectedMemoryEntryState::Deleted(entry) =
+            &review.expected
+        {
+            writeln!(writer, "Expected key: {}", entry.normalized_key().as_str())?;
+        }
+        if let Some(candidate) = &review.candidate {
+            render_memory_candidate(candidate, writer)?;
+        }
+        writeln!(writer, "Changed fields: {}", review.diff.len())?;
+        for diff in &review.diff {
+            render_memory_field_diff(diff, writer)?;
+        }
+        writeln!(writer, "Review digest: {}", review.review_digest)?;
+        writeln!(writer, "Type exactly: {action} {}", review.review_digest)
+    }
+
+    pub fn render_memory_resolution_review<W: Write>(
+        review: &MemoryProposalResolutionReview,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        let action = match review.action {
+            crate::memory::MemoryResolutionAction::Approve => "approve",
+            crate::memory::MemoryResolutionAction::Reject => "reject",
+        };
+        writeln!(writer, "Memory proposal {action} review")?;
+        writeln!(writer, "{MEMORY_PLAINTEXT_WARNING}")?;
+        let proposal = &review.proposal;
+        let proposal_ref = proposal.reference();
+        writeln!(
+            writer,
+            "Proposal: {}@{} digest {}",
+            proposal_ref.proposal_id(),
+            proposal_ref.version().get(),
+            proposal_ref.content_digest(),
+        )?;
+        writeln!(
+            writer,
+            "Approval: {} expected {:?}",
+            review.approval_id, review.expected_approval_status,
+        )?;
+        writeln!(writer, "Namespace: {}", proposal.namespace_id())?;
+        render_memory_profile_identity(
+            "Proposer",
+            &review.proposer_identity,
+            review.proposer_is_historical,
+            writer,
+        )?;
+        render_memory_profile_identity(
+            "Namespace owner",
+            &review.namespace_owner_identity,
+            false,
+            writer,
+        )?;
+        writeln!(
+            writer,
+            "Display key: {}",
+            escaped_bounded_bytes(proposal.display_key(), MAX_MEMORY_KEY_RENDER_BYTES),
+        )?;
+        writeln!(
+            writer,
+            "Normalized key: {}",
+            escaped_bounded_bytes(
+                proposal.normalized_key().as_str(),
+                MAX_MEMORY_KEY_RENDER_BYTES,
+            ),
+        )?;
+        render_expected_entry("Expected/current entry", &review.expected_entry, writer)?;
+        match proposal.operation() {
+            MemoryProposalOperation::Set { candidate } => {
+                writer.write_all(b"Operation: Set\n")?;
+                render_memory_candidate(candidate, writer)?;
+            }
+            MemoryProposalOperation::Delete => writer.write_all(b"Operation: Delete\n")?,
+        }
+        writeln!(
+            writer,
+            "Rationale: {}",
+            escaped_bounded_bytes(proposal.rationale(), MAX_MEMORY_RATIONALE_RENDER_BYTES),
+        )?;
+        writeln!(writer, "Created: {}", proposal.created_at_ms())?;
+        writeln!(writer, "Creation event: {}", proposal.creation_event_id())?;
+        writeln!(writer, "Review digest: {}", review.review_digest)?;
+        writeln!(writer, "Type exactly: {action} {}", review.review_digest)
+    }
+
+    pub fn render_memory_confirmation<W: Write>(
+        expected_confirmation: &str,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writeln!(writer, "{MEMORY_PLAINTEXT_WARNING}")?;
+        writeln!(writer, "Type exactly: {expected_confirmation}")
+    }
+
+    pub fn render_memory_confirmation_mismatch<W: Write>(writer: &mut W) -> io::Result<()> {
+        writer.write_all(b"Confirmation did not match; memory review retained.\n")
+    }
+
+    pub fn render_fresh_memory_review_required<W: Write>(writer: &mut W) -> io::Result<()> {
+        writer.write_all(b"Start a fresh /memory command to request a new review.\n")
+    }
+
     pub fn render_outcome<W: Write>(outcome: &CommandOutcome, writer: &mut W) -> io::Result<()> {
         Self::render_view(&outcome.view, writer)
     }
@@ -1179,6 +1323,32 @@ fn render_memory_candidate<W: Write>(
         "Candidate purpose tags: {}",
         escaped_memory_list(candidate.purpose_tags(), MAX_MEMORY_TAG_RENDER_BYTES),
     )
+}
+
+fn render_memory_field_diff<W: Write>(diff: &MemoryFieldDiff, writer: &mut W) -> io::Result<()> {
+    let label = match diff.field {
+        MemoryField::DisplayKey => "Display key",
+        MemoryField::State => "State",
+        MemoryField::Value => "Value",
+        MemoryField::PurposeTags => "Purpose tags",
+    };
+    writeln!(
+        writer,
+        "  {label}: {} -> {}",
+        rendered_memory_field_value(&diff.before),
+        rendered_memory_field_value(&diff.after),
+    )
+}
+
+fn rendered_memory_field_value(value: &MemoryFieldValue) -> String {
+    match value {
+        MemoryFieldValue::Missing => "missing".to_owned(),
+        MemoryFieldValue::Text(value) => {
+            escaped_bounded_bytes(value, MAX_MEMORY_VALUE_RENDER_BYTES)
+        }
+        MemoryFieldValue::Tags(tags) => escaped_memory_list(tags, MAX_MEMORY_TAG_RENDER_BYTES),
+        MemoryFieldValue::State(state) => format!("{state:?}"),
+    }
 }
 
 fn render_expected_entry<W: Write>(

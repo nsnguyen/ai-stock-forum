@@ -1,36 +1,367 @@
+mod support;
+
+use std::{
+    collections::VecDeque,
+    io::{self, BufRead, Cursor, Read, Write},
+    panic::AssertUnwindSafe,
+    sync::{Arc, Mutex},
+};
+
 use ai_stock_forum::{
-    agents::{AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentRole},
+    agents::{
+        AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentRole, builtin_profile_templates,
+    },
     app::{
-        AgentProfileSelector, AgentProfilesView, ApplicationCommand, CommandView,
-        DatabaseReadiness, EpisodicSummariesView, EpisodicSummaryListItem, EpisodicSummaryView,
-        HelpView, InputRejectedView, InputRejectionCategory, MemoryEntriesView,
-        MemoryEntryHistorySummary, MemoryEntryHistoryView, MemoryEntryMutationView,
-        MemoryEntrySummary, MemoryEntryVersionView, MemoryEntryView, MemoryProfileIdentityView,
-        MemoryProposalCreatedView, MemoryProposalResolutionView, MemoryProposalSummary,
-        MemoryProposalView, MemoryProposalsView, PresentationSnapshot, ProcessGuardOwnership,
+        AgentProfileSelector, AgentProfilesView, AppError, ApplicationCommand, CommandOutcome,
+        CommandView, DatabaseReadiness, EpisodicSummariesView, EpisodicSummaryListItem,
+        EpisodicSummaryView, HelpView, InputRejectedView, InputRejectionCategory,
+        MemoryEditPreview, MemoryEntriesView, MemoryEntryHistorySummary, MemoryEntryHistoryView,
+        MemoryEntryMutationView, MemoryEntrySummary, MemoryEntryVersionView, MemoryEntryView,
+        MemoryProfileIdentityView, MemoryProposalCreatedView, MemoryProposalResolutionReview,
+        MemoryProposalResolutionView, MemoryProposalSummary, MemoryProposalView,
+        MemoryProposalsView, PresentationSnapshot, ProcessGuardOwnership, ShutdownDisposition,
+        ShutdownReason, ShutdownView,
     },
     domain::{
-        Actor, AgentProfileId, AgentProfileVersionId, ApprovalId, EpisodicSummaryId, EventId,
-        InstallationId, MemoryEntryId, MemoryEntryVersionId, MemoryNamespaceId, MemoryProposalId,
-        ObjectVersion, SessionId, sha256,
+        Actor, AgentProfileId, AgentProfileVersionId, ApprovalId, DomainError, EpisodicSummaryId,
+        EventId, InstallationId, MemoryEntryId, MemoryEntryVersionId, MemoryNamespaceId,
+        MemoryProposalId, MemoryReviewToken, ObjectVersion, SessionId, sha256,
     },
     memory::{
         EpisodicQualification, EpisodicSourceRef, EpisodicSummary, ExpectedMemoryEntryState,
-        MemoryEntryDraft, MemoryEntryVersion, MemoryProposal, MemoryProposalFilter,
+        MEMORY_PLAINTEXT_WARNING, MemoryEditReview, MemoryEntryDraft, MemoryEntryVersion,
+        MemoryField, MemoryFieldDiff, MemoryFieldValue, MemoryMutationKind, MemoryNoChange,
+        MemoryPlaintextAcknowledgement, MemoryProposal, MemoryProposalFilter,
         MemoryProposalOperation, MemoryProposalOperationKind, MemoryProposalResolution,
-        MemoryProposalStatus,
+        MemoryProposalStatus, MemoryResolutionAction,
     },
+    persistence::PersistenceError,
+    policy::{ApprovalStatus, Capability, PolicyDecision},
+    runtime::{ApplicationRuntime, CommandExecutor, PendingOutcome, RuntimeClient, RuntimeError},
     setup::SetupStatus,
     ui::{
-        command::{MemoryWorkflowCommand, ParsedLine, TextRenderer, parse_line},
+        command::{
+            FallbackRunner, MemoryWorkflowCommand, ParsedLine, TextRenderer, UiError, parse_line,
+        },
         tui::{
             ControllerEffect, TuiEvent, handle_event,
             model::{AgentsPane, Focus, Severity, TuiModel, UiMessage, View},
         },
     },
 };
+use crossbeam_channel::{Receiver, Sender, bounded};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
+
+#[derive(Default)]
+struct WorkflowExecutorState {
+    commands: Vec<ApplicationCommand>,
+    preview_count: usize,
+    cancel_count: usize,
+    cancel_results: VecDeque<Result<(), AppError>>,
+    mutation_results: VecDeque<Result<CommandOutcome, AppError>>,
+}
+
+struct WorkflowExecutor {
+    state: Arc<Mutex<WorkflowExecutorState>>,
+    entry: Option<MemoryEntryVersion>,
+    proposal: Option<MemoryProposalView>,
+    edit_preview: Option<Result<MemoryEditPreview, AppError>>,
+    resolution_preview: Option<Result<MemoryProposalResolutionReview, AppError>>,
+    execution_gate: Option<(
+        crossbeam_channel::Sender<()>,
+        crossbeam_channel::Receiver<()>,
+    )>,
+    panic_on_mutation: bool,
+}
+
+impl CommandExecutor for WorkflowExecutor {
+    fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError> {
+        self.state.lock().unwrap().commands.push(command.clone());
+        if self.panic_on_mutation
+            && matches!(
+                command,
+                ApplicationCommand::SetMemoryEntry { .. }
+                    | ApplicationCommand::DeleteMemoryEntry { .. }
+                    | ApplicationCommand::ApproveMemoryProposal { .. }
+                    | ApplicationCommand::RejectMemoryProposal { .. }
+            )
+        {
+            panic!("private worker failure");
+        }
+        if matches!(command, ApplicationCommand::ShowStatus)
+            && let Some((entered, release)) = &self.execution_gate
+        {
+            entered.send(()).unwrap();
+            release.recv().unwrap();
+        }
+        match command {
+            ApplicationCommand::RequestShutdown => Ok(workflow_outcome_with_shutdown(
+                CommandView::Shutdown(ShutdownView {
+                    disposition: ShutdownDisposition::Requested,
+                }),
+                ShutdownDisposition::Requested,
+            )),
+            ApplicationCommand::ShowMemoryEntry { .. } => self.entry.clone().map_or_else(
+                || Err(AppError::MemoryEntryNotFound),
+                |entry| {
+                    Ok(workflow_outcome(CommandView::MemoryEntry(
+                        MemoryEntryView {
+                            profile: profile().reference(),
+                            entry,
+                        },
+                    )))
+                },
+            ),
+            ApplicationCommand::ShowMemoryProposal { .. } => self
+                .proposal
+                .clone()
+                .map(|view| workflow_outcome(CommandView::MemoryProposal(view)))
+                .ok_or(AppError::MemoryProposalNotFound),
+            _ => self
+                .state
+                .lock()
+                .unwrap()
+                .mutation_results
+                .pop_front()
+                .unwrap_or_else(|| Ok(workflow_outcome(CommandView::Help(HelpView)))),
+        }
+    }
+
+    fn preview_memory_set(
+        &mut self,
+        _selector: AgentProfileSelector,
+        _candidate: MemoryEntryDraft,
+    ) -> Result<MemoryEditPreview, AppError> {
+        let result = self
+            .edit_preview
+            .clone()
+            .unwrap_or(Err(AppError::WrongMemoryCommandDispatcher));
+        if matches!(&result, Ok(MemoryEditPreview::Review(_))) {
+            self.state.lock().unwrap().preview_count += 1;
+        }
+        result
+    }
+
+    fn preview_memory_delete(
+        &mut self,
+        _selector: AgentProfileSelector,
+        _display_key: String,
+    ) -> Result<MemoryEditPreview, AppError> {
+        let result = self
+            .edit_preview
+            .clone()
+            .unwrap_or(Err(AppError::WrongMemoryCommandDispatcher));
+        if matches!(&result, Ok(MemoryEditPreview::Review(_))) {
+            self.state.lock().unwrap().preview_count += 1;
+        }
+        result
+    }
+
+    fn preview_memory_proposal_approval(
+        &mut self,
+        _proposal: ai_stock_forum::memory::MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        let result = self
+            .resolution_preview
+            .clone()
+            .unwrap_or(Err(AppError::WrongMemoryCommandDispatcher));
+        if result.is_ok() {
+            self.state.lock().unwrap().preview_count += 1;
+        }
+        result
+    }
+
+    fn preview_memory_proposal_rejection(
+        &mut self,
+        _proposal: ai_stock_forum::memory::MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        let result = self
+            .resolution_preview
+            .clone()
+            .unwrap_or(Err(AppError::WrongMemoryCommandDispatcher));
+        if result.is_ok() {
+            self.state.lock().unwrap().preview_count += 1;
+        }
+        result
+    }
+
+    fn cancel_memory_review(&mut self) -> Result<(), AppError> {
+        let mut state = self.state.lock().unwrap();
+        state.cancel_count += 1;
+        state.cancel_results.pop_front().unwrap_or(Ok(()))
+    }
+
+    fn finish(&mut self, _reason: ShutdownReason) -> Result<(), AppError> {
+        Ok(())
+    }
+}
+
+fn workflow_outcome(view: CommandView) -> CommandOutcome {
+    workflow_outcome_with_shutdown(view, ShutdownDisposition::Continue)
+}
+
+fn workflow_outcome_with_shutdown(
+    view: CommandView,
+    shutdown: ShutdownDisposition,
+) -> CommandOutcome {
+    CommandOutcome {
+        command_id: ai_stock_forum::domain::CommandId::from_uuid(Uuid::from_u128(91_001)),
+        correlation_id: ai_stock_forum::domain::CorrelationId::from_uuid(Uuid::from_u128(91_002)),
+        committed_events: Vec::new(),
+        view,
+        shutdown,
+    }
+}
+
+fn edit_review(
+    operation: MemoryMutationKind,
+    expected: ExpectedMemoryEntryState,
+    candidate: Option<MemoryEntryDraft>,
+    digest_seed: &[u8],
+) -> MemoryEditReview {
+    let profile = profile();
+    let diff = match (&operation, &candidate) {
+        (MemoryMutationKind::Set, Some(candidate)) => vec![
+            MemoryFieldDiff {
+                field: MemoryField::DisplayKey,
+                before: MemoryFieldValue::Missing,
+                after: MemoryFieldValue::Text(candidate.display_key().to_owned()),
+            },
+            MemoryFieldDiff {
+                field: MemoryField::State,
+                before: MemoryFieldValue::Missing,
+                after: MemoryFieldValue::State(ai_stock_forum::memory::MemoryEntryState::Present),
+            },
+            MemoryFieldDiff {
+                field: MemoryField::Value,
+                before: MemoryFieldValue::Missing,
+                after: MemoryFieldValue::Text(candidate.value().to_owned()),
+            },
+            MemoryFieldDiff {
+                field: MemoryField::PurposeTags,
+                before: MemoryFieldValue::Missing,
+                after: MemoryFieldValue::Tags(candidate.purpose_tags().to_vec()),
+            },
+        ],
+        (MemoryMutationKind::Delete, None) => vec![
+            MemoryFieldDiff {
+                field: MemoryField::State,
+                before: MemoryFieldValue::State(ai_stock_forum::memory::MemoryEntryState::Present),
+                after: MemoryFieldValue::State(ai_stock_forum::memory::MemoryEntryState::Deleted),
+            },
+            MemoryFieldDiff {
+                field: MemoryField::Value,
+                before: MemoryFieldValue::Text("private thesis\nsecond line".into()),
+                after: MemoryFieldValue::Missing,
+            },
+            MemoryFieldDiff {
+                field: MemoryField::PurposeTags,
+                before: MemoryFieldValue::Tags(vec!["Catalyst".into()]),
+                after: MemoryFieldValue::Tags(Vec::new()),
+            },
+        ],
+        _ => Vec::new(),
+    };
+    MemoryEditReview {
+        profile: profile.reference(),
+        namespace_id: profile.memory_namespace_id(),
+        expected,
+        operation,
+        candidate,
+        diff,
+        plaintext_acknowledgement: MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1,
+        review_token: MemoryReviewToken::from_uuid(Uuid::from_u128(91_003)),
+        review_digest: sha256(digest_seed),
+    }
+}
+
+fn proposal_view(proposal: MemoryProposal) -> MemoryProposalView {
+    let owner = profile();
+    MemoryProposalView {
+        proposal,
+        status: MemoryProposalStatus::Pending,
+        resolution: None,
+        current_entry: ExpectedMemoryEntryState::Absent,
+        proposer_is_historical: false,
+        proposer_identity: MemoryProfileIdentityView {
+            profile: owner.reference(),
+            display_name: owner.display_name().to_owned(),
+        },
+        namespace_owner_identity: MemoryProfileIdentityView {
+            profile: owner.reference(),
+            display_name: owner.display_name().to_owned(),
+        },
+    }
+}
+
+fn resolution_review(
+    action: MemoryResolutionAction,
+    digest_seed: &[u8],
+) -> MemoryProposalResolutionReview {
+    let proposer = profile();
+    MemoryProposalResolutionReview {
+        action,
+        proposal: proposal(&proposer),
+        approval_id: ApprovalId::from_uuid(Uuid::from_u128(91_004)),
+        expected_approval_status: ApprovalStatus::Pending,
+        expected_entry: ExpectedMemoryEntryState::Absent,
+        proposer_is_historical: false,
+        proposer_identity: MemoryProfileIdentityView {
+            profile: proposer.reference(),
+            display_name: proposer.display_name().to_owned(),
+        },
+        namespace_owner_identity: MemoryProfileIdentityView {
+            profile: proposer.reference(),
+            display_name: proposer.display_name().to_owned(),
+        },
+        plaintext_acknowledgement: MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1,
+        review_token: MemoryReviewToken::from_uuid(Uuid::from_u128(91_005)),
+        review_digest: sha256(digest_seed),
+    }
+}
+
+fn workflow_runtime(
+    entry: Option<MemoryEntryVersion>,
+    proposal: Option<MemoryProposalView>,
+    edit_preview: Option<Result<MemoryEditPreview, AppError>>,
+    resolution_preview: Option<Result<MemoryProposalResolutionReview, AppError>>,
+) -> (ApplicationRuntime, Arc<Mutex<WorkflowExecutorState>>) {
+    let state = Arc::new(Mutex::new(WorkflowExecutorState::default()));
+    let runtime = ApplicationRuntime::spawn(
+        WorkflowExecutor {
+            state: state.clone(),
+            entry,
+            proposal,
+            edit_preview,
+            resolution_preview,
+            execution_gate: None,
+            panic_on_mutation: false,
+        },
+        8,
+    )
+    .unwrap();
+    (runtime, state)
+}
+
+fn mutation_commands(state: &Arc<Mutex<WorkflowExecutorState>>) -> Vec<ApplicationCommand> {
+    state
+        .lock()
+        .unwrap()
+        .commands
+        .iter()
+        .filter(|command| {
+            matches!(
+                command,
+                ApplicationCommand::SetMemoryEntry { .. }
+                    | ApplicationCommand::DeleteMemoryEntry { .. }
+                    | ApplicationCommand::ApproveMemoryProposal { .. }
+                    | ApplicationCommand::RejectMemoryProposal { .. }
+            )
+        })
+        .cloned()
+        .collect()
+}
 
 fn command(input: &[u8]) -> ApplicationCommand {
     match parse_line(input) {
@@ -50,6 +381,1114 @@ fn malformed(input: &[u8]) {
     assert_eq!(rejection.safe_token.as_deref(), Some("/memory"));
     let encoded = serde_json::to_string(&rejection).unwrap();
     assert!(!encoded.contains("raw_input"));
+}
+
+#[test]
+fn fallback_set_opens_a_seeded_editor_for_an_absent_key() {
+    let fixture = support::runtime();
+    let client = fixture.client();
+    let template = &builtin_profile_templates()[0];
+    let mut draft = template.copy_to_draft().unwrap();
+    draft.display_name = "Fallback Memory Agent".to_owned();
+    client
+        .submit(ApplicationCommand::CreateAgentProfile {
+            draft,
+            template_provenance: Some(template.provenance()),
+        })
+        .unwrap();
+
+    let mut output = Vec::new();
+    let reason = FallbackRunner::new(client, false)
+        .run(
+            Cursor::new(b"/memory set \"Fallback Memory Agent\" thesis\n:cancel\n".to_vec()),
+            &mut output,
+        )
+        .unwrap();
+
+    assert_eq!(reason, ai_stock_forum::app::ShutdownReason::InputClosed);
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("Memory editor [Value]"));
+    assert!(output.contains("Plaintext local memory"));
+    fixture.finish_and_join(reason);
+}
+
+#[test]
+fn fallback_recreates_from_a_tombstone_and_delete_tombstone_is_passive_no_change() {
+    let fixture = support::runtime();
+    let client = fixture.client();
+    let template = &builtin_profile_templates()[0];
+    let mut draft = template.copy_to_draft().unwrap();
+    draft.display_name = "Fallback Tombstone Agent".to_owned();
+    client
+        .submit(ApplicationCommand::CreateAgentProfile {
+            draft,
+            template_provenance: Some(template.provenance()),
+        })
+        .unwrap();
+    let candidate = MemoryEntryDraft::new(
+        "Thesis".into(),
+        "original value".into(),
+        vec!["evidence".into()],
+    )
+    .unwrap();
+    let set_review = match client
+        .preview_memory_set(
+            AgentProfileSelector::Name("Fallback Tombstone Agent".into()),
+            candidate,
+        )
+        .unwrap()
+    {
+        MemoryEditPreview::Review(review) => review,
+        other => panic!("expected set review, got {other:?}"),
+    };
+    client
+        .submit(ApplicationCommand::SetMemoryEntry {
+            profile: set_review.profile,
+            expected: set_review.expected,
+            candidate: set_review.candidate.unwrap(),
+            review_token: set_review.review_token,
+            review_digest: set_review.review_digest,
+        })
+        .unwrap();
+    let delete_review = match client
+        .preview_memory_delete(
+            AgentProfileSelector::Name("Fallback Tombstone Agent".into()),
+            "Thesis".into(),
+        )
+        .unwrap()
+    {
+        MemoryEditPreview::Review(review) => review,
+        other => panic!("expected delete review, got {other:?}"),
+    };
+    let ExpectedMemoryEntryState::Present(expected) = delete_review.expected else {
+        panic!("delete must bind a present entry");
+    };
+    client
+        .submit(ApplicationCommand::DeleteMemoryEntry {
+            profile: delete_review.profile,
+            expected,
+            review_token: delete_review.review_token,
+            review_digest: delete_review.review_digest,
+        })
+        .unwrap();
+
+    let mut output = Vec::new();
+    let reason = FallbackRunner::new(client, false)
+        .run(
+            Cursor::new(
+                b"/memory set \"Fallback Tombstone Agent\" thesis\n:cancel\n/memory delete \"Fallback Tombstone Agent\" thesis\n"
+                    .to_vec(),
+            ),
+            &mut output,
+        )
+        .unwrap();
+
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("Memory editor [Value]"));
+    assert!(output.contains("Memory edit has no effect: AlreadyAbsent."));
+    fixture.finish_and_join(reason);
+}
+
+#[test]
+fn fallback_set_from_absent_and_current_submits_the_exact_review_owned_command() {
+    for current in [None, Some(entry(&profile()))] {
+        let (display_key, expected, input_prefix) = match current.as_ref() {
+            Some(current) => (
+                current.display_key().to_owned(),
+                ExpectedMemoryEntryState::Present(current.reference()),
+                format!(
+                    "/memory set {} \"{}\"\nreplacement value\nfresh\n",
+                    profile().profile_id(),
+                    current.display_key()
+                ),
+            ),
+            None => (
+                "Fresh Key".to_owned(),
+                ExpectedMemoryEntryState::Absent,
+                format!(
+                    "/memory set {} \"Fresh Key\"\nreplacement value\nfresh\n",
+                    profile().profile_id()
+                ),
+            ),
+        };
+        let candidate = MemoryEntryDraft::new(
+            display_key,
+            "replacement value".into(),
+            vec!["fresh".into()],
+        )
+        .unwrap();
+        let review = edit_review(
+            MemoryMutationKind::Set,
+            expected,
+            Some(candidate.clone()),
+            if current.is_some() {
+                b"current"
+            } else {
+                b"absent"
+            },
+        );
+        let exact = format!("set {}", review.review_digest);
+        let expected_command = ApplicationCommand::SetMemoryEntry {
+            profile: review.profile.clone(),
+            expected: review.expected.clone(),
+            candidate,
+            review_token: review.review_token,
+            review_digest: review.review_digest.clone(),
+        };
+        let (runtime, state) = workflow_runtime(
+            current,
+            None,
+            Some(Ok(MemoryEditPreview::Review(review))),
+            None,
+        );
+        let mut output = Vec::new();
+        let reason = FallbackRunner::new(runtime.client(), false)
+            .run(
+                Cursor::new(format!("{input_prefix}{exact}\n").into_bytes()),
+                &mut output,
+            )
+            .unwrap();
+
+        assert_eq!(mutation_commands(&state), vec![expected_command]);
+        assert_eq!(state.lock().unwrap().cancel_count, 0);
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Memory editor [Value]"));
+        assert!(output.contains("Memory set review"));
+        assert!(output.matches(MEMORY_PLAINTEXT_WARNING).count() >= 2);
+        runtime.finish_and_join(reason).unwrap();
+    }
+}
+
+#[test]
+fn fallback_no_change_previews_are_passive_and_never_register_or_submit() {
+    for (input, preview) in [
+        (
+            format!(
+                "/memory set {} \"Earnings Thesis\"\nprivate thesis\nCatalyst\n",
+                profile().profile_id()
+            ),
+            MemoryEditPreview::NoChange(MemoryNoChange::IdenticalContent),
+        ),
+        (
+            format!(
+                "/memory delete {} \"Missing Key\"\n",
+                profile().profile_id()
+            ),
+            MemoryEditPreview::NoChange(MemoryNoChange::AlreadyAbsent),
+        ),
+    ] {
+        let current = matches!(
+            preview,
+            MemoryEditPreview::NoChange(MemoryNoChange::IdenticalContent)
+        )
+        .then(|| entry(&profile()));
+        let (runtime, state) = workflow_runtime(current, None, Some(Ok(preview)), None);
+        let mut output = Vec::new();
+        let reason = FallbackRunner::new(runtime.client(), false)
+            .run(Cursor::new(input.into_bytes()), &mut output)
+            .unwrap();
+
+        assert!(mutation_commands(&state).is_empty());
+        assert_eq!(state.lock().unwrap().cancel_count, 0);
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Memory edit has no effect:"));
+        runtime.finish_and_join(reason).unwrap();
+    }
+}
+
+#[test]
+fn fallback_delete_review_shows_detail_and_submits_the_exact_bound_command() {
+    let current = entry(&profile());
+    let review = edit_review(
+        MemoryMutationKind::Delete,
+        ExpectedMemoryEntryState::Present(current.reference()),
+        None,
+        b"delete",
+    );
+    let exact = format!("delete {}", review.review_digest);
+    let expected_command = ApplicationCommand::DeleteMemoryEntry {
+        profile: review.profile.clone(),
+        expected: current.reference(),
+        review_token: review.review_token,
+        review_digest: review.review_digest.clone(),
+    };
+    let (runtime, state) = workflow_runtime(
+        Some(current.clone()),
+        None,
+        Some(Ok(MemoryEditPreview::Review(review))),
+        None,
+    );
+    let mut output = Vec::new();
+    let reason = FallbackRunner::new(runtime.client(), false)
+        .run(
+            Cursor::new(
+                format!(
+                    "/memory delete {} \"{}\"\n{exact}\n",
+                    profile().profile_id(),
+                    current.display_key()
+                )
+                .into_bytes(),
+            ),
+            &mut output,
+        )
+        .unwrap();
+
+    assert_eq!(mutation_commands(&state), vec![expected_command]);
+    assert_eq!(state.lock().unwrap().cancel_count, 0);
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("Memory delete review"));
+    assert!(output.contains(current.reference().normalized_key().as_str()));
+    assert!(output.contains(&current.reference().entry_version_id().to_string()));
+    let state_diff = output.find("State: Present -> Deleted").unwrap();
+    let value_diff = output
+        .find("Value: private thesis\\nsecond line -> missing")
+        .unwrap();
+    let tags_diff = output.find("Purpose tags: Catalyst -> none").unwrap();
+    assert!(state_diff < value_diff && value_diff < tags_diff);
+    assert!(output.contains(MEMORY_PLAINTEXT_WARNING));
+    runtime.finish_and_join(reason).unwrap();
+}
+
+#[test]
+fn fallback_confirmation_is_untrimmed_bounded_action_specific_and_retains_review() {
+    let review = edit_review(
+        MemoryMutationKind::Delete,
+        ExpectedMemoryEntryState::Present(entry(&profile()).reference()),
+        None,
+        b"confirmation",
+    );
+    let exact = format!("delete {}", review.review_digest);
+    let (runtime, state) = workflow_runtime(
+        None,
+        None,
+        Some(Ok(MemoryEditPreview::Review(review))),
+        None,
+    );
+    let input = format!(
+        "/memory delete {} thesis\nyes\n {exact}\n{exact} \n{}\n/help\n{exact}\n",
+        profile().profile_id(),
+        "x".repeat(81),
+    );
+    let mut output = Vec::new();
+    let reason = FallbackRunner::new(runtime.client(), false)
+        .run(Cursor::new(input.into_bytes()), &mut output)
+        .unwrap();
+
+    assert_eq!(mutation_commands(&state).len(), 1);
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .commands
+            .iter()
+            .filter(|command| matches!(command, ApplicationCommand::ShowHelp))
+            .count(),
+        0
+    );
+    assert_eq!(state.lock().unwrap().cancel_count, 0);
+    let output = String::from_utf8(output).unwrap();
+    assert_eq!(output.matches("Confirmation did not match").count(), 5);
+    runtime.finish_and_join(reason).unwrap();
+}
+
+#[test]
+fn fallback_approve_and_reject_submit_only_the_requested_bound_action() {
+    for action in [
+        MemoryResolutionAction::Approve,
+        MemoryResolutionAction::Reject,
+    ] {
+        let review = resolution_review(
+            action,
+            match action {
+                MemoryResolutionAction::Approve => b"approve",
+                MemoryResolutionAction::Reject => b"reject",
+            },
+        );
+        let verb = match action {
+            MemoryResolutionAction::Approve => "approve",
+            MemoryResolutionAction::Reject => "reject",
+        };
+        let opposite = match action {
+            MemoryResolutionAction::Approve => "reject",
+            MemoryResolutionAction::Reject => "approve",
+        };
+        let proposal_id = review.proposal.reference().proposal_id();
+        let exact = format!("{verb} {}", review.review_digest);
+        let wrong_action = format!("{opposite} {}", review.review_digest);
+        let view = proposal_view(review.proposal.clone());
+        let (runtime, state) = workflow_runtime(None, Some(view), None, Some(Ok(review.clone())));
+        let input = format!("/memory {verb} {proposal_id}\n{wrong_action}\n{exact}\n");
+        let mut output = Vec::new();
+        let reason = FallbackRunner::new(runtime.client(), false)
+            .run(Cursor::new(input.into_bytes()), &mut output)
+            .unwrap();
+
+        let commands = mutation_commands(&state);
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            (&action, &commands[0]),
+            (
+                MemoryResolutionAction::Approve,
+                ApplicationCommand::ApproveMemoryProposal { .. }
+            ) | (
+                MemoryResolutionAction::Reject,
+                ApplicationCommand::RejectMemoryProposal { .. }
+            )
+        ));
+        assert_eq!(state.lock().unwrap().cancel_count, 0);
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains(&format!("Memory proposal {verb} review")));
+        assert!(output.contains(MEMORY_PLAINTEXT_WARNING));
+        assert_eq!(output.matches("Confirmation did not match").count(), 1);
+        runtime.finish_and_join(reason).unwrap();
+    }
+}
+
+#[test]
+fn fallback_rejects_a_cross_wired_resolution_preview_without_submitting() {
+    let review = resolution_review(MemoryResolutionAction::Reject, b"cross-wired");
+    let proposal_id = review.proposal.reference().proposal_id();
+    let view = proposal_view(review.proposal.clone());
+    let (runtime, state) = workflow_runtime(None, Some(view), None, Some(Ok(review.clone())));
+    let input = format!(
+        "/memory approve {proposal_id}\nreject {}\n",
+        review.review_digest
+    );
+    let mut output = Vec::new();
+    let error = FallbackRunner::new(runtime.client(), false)
+        .run(Cursor::new(input.into_bytes()), &mut output)
+        .unwrap_err();
+
+    assert!(mutation_commands(&state).is_empty());
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    assert!(matches!(
+        error,
+        ai_stock_forum::ui::command::UiError::Panicked
+    ));
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
+}
+
+#[test]
+fn fallback_resolution_review_renders_full_bound_provenance_and_sensitive_detail_safely() {
+    let mut review = resolution_review(MemoryResolutionAction::Approve, b"full-resolution");
+    review.proposer_is_historical = true;
+    review.proposer_identity.display_name = "\u{1b}[31mHistorical Proposer".into();
+    let text = render_memory_resolution_review(&review);
+    let proposal = &review.proposal;
+
+    assert!(text.contains(&proposal.reference().proposal_id().to_string()));
+    assert!(text.contains(proposal.reference().content_digest().as_str()));
+    assert!(text.contains(&review.approval_id.to_string()));
+    assert!(text.contains("Pending"));
+    assert!(text.contains(&proposal.namespace_id().to_string()));
+    assert!(text.contains(proposal.display_key()));
+    assert!(text.contains(proposal.normalized_key().as_str()));
+    assert!(text.contains("Operation: Set"));
+    assert!(text.contains("private proposed value\\nsecond line"));
+    assert!(text.contains("private rationale\\nsecond line"));
+    assert!(
+        text.contains(
+            &review
+                .proposer_identity
+                .profile
+                .profile_version_id()
+                .to_string()
+        )
+    );
+    assert!(text.contains(review.proposer_identity.profile.content_digest().as_str()));
+    assert!(
+        text.contains(
+            &review
+                .namespace_owner_identity
+                .profile
+                .profile_version_id()
+                .to_string()
+        )
+    );
+    assert!(text.contains("historical profile version"));
+    assert!(text.contains("\\u{1b}[31mHistorical Proposer"));
+    assert!(!text.contains('\u{1b}'));
+    assert!(text.contains(MEMORY_PLAINTEXT_WARNING));
+    assert!(text.len() < 25_000);
+}
+
+fn render_memory_resolution_review(review: &MemoryProposalResolutionReview) -> String {
+    let mut bytes = Vec::new();
+    TextRenderer::render_memory_resolution_review(review, &mut bytes).unwrap();
+    String::from_utf8(bytes).unwrap()
+}
+
+#[test]
+fn every_memory_action_confirmation_repeats_the_plaintext_warning_and_exact_phrase() {
+    for action in ["set", "delete", "approve", "reject"] {
+        let expected = format!("{action} {}", sha256(action.as_bytes()));
+        let mut bytes = Vec::new();
+        TextRenderer::render_memory_confirmation(&expected, &mut bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(
+            text,
+            format!("{MEMORY_PLAINTEXT_WARNING}\nType exactly: {expected}\n")
+        );
+    }
+}
+
+#[test]
+fn fallback_set_seed_read_precedes_and_is_the_only_activity_before_draft_review() {
+    let (runtime, state) = workflow_runtime(Some(entry(&profile())), None, None, None);
+    let mut output = Vec::new();
+    let reason = FallbackRunner::new(runtime.client(), false)
+        .run(
+            Cursor::new(
+                format!(
+                    "/memory set {} \"Earnings Thesis\"\n",
+                    profile().profile_id()
+                )
+                .into_bytes(),
+            ),
+            &mut output,
+        )
+        .unwrap();
+
+    let state = state.lock().unwrap();
+    assert_eq!(state.commands.len(), 1);
+    assert!(matches!(
+        state.commands[0],
+        ApplicationCommand::ShowMemoryEntry { .. }
+    ));
+    assert_eq!(state.cancel_count, 0);
+    drop(state);
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("Memory editor [Value]")
+    );
+    runtime.finish_and_join(reason).unwrap();
+}
+
+fn delete_script(review: &MemoryEditReview, confirmations: usize) -> Vec<u8> {
+    let exact = format!("delete {}", review.review_digest);
+    format!(
+        "/memory delete {} thesis\n{}",
+        profile().profile_id(),
+        format!("{exact}\n").repeat(confirmations),
+    )
+    .into_bytes()
+}
+
+#[test]
+fn recoverable_memory_confirmation_failures_retain_one_review_and_exact_retry() {
+    for persistence in [
+        PersistenceError::Contention,
+        PersistenceError::Capacity,
+        PersistenceError::QueryFailed,
+    ] {
+        let review = edit_review(
+            MemoryMutationKind::Delete,
+            ExpectedMemoryEntryState::Present(entry(&profile()).reference()),
+            None,
+            format!("recoverable-{persistence:?}").as_bytes(),
+        );
+        let exact = format!("delete {}", review.review_digest);
+        let (runtime, state) = workflow_runtime(
+            None,
+            None,
+            Some(Ok(MemoryEditPreview::Review(review.clone()))),
+            None,
+        );
+        state.lock().unwrap().mutation_results.extend([
+            Err(AppError::Persistence(persistence)),
+            Ok(workflow_outcome(CommandView::Help(HelpView))),
+        ]);
+        let mut output = Vec::new();
+        let reason = FallbackRunner::new(runtime.client(), false)
+            .run(Cursor::new(delete_script(&review, 2)), &mut output)
+            .unwrap();
+
+        let state = state.lock().unwrap();
+        let commands = state
+            .commands
+            .iter()
+            .filter(|command| matches!(command, ApplicationCommand::DeleteMemoryEntry { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0], commands[1]);
+        assert_eq!(state.preview_count, 1);
+        assert_eq!(state.cancel_count, 0);
+        drop(state);
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.matches(&exact).count() >= 2);
+        assert!(output.matches(MEMORY_PLAINTEXT_WARNING).count() >= 2);
+        runtime.finish_and_join(reason).unwrap();
+    }
+}
+
+struct QueueSaturatingWriter {
+    output: Vec<u8>,
+    client: RuntimeClient,
+    entered: Receiver<()>,
+    release: Sender<()>,
+    pending: Vec<PendingOutcome>,
+    saturated: bool,
+    released: bool,
+}
+
+impl QueueSaturatingWriter {
+    fn text(&self) -> String {
+        String::from_utf8(self.output.clone()).unwrap()
+    }
+}
+
+impl Write for QueueSaturatingWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.output.extend_from_slice(bytes);
+        let text = String::from_utf8_lossy(&self.output);
+        if !self.saturated && text.contains("Type exactly: delete ") {
+            let first = self
+                .client
+                .try_submit(ApplicationCommand::ShowStatus)
+                .unwrap();
+            self.entered.recv().unwrap();
+            let second = self
+                .client
+                .try_submit(ApplicationCommand::ShowHelp)
+                .unwrap();
+            self.pending.extend([first, second]);
+            self.saturated = true;
+        }
+        if self.saturated && !self.released && text.contains("Command queue is busy; try again.") {
+            self.release.send(()).unwrap();
+            for pending in self.pending.drain(..) {
+                pending.recv().unwrap();
+            }
+            self.released = true;
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn enqueue_backpressure_retains_the_registered_review_for_exact_retry() {
+    let review = edit_review(
+        MemoryMutationKind::Delete,
+        ExpectedMemoryEntryState::Present(entry(&profile()).reference()),
+        None,
+        b"enqueue-backpressure",
+    );
+    let state = Arc::new(Mutex::new(WorkflowExecutorState::default()));
+    let (entered_tx, entered_rx) = bounded(1);
+    let (release_tx, release_rx) = bounded(1);
+    let runtime = ApplicationRuntime::spawn(
+        WorkflowExecutor {
+            state: state.clone(),
+            entry: None,
+            proposal: None,
+            edit_preview: Some(Ok(MemoryEditPreview::Review(review.clone()))),
+            resolution_preview: None,
+            execution_gate: Some((entered_tx, release_rx)),
+            panic_on_mutation: false,
+        },
+        1,
+    )
+    .unwrap();
+    let mut writer = QueueSaturatingWriter {
+        output: Vec::new(),
+        client: runtime.client(),
+        entered: entered_rx,
+        release: release_tx,
+        pending: Vec::new(),
+        saturated: false,
+        released: false,
+    };
+    let reason = FallbackRunner::new(runtime.client(), false)
+        .run(Cursor::new(delete_script(&review, 2)), &mut writer)
+        .unwrap();
+
+    let state = state.lock().unwrap();
+    assert_eq!(
+        mutation_commands(&Arc::new(Mutex::new(WorkflowExecutorState {
+            commands: state.commands.clone(),
+            ..WorkflowExecutorState::default()
+        })))
+        .len(),
+        1
+    );
+    assert_eq!(state.preview_count, 1);
+    assert_eq!(state.cancel_count, 0);
+    drop(state);
+    assert!(writer.text().contains("Command queue is busy; try again."));
+    assert!(writer.text().contains(MEMORY_PLAINTEXT_WARNING));
+    runtime.finish_and_join(reason).unwrap();
+}
+
+#[test]
+fn terminal_memory_confirmation_failures_cancel_once_and_cannot_retry() {
+    let failures = [
+        AppError::Domain(DomainError::MemoryExpectedStateMismatch),
+        AppError::Domain(DomainError::MemoryReviewUnavailable),
+        AppError::CommandConflict,
+        AppError::CapabilityDenied {
+            capability: Capability::MemoryMutate,
+            decision: PolicyDecision::Denied,
+        },
+        AppError::Persistence(PersistenceError::MemoryRowMismatch),
+    ];
+    for failure in failures {
+        let review = edit_review(
+            MemoryMutationKind::Delete,
+            ExpectedMemoryEntryState::Present(entry(&profile()).reference()),
+            None,
+            format!("terminal-{}", failure.code()).as_bytes(),
+        );
+        let (runtime, state) = workflow_runtime(
+            None,
+            None,
+            Some(Ok(MemoryEditPreview::Review(review.clone()))),
+            None,
+        );
+        state
+            .lock()
+            .unwrap()
+            .mutation_results
+            .push_back(Err(failure));
+        let mut output = Vec::new();
+        let reason = FallbackRunner::new(runtime.client(), false)
+            .run(Cursor::new(delete_script(&review, 2)), &mut output)
+            .unwrap();
+
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state
+                .commands
+                .iter()
+                .filter(|command| matches!(command, ApplicationCommand::DeleteMemoryEntry { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(state.preview_count, 1);
+        assert_eq!(state.cancel_count, 1);
+        drop(state);
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("Start a fresh /memory command")
+        );
+        runtime.finish_and_join(reason).unwrap();
+    }
+}
+
+#[test]
+fn non_application_worker_failure_clears_confirmation_and_requires_a_fresh_review() {
+    let review = edit_review(
+        MemoryMutationKind::Delete,
+        ExpectedMemoryEntryState::Present(entry(&profile()).reference()),
+        None,
+        b"worker-failure",
+    );
+    let state = Arc::new(Mutex::new(WorkflowExecutorState::default()));
+    let runtime = ApplicationRuntime::spawn(
+        WorkflowExecutor {
+            state: state.clone(),
+            entry: None,
+            proposal: None,
+            edit_preview: Some(Ok(MemoryEditPreview::Review(review.clone()))),
+            resolution_preview: None,
+            execution_gate: None,
+            panic_on_mutation: true,
+        },
+        4,
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    let error = FallbackRunner::new(runtime.client(), false)
+        .run(Cursor::new(delete_script(&review, 1)), &mut output)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        UiError::Runtime(RuntimeError::WorkerPanicked)
+    ));
+    assert_eq!(mutation_commands(&state).len(), 1);
+    assert_eq!(state.lock().unwrap().preview_count, 1);
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("Application worker stopped unexpectedly."));
+    assert!(output.contains("Start a fresh /memory command"));
+    assert!(matches!(
+        runtime.finish_and_join(ShutdownReason::ApplicationError),
+        Err(RuntimeError::WorkerPanicked)
+    ));
+}
+
+#[test]
+fn cancellation_failure_does_not_mask_the_primary_terminal_memory_error() {
+    let review = edit_review(
+        MemoryMutationKind::Delete,
+        ExpectedMemoryEntryState::Present(entry(&profile()).reference()),
+        None,
+        b"cancel-precedence",
+    );
+    let (runtime, state) = workflow_runtime(
+        None,
+        None,
+        Some(Ok(MemoryEditPreview::Review(review.clone()))),
+        None,
+    );
+    {
+        let mut state = state.lock().unwrap();
+        state.mutation_results.push_back(Err(AppError::Domain(
+            DomainError::MemoryExpectedStateMismatch,
+        )));
+        state
+            .cancel_results
+            .push_back(Err(AppError::Persistence(PersistenceError::QueryFailed)));
+    }
+    let mut output = Vec::new();
+    let error = FallbackRunner::new(runtime.client(), false)
+        .run(Cursor::new(delete_script(&review, 1)), &mut output)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        UiError::Runtime(RuntimeError::Application(AppError::Domain(
+            DomainError::MemoryExpectedStateMismatch
+        )))
+    ));
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("Agent profile operation could not be completed.")
+    );
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
+}
+
+struct OneLineThenError {
+    line: Vec<u8>,
+    position: usize,
+}
+
+impl Read for OneLineThenError {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let available = self.fill_buf()?;
+        let count = available.len().min(buffer.len());
+        buffer[..count].copy_from_slice(&available[..count]);
+        self.consume(count);
+        Ok(count)
+    }
+}
+
+impl BufRead for OneLineThenError {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if self.position == self.line.len() {
+            Err(io::Error::other("private input failure"))
+        } else {
+            Ok(&self.line[self.position..])
+        }
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.position = self.position.saturating_add(amount).min(self.line.len());
+    }
+}
+
+struct FailOnTextWriter {
+    output: Vec<u8>,
+    needle: &'static str,
+    panic: bool,
+}
+
+impl Write for FailOnTextWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let mut combined = self.output.clone();
+        combined.extend_from_slice(bytes);
+        if String::from_utf8_lossy(&combined).contains(self.needle) {
+            if self.panic {
+                panic!("private writer panic");
+            }
+            return Err(io::Error::other("private writer failure"));
+        }
+        self.output.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn delete_review_runtime(
+    digest_seed: &[u8],
+) -> (
+    ApplicationRuntime,
+    Arc<Mutex<WorkflowExecutorState>>,
+    MemoryEditReview,
+) {
+    let review = edit_review(
+        MemoryMutationKind::Delete,
+        ExpectedMemoryEntryState::Present(entry(&profile()).reference()),
+        None,
+        digest_seed,
+    );
+    let (runtime, state) = workflow_runtime(
+        None,
+        None,
+        Some(Ok(MemoryEditPreview::Review(review.clone()))),
+        None,
+    );
+    (runtime, state, review)
+}
+
+#[test]
+fn registered_memory_review_is_cancelled_once_on_cancel_quit_eof_and_input_error() {
+    for suffix in [":cancel\n", "/quit\n", ""] {
+        let (runtime, state, review) = delete_review_runtime(suffix.as_bytes());
+        let mut input = delete_script(&review, 0);
+        input.extend_from_slice(suffix.as_bytes());
+        let mut output = Vec::new();
+        let reason = FallbackRunner::new(runtime.client(), false)
+            .run(Cursor::new(input), &mut output)
+            .unwrap();
+
+        assert_eq!(state.lock().unwrap().preview_count, 1);
+        assert_eq!(state.lock().unwrap().cancel_count, 1);
+        assert!(mutation_commands(&state).is_empty());
+        let expected_reason = if suffix == "/quit\n" {
+            ShutdownReason::UserQuit
+        } else {
+            ShutdownReason::InputClosed
+        };
+        assert_eq!(reason, expected_reason);
+        runtime.finish_and_join(reason).unwrap();
+    }
+
+    let (runtime, state, review) = delete_review_runtime(b"input-error");
+    state
+        .lock()
+        .unwrap()
+        .cancel_results
+        .push_back(Err(AppError::Persistence(PersistenceError::QueryFailed)));
+    let reader = OneLineThenError {
+        line: delete_script(&review, 0),
+        position: 0,
+    };
+    let error = FallbackRunner::new(runtime.client(), false)
+        .run(reader, Vec::new())
+        .unwrap_err();
+    assert!(matches!(error, UiError::Read));
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
+}
+
+#[test]
+fn review_render_error_cancels_once_and_success_output_error_never_cancels() {
+    let (runtime, state, review) = delete_review_runtime(b"review-write");
+    let mut writer = FailOnTextWriter {
+        output: Vec::new(),
+        needle: "Memory delete review",
+        panic: false,
+    };
+    let error = FallbackRunner::new(runtime.client(), false)
+        .run(Cursor::new(delete_script(&review, 0)), &mut writer)
+        .unwrap_err();
+    assert!(matches!(error, UiError::Write));
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
+
+    let (runtime, state, review) = delete_review_runtime(b"commit-write");
+    let mut writer = FailOnTextWriter {
+        output: Vec::new(),
+        needle: "Available commands",
+        panic: false,
+    };
+    let error = FallbackRunner::new(runtime.client(), false)
+        .run(Cursor::new(delete_script(&review, 1)), &mut writer)
+        .unwrap_err();
+    assert!(matches!(error, UiError::Write));
+    assert_eq!(mutation_commands(&state).len(), 1);
+    assert_eq!(state.lock().unwrap().cancel_count, 0);
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
+}
+
+#[test]
+fn invariant_failure_after_workflow_take_still_cancels_the_registered_review_once() {
+    let review = edit_review(
+        MemoryMutationKind::Delete,
+        ExpectedMemoryEntryState::Absent,
+        None,
+        b"invalid-delete-expected",
+    );
+    let (runtime, state) = workflow_runtime(
+        None,
+        None,
+        Some(Ok(MemoryEditPreview::Review(review.clone()))),
+        None,
+    );
+    let error = FallbackRunner::new(runtime.client(), false)
+        .run(Cursor::new(delete_script(&review, 1)), Vec::new())
+        .unwrap_err();
+
+    assert!(matches!(error, UiError::Panicked));
+    assert!(mutation_commands(&state).is_empty());
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
+}
+
+#[test]
+fn caught_review_writer_panic_cancels_the_registered_review_once() {
+    let (runtime, state, review) = delete_review_runtime(b"review-panic");
+    let runner = FallbackRunner::new(runtime.client(), false);
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let mut writer = FailOnTextWriter {
+            output: Vec::new(),
+            needle: "Memory delete review",
+            panic: true,
+        };
+        let _ = runner.run(Cursor::new(delete_script(&review, 0)), &mut writer);
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
+}
+
+struct BackpressureConfirmationPanicWriter(QueueSaturatingWriter);
+
+impl Write for BackpressureConfirmationPanicWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let count = self.0.write(bytes)?;
+        if self.0.released && self.0.text().matches("Type exactly: delete ").count() >= 2 {
+            panic!("private retained-confirmation writer panic");
+        }
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct BackpressureConfirmationErrorWriter(QueueSaturatingWriter);
+
+impl Write for BackpressureConfirmationErrorWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let count = self.0.write(bytes)?;
+        if self.0.released && self.0.text().matches("Type exactly: delete ").count() >= 2 {
+            return Err(io::Error::other("private retained-confirmation failure"));
+        }
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn backpressure_runtime(
+    review: &MemoryEditReview,
+) -> (
+    ApplicationRuntime,
+    Arc<Mutex<WorkflowExecutorState>>,
+    Receiver<()>,
+    Sender<()>,
+) {
+    let state = Arc::new(Mutex::new(WorkflowExecutorState::default()));
+    let (entered_tx, entered_rx) = bounded(1);
+    let (release_tx, release_rx) = bounded(1);
+    let runtime = ApplicationRuntime::spawn(
+        WorkflowExecutor {
+            state: state.clone(),
+            entry: None,
+            proposal: None,
+            edit_preview: Some(Ok(MemoryEditPreview::Review(review.clone()))),
+            resolution_preview: None,
+            execution_gate: Some((entered_tx, release_rx)),
+            panic_on_mutation: false,
+        },
+        1,
+    )
+    .unwrap();
+    (runtime, state, entered_rx, release_tx)
+}
+
+fn queue_saturating_writer(
+    runtime: &ApplicationRuntime,
+    entered: Receiver<()>,
+    release: Sender<()>,
+) -> QueueSaturatingWriter {
+    QueueSaturatingWriter {
+        output: Vec::new(),
+        client: runtime.client(),
+        entered,
+        release,
+        pending: Vec::new(),
+        saturated: false,
+        released: false,
+    }
+}
+
+#[test]
+fn retained_confirmation_output_error_after_backpressure_cancels_once() {
+    let review = edit_review(
+        MemoryMutationKind::Delete,
+        ExpectedMemoryEntryState::Present(entry(&profile()).reference()),
+        None,
+        b"backpressure-write",
+    );
+    let (runtime, state, entered, release) = backpressure_runtime(&review);
+    let mut writer =
+        BackpressureConfirmationErrorWriter(queue_saturating_writer(&runtime, entered, release));
+    let error = FallbackRunner::new(runtime.client(), false)
+        .run(Cursor::new(delete_script(&review, 1)), &mut writer)
+        .unwrap_err();
+
+    assert!(matches!(error, UiError::Write));
+    assert_eq!(state.lock().unwrap().preview_count, 1);
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
+}
+
+#[test]
+fn caught_retained_confirmation_panic_after_backpressure_cancels_once() {
+    let review = edit_review(
+        MemoryMutationKind::Delete,
+        ExpectedMemoryEntryState::Present(entry(&profile()).reference()),
+        None,
+        b"backpressure-panic",
+    );
+    let (runtime, state, entered, release) = backpressure_runtime(&review);
+    let runner = FallbackRunner::new(runtime.client(), false);
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let mut writer = BackpressureConfirmationPanicWriter(queue_saturating_writer(
+            &runtime, entered, release,
+        ));
+        let _ = runner.run(Cursor::new(delete_script(&review, 1)), &mut writer);
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(state.lock().unwrap().preview_count, 1);
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
 }
 
 #[test]

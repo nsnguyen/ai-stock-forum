@@ -10,16 +10,23 @@ use std::{
 };
 
 use ai_stock_forum::{
+    agents::{AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentRole},
     app::{
-        AppError, ApplicationCommand, AuditTailView, CommandOutcome, CommandView, HelpView,
-        InputRejectedView, InputRejection, InputRejectionCategory, SetupStatusView,
-        ShutdownDisposition, ShutdownReason, ShutdownView, StatusView,
+        AgentProfileSelector, AppError, ApplicationCommand, AuditTailView, CommandOutcome,
+        CommandView, HelpView, InputRejectedView, InputRejection, InputRejectionCategory,
+        MemoryEditPreview, SetupStatusView, ShutdownDisposition, ShutdownReason, ShutdownView,
+        StatusView,
     },
     audit::AuditEntry,
     config::{AppPaths, StartupError},
     domain::{
-        Actor, CommandId, ConfigurationVersionId, CorrelationId, InstallationId, SessionId,
-        SetupDraftId,
+        Actor, AgentProfileId, AgentProfileVersionId, CommandId, ConfigurationVersionId,
+        CorrelationId, EventId, InstallationId, MemoryEntryId, MemoryEntryVersionId,
+        MemoryNamespaceId, MemoryReviewToken, SessionId, SetupDraftId, sha256,
+    },
+    memory::{
+        ExpectedMemoryEntryState, MemoryEditReview, MemoryEntryDraft, MemoryEntryVersion,
+        MemoryMutationKind, MemoryPlaintextAcknowledgement,
     },
     persistence::{PersistenceError, RecoveryError},
     runtime::{ApplicationRuntime, CommandExecutor, RuntimeError},
@@ -450,6 +457,249 @@ fn host_finishes_with_application_error_after_input_write_and_panic_failures() {
     );
     assert!(matches!(result, Err(UiError::Panicked)));
     assert_eq!(receive(&finished), ShutdownReason::ApplicationError);
+}
+
+#[derive(Default)]
+struct MemoryCleanupState {
+    preview_count: usize,
+    cancel_count: usize,
+    cancel_fails: bool,
+}
+
+struct MemoryCleanupExecutor {
+    state: Arc<Mutex<MemoryCleanupState>>,
+    review: MemoryEditReview,
+}
+
+impl CommandExecutor for MemoryCleanupExecutor {
+    fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError> {
+        Ok(outcome_for(command))
+    }
+
+    fn preview_memory_delete(
+        &mut self,
+        _selector: AgentProfileSelector,
+        _display_key: String,
+    ) -> Result<MemoryEditPreview, AppError> {
+        self.state.lock().unwrap().preview_count += 1;
+        Ok(MemoryEditPreview::Review(self.review.clone()))
+    }
+
+    fn cancel_memory_review(&mut self) -> Result<(), AppError> {
+        let mut state = self.state.lock().unwrap();
+        state.cancel_count += 1;
+        if state.cancel_fails {
+            Err(AppError::Persistence(PersistenceError::QueryFailed))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn finish(&mut self, _reason: ShutdownReason) -> Result<(), AppError> {
+        Ok(())
+    }
+}
+
+fn memory_cleanup_review() -> MemoryEditReview {
+    let profile = AgentProfileVersion::create(
+        AgentProfileId::from_uuid(id(8_001)),
+        AgentProfileVersionId::from_uuid(id(8_002)),
+        MemoryNamespaceId::from_uuid(id(8_003)),
+        1_700_000_000_000,
+        AgentProfileDraft::new(
+            "Cleanup Agent".into(),
+            "Fallback cleanup fixture.".into(),
+            AgentRole::Custom,
+            "research".into(),
+            vec![],
+            "Careful.".into(),
+            "Use evidence.".into(),
+            AgentBindings::default(),
+            vec![],
+            vec![],
+        )
+        .unwrap(),
+        None,
+    )
+    .unwrap();
+    let entry = MemoryEntryVersion::create_present(
+        profile.memory_namespace_id(),
+        MemoryEntryId::from_uuid(id(8_004)),
+        MemoryEntryVersionId::from_uuid(id(8_005)),
+        MemoryEntryDraft::new("Thesis".into(), "private value".into(), vec![]).unwrap(),
+        Actor::Human,
+        1_700_000_000_001,
+        None,
+        EventId::from_uuid(id(8_006)),
+    )
+    .unwrap();
+    MemoryEditReview {
+        profile: profile.reference(),
+        namespace_id: profile.memory_namespace_id(),
+        expected: ExpectedMemoryEntryState::Present(entry.reference()),
+        operation: MemoryMutationKind::Delete,
+        candidate: None,
+        diff: vec![],
+        plaintext_acknowledgement: MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1,
+        review_token: MemoryReviewToken::from_uuid(id(8_007)),
+        review_digest: sha256(b"fallback host cleanup"),
+    }
+}
+
+fn memory_cleanup_runtime(
+    cancel_fails: bool,
+) -> (ApplicationRuntime, Arc<Mutex<MemoryCleanupState>>, String) {
+    let review = memory_cleanup_review();
+    let input = format!("/memory delete {} thesis\n", review.profile.profile_id());
+    let state = Arc::new(Mutex::new(MemoryCleanupState {
+        cancel_fails,
+        ..MemoryCleanupState::default()
+    }));
+    let runtime = ApplicationRuntime::spawn(
+        MemoryCleanupExecutor {
+            state: state.clone(),
+            review,
+        },
+        4,
+    )
+    .unwrap();
+    (runtime, state, input)
+}
+
+struct InterruptOnReviewWriter {
+    output: Vec<u8>,
+    interrupts: Sender<()>,
+    sent: bool,
+}
+
+impl Write for InterruptOnReviewWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.output.extend_from_slice(bytes);
+        if !self.sent && String::from_utf8_lossy(&self.output).contains("Memory delete review") {
+            self.interrupts.send(()).unwrap();
+            self.sent = true;
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct PanicAfterLineSource {
+    line: Option<ai_stock_forum::ui::command::RawLine>,
+    cancellation: Arc<ScriptedCancellation>,
+}
+
+impl CancellableLineSource for PanicAfterLineSource {
+    fn cancellation(&self) -> Arc<dyn LineSourceCancellation> {
+        self.cancellation.clone()
+    }
+
+    fn next_line(&mut self) -> io::Result<LineSourceEvent> {
+        if let Some(line) = self.line.take() {
+            Ok(LineSourceEvent::Line(line))
+        } else {
+            panic!("private source panic");
+        }
+    }
+}
+
+fn first_raw_line(input: &str) -> ai_stock_forum::ui::command::RawLine {
+    let mut source = scripted_source(Cursor::new(input.as_bytes().to_vec()));
+    match source.events.pop_front().unwrap().unwrap() {
+        LineSourceEvent::Line(line) => line,
+        _ => panic!("expected scripted line"),
+    }
+}
+
+#[test]
+fn memory_review_cleanup_is_exactly_once_for_host_exit_and_failure_paths() {
+    for suffix in [":cancel\n", "/quit\n", ""] {
+        let (runtime, state, mut input) = memory_cleanup_runtime(false);
+        input.push_str(suffix);
+        let result = FallbackHost::new(runtime, false, false).run(
+            scripted_source(Cursor::new(input.into_bytes())),
+            SharedWriter::default(),
+            never(),
+        );
+        assert!(result.is_ok());
+        let state = state.lock().unwrap();
+        assert_eq!(state.preview_count, 1);
+        assert_eq!(state.cancel_count, 1);
+    }
+
+    let (runtime, state, input) = memory_cleanup_runtime(false);
+    let (interrupt_tx, interrupt_rx) = bounded(1);
+    let result = FallbackHost::new(runtime, false, false).run(
+        scripted_source(Cursor::new(input.into_bytes())),
+        InterruptOnReviewWriter {
+            output: Vec::new(),
+            interrupts: interrupt_tx,
+            sent: false,
+        },
+        interrupt_rx,
+    );
+    assert_eq!(result.unwrap(), ShutdownReason::Interrupted);
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+
+    for panic_writer in [false, true] {
+        let (runtime, state, input) = memory_cleanup_runtime(true);
+        let result = if panic_writer {
+            FallbackHost::new(runtime, false, false).run(
+                scripted_source(Cursor::new(input.into_bytes())),
+                PanickingWriter,
+                never(),
+            )
+        } else {
+            FallbackHost::new(runtime, false, false).run(
+                scripted_source(Cursor::new(input.into_bytes())),
+                FailingWriter,
+                never(),
+            )
+        };
+        if panic_writer {
+            assert!(matches!(result, Err(UiError::Panicked)));
+        } else {
+            assert!(matches!(result, Err(UiError::Write)));
+        }
+        assert_eq!(state.lock().unwrap().cancel_count, 1);
+    }
+
+    let (runtime, state, input) = memory_cleanup_runtime(true);
+    let mut source = scripted_source(Cursor::new(input.into_bytes()));
+    source.events.pop_back();
+    source
+        .events
+        .push_back(Err(io::Error::other("private source failure")));
+    let result =
+        FallbackHost::new(runtime, false, false).run(source, SharedWriter::default(), never());
+    assert!(matches!(result, Err(UiError::Read)));
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+
+    let (runtime, state, input) = memory_cleanup_runtime(false);
+    let mut source = scripted_source(Cursor::new(input.into_bytes()));
+    source.events.pop_back();
+    source.events.push_back(Ok(LineSourceEvent::Cancelled));
+    let result =
+        FallbackHost::new(runtime, false, false).run(source, SharedWriter::default(), never());
+    assert!(matches!(result, Err(UiError::ReaderThread)));
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+
+    let (runtime, state, input) = memory_cleanup_runtime(true);
+    let result = FallbackHost::new(runtime, false, false).run(
+        PanicAfterLineSource {
+            line: Some(first_raw_line(&input)),
+            cancellation: Arc::new(ScriptedCancellation(std::sync::atomic::AtomicBool::new(
+                false,
+            ))),
+        },
+        SharedWriter::default(),
+        never(),
+    );
+    assert!(matches!(result, Err(UiError::ReaderThread)));
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
 }
 
 #[test]
