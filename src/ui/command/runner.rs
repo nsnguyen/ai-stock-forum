@@ -19,7 +19,10 @@ use crate::{
         MemoryProposalResolutionReview, ShutdownDisposition, ShutdownReason, SkillSelector,
     },
     domain::Digest,
-    memory::{ExpectedMemoryEntryState, MemoryEditReview, MemoryEntryState, MemoryMutationKind},
+    memory::{
+        ExpectedMemoryEntryState, MemoryEditReview, MemoryEntryDraft, MemoryEntryState,
+        MemoryField, MemoryFieldDiff, MemoryFieldValue, MemoryMutationKind, NormalizedMemoryKey,
+    },
     panic_boundary::catch_sensitive_unwind,
     persistence::PersistenceError,
     runtime::{ApplicationRuntime, RuntimeClient, RuntimeError},
@@ -979,8 +982,14 @@ impl FallbackRunner {
                 let CommandView::MemoryEntry(view) = outcome.view else {
                     return Err(UiError::Panicked);
                 };
-                MemoryEditor::for_set(agent, view.entry)
-                    .map_err(|error| UiError::Runtime(RuntimeError::Application(error.into())))?
+                match MemoryEditor::for_set(agent, view.entry) {
+                    Ok(editor) => editor,
+                    Err(error) => {
+                        TextRenderer::render_memory_editor_error(error.code(), writer)
+                            .map_err(|_| UiError::Write)?;
+                        return Ok(());
+                    }
+                }
             }
             Err(RuntimeError::Application(AppError::MemoryEntryNotFound)) => {
                 let mut editor = MemoryEditor::for_create(agent);
@@ -1007,12 +1016,20 @@ impl FallbackRunner {
         key: String,
         writer: &mut W,
     ) -> Result<(), UiError> {
-        match self.client.preview_memory_delete(agent, key) {
+        let normalized_key = match NormalizedMemoryKey::new(&key) {
+            Ok(normalized_key) => normalized_key,
+            Err(error) => {
+                TextRenderer::render_memory_editor_error(error.code(), writer)
+                    .map_err(|_| UiError::Write)?;
+                return Ok(());
+            }
+        };
+        match self.client.preview_memory_delete(agent.clone(), key) {
             Ok(MemoryEditPreview::NoChange(no_change)) => {
                 TextRenderer::render_memory_no_change(no_change, writer).map_err(|_| UiError::Write)
             }
             Ok(MemoryEditPreview::Review(review)) => {
-                if !memory_edit_review_matches_request(&review, MemoryMutationKind::Delete) {
+                if !memory_delete_review_matches_request(&review, &agent, &normalized_key) {
                     return self.reject_new_memory_edit_review();
                 }
                 self.register_memory_review()?;
@@ -1167,10 +1184,12 @@ impl FallbackRunner {
                         TextRenderer::render_memory_cancelled(writer).map_err(|_| UiError::Write)
                     }
                     MemoryEditorEffect::Preview(request) => {
-                        let preview = match self
-                            .client
-                            .preview_memory_set(request.selector, request.candidate)
-                        {
+                        let requested_selector = request.selector;
+                        let requested_candidate = request.candidate;
+                        let preview = match self.client.preview_memory_set(
+                            requested_selector.clone(),
+                            requested_candidate.clone(),
+                        ) {
                             Ok(preview) => preview,
                             Err(
                                 error @ (RuntimeError::Application(_) | RuntimeError::Backpressure),
@@ -1194,9 +1213,10 @@ impl FallbackRunner {
                                 self.render_memory_workflow(writer)
                             }
                             MemoryEditPreview::Review(review) => {
-                                if !memory_edit_review_matches_request(
+                                if !memory_set_review_matches_request(
                                     &review,
-                                    MemoryMutationKind::Set,
+                                    &requested_selector,
+                                    &requested_candidate,
                                 ) {
                                     return self.reject_new_memory_edit_review();
                                 }
@@ -2242,42 +2262,141 @@ fn confirmation_matches(input: &str, expected: &str) -> bool {
     input.len() <= 80 && input == expected
 }
 
-fn memory_edit_review_matches_request(
+fn memory_set_review_matches_request(
     review: &MemoryEditReview,
-    requested_operation: MemoryMutationKind,
+    requested_selector: &AgentProfileSelector,
+    requested_candidate: &MemoryEntryDraft,
 ) -> bool {
-    if review.operation != requested_operation || !canonical_memory_edit_diff(&review.diff) {
+    if review.operation != MemoryMutationKind::Set
+        || review.candidate.as_ref() != Some(requested_candidate)
+        || !profile_matches_selector(&review.profile, requested_selector)
+        || !canonical_memory_edit_diff(&review.diff)
+    {
         return false;
     }
-    match requested_operation {
-        MemoryMutationKind::Set => {
-            let Some(candidate) = review.candidate.as_ref() else {
-                return false;
-            };
-            match &review.expected {
-                ExpectedMemoryEntryState::Absent => true,
-                ExpectedMemoryEntryState::Present(entry) => {
-                    entry.namespace_id() == review.namespace_id
-                        && entry.state() == MemoryEntryState::Present
-                        && *entry.normalized_key() == candidate.normalized_key()
-                }
-                ExpectedMemoryEntryState::Deleted(entry) => {
-                    entry.namespace_id() == review.namespace_id
-                        && entry.state() == MemoryEntryState::Deleted
-                        && *entry.normalized_key() == candidate.normalized_key()
-                }
-            }
+    match &review.expected {
+        ExpectedMemoryEntryState::Absent => {
+            absent_set_diff_matches(&review.diff, requested_candidate)
         }
-        MemoryMutationKind::Delete => {
-            review.candidate.is_none()
-                && matches!(
-                    &review.expected,
-                    ExpectedMemoryEntryState::Present(entry)
-                        if entry.namespace_id() == review.namespace_id
-                            && entry.state() == MemoryEntryState::Present
-                )
+        ExpectedMemoryEntryState::Present(entry) => {
+            entry.namespace_id() == review.namespace_id
+                && entry.state() == MemoryEntryState::Present
+                && *entry.normalized_key() == requested_candidate.normalized_key()
+                && present_set_diff_matches(&review.diff, requested_candidate)
+        }
+        ExpectedMemoryEntryState::Deleted(entry) => {
+            entry.namespace_id() == review.namespace_id
+                && entry.state() == MemoryEntryState::Deleted
+                && *entry.normalized_key() == requested_candidate.normalized_key()
+                && deleted_set_diff_matches(&review.diff, requested_candidate)
         }
     }
+}
+
+fn memory_delete_review_matches_request(
+    review: &MemoryEditReview,
+    requested_selector: &AgentProfileSelector,
+    requested_key: &NormalizedMemoryKey,
+) -> bool {
+    review.operation == MemoryMutationKind::Delete
+        && review.candidate.is_none()
+        && profile_matches_selector(&review.profile, requested_selector)
+        && canonical_memory_edit_diff(&review.diff)
+        && matches!(
+            &review.expected,
+            ExpectedMemoryEntryState::Present(entry)
+                if entry.namespace_id() == review.namespace_id
+                    && entry.state() == MemoryEntryState::Present
+                    && entry.normalized_key() == requested_key
+        )
+        && delete_diff_matches(&review.diff)
+}
+
+fn profile_matches_selector(
+    profile: &crate::agents::AgentProfileVersionRef,
+    selector: &AgentProfileSelector,
+) -> bool {
+    match selector {
+        AgentProfileSelector::Id(profile_id) => profile.profile_id() == *profile_id,
+        AgentProfileSelector::Name(_) => true,
+    }
+}
+
+fn absent_set_diff_matches(diff: &[MemoryFieldDiff], candidate: &MemoryEntryDraft) -> bool {
+    diff.len() == 4
+        && diff[0].field == MemoryField::DisplayKey
+        && diff[0].before == MemoryFieldValue::Missing
+        && text_value_matches(&diff[0].after, candidate.display_key())
+        && diff[1].field == MemoryField::State
+        && diff[1].before == MemoryFieldValue::Missing
+        && diff[1].after == MemoryFieldValue::State(MemoryEntryState::Present)
+        && diff[2].field == MemoryField::Value
+        && diff[2].before == MemoryFieldValue::Missing
+        && text_value_matches(&diff[2].after, candidate.value())
+        && diff[3].field == MemoryField::PurposeTags
+        && diff[3].before == MemoryFieldValue::Missing
+        && tags_value_matches(&diff[3].after, candidate.purpose_tags())
+}
+
+fn present_set_diff_matches(diff: &[MemoryFieldDiff], candidate: &MemoryEntryDraft) -> bool {
+    diff.iter().all(|item| match item.field {
+        MemoryField::DisplayKey => {
+            matches!(item.before, MemoryFieldValue::Text(_))
+                && text_value_matches(&item.after, candidate.display_key())
+        }
+        MemoryField::Value => {
+            matches!(item.before, MemoryFieldValue::Text(_))
+                && text_value_matches(&item.after, candidate.value())
+        }
+        MemoryField::PurposeTags => {
+            matches!(item.before, MemoryFieldValue::Tags(_))
+                && tags_value_matches(&item.after, candidate.purpose_tags())
+        }
+        MemoryField::State => false,
+    })
+}
+
+fn deleted_set_diff_matches(diff: &[MemoryFieldDiff], candidate: &MemoryEntryDraft) -> bool {
+    let required = if diff.first().is_some_and(|item| {
+        item.field == MemoryField::DisplayKey
+            && matches!(item.before, MemoryFieldValue::Text(_))
+            && text_value_matches(&item.after, candidate.display_key())
+    }) {
+        &diff[1..]
+    } else {
+        diff
+    };
+    required.len() == 3
+        && required[0].field == MemoryField::State
+        && required[0].before == MemoryFieldValue::State(MemoryEntryState::Deleted)
+        && required[0].after == MemoryFieldValue::State(MemoryEntryState::Present)
+        && required[1].field == MemoryField::Value
+        && required[1].before == MemoryFieldValue::Missing
+        && text_value_matches(&required[1].after, candidate.value())
+        && required[2].field == MemoryField::PurposeTags
+        && required[2].before == MemoryFieldValue::Missing
+        && tags_value_matches(&required[2].after, candidate.purpose_tags())
+}
+
+fn delete_diff_matches(diff: &[MemoryFieldDiff]) -> bool {
+    diff.len() == 3
+        && diff[0].field == MemoryField::State
+        && diff[0].before == MemoryFieldValue::State(MemoryEntryState::Present)
+        && diff[0].after == MemoryFieldValue::State(MemoryEntryState::Deleted)
+        && diff[1].field == MemoryField::Value
+        && matches!(diff[1].before, MemoryFieldValue::Text(_))
+        && diff[1].after == MemoryFieldValue::Missing
+        && diff[2].field == MemoryField::PurposeTags
+        && matches!(diff[2].before, MemoryFieldValue::Tags(_))
+        && diff[2].after == MemoryFieldValue::Missing
+}
+
+fn text_value_matches(value: &MemoryFieldValue, expected: &str) -> bool {
+    matches!(value, MemoryFieldValue::Text(actual) if actual == expected)
+}
+
+fn tags_value_matches(value: &MemoryFieldValue, expected: &[String]) -> bool {
+    matches!(value, MemoryFieldValue::Tags(actual) if actual == expected)
 }
 
 fn cancel_registered_memory_review(
@@ -2516,5 +2635,88 @@ pub fn run_stdio(
         let _ = resources;
         let _ = runtime.finish_and_join(ShutdownReason::ApplicationError);
         Err(UiError::LineSourceUnavailable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::Cursor,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::{
+        app::{CommandOutcome, MemoryEditPreview},
+        domain::AgentProfileId,
+        runtime::CommandExecutor,
+    };
+
+    #[derive(Default)]
+    struct InvalidDeleteState {
+        preview_calls: AtomicUsize,
+        cancel_calls: AtomicUsize,
+    }
+
+    struct InvalidDeleteExecutor(Arc<InvalidDeleteState>);
+
+    impl CommandExecutor for InvalidDeleteExecutor {
+        fn execute_user(
+            &mut self,
+            _command: ApplicationCommand,
+        ) -> Result<CommandOutcome, AppError> {
+            panic!("invalid delete-key handling must not execute a command")
+        }
+
+        fn preview_memory_delete(
+            &mut self,
+            _selector: AgentProfileSelector,
+            _display_key: String,
+        ) -> Result<MemoryEditPreview, AppError> {
+            self.0.preview_calls.fetch_add(1, Ordering::SeqCst);
+            Err(crate::domain::DomainError::MemoryReviewUnavailable.into())
+        }
+
+        fn cancel_memory_review(&mut self) -> Result<(), AppError> {
+            self.0.cancel_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn finish(&mut self, _reason: ShutdownReason) -> Result<(), AppError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn invalid_delete_key_renders_only_safe_code_without_preview_or_workflow() {
+        let state = Arc::new(InvalidDeleteState::default());
+        let runtime = ApplicationRuntime::spawn(InvalidDeleteExecutor(state.clone()), 1).unwrap();
+        let runner = FallbackRunner::new(runtime.client(), false);
+        let mut output = Vec::new();
+
+        runner
+            .start_memory_delete(
+                AgentProfileSelector::Id(AgentProfileId::from_uuid(Uuid::from_u128(701))),
+                "api key".into(),
+                &mut output,
+            )
+            .unwrap();
+
+        assert_eq!(
+            output,
+            b"Memory editor input was rejected [invalid_memory_field].\n"
+        );
+        assert_eq!(state.preview_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.cancel_calls.load(Ordering::SeqCst), 0);
+        assert!(runner.memory_workflow.lock().unwrap().is_none());
+        assert!(!*runner.memory_review_registered.lock().unwrap());
+        let reason = runner.run(Cursor::new(Vec::new()), Vec::new()).unwrap();
+        assert_eq!(reason, ShutdownReason::InputClosed);
+        runtime.finish_and_join(reason).unwrap();
     }
 }

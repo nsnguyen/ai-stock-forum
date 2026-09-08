@@ -221,45 +221,74 @@ fn edit_review(
     digest_seed: &[u8],
 ) -> MemoryEditReview {
     let profile = profile();
-    let diff = match (&operation, &candidate) {
-        (MemoryMutationKind::Set, Some(candidate)) => vec![
-            MemoryFieldDiff {
-                field: MemoryField::DisplayKey,
-                before: MemoryFieldValue::Missing,
-                after: MemoryFieldValue::Text(candidate.display_key().to_owned()),
-            },
-            MemoryFieldDiff {
-                field: MemoryField::State,
-                before: MemoryFieldValue::Missing,
-                after: MemoryFieldValue::State(ai_stock_forum::memory::MemoryEntryState::Present),
-            },
-            MemoryFieldDiff {
-                field: MemoryField::Value,
-                before: MemoryFieldValue::Missing,
-                after: MemoryFieldValue::Text(candidate.value().to_owned()),
-            },
-            MemoryFieldDiff {
-                field: MemoryField::PurposeTags,
-                before: MemoryFieldValue::Missing,
-                after: MemoryFieldValue::Tags(candidate.purpose_tags().to_vec()),
-            },
+    let diff = match (&operation, &expected, &candidate) {
+        (MemoryMutationKind::Set, ExpectedMemoryEntryState::Absent, Some(candidate)) => vec![
+            memory_diff(
+                MemoryField::DisplayKey,
+                MemoryFieldValue::Missing,
+                MemoryFieldValue::Text(candidate.display_key().to_owned()),
+            ),
+            memory_diff(
+                MemoryField::State,
+                MemoryFieldValue::Missing,
+                MemoryFieldValue::State(ai_stock_forum::memory::MemoryEntryState::Present),
+            ),
+            memory_diff(
+                MemoryField::Value,
+                MemoryFieldValue::Missing,
+                MemoryFieldValue::Text(candidate.value().to_owned()),
+            ),
+            memory_diff(
+                MemoryField::PurposeTags,
+                MemoryFieldValue::Missing,
+                MemoryFieldValue::Tags(candidate.purpose_tags().to_vec()),
+            ),
         ],
-        (MemoryMutationKind::Delete, None) => vec![
-            MemoryFieldDiff {
-                field: MemoryField::State,
-                before: MemoryFieldValue::State(ai_stock_forum::memory::MemoryEntryState::Present),
-                after: MemoryFieldValue::State(ai_stock_forum::memory::MemoryEntryState::Deleted),
-            },
-            MemoryFieldDiff {
-                field: MemoryField::Value,
-                before: MemoryFieldValue::Text("private thesis\nsecond line".into()),
-                after: MemoryFieldValue::Missing,
-            },
-            MemoryFieldDiff {
-                field: MemoryField::PurposeTags,
-                before: MemoryFieldValue::Tags(vec!["Catalyst".into()]),
-                after: MemoryFieldValue::Tags(Vec::new()),
-            },
+        (MemoryMutationKind::Set, ExpectedMemoryEntryState::Present(_), Some(candidate)) => vec![
+            memory_diff(
+                MemoryField::Value,
+                MemoryFieldValue::Text("private thesis\nsecond line".into()),
+                MemoryFieldValue::Text(candidate.value().to_owned()),
+            ),
+            memory_diff(
+                MemoryField::PurposeTags,
+                MemoryFieldValue::Tags(vec!["Catalyst".into()]),
+                MemoryFieldValue::Tags(candidate.purpose_tags().to_vec()),
+            ),
+        ],
+        (MemoryMutationKind::Set, ExpectedMemoryEntryState::Deleted(_), Some(candidate)) => vec![
+            memory_diff(
+                MemoryField::State,
+                MemoryFieldValue::State(ai_stock_forum::memory::MemoryEntryState::Deleted),
+                MemoryFieldValue::State(ai_stock_forum::memory::MemoryEntryState::Present),
+            ),
+            memory_diff(
+                MemoryField::Value,
+                MemoryFieldValue::Missing,
+                MemoryFieldValue::Text(candidate.value().to_owned()),
+            ),
+            memory_diff(
+                MemoryField::PurposeTags,
+                MemoryFieldValue::Missing,
+                MemoryFieldValue::Tags(candidate.purpose_tags().to_vec()),
+            ),
+        ],
+        (MemoryMutationKind::Delete, _, None) => vec![
+            memory_diff(
+                MemoryField::State,
+                MemoryFieldValue::State(ai_stock_forum::memory::MemoryEntryState::Present),
+                MemoryFieldValue::State(ai_stock_forum::memory::MemoryEntryState::Deleted),
+            ),
+            memory_diff(
+                MemoryField::Value,
+                MemoryFieldValue::Text("private thesis\nsecond line".into()),
+                MemoryFieldValue::Missing,
+            ),
+            memory_diff(
+                MemoryField::PurposeTags,
+                MemoryFieldValue::Tags(vec!["Catalyst".into()]),
+                MemoryFieldValue::Missing,
+            ),
         ],
         _ => Vec::new(),
     };
@@ -273,6 +302,18 @@ fn edit_review(
         plaintext_acknowledgement: MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1,
         review_token: MemoryReviewToken::from_uuid(Uuid::from_u128(91_003)),
         review_digest: sha256(digest_seed),
+    }
+}
+
+fn memory_diff(
+    field: MemoryField,
+    before: MemoryFieldValue,
+    after: MemoryFieldValue,
+) -> MemoryFieldDiff {
+    MemoryFieldDiff {
+        field,
+        before,
+        after,
     }
 }
 
@@ -361,6 +402,41 @@ fn mutation_commands(state: &Arc<Mutex<WorkflowExecutorState>>) -> Vec<Applicati
         })
         .cloned()
         .collect()
+}
+
+fn assert_rejected_edit_preview(
+    current: Option<MemoryEntryVersion>,
+    review: MemoryEditReview,
+    input: Vec<u8>,
+) {
+    let (runtime, state) = workflow_runtime(
+        current,
+        None,
+        Some(Ok(MemoryEditPreview::Review(review))),
+        None,
+    );
+    let runner = FallbackRunner::new(runtime.client(), false);
+    let mut output = Vec::new();
+    let error = runner.run(Cursor::new(input), &mut output).unwrap_err();
+
+    assert!(matches!(error, UiError::Panicked));
+    assert!(mutation_commands(&state).is_empty());
+    assert_eq!(state.lock().unwrap().preview_count, 1);
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    let output = String::from_utf8(output).unwrap();
+    assert!(!output.contains("Memory set review"));
+    assert!(!output.contains("Memory delete review"));
+
+    assert_eq!(
+        runner
+            .run(Cursor::new(b":cancel\n".to_vec()), Vec::new())
+            .unwrap(),
+        ShutdownReason::InputClosed
+    );
+    assert_eq!(state.lock().unwrap().cancel_count, 1);
+    runtime
+        .finish_and_join(ShutdownReason::ApplicationError)
+        .unwrap();
 }
 
 fn command(input: &[u8]) -> ApplicationCommand {
@@ -713,7 +789,7 @@ fn fallback_delete_review_shows_detail_and_submits_the_exact_bound_command() {
     let value_diff = output
         .find("Value: private thesis\\nsecond line -> missing")
         .unwrap();
-    let tags_diff = output.find("Purpose tags: Catalyst -> none").unwrap();
+    let tags_diff = output.find("Purpose tags: Catalyst -> missing").unwrap();
     assert!(state_diff < value_diff && value_diff < tags_diff);
     assert!(output.contains(MEMORY_PLAINTEXT_WARNING));
     runtime.finish_and_join(reason).unwrap();
@@ -805,6 +881,177 @@ fn fallback_set_rejects_a_cross_wired_delete_preview_before_render_or_submission
 }
 
 #[test]
+fn fallback_set_rejects_a_same_operation_candidate_cross_wire() {
+    let requested = MemoryEntryDraft::new(
+        "Requested Key".into(),
+        "requested value".into(),
+        vec!["requested".into()],
+    )
+    .unwrap();
+    let substituted = MemoryEntryDraft::new(
+        "Different Key".into(),
+        "substituted value".into(),
+        vec!["substituted".into()],
+    )
+    .unwrap();
+    let review = edit_review(
+        MemoryMutationKind::Set,
+        ExpectedMemoryEntryState::Absent,
+        Some(substituted),
+        b"set-candidate-cross-wire",
+    );
+    assert_rejected_edit_preview(
+        None,
+        review,
+        format!(
+            "/memory set {} \"{}\"\n{}\n{}\n",
+            profile().profile_id(),
+            requested.display_key(),
+            requested.value(),
+            requested.purpose_tags().join(", "),
+        )
+        .into_bytes(),
+    );
+}
+
+#[test]
+fn fallback_set_id_selector_rejects_a_same_operation_profile_cross_wire() {
+    let requested = MemoryEntryDraft::new(
+        "Requested Key".into(),
+        "requested value".into(),
+        vec!["requested".into()],
+    )
+    .unwrap();
+    let mut review = edit_review(
+        MemoryMutationKind::Set,
+        ExpectedMemoryEntryState::Absent,
+        Some(requested.clone()),
+        b"set-profile-cross-wire",
+    );
+    review.profile = different_profile().reference();
+    assert_rejected_edit_preview(
+        None,
+        review,
+        format!(
+            "/memory set {} \"{}\"\n{}\n{}\n",
+            profile().profile_id(),
+            requested.display_key(),
+            requested.value(),
+            requested.purpose_tags().join(", "),
+        )
+        .into_bytes(),
+    );
+}
+
+#[test]
+fn fallback_delete_rejects_a_same_operation_normalized_key_cross_wire() {
+    let review = edit_review(
+        MemoryMutationKind::Delete,
+        ExpectedMemoryEntryState::Present(entry(&profile()).reference()),
+        None,
+        b"delete-key-cross-wire",
+    );
+    assert_rejected_edit_preview(
+        None,
+        review,
+        format!(
+            "/memory delete {} \"Different Key\"\n",
+            profile().profile_id()
+        )
+        .into_bytes(),
+    );
+}
+
+#[test]
+fn fallback_delete_id_selector_rejects_a_same_operation_profile_cross_wire() {
+    let mut review = edit_review(
+        MemoryMutationKind::Delete,
+        ExpectedMemoryEntryState::Present(entry(&profile()).reference()),
+        None,
+        b"delete-profile-cross-wire",
+    );
+    review.profile = different_profile().reference();
+    assert_rejected_edit_preview(
+        None,
+        review,
+        format!(
+            "/memory delete {} \"Earnings Thesis\"\n",
+            profile().profile_id()
+        )
+        .into_bytes(),
+    );
+}
+
+#[test]
+fn fallback_delete_rejects_a_diff_without_the_state_transition() {
+    let mut review = edit_review(
+        MemoryMutationKind::Delete,
+        ExpectedMemoryEntryState::Present(entry(&profile()).reference()),
+        None,
+        b"delete-missing-state",
+    );
+    review.diff.remove(0);
+    assert_rejected_edit_preview(
+        None,
+        review,
+        format!(
+            "/memory delete {} \"Earnings Thesis\"\n",
+            profile().profile_id()
+        )
+        .into_bytes(),
+    );
+}
+
+#[test]
+fn fallback_delete_rejects_a_diff_that_retains_deleted_content() {
+    let mut review = edit_review(
+        MemoryMutationKind::Delete,
+        ExpectedMemoryEntryState::Present(entry(&profile()).reference()),
+        None,
+        b"delete-retains-value",
+    );
+    review.diff[1].after = MemoryFieldValue::Text("retained value".into());
+    assert_rejected_edit_preview(
+        None,
+        review,
+        format!(
+            "/memory delete {} \"Earnings Thesis\"\n",
+            profile().profile_id()
+        )
+        .into_bytes(),
+    );
+}
+
+#[test]
+fn fallback_absent_set_rejects_an_incomplete_missing_to_candidate_diff() {
+    let requested = MemoryEntryDraft::new(
+        "Requested Key".into(),
+        "requested value".into(),
+        vec!["requested".into()],
+    )
+    .unwrap();
+    let mut review = edit_review(
+        MemoryMutationKind::Set,
+        ExpectedMemoryEntryState::Absent,
+        Some(requested.clone()),
+        b"set-incomplete-diff",
+    );
+    review.diff.pop();
+    assert_rejected_edit_preview(
+        None,
+        review,
+        format!(
+            "/memory set {} \"{}\"\n{}\n{}\n",
+            profile().profile_id(),
+            requested.display_key(),
+            requested.value(),
+            requested.purpose_tags().join(", "),
+        )
+        .into_bytes(),
+    );
+}
+
+#[test]
 fn fallback_rejects_noncanonical_edit_diff_before_confirmation() {
     let current = entry(&profile());
     let mut review = edit_review(
@@ -865,7 +1112,7 @@ fn fallback_confirmation_is_untrimmed_bounded_action_specific_and_retains_review
         None,
     );
     let input = format!(
-        "/memory delete {} thesis\nyes\n {exact}\n{exact} \n{}\n/help\n{exact}\n",
+        "/memory delete {} \"Earnings Thesis\"\nyes\n {exact}\n{exact} \n{}\n/help\n{exact}\n",
         profile().profile_id(),
         "x".repeat(81),
     );
@@ -1106,10 +1353,79 @@ fn fallback_set_seed_read_precedes_and_is_the_only_activity_before_draft_review(
     runtime.finish_and_join(reason).unwrap();
 }
 
+#[test]
+fn fallback_invalid_tombstone_seed_is_content_free_and_does_not_install_a_workflow() {
+    let tombstone = entry(&profile())
+        .next_deleted(
+            MemoryEntryVersionId::from_uuid(Uuid::from_u128(204)),
+            Actor::Human,
+            1_700_000_000_011,
+            None,
+            EventId::from_uuid(Uuid::from_u128(205)),
+        )
+        .unwrap();
+    let (runtime, state) = workflow_runtime(Some(tombstone.clone()), None, None, None);
+    let mut output = Vec::new();
+    let reason = FallbackRunner::new(runtime.client(), false)
+        .run(
+            Cursor::new(
+                format!(
+                    "/memory set {} \"Requested Key\"\n:cancel\n/help\n",
+                    profile().profile_id()
+                )
+                .into_bytes(),
+            ),
+            &mut output,
+        )
+        .unwrap();
+
+    assert_eq!(reason, ShutdownReason::InputClosed);
+    let state = state.lock().unwrap();
+    assert_eq!(state.preview_count, 0);
+    assert_eq!(state.cancel_count, 0);
+    assert!(state.commands.iter().all(|command| !matches!(
+        command,
+        ApplicationCommand::SetMemoryEntry { .. }
+            | ApplicationCommand::DeleteMemoryEntry { .. }
+            | ApplicationCommand::ApproveMemoryProposal { .. }
+            | ApplicationCommand::RejectMemoryProposal { .. }
+    )));
+    assert_eq!(
+        state
+            .commands
+            .iter()
+            .filter(|command| matches!(command, ApplicationCommand::ShowMemoryEntry { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        state
+            .commands
+            .iter()
+            .filter(|command| matches!(command, ApplicationCommand::ShowHelp))
+            .count(),
+        1
+    );
+    drop(state);
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("Memory editor input was rejected [invalid_memory_editor_seed]."));
+    assert!(output.contains("Available commands"));
+    assert!(!output.contains(tombstone.display_key()));
+    assert!(!output.contains(&tombstone.reference().entry_version_id().to_string()));
+    assert!(!output.contains(tombstone.reference().content_digest().as_str()));
+    runtime.finish_and_join(reason).unwrap();
+}
+
 fn delete_script(review: &MemoryEditReview, confirmations: usize) -> Vec<u8> {
     let exact = format!("delete {}", review.review_digest);
+    let key = match &review.expected {
+        ExpectedMemoryEntryState::Present(entry) | ExpectedMemoryEntryState::Deleted(entry) => {
+            entry.normalized_key().as_str()
+        }
+        ExpectedMemoryEntryState::Absent => "thesis",
+    };
     format!(
-        "/memory delete {} thesis\n{}",
+        "/memory delete {} \"{key}\"\n{}",
         profile().profile_id(),
         format!("{exact}\n").repeat(confirmations),
     )
@@ -1893,6 +2209,30 @@ fn profile() -> AgentProfileVersion {
         AgentProfileDraft::new(
             "Memory Agent".into(),
             "Fallback renderer fixture.".into(),
+            AgentRole::Custom,
+            "research".into(),
+            vec!["analysis".into()],
+            "Careful.".into(),
+            "Use evidence.".into(),
+            AgentBindings::default(),
+            vec![],
+            vec![],
+        )
+        .unwrap(),
+        None,
+    )
+    .unwrap()
+}
+
+fn different_profile() -> AgentProfileVersion {
+    AgentProfileVersion::create(
+        AgentProfileId::from_uuid(Uuid::from_u128(201)),
+        AgentProfileVersionId::from_uuid(Uuid::from_u128(202)),
+        MemoryNamespaceId::from_uuid(Uuid::from_u128(203)),
+        1_700_000_000_000,
+        AgentProfileDraft::new(
+            "Different Memory Agent".into(),
+            "Adversarial fallback fixture.".into(),
             AgentRole::Custom,
             "research".into(),
             vec!["analysis".into()],
