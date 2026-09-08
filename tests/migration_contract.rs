@@ -930,6 +930,17 @@ fn v4_memory_proposal_resolution_and_current_status_lifecycle_is_exact() {
     let (_temp, database) = fresh_database();
     let connection = database.connection();
     seed_v4_memory_parents(connection);
+    for (sequence, event_id, event_type, event_digest) in [
+        (3_i64, "event-3", "memory.proposal.created", "c".repeat(64)),
+        (4_i64, "event-4", "memory.proposal.resolved", "d".repeat(64)),
+        (5_i64, "event-5", "memory.proposal.created", "g".repeat(64)),
+        (6_i64, "event-6", "memory.proposal.resolved", "h".repeat(64)),
+    ] {
+        connection.execute(
+            "INSERT INTO event_stream (sequence, event_id, event_schema_version, event_type, actor_kind, occurred_at_ms, correlation_id, payload_json, event_digest) VALUES (?1, ?2, 1, ?3, 'system', ?1, ?4, '{}', ?5)",
+            rusqlite::params![sequence, event_id, event_type, format!("corr-{sequence}"), event_digest],
+        ).unwrap();
+    }
     let profile = "00000000-0000-0000-0000-000000000001";
     let namespace = "00000000-0000-0000-0000-000000000003";
     let proposal = "00000000-0000-0000-0000-000000000041";
@@ -951,8 +962,114 @@ fn v4_memory_proposal_resolution_and_current_status_lifecycle_is_exact() {
     transaction.execute("INSERT INTO current_memory_proposal_status (proposal_id, proposal_version, proposal_content_digest, memory_namespace_id, normalized_key, status, resolution_event_id, created_at_ms) VALUES (?1, 1, ?2, ?3, 'key', 'accepted', 'event-2', 1)", rusqlite::params![proposal, digest, namespace]).unwrap();
     transaction.commit().unwrap();
     assert!(connection.execute("INSERT INTO memory_proposal_resolutions (proposal_id, proposal_version, proposal_content_digest, status, approval_id, resolved_by_kind, resolved_by_id, resolved_at_ms, resolution_event_sequence, resolution_event_id, resolution_json) VALUES (?1, 1, ?2, 'accepted', ?3, 'human', NULL, 2, 2, 'event-2', CAST('{}' AS BLOB))", rusqlite::params![proposal, digest, approval]).is_err());
-    assert!(connection.execute("INSERT INTO memory_proposal_resolutions (proposal_id, proposal_version, proposal_content_digest, status, approval_id, resolved_by_kind, resolved_by_id, resolved_at_ms, resolution_event_sequence, resolution_event_id, resolution_json) VALUES ('00000000-0000-0000-0000-000000000051', 1, ?1, 'accepted', ?2, 'human', NULL, 2, 2, 'event-2', CAST('{}' AS BLOB))", rusqlite::params!["b".repeat(64), approval]).is_err());
-    assert!(connection.execute("INSERT INTO current_memory_proposal_status (proposal_id, proposal_version, proposal_content_digest, memory_namespace_id, normalized_key, status, resolution_event_id, created_at_ms) VALUES (?1, 1, ?2, ?3, 'key', 'rejected', 'event-2', 1)", rusqlite::params![proposal, digest, namespace]).is_err());
+
+    let mismatched_resolution_proposal = "00000000-0000-0000-0000-000000000051";
+    let mismatched_resolution_approval = "00000000-0000-0000-0000-000000000052";
+    seed_pending_memory_proposal(
+        connection,
+        mismatched_resolution_proposal,
+        mismatched_resolution_approval,
+        "resolution-mismatch",
+        3,
+        "event-3",
+        &digest,
+    );
+    connection.execute(
+        "UPDATE approval_records SET status = 'accepted', resolved_at_ms = 4, resolution_kind = 'accepted', resolution_event_id = 'event-4', resolution_actor_kind = 'human', resolution_actor_id = NULL WHERE approval_id = ?1",
+        [mismatched_resolution_approval],
+    ).unwrap();
+    let pending_status_before =
+        current_memory_proposal_status_values(connection, mismatched_resolution_proposal);
+    let transaction = connection.unchecked_transaction().unwrap();
+    transaction.execute(
+        "INSERT INTO memory_proposal_resolutions (proposal_id, proposal_version, proposal_content_digest, status, approval_id, resolved_by_kind, resolved_by_id, resolved_at_ms, resolution_event_sequence, resolution_event_id, resolution_json) VALUES (?1, 1, ?2, 'accepted', ?3, 'human', NULL, 4, 4, 'event-4', CAST('{}' AS BLOB))",
+        rusqlite::params![mismatched_resolution_proposal, "b".repeat(64), mismatched_resolution_approval],
+    ).unwrap();
+    assert_single_foreign_key_violation(
+        &transaction,
+        "memory_proposal_resolutions",
+        "memory_proposals",
+    );
+    assert_foreign_key_commit_failure(transaction.commit());
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM memory_proposal_resolutions WHERE proposal_id = ?1",
+                [mismatched_resolution_proposal],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        current_memory_proposal_status_values(connection, mismatched_resolution_proposal),
+        pending_status_before
+    );
+
+    let mismatched_status_proposal = "00000000-0000-0000-0000-000000000061";
+    let mismatched_status_approval = "00000000-0000-0000-0000-000000000062";
+    seed_pending_memory_proposal(
+        connection,
+        mismatched_status_proposal,
+        mismatched_status_approval,
+        "status-mismatch",
+        5,
+        "event-5",
+        &digest,
+    );
+    connection.execute(
+        "UPDATE approval_records SET status = 'accepted', resolved_at_ms = 6, resolution_kind = 'accepted', resolution_event_id = 'event-6', resolution_actor_kind = 'human', resolution_actor_id = NULL WHERE approval_id = ?1",
+        [mismatched_status_approval],
+    ).unwrap();
+    let transaction = connection.unchecked_transaction().unwrap();
+    transaction.execute(
+        "INSERT INTO memory_proposal_resolutions (proposal_id, proposal_version, proposal_content_digest, status, approval_id, resolved_by_kind, resolved_by_id, resolved_at_ms, resolution_event_sequence, resolution_event_id, resolution_json) VALUES (?1, 1, ?2, 'accepted', ?3, 'human', NULL, 6, 6, 'event-6', CAST('{}' AS BLOB))",
+        rusqlite::params![mismatched_status_proposal, digest, mismatched_status_approval],
+    ).unwrap();
+    transaction
+        .execute(
+            "DELETE FROM current_memory_proposal_status WHERE proposal_id = ?1",
+            [mismatched_status_proposal],
+        )
+        .unwrap();
+    transaction.execute(
+        "INSERT INTO current_memory_proposal_status (proposal_id, proposal_version, proposal_content_digest, memory_namespace_id, normalized_key, status, resolution_event_id, created_at_ms) VALUES (?1, 1, ?2, ?3, 'status-mismatch', 'accepted', 'event-6', 5)",
+        rusqlite::params![mismatched_status_proposal, digest, namespace],
+    ).unwrap();
+    transaction.commit().unwrap();
+    let canonical_status_before =
+        current_memory_proposal_status_values(connection, mismatched_status_proposal);
+    let transaction = connection.unchecked_transaction().unwrap();
+    transaction
+        .execute(
+            "DELETE FROM current_memory_proposal_status WHERE proposal_id = ?1",
+            [mismatched_status_proposal],
+        )
+        .unwrap();
+    transaction.execute(
+        "INSERT INTO current_memory_proposal_status (proposal_id, proposal_version, proposal_content_digest, memory_namespace_id, normalized_key, status, resolution_event_id, created_at_ms) VALUES (?1, 1, ?2, ?3, 'status-mismatch', 'rejected', 'event-6', 5)",
+        rusqlite::params![mismatched_status_proposal, digest, namespace],
+    ).unwrap();
+    assert_single_foreign_key_violation(
+        &transaction,
+        "current_memory_proposal_status",
+        "memory_proposal_resolutions",
+    );
+    assert_foreign_key_commit_failure(transaction.commit());
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM memory_proposal_resolutions WHERE proposal_id = ?1",
+                [mismatched_status_proposal],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        current_memory_proposal_status_values(connection, mismatched_status_proposal),
+        canonical_status_before
+    );
     for table in ["memory_proposals", "memory_proposal_resolutions"] {
         assert!(
             connection
@@ -978,6 +1095,80 @@ fn seed_v4_memory_parents(connection: &rusqlite::Connection) {
              ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002', 1, NULL, NULL, NULL, NULL, 'custom', 'Profile', 'profile', '00000000-0000-0000-0000-000000000003', 'policy', '{}', CAST('{{}}' AS BLOB), 1, 1);",
         "e".repeat(64), "f".repeat(64), "a".repeat(64)
     )).unwrap();
+}
+
+fn seed_pending_memory_proposal(
+    connection: &rusqlite::Connection,
+    proposal_id: &str,
+    approval_id: &str,
+    normalized_key: &str,
+    creation_event_sequence: i64,
+    creation_event_id: &str,
+    digest: &str,
+) {
+    let profile_id = "00000000-0000-0000-0000-000000000001";
+    let namespace_id = "00000000-0000-0000-0000-000000000003";
+    connection.execute(
+        "INSERT INTO approval_records (approval_id, action_kind, object_kind, object_id, object_version, object_digest, actor_kind, actor_id, status, created_at_ms) VALUES (?1, 'memory_mutation', 'memory_proposal', ?2, 1, ?3, 'agent', ?4, 'pending', ?5)",
+        rusqlite::params![approval_id, proposal_id, digest, profile_id, creation_event_sequence],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO memory_proposals (proposal_id, version, proposer_profile_id, proposer_profile_version_id, proposer_profile_version, proposer_profile_digest, memory_namespace_id, operation, display_key, normalized_key, expected_kind, expected_entry_id, expected_entry_version_id, expected_entry_version, expected_entry_digest, candidate_value, candidate_value_bytes, candidate_purpose_tags_json, rationale, plaintext_validation_version, created_at_ms, creation_event_sequence, creation_event_id, approval_id, content_digest, record_digest, record_json) VALUES (?1, 1, ?2, '00000000-0000-0000-0000-000000000002', 1, ?3, ?4, 'set', ?5, ?5, 'absent', NULL, NULL, NULL, NULL, 'value', 5, CAST('[]' AS BLOB), 'because', 1, ?6, ?6, ?7, ?8, ?3, ?3, CAST('{}' AS BLOB))",
+        rusqlite::params![proposal_id, profile_id, digest, namespace_id, normalized_key, creation_event_sequence, creation_event_id, approval_id],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO current_memory_proposal_status (proposal_id, proposal_version, proposal_content_digest, memory_namespace_id, normalized_key, status, resolution_event_id, created_at_ms) VALUES (?1, 1, ?2, ?3, ?4, 'pending', NULL, ?5)",
+        rusqlite::params![proposal_id, digest, namespace_id, normalized_key, creation_event_sequence],
+    ).unwrap();
+}
+
+fn current_memory_proposal_status_values(
+    connection: &rusqlite::Connection,
+    proposal_id: &str,
+) -> Vec<rusqlite::types::Value> {
+    connection.query_row(
+        "SELECT proposal_id, proposal_version, proposal_content_digest, memory_namespace_id, normalized_key, status, resolution_event_id, created_at_ms FROM current_memory_proposal_status WHERE proposal_id = ?1",
+        [proposal_id],
+        |row| (0..8).map(|index| row.get(index)).collect(),
+    ).unwrap()
+}
+
+fn assert_single_foreign_key_violation(
+    connection: &rusqlite::Connection,
+    table: &str,
+    expected_parent: &str,
+) {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA foreign_key_check({table})"))
+        .unwrap();
+    let violations = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(violations.len(), 1, "unexpected violations: {violations:?}");
+    assert_eq!(violations[0].0, table);
+    assert_eq!(violations[0].2, expected_parent);
+}
+
+fn assert_foreign_key_commit_failure(result: rusqlite::Result<()>) {
+    let error = result.unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            rusqlite::Error::SqliteFailure(sqlite, _)
+                if sqlite.code == rusqlite::ErrorCode::ConstraintViolation
+                    && sqlite.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
+        ),
+        "expected deferred foreign-key failure at commit, got {error:?}"
+    );
 }
 
 #[test]
