@@ -806,6 +806,31 @@ fn exhaustive_v4_schema_oracle_detects_added_and_omitted_objects() {
 }
 
 #[test]
+fn exhaustive_v4_schema_oracle_detects_inline_constraint_and_trigger_body_mutations() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = Database::open(&AppPaths::for_test(temp.path())).unwrap();
+    let connection = database.connection();
+    connection.execute_batch("PRAGMA writable_schema = ON; UPDATE sqlite_schema SET sql = replace(sql, 'UNIQUE (proposal_id, status, resolution_event_id)', 'CHECK (proposal_id IS NOT NULL)') WHERE type = 'table' AND name = 'memory_proposal_resolutions'; PRAGMA writable_schema = OFF;").unwrap();
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_complete_task_six_schema_contract(connection)
+        }))
+        .is_err()
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    let database = Database::open(&AppPaths::for_test(temp.path())).unwrap();
+    let connection = database.connection();
+    connection.execute_batch("DROP TRIGGER memory_proposals_no_update; CREATE TRIGGER memory_proposals_no_update BEFORE UPDATE ON memory_proposals BEGIN SELECT 1; END;").unwrap();
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_complete_task_six_schema_contract(connection)
+        }))
+        .is_err()
+    );
+}
+
+#[test]
 fn v4_memory_history_pointer_and_episodic_source_guards_are_effective() {
     let (_temp, database) = fresh_database();
     let connection = database.connection();
@@ -872,6 +897,48 @@ fn v4_memory_history_pointer_and_episodic_source_guards_are_effective() {
             )
             .is_err()
     );
+}
+
+#[test]
+fn v4_memory_proposal_resolution_and_current_status_lifecycle_is_exact() {
+    let (_temp, database) = fresh_database();
+    let connection = database.connection();
+    seed_v4_memory_parents(connection);
+    let profile = "00000000-0000-0000-0000-000000000001";
+    let namespace = "00000000-0000-0000-0000-000000000003";
+    let proposal = "00000000-0000-0000-0000-000000000041";
+    let approval = "00000000-0000-0000-0000-000000000042";
+    let digest = "a".repeat(64);
+    connection.execute("INSERT INTO approval_records (approval_id, action_kind, object_kind, object_id, object_version, object_digest, actor_kind, actor_id, status, created_at_ms) VALUES (?1, 'memory_mutation', 'memory_proposal', ?2, 1, ?3, 'agent', ?4, 'pending', 1)", rusqlite::params![approval, proposal, digest, profile]).unwrap();
+    connection.execute("INSERT INTO memory_proposals (proposal_id, version, proposer_profile_id, proposer_profile_version_id, proposer_profile_version, proposer_profile_digest, memory_namespace_id, operation, display_key, normalized_key, expected_kind, expected_entry_id, expected_entry_version_id, expected_entry_version, expected_entry_digest, candidate_value, candidate_value_bytes, candidate_purpose_tags_json, rationale, plaintext_validation_version, created_at_ms, creation_event_sequence, creation_event_id, approval_id, content_digest, record_digest, record_json) VALUES (?1, 1, ?2, '00000000-0000-0000-0000-000000000002', 1, ?3, ?4, 'set', 'Key', 'key', 'absent', NULL, NULL, NULL, NULL, 'value', 5, CAST('[]' AS BLOB), 'because', 1, 1, 1, 'event-1', ?5, ?3, ?3, CAST('{}' AS BLOB))", rusqlite::params![proposal, profile, digest, namespace, approval]).unwrap();
+    connection.execute("INSERT INTO current_memory_proposal_status (proposal_id, proposal_version, proposal_content_digest, memory_namespace_id, normalized_key, status, resolution_event_id, created_at_ms) VALUES (?1, 1, ?2, ?3, 'key', 'pending', NULL, 1)", rusqlite::params![proposal, digest, namespace]).unwrap();
+    assert!(connection.execute("INSERT INTO current_memory_proposal_status (proposal_id, proposal_version, proposal_content_digest, memory_namespace_id, normalized_key, status, resolution_event_id, created_at_ms) VALUES ('00000000-0000-0000-0000-000000000099', 1, ?1, ?2, 'key', 'pending', NULL, 1)", rusqlite::params![digest, namespace]).is_err());
+    connection.execute("UPDATE approval_records SET status = 'accepted', resolved_at_ms = 2, resolution_kind = 'accepted', resolution_event_id = 'event-2', resolution_actor_kind = 'human', resolution_actor_id = NULL WHERE approval_id = ?1", [approval]).unwrap();
+    let transaction = connection.unchecked_transaction().unwrap();
+    transaction.execute("INSERT INTO memory_proposal_resolutions (proposal_id, proposal_version, proposal_content_digest, status, approval_id, resolved_by_kind, resolved_by_id, resolved_at_ms, resolution_event_sequence, resolution_event_id, resolution_json) VALUES (?1, 1, ?2, 'accepted', ?3, 'human', NULL, 2, 2, 'event-2', CAST('{}' AS BLOB))", rusqlite::params![proposal, digest, approval]).unwrap();
+    transaction
+        .execute(
+            "DELETE FROM current_memory_proposal_status WHERE proposal_id = ?1",
+            [proposal],
+        )
+        .unwrap();
+    transaction.execute("INSERT INTO current_memory_proposal_status (proposal_id, proposal_version, proposal_content_digest, memory_namespace_id, normalized_key, status, resolution_event_id, created_at_ms) VALUES (?1, 1, ?2, ?3, 'key', 'accepted', 'event-2', 1)", rusqlite::params![proposal, digest, namespace]).unwrap();
+    transaction.commit().unwrap();
+    assert!(connection.execute("INSERT INTO memory_proposal_resolutions (proposal_id, proposal_version, proposal_content_digest, status, approval_id, resolved_by_kind, resolved_by_id, resolved_at_ms, resolution_event_sequence, resolution_event_id, resolution_json) VALUES (?1, 1, ?2, 'accepted', ?3, 'human', NULL, 2, 2, 'event-2', CAST('{}' AS BLOB))", rusqlite::params![proposal, digest, approval]).is_err());
+    for table in ["memory_proposals", "memory_proposal_resolutions"] {
+        assert!(
+            connection
+                .execute(&format!("UPDATE {table} SET proposal_id = proposal_id"), [])
+                .is_err(),
+            "{table} update was accepted"
+        );
+        assert!(
+            connection
+                .execute(&format!("DELETE FROM {table}"), [])
+                .is_err(),
+            "{table} delete was accepted"
+        );
+    }
 }
 
 fn seed_v4_memory_parents(connection: &rusqlite::Connection) {
@@ -1845,6 +1912,7 @@ fn assert_complete_task_six_schema_contract(connection: &rusqlite::Connection) {
 }
 
 fn assert_complete_v4_memory_schema(connection: &rusqlite::Connection) {
+    assert_v4_sql_definitions(connection);
     let expected_columns: &[(&str, &[&str])] = &[
         (
             "memory_entry_versions",
@@ -2293,6 +2361,87 @@ fn assert_complete_v4_memory_schema(connection: &rusqlite::Connection) {
     ] {
         assert_composite_foreign_key(connection, table, child, parent, parent_columns);
     }
+}
+
+fn assert_v4_sql_definitions(connection: &rusqlite::Connection) {
+    for table in [
+        "approval_records",
+        "command_receipts",
+        "command_event_refs",
+        "memory_entry_versions",
+        "current_memory_entries",
+        "memory_proposals",
+        "memory_proposal_resolutions",
+        "current_memory_proposal_status",
+        "episodic_summaries",
+        "episodic_summary_sources",
+    ] {
+        let actual: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            normalize_sql(&actual),
+            normalize_sql(&v4_object_sql("CREATE TABLE", table)),
+            "exact table definition for {table}"
+        );
+    }
+    for trigger in [
+        "approval_records_identity_guard",
+        "approval_records_requester_insert_guard",
+        "approval_records_pending_insert_guard",
+        "approval_records_memory_insert_guard",
+        "approval_records_transition_guard",
+        "approval_records_terminal_insert_guard",
+        "approval_records_no_delete",
+        "command_receipts_no_update",
+        "command_receipts_no_delete",
+        "command_event_refs_no_update",
+        "command_event_refs_no_delete",
+        "memory_entry_versions_identity_guard",
+        "memory_entry_versions_predecessor_guard",
+        "memory_entry_versions_no_update",
+        "memory_entry_versions_no_delete",
+        "memory_proposals_no_update",
+        "memory_proposals_no_delete",
+        "memory_proposal_resolutions_no_update",
+        "memory_proposal_resolutions_no_delete",
+        "episodic_summary_sources_order_guard",
+        "episodic_summaries_no_update",
+        "episodic_summaries_no_delete",
+        "episodic_summary_sources_no_update",
+        "episodic_summary_sources_no_delete",
+    ] {
+        let actual: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?1",
+                [trigger],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            normalize_sql(&actual),
+            normalize_sql(&v4_object_sql("CREATE TRIGGER", trigger)),
+            "exact trigger definition for {trigger}"
+        );
+    }
+}
+
+fn v4_object_sql(kind: &str, name: &str) -> String {
+    let migration = include_str!("../migrations/0004_hybrid_memory.sql");
+    let needle = format!("{kind} {name}");
+    let start = migration
+        .find(&needle)
+        .unwrap_or_else(|| panic!("missing {needle} in v4 migration"));
+    migration[start..]
+        .split("\n-- migration-boundary:")
+        .next()
+        .unwrap()
+        .trim_end_matches(';')
+        .to_owned()
 }
 
 fn assert_composite_foreign_key(
