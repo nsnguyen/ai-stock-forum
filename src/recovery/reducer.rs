@@ -953,7 +953,15 @@ fn validate_memory_read_event(
                 .agent_profiles
                 .resolve_reference(profile)
                 .map_err(|_| RecoveryError::InvalidEventRecord)?;
-            if profile.memory_namespace_id() != entry.namespace_id() {
+            let current = state
+                .memory
+                .current_entry(entry.namespace_id(), entry.normalized_key())
+                .ok_or(RecoveryError::InvalidEventRecord)?;
+            if profile.memory_namespace_id() != entry.namespace_id()
+                || current.entry_id() != entry.entry_id()
+                || entry.version() > current.version()
+                || (entry.version() == current.version() && entry != current)
+            {
                 return Err(RecoveryError::InvalidEventRecord);
             }
         }
@@ -977,6 +985,7 @@ fn validate_memory_read_event(
                 .resolve_reference(profile)
                 .map_err(|_| RecoveryError::InvalidEventRecord)?;
             if profile.memory_namespace_id() != current.namespace_id()
+                || *total_count != current.version().get()
                 || state
                     .memory
                     .current_entry(current.namespace_id(), current.normalized_key())
@@ -988,9 +997,12 @@ fn validate_memory_read_event(
                         || version.entry_id() != current.entry_id()
                         || version.normalized_key() != current.normalized_key()
                 })
-                || versions
-                    .windows(2)
-                    .any(|window| window[0].version() <= window[1].version())
+                || versions.iter().enumerate().any(|(index, version)| {
+                    u64::try_from(index)
+                        .ok()
+                        .and_then(|offset| current.version().get().checked_sub(offset))
+                        != Some(version.version().get())
+                })
             {
                 return Err(RecoveryError::InvalidEventRecord);
             }
@@ -1069,6 +1081,7 @@ fn validate_memory_read_event(
                 (_, Some(resolution))
                     if resolution.proposal() == proposal
                         && resolution.status() == *status
+                        && resolution.approval_id() == projected.approval_id()
                         && projected.resolution_event_id()
                             == Some(resolution.resolution_event_id()) => {}
                 _ => return Err(RecoveryError::InvalidEventRecord),
@@ -1117,6 +1130,15 @@ fn validate_memory_read_event(
                 .scope()
                 .validate_against(profile)
                 .map_err(|_| RecoveryError::InvalidEventRecord)?;
+            if metadata.entry_refs().iter().any(|entry| {
+                entry.state() != MemoryEntryState::Present
+                    || state
+                        .memory
+                        .current_entry(entry.namespace_id(), entry.normalized_key())
+                        != Some(entry)
+            }) {
+                return Err(RecoveryError::InvalidEventRecord);
+            }
         }
         _ => return Err(RecoveryError::InvalidEventRecord),
     }

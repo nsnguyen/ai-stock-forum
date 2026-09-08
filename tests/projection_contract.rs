@@ -356,9 +356,10 @@ mod memory_reduction {
         },
         memory::{
             EpisodicSourceRef, EpisodicSummary, ExpectedMemoryEntryState, MemoryEntryDraft,
-            MemoryEntryVersion, MemoryProposal, MemoryProposalFilter, MemoryProposalOperation,
-            MemoryProposalResolution, MemoryProposalStatus, MemoryPurposeScope,
-            MemoryRetrievalBudget, MemoryRetrievalRequest, MemoryRetrievalScope, select_snapshot,
+            MemoryEntryState, MemoryEntryVersion, MemoryKvContextItem, MemoryProposal,
+            MemoryProposalFilter, MemoryProposalOperation, MemoryProposalResolution,
+            MemoryProposalStatus, MemoryPurposeScope, MemoryRetrievalBudget,
+            MemoryRetrievalRequest, MemoryRetrievalScope, select_snapshot,
         },
         persistence::{EventRepository, ProjectionRepository, RecoveryError},
         policy::{ApprovalAction, ApprovalRecord, ApprovalStatus},
@@ -552,6 +553,50 @@ mod memory_reduction {
             event_id(event),
         )
         .unwrap()
+    }
+
+    fn next_direct_present(
+        entry: &MemoryEntryVersion,
+        id: u128,
+        value: &str,
+    ) -> MemoryEntryVersion {
+        entry
+            .next_present(
+                MemoryEntryVersionId::from_uuid(uuid(id)),
+                MemoryEntryDraft::new(
+                    entry.display_key().into(),
+                    value.into(),
+                    entry.purpose_tags().to_vec(),
+                )
+                .unwrap(),
+                Actor::Human,
+                i64::try_from(id).unwrap(),
+                None,
+                event_id(id),
+            )
+            .unwrap()
+    }
+
+    fn apply_direct_entry(state: &mut ProjectionState, entry: &MemoryEntryVersion) {
+        let event = match entry.reference().state() {
+            MemoryEntryState::Present => ApplicationEvent::MemoryEntrySet {
+                entry: entry.clone(),
+                expired_proposals: vec![],
+            },
+            MemoryEntryState::Deleted => ApplicationEvent::MemoryEntryDeleted {
+                entry: entry.clone(),
+                expired_proposals: vec![],
+            },
+        };
+        let envelope = envelope(
+            state,
+            entry.creation_event_id().as_uuid().as_u128(),
+            entry.created_by().clone(),
+            entry.created_at_ms(),
+            Some(entry_object(entry)),
+            event,
+        );
+        reduce(state, &envelope).unwrap();
     }
 
     fn assert_invalid_unchanged(state: &ProjectionState, event: EventEnvelope) {
@@ -1194,6 +1239,303 @@ mod memory_reduction {
         );
         bad_object.object = Some(entry_object(&entry));
         assert_invalid_unchanged(&state, bad_object);
+    }
+
+    #[test]
+    fn read_event_version_requires_current_lineage_and_not_future() {
+        let profile = profile(900);
+        let mut state = ProjectionState::default();
+        seed_profile(&mut state, &profile, 909);
+        let first = direct_entry(&profile, 920, 921, 922, 922, "Versioned Entry");
+        apply_direct_entry(&mut state, &first);
+        let second = next_direct_present(&first, 923, "private second value");
+        apply_direct_entry(&mut state, &second);
+
+        let unrelated = MemoryEntryVersion::create_present(
+            profile.memory_namespace_id(),
+            MemoryEntryId::from_uuid(uuid(924)),
+            MemoryEntryVersionId::from_uuid(uuid(925)),
+            MemoryEntryDraft::new(
+                "Versioned Entry".into(),
+                "private substituted value".into(),
+                vec!["tag".into()],
+            )
+            .unwrap(),
+            Actor::Human,
+            925,
+            None,
+            event_id(925),
+        )
+        .unwrap();
+        let future = next_direct_present(&second, 926, "private future value");
+        for (id, entry) in [(927, unrelated.reference()), (928, future.reference())] {
+            assert_invalid_unchanged(
+                &state,
+                envelope(
+                    &state,
+                    id,
+                    Actor::Human,
+                    i64::try_from(id).unwrap(),
+                    None,
+                    ApplicationEvent::MemoryEntryVersionShown {
+                        profile: profile.reference(),
+                        entry,
+                    },
+                ),
+            );
+        }
+
+        let mut candidate = state.clone();
+        let historical = envelope(
+            &candidate,
+            929,
+            Actor::Human,
+            929,
+            None,
+            ApplicationEvent::MemoryEntryVersionShown {
+                profile: profile.reference(),
+                entry: first.reference(),
+            },
+        );
+        reduce(&mut candidate, &historical).unwrap();
+        assert_eq!(candidate.memory, state.memory);
+    }
+
+    #[test]
+    fn read_event_history_requires_exact_total_and_contiguous_prefix() {
+        let profile = profile(1_000);
+        let mut state = ProjectionState::default();
+        seed_profile(&mut state, &profile, 1_009);
+        let first = direct_entry(&profile, 1_020, 1_021, 1_022, 1_022, "History Entry");
+        apply_direct_entry(&mut state, &first);
+        let second = next_direct_present(&first, 1_023, "private second value");
+        apply_direct_entry(&mut state, &second);
+        let third = next_direct_present(&second, 1_024, "private third value");
+        apply_direct_entry(&mut state, &third);
+
+        for (id, versions, total_count, omitted_count) in [
+            (1_025, vec![third.reference(), second.reference()], 2, 0),
+            (1_026, vec![third.reference(), first.reference()], 3, 1),
+        ] {
+            assert_invalid_unchanged(
+                &state,
+                envelope(
+                    &state,
+                    id,
+                    Actor::Human,
+                    i64::try_from(id).unwrap(),
+                    None,
+                    ApplicationEvent::MemoryEntryHistoryShown {
+                        profile: profile.reference(),
+                        current: third.reference(),
+                        returned_count: u64::try_from(versions.len()).unwrap(),
+                        versions,
+                        total_count,
+                        omitted_count,
+                    },
+                ),
+            );
+        }
+
+        let mut candidate = state.clone();
+        let valid_prefix = envelope(
+            &candidate,
+            1_027,
+            Actor::Human,
+            1_027,
+            None,
+            ApplicationEvent::MemoryEntryHistoryShown {
+                profile: profile.reference(),
+                current: third.reference(),
+                versions: vec![third.reference(), second.reference()],
+                total_count: 3,
+                returned_count: 2,
+                omitted_count: 1,
+            },
+        );
+        reduce(&mut candidate, &valid_prefix).unwrap();
+        assert_eq!(candidate.memory, state.memory);
+    }
+
+    #[test]
+    fn read_event_terminal_proposal_requires_projected_approval() {
+        let profile = profile(1_100);
+        let mut state = ProjectionState::default();
+        seed_profile(&mut state, &profile, 1_109);
+        let proposal = proposal(
+            &profile,
+            1_120,
+            "Terminal Proposal",
+            ExpectedMemoryEntryState::Absent,
+        );
+        create_proposal(&mut state, &proposal);
+        let rejected = resolution(&proposal, MemoryProposalStatus::Rejected, 1_121, 1_121);
+        let reject = envelope(
+            &state,
+            1_121,
+            Actor::Human,
+            1_121,
+            Some(proposal.object_ref().unwrap()),
+            ApplicationEvent::MemoryProposalRejected {
+                resolution: rejected.clone(),
+            },
+        );
+        reduce(&mut state, &reject).unwrap();
+        let substituted_resolution = MemoryProposalResolution::new(
+            proposal.reference(),
+            MemoryProposalStatus::Rejected,
+            ApprovalId::from_uuid(uuid(9_121)),
+            Actor::Human,
+            1_121,
+            event_id(1_121),
+        )
+        .unwrap();
+        assert_invalid_unchanged(
+            &state,
+            envelope(
+                &state,
+                1_122,
+                Actor::Human,
+                1_122,
+                None,
+                ApplicationEvent::MemoryProposalShown {
+                    proposal: proposal.reference(),
+                    status: MemoryProposalStatus::Rejected,
+                    resolution: Some(substituted_resolution),
+                },
+            ),
+        );
+    }
+
+    #[test]
+    fn read_event_snapshot_requires_current_present_entry_refs() {
+        let profile = profile(1_200);
+        let mut state = ProjectionState::default();
+        seed_profile(&mut state, &profile, 1_209);
+        let first = MemoryEntryVersion::create_present(
+            profile.memory_namespace_id(),
+            MemoryEntryId::from_uuid(uuid(1_220)),
+            MemoryEntryVersionId::from_uuid(uuid(1_221)),
+            MemoryEntryDraft::new(
+                "Snapshot Entry".into(),
+                "private first value".into(),
+                vec![],
+            )
+            .unwrap(),
+            Actor::Human,
+            1_222,
+            None,
+            event_id(1_222),
+        )
+        .unwrap();
+        apply_direct_entry(&mut state, &first);
+        let second = next_direct_present(&first, 1_223, "private second value");
+        apply_direct_entry(&mut state, &second);
+        let request = MemoryRetrievalRequest::new(
+            MemoryRetrievalScope::new(&profile, MemoryPurposeScope::General).unwrap(),
+            MemoryRetrievalBudget::default(),
+        )
+        .unwrap();
+        let snapshot_for = |entry: &MemoryEntryVersion| {
+            select_snapshot(
+                &request,
+                [MemoryKvContextItem::from_entry(entry)],
+                std::iter::empty(),
+            )
+            .unwrap()
+        };
+
+        let stale = snapshot_for(&first);
+        assert_invalid_unchanged(
+            &state,
+            envelope(
+                &state,
+                1_224,
+                Actor::Human,
+                1_224,
+                None,
+                ApplicationEvent::MemorySnapshotBuilt {
+                    metadata: stale.metadata(),
+                },
+            ),
+        );
+        let substituted = MemoryEntryVersion::create_present(
+            profile.memory_namespace_id(),
+            MemoryEntryId::from_uuid(uuid(1_225)),
+            MemoryEntryVersionId::from_uuid(uuid(1_226)),
+            MemoryEntryDraft::new(
+                "Snapshot Entry".into(),
+                "private substituted value".into(),
+                vec![],
+            )
+            .unwrap(),
+            Actor::Human,
+            1_226,
+            None,
+            event_id(1_226),
+        )
+        .unwrap();
+        let substituted_snapshot = snapshot_for(&substituted);
+        assert_invalid_unchanged(
+            &state,
+            envelope(
+                &state,
+                1_226,
+                Actor::Human,
+                1_226,
+                None,
+                ApplicationEvent::MemorySnapshotBuilt {
+                    metadata: substituted_snapshot.metadata(),
+                },
+            ),
+        );
+
+        for (id, metadata) in [
+            (1_227, snapshot_for(&second).metadata()),
+            (
+                1_228,
+                select_snapshot(&request, std::iter::empty(), std::iter::empty())
+                    .unwrap()
+                    .metadata(),
+            ),
+        ] {
+            let mut candidate = state.clone();
+            let read = envelope(
+                &candidate,
+                id,
+                Actor::Human,
+                i64::try_from(id).unwrap(),
+                None,
+                ApplicationEvent::MemorySnapshotBuilt { metadata },
+            );
+            reduce(&mut candidate, &read).unwrap();
+            assert_eq!(candidate.memory, state.memory);
+        }
+
+        let deleted = second
+            .next_deleted(
+                MemoryEntryVersionId::from_uuid(uuid(1_229)),
+                Actor::Human,
+                1_229,
+                None,
+                event_id(1_229),
+            )
+            .unwrap();
+        apply_direct_entry(&mut state, &deleted);
+        let tombstoned = snapshot_for(&second);
+        assert_invalid_unchanged(
+            &state,
+            envelope(
+                &state,
+                1_230,
+                Actor::Human,
+                1_230,
+                None,
+                ApplicationEvent::MemorySnapshotBuilt {
+                    metadata: tombstoned.metadata(),
+                },
+            ),
+        );
     }
 
     #[test]
