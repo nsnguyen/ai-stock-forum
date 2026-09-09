@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::runtime::RuntimeError;
+use crate::{domain::DomainError, runtime::RuntimeError};
 
 #[derive(Debug, Error)]
 pub enum TuiError {
@@ -14,6 +14,10 @@ pub enum TuiError {
     InterruptHandler,
     #[error("application runtime failed")]
     Runtime(#[from] RuntimeError),
+    #[error("unexpected controller effect")]
+    UnexpectedControllerEffect,
+    #[error("memory state transition failed")]
+    MemoryState(#[from] DomainError),
     #[error("terminal interface stopped unexpectedly")]
     Panicked,
 }

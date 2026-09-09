@@ -405,6 +405,18 @@ impl MemoryViewState {
         self.pending_intent = None;
     }
 
+    pub(crate) fn clear_pending_if(
+        &mut self,
+        intent: &MemoryOutcomeIntent,
+        generation: u64,
+    ) -> bool {
+        if self.generation != generation || self.pending_intent.as_ref() != Some(intent) {
+            return false;
+        }
+        self.pending_intent = None;
+        true
+    }
+
     pub fn selected_entry_id(&self) -> Result<MemoryEntryId, DomainError> {
         self.entries
             .as_ref()
@@ -2515,5 +2527,20 @@ mod tests {
         assert_eq!(model.audit_selection, Some(1));
         model.select_last_audit();
         assert_eq!(model.audit_selection, Some(1));
+    }
+
+    #[test]
+    fn memory_pending_cleanup_requires_the_exact_intent_and_generation() {
+        let mut state = MemoryViewState::default();
+        let generation = state
+            .begin_pending(MemoryOutcomeIntent::Entries)
+            .expect("pending generation");
+
+        assert!(!state.clear_pending_if(&MemoryOutcomeIntent::Proposals, generation));
+        assert!(!state.clear_pending_if(&MemoryOutcomeIntent::Entries, generation + 1));
+        assert_eq!(state.pending_intent, Some(MemoryOutcomeIntent::Entries));
+
+        assert!(state.clear_pending_if(&MemoryOutcomeIntent::Entries, generation));
+        assert_eq!(state.pending_intent, None);
     }
 }

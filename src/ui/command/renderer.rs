@@ -881,6 +881,12 @@ impl TextRenderer {
                 writer.write_all(b"Interrupt handling could not be started.\n")
             }
             TuiError::Runtime(error) => Self::render_runtime_error(error, writer),
+            TuiError::UnexpectedControllerEffect => {
+                writer.write_all(b"Terminal action could not be processed.\n")
+            }
+            TuiError::MemoryState(_) => {
+                writer.write_all(b"Memory action could not be processed.\n")
+            }
             TuiError::Panicked => writer.write_all(b"Terminal interface stopped unexpectedly.\n"),
         }
     }
