@@ -1,29 +1,58 @@
 #![allow(dead_code)]
 
 use ai_stock_forum::{
+    agents::{
+        AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentProfileVersionRef, AgentRole,
+    },
     app::{
-        ApplicationEvent, ApplicationService, ApplicationWorker, AuthorizationDecision,
-        CommandPolicy, CommandTransactionHook, EVENT_SCHEMA_VERSION, PendingEvent, ShutdownReason,
+        AgentProfileSelector, AppError, ApplicationCommand, ApplicationEvent, ApplicationService,
+        ApplicationWorker, AuditLimit, AuthorizationDecision, CommandEnvelope, CommandOutcome,
+        CommandPolicy, CommandTransactionHook, CommandView, EVENT_SCHEMA_VERSION,
+        MemoryEditPreview, MemoryProfileIdentityView, PendingEvent, PresentationSnapshot,
+        ShutdownReason,
     },
     config::AppPaths,
     domain::{
-        Actor, Clock, CorrelationId, Digest, EpisodicSummaryId, EventId, IdGenerator, ObjectRef,
+        Actor, Clock, CommandId, CorrelationId, Digest, EpisodicSummaryId, EventId, IdGenerator,
+        MemoryProposalId, ObjectRef,
     },
-    memory::{EpisodicSourceRef, EpisodicSummary},
+    memory::{
+        EpisodicSourceRef, EpisodicSummary, ExpectedMemoryEntryState, MemoryEntryDraft,
+        MemoryProposalOperation, MemoryProposalStatus, MemoryResolutionAction,
+    },
     persistence::{
         Database, EventRepository, PersistenceError, ProjectionRepository, RecoveryError,
     },
     policy::Capability,
-    runtime::{ApplicationRuntime, RuntimeClient},
+    runtime::{ApplicationRuntime, CommandExecutor, RuntimeClient},
+    ui::{
+        command::FallbackRunner,
+        memory_editor::MemoryEditorStep,
+        tui::{
+            EventSource, Screen, TuiError, TuiEvent,
+            model::{
+                AgentDetailAction, AgentsPane, MemoryPane, MemoryProposalDetailAction, TuiModel,
+                View,
+            },
+            render, run_tui_with_screen,
+            theme::Theme,
+        },
+    },
 };
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use rusqlite::{Connection, OptionalExtension, types::ValueRef};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
+    fs,
+    io::{self, BufRead, Read},
     ops::{Deref, DerefMut},
     sync::{
         Arc, Barrier, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    thread,
+    time::{Duration, Instant},
 };
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -545,12 +574,18 @@ impl Clock for TestClock {
 }
 
 pub struct TestIds {
+    first: u128,
     calls: AtomicUsize,
 }
 
 impl TestIds {
     pub fn new() -> Self {
+        Self::starting_at(10_000)
+    }
+
+    pub fn starting_at(first: u128) -> Self {
         Self {
+            first,
             calls: AtomicUsize::new(0),
         }
     }
@@ -562,8 +597,1147 @@ impl TestIds {
 
 impl IdGenerator for TestIds {
     fn next_uuid(&self) -> Uuid {
-        Uuid::from_u128(10_000 + self.calls.fetch_add(1, Ordering::SeqCst) as u128)
+        Uuid::from_u128(self.first + self.calls.fetch_add(1, Ordering::SeqCst) as u128)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualMemoryAcceptanceSeed {
+    pub profile: AgentProfileVersionRef,
+    pub tui_approval_proposal_id: MemoryProposalId,
+    pub tui_rejection_proposal_id: MemoryProposalId,
+    pub fallback_approval_proposal_id: MemoryProposalId,
+    pub fallback_rejection_proposal_id: MemoryProposalId,
+    pub restart_pending_proposal_id: MemoryProposalId,
+    pub summary_id: EpisodicSummaryId,
+}
+
+fn manual_acceptance_support_error() -> AppError {
+    AppError::Persistence(PersistenceError::QueryFailed)
+}
+
+fn manual_acceptance_envelope(
+    id: u128,
+    actor: Actor,
+    command: ApplicationCommand,
+) -> CommandEnvelope {
+    CommandEnvelope {
+        command_id: CommandId::from_uuid(Uuid::from_u128(id)),
+        correlation_id: CorrelationId::from_uuid(Uuid::from_u128(id + 1_000_000)),
+        actor,
+        command,
+    }
+}
+
+fn create_manual_acceptance_proposal(
+    service: &mut ApplicationService,
+    profile: &ai_stock_forum::agents::AgentProfileVersion,
+    command_id: u128,
+    display_key: &str,
+    value: &str,
+    rationale: &str,
+) -> Result<(MemoryProposalId, EventId), AppError> {
+    let outcome = service.execute(manual_acceptance_envelope(
+        command_id,
+        Actor::Agent(profile.profile_id()),
+        ApplicationCommand::ProposeMemoryMutation {
+            proposer: profile.reference(),
+            expected: ExpectedMemoryEntryState::Absent,
+            operation: MemoryProposalOperation::Set {
+                candidate: MemoryEntryDraft::new(
+                    display_key.to_owned(),
+                    value.to_owned(),
+                    vec!["acceptance".to_owned()],
+                )?,
+            },
+            rationale: rationale.to_owned(),
+        },
+    ))?;
+    let CommandView::MemoryProposalCreated(view) = outcome.view else {
+        return Err(manual_acceptance_support_error());
+    };
+    if view.status != MemoryProposalStatus::Pending || outcome.committed_events.len() != 1 {
+        return Err(manual_acceptance_support_error());
+    }
+    Ok((
+        view.proposal.proposal_id(),
+        outcome.committed_events[0].event_id,
+    ))
+}
+
+pub fn seed_manual_memory_acceptance(
+    paths: &AppPaths,
+) -> Result<ManualMemoryAcceptanceSeed, AppError> {
+    fs::create_dir(paths.state_dir()).map_err(|_| manual_acceptance_support_error())?;
+
+    let clock = Arc::new(TestClock::new());
+    let ids = Arc::new(TestIds::new());
+    let mut service = ApplicationService::bootstrap(paths, clock.clone(), ids.clone())
+        .map_err(|_| manual_acceptance_support_error())?;
+
+    let seeded = (|| {
+        let profile_creation = service.execute(manual_acceptance_envelope(
+            7_000_000,
+            Actor::Human,
+            ApplicationCommand::CreateAgentProfile {
+                draft: AgentProfileDraft::new(
+                    "Manual Memory Acceptance".to_owned(),
+                    "Synthetic local acceptance profile.".to_owned(),
+                    AgentRole::Custom,
+                    "memory acceptance".to_owned(),
+                    vec!["acceptance".to_owned()],
+                    "Careful and deterministic.".to_owned(),
+                    "Exercise only local Hybrid Memory.".to_owned(),
+                    AgentBindings::default(),
+                    Vec::new(),
+                    Vec::new(),
+                )?,
+                template_provenance: None,
+            },
+        ))?;
+        let CommandView::AgentProfileCreated(created) = profile_creation.view else {
+            return Err(manual_acceptance_support_error());
+        };
+        let profile_detail = service.execute(manual_acceptance_envelope(
+            7_000_001,
+            Actor::Human,
+            ApplicationCommand::ShowAgentProfile {
+                selector: AgentProfileSelector::from(created.profile_id),
+            },
+        ))?;
+        let CommandView::AgentProfile(profile_detail) = profile_detail.view else {
+            return Err(manual_acceptance_support_error());
+        };
+        let profile = profile_detail.profile;
+
+        let (tui_approval_proposal_id, summary_source_event_id) =
+            create_manual_acceptance_proposal(
+                &mut service,
+                &profile,
+                7_000_100,
+                "TUI approval candidate",
+                "Synthetic TUI approval value.",
+                "Synthetic TUI approval rationale.",
+            )?;
+        let (tui_rejection_proposal_id, _) = create_manual_acceptance_proposal(
+            &mut service,
+            &profile,
+            7_000_101,
+            "TUI rejection candidate",
+            "Synthetic TUI rejection value.",
+            "Synthetic TUI rejection rationale.",
+        )?;
+        let (fallback_approval_proposal_id, _) = create_manual_acceptance_proposal(
+            &mut service,
+            &profile,
+            7_000_102,
+            "Fallback approval candidate",
+            "Synthetic fallback approval value.",
+            "Synthetic fallback approval rationale.",
+        )?;
+        let (fallback_rejection_proposal_id, _) = create_manual_acceptance_proposal(
+            &mut service,
+            &profile,
+            7_000_103,
+            "Fallback rejection candidate",
+            "Synthetic fallback rejection value.",
+            "Synthetic fallback rejection rationale.",
+        )?;
+        let (restart_pending_proposal_id, _) = create_manual_acceptance_proposal(
+            &mut service,
+            &profile,
+            7_000_104,
+            "Restart preservation candidate",
+            "Synthetic restart preservation value.",
+            "Synthetic restart preservation rationale.",
+        )?;
+        let summary = record_test_episodic_summary_at(
+            paths,
+            ids.as_ref(),
+            clock.as_ref(),
+            profile.reference(),
+            "Manual source-linked summary".to_owned(),
+            "Synthetic summary retained for local manual acceptance.".to_owned(),
+            vec!["acceptance".to_owned()],
+            vec![summary_source_event_id],
+        )?;
+
+        Ok(ManualMemoryAcceptanceSeed {
+            profile: profile.reference(),
+            tui_approval_proposal_id,
+            tui_rejection_proposal_id,
+            fallback_approval_proposal_id,
+            fallback_rejection_proposal_id,
+            restart_pending_proposal_id,
+            summary_id: summary.summary_id(),
+        })
+    })();
+
+    let finish_reason = if seeded.is_ok() {
+        ShutdownReason::InputClosed
+    } else {
+        ShutdownReason::ApplicationError
+    };
+    let finish = service.finish(finish_reason);
+    drop(service);
+    let seed = seeded?;
+    finish?;
+
+    let mut reopened = ApplicationService::bootstrap(paths, clock, ids)
+        .map_err(|_| manual_acceptance_support_error())?;
+    let finish = reopened.finish(ShutdownReason::InputClosed);
+    drop(reopened);
+    finish?;
+
+    Ok(seed)
+}
+
+const HOST_PARITY_NAVIGATION_LABELS: [&str; 6] = [
+    "1 Overview",
+    "2 Setup",
+    "3 Audit",
+    "4 Help",
+    "a Agents",
+    "s Skills",
+];
+const HOST_PARITY_KEY: &str = "HK701X Thesis";
+const HOST_PARITY_INITIAL_VALUE: &str = "HI702X Initial aligned value.";
+const HOST_PARITY_SET_VALUE: &str = "HV703X Aligned host value.";
+const HOST_PARITY_TAG: &str = "HT704X";
+const HOST_PARITY_PROPOSAL_KEY: &str = "HP705X Resolution candidate";
+const HOST_PARITY_PROPOSAL_VALUE: &str = "HPV706X Aligned proposal value.";
+const HOST_PARITY_PROPOSAL_RATIONALE: &str = "HPR707X Aligned proposal rationale.";
+const HOST_PARITY_NAVIGATION_SENTINELS: [&str; 7] = [
+    "HK701X", "HI702X", "HV703X", "HT704X", "HP705X", "HPV706X", "HPR707X",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostParityResult {
+    pub command: ApplicationCommand,
+    pub event_payload: ApplicationEvent,
+    pub view: CommandView,
+    pub navigation_labels: [&'static str; 6],
+}
+
+#[derive(Clone)]
+struct RecordedHostMutation {
+    command: ApplicationCommand,
+    event_payload: ApplicationEvent,
+    view: CommandView,
+}
+
+struct AlignedMemoryHostFixture {
+    _temporary_directory: TempDir,
+    service: ApplicationService,
+    snapshot: PresentationSnapshot,
+    profile: AgentProfileVersion,
+    proposal_id: MemoryProposalId,
+}
+
+fn aligned_memory_host_fixture() -> Result<AlignedMemoryHostFixture, AppError> {
+    let temporary_directory = tempfile::tempdir().map_err(|_| manual_acceptance_support_error())?;
+    let paths = AppPaths::for_test(temporary_directory.path());
+    let clock = Arc::new(TestClock::new());
+    let ids = Arc::new(TestIds::starting_at(9_000_000));
+    let mut service = ApplicationService::bootstrap(&paths, clock, ids)
+        .map_err(|_| manual_acceptance_support_error())?;
+
+    let created = service.execute(manual_acceptance_envelope(
+        9_100_000,
+        Actor::Human,
+        ApplicationCommand::CreateAgentProfile {
+            draft: AgentProfileDraft::new(
+                "Host parity profile".to_owned(),
+                "Synthetic profile for cross-host parity.".to_owned(),
+                AgentRole::Custom,
+                "memory parity".to_owned(),
+                vec![HOST_PARITY_TAG.to_owned()],
+                "Deterministic.".to_owned(),
+                "Exercise equivalent host paths.".to_owned(),
+                AgentBindings::default(),
+                Vec::new(),
+                Vec::new(),
+            )?,
+            template_provenance: None,
+        },
+    ))?;
+    let profile = created
+        .committed_events
+        .iter()
+        .find_map(|event| match &event.event {
+            ApplicationEvent::AgentProfileCreated { profile } => Some(profile.clone()),
+            _ => None,
+        })
+        .ok_or_else(manual_acceptance_support_error)?;
+
+    let seed_candidate = MemoryEntryDraft::new(
+        HOST_PARITY_KEY.to_owned(),
+        HOST_PARITY_INITIAL_VALUE.to_owned(),
+        vec![HOST_PARITY_TAG.to_owned()],
+    )?;
+    let MemoryEditPreview::Review(seed_review) = service.preview_memory_set(
+        AgentProfileSelector::from(profile.profile_id()),
+        seed_candidate,
+    )?
+    else {
+        return Err(manual_acceptance_support_error());
+    };
+    let seed_candidate = seed_review
+        .candidate
+        .clone()
+        .ok_or_else(manual_acceptance_support_error)?;
+    let seeded = service.execute(manual_acceptance_envelope(
+        9_100_001,
+        Actor::Human,
+        ApplicationCommand::SetMemoryEntry {
+            profile: seed_review.profile,
+            expected: seed_review.expected,
+            candidate: seed_candidate,
+            review_token: seed_review.review_token,
+            review_digest: seed_review.review_digest,
+        },
+    ))?;
+    if !matches!(seeded.view, CommandView::MemoryEntryMutation(_)) {
+        return Err(manual_acceptance_support_error());
+    }
+
+    let (proposal_id, _) = create_manual_acceptance_proposal(
+        &mut service,
+        &profile,
+        9_100_002,
+        HOST_PARITY_PROPOSAL_KEY,
+        HOST_PARITY_PROPOSAL_VALUE,
+        HOST_PARITY_PROPOSAL_RATIONALE,
+    )?;
+
+    let audit_limit = AuditLimit::new(100).map_err(|_| manual_acceptance_support_error())?;
+    let snapshot = service.presentation_snapshot(audit_limit)?;
+    Ok(AlignedMemoryHostFixture {
+        _temporary_directory: temporary_directory,
+        service,
+        snapshot,
+        profile,
+        proposal_id,
+    })
+}
+
+fn execute_aligned_memory_prerequisite_reads(
+    service: &mut ApplicationService,
+    profile: &AgentProfileVersion,
+) -> Result<(), AppError> {
+    let commands = [
+        ApplicationCommand::ListSkills,
+        ApplicationCommand::ListAgentProfiles,
+        ApplicationCommand::ShowAgentProfile {
+            selector: AgentProfileSelector::from(profile.profile_id()),
+        },
+        ApplicationCommand::ListMemoryEntries {
+            selector: AgentProfileSelector::from(profile.profile_id()),
+        },
+    ];
+    for command in commands {
+        service.execute_user(command)?;
+    }
+    Ok(())
+}
+
+struct RecordingMemoryExecutor {
+    service: ApplicationService,
+    recorded: Arc<Mutex<Option<RecordedHostMutation>>>,
+    confirmation: Arc<Mutex<Option<String>>>,
+    target: RecordedHostTarget,
+}
+
+#[derive(Clone, Copy)]
+enum RecordedHostTarget {
+    Set,
+    Resolution(MemoryResolutionAction),
+}
+
+impl RecordedHostTarget {
+    fn matches(self, command: &ApplicationCommand) -> bool {
+        matches!(
+            (self, command),
+            (Self::Set, ApplicationCommand::SetMemoryEntry { .. })
+                | (
+                    Self::Resolution(MemoryResolutionAction::Approve),
+                    ApplicationCommand::ApproveMemoryProposal { .. }
+                )
+                | (
+                    Self::Resolution(MemoryResolutionAction::Reject),
+                    ApplicationCommand::RejectMemoryProposal { .. }
+                )
+        )
+    }
+}
+
+impl CommandExecutor for RecordingMemoryExecutor {
+    fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError> {
+        let should_record = self.target.matches(&command);
+        let submitted = command.clone();
+        let outcome = self.service.execute_user(command)?;
+        if should_record {
+            let event_payload = outcome
+                .committed_events
+                .first()
+                .map(|event| event.event.clone());
+            if outcome.committed_events.len() == 1
+                && let Some(event_payload) = event_payload
+            {
+                *self
+                    .recorded
+                    .lock()
+                    .map_err(|_| AppError::LifecycleFinished)? = Some(RecordedHostMutation {
+                    command: submitted,
+                    event_payload,
+                    view: outcome.view.clone(),
+                });
+            }
+        }
+        Ok(outcome)
+    }
+
+    fn preview_memory_set(
+        &mut self,
+        selector: AgentProfileSelector,
+        candidate: MemoryEntryDraft,
+    ) -> Result<MemoryEditPreview, AppError> {
+        let preview = self.service.preview_memory_set(selector, candidate)?;
+        if let MemoryEditPreview::Review(review) = &preview {
+            *self
+                .confirmation
+                .lock()
+                .map_err(|_| AppError::LifecycleFinished)? =
+                Some(format!("set {}", review.review_digest));
+        }
+        Ok(preview)
+    }
+
+    fn preview_memory_delete(
+        &mut self,
+        selector: AgentProfileSelector,
+        display_key: String,
+    ) -> Result<MemoryEditPreview, AppError> {
+        self.service.preview_memory_delete(selector, display_key)
+    }
+
+    fn preview_memory_proposal_approval(
+        &mut self,
+        proposal: ai_stock_forum::memory::MemoryProposalRef,
+    ) -> Result<ai_stock_forum::app::MemoryProposalResolutionReview, AppError> {
+        let review = self.service.preview_memory_proposal_approval(proposal)?;
+        *self
+            .confirmation
+            .lock()
+            .map_err(|_| AppError::LifecycleFinished)? =
+            Some(format!("approve {}", review.review_digest));
+        Ok(review)
+    }
+
+    fn preview_memory_proposal_rejection(
+        &mut self,
+        proposal: ai_stock_forum::memory::MemoryProposalRef,
+    ) -> Result<ai_stock_forum::app::MemoryProposalResolutionReview, AppError> {
+        let review = self.service.preview_memory_proposal_rejection(proposal)?;
+        *self
+            .confirmation
+            .lock()
+            .map_err(|_| AppError::LifecycleFinished)? =
+            Some(format!("reject {}", review.review_digest));
+        Ok(review)
+    }
+
+    fn cancel_memory_review(&mut self) -> Result<(), AppError> {
+        self.service.cancel_memory_review()
+    }
+
+    fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
+        self.service.finish(reason)
+    }
+}
+
+struct DynamicFallbackInput {
+    initial: VecDeque<Vec<u8>>,
+    confirmation: Arc<Mutex<Option<String>>>,
+    confirmation_emitted: bool,
+    current: Vec<u8>,
+    position: usize,
+}
+
+impl DynamicFallbackInput {
+    fn memory_set(profile: &AgentProfileVersion, confirmation: Arc<Mutex<Option<String>>>) -> Self {
+        Self {
+            initial: VecDeque::from([
+                format!(
+                    "/memory set {} \"{HOST_PARITY_KEY}\"\n",
+                    profile.profile_id()
+                )
+                .into_bytes(),
+                format!("{HOST_PARITY_SET_VALUE}\n").into_bytes(),
+                format!("{HOST_PARITY_TAG}\n").into_bytes(),
+            ]),
+            confirmation,
+            confirmation_emitted: false,
+            current: Vec::new(),
+            position: 0,
+        }
+    }
+
+    fn memory_resolution(
+        proposal_id: MemoryProposalId,
+        action: MemoryResolutionAction,
+        confirmation: Arc<Mutex<Option<String>>>,
+    ) -> Self {
+        let action = match action {
+            MemoryResolutionAction::Approve => "approve",
+            MemoryResolutionAction::Reject => "reject",
+        };
+        Self {
+            initial: VecDeque::from([format!("/memory {action} {proposal_id}\n").into_bytes()]),
+            confirmation,
+            confirmation_emitted: false,
+            current: Vec::new(),
+            position: 0,
+        }
+    }
+
+    fn load_next(&mut self) -> io::Result<bool> {
+        if self.position < self.current.len() {
+            return Ok(true);
+        }
+        self.current.clear();
+        self.position = 0;
+        if let Some(next) = self.initial.pop_front() {
+            self.current = next;
+            return Ok(true);
+        }
+        if self.confirmation_emitted {
+            return Ok(false);
+        }
+        let confirmation = self
+            .confirmation
+            .lock()
+            .map_err(|_| io::Error::other("fallback confirmation unavailable"))?
+            .clone()
+            .ok_or_else(|| io::Error::other("fallback confirmation unavailable"))?;
+        self.current = format!("{confirmation}\n").into_bytes();
+        self.confirmation_emitted = true;
+        Ok(true)
+    }
+}
+
+impl Read for DynamicFallbackInput {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        let available = self.fill_buf()?;
+        let count = available.len().min(output.len());
+        output[..count].copy_from_slice(&available[..count]);
+        self.consume(count);
+        Ok(count)
+    }
+}
+
+impl BufRead for DynamicFallbackInput {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.load_next()?;
+        Ok(&self.current[self.position..])
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.position = self.position.saturating_add(amount).min(self.current.len());
+    }
+}
+
+fn render_memory_navigation_labels(model: &TuiModel) -> Result<[&'static str; 6], TuiError> {
+    let width = model.terminal_width.max(140);
+    let height = model.terminal_height.max(40);
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).map_err(|_| TuiError::TerminalOutput)?;
+    terminal
+        .draw(|frame| render::render(frame, model, &Theme::from_no_color(true)))
+        .map_err(|_| TuiError::TerminalOutput)?;
+    let navigation = ai_stock_forum::ui::tui::layout::view_geometry_for_state(
+        Rect::new(0, 0, width, height),
+        model.active_view,
+        model.inspector_open,
+        true,
+    )
+    .cockpit
+    .navigation
+    .ok_or(TuiError::TerminalOutput)?;
+    let rows = terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(usize::from(width))
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>();
+    let inner_rows = rows
+        .iter()
+        .skip(usize::from(navigation.y.saturating_add(1)))
+        .take(usize::from(navigation.height.saturating_sub(2)))
+        .map(|row| {
+            row.chars()
+                .skip(usize::from(navigation.x.saturating_add(1)))
+                .take(usize::from(navigation.width.saturating_sub(2)))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    let views_row = inner_rows
+        .iter()
+        .position(|row| row.trim() == "VIEWS")
+        .ok_or(TuiError::TerminalOutput)?;
+    let entire_navigation = inner_rows.join("\n");
+    if HOST_PARITY_NAVIGATION_SENTINELS
+        .iter()
+        .any(|sentinel| entire_navigation.contains(sentinel))
+    {
+        return Err(TuiError::TerminalOutput);
+    }
+    let mut labels = Vec::new();
+    let mut started = false;
+    for row in inner_rows.iter().skip(views_row + 1) {
+        let row = row.trim();
+        if row.is_empty() {
+            if started {
+                break;
+            }
+            continue;
+        }
+        started = true;
+        labels.push(row.strip_prefix("> ").unwrap_or(row));
+    }
+    if labels.as_slice() != HOST_PARITY_NAVIGATION_LABELS {
+        return Err(TuiError::TerminalOutput);
+    }
+    Ok(HOST_PARITY_NAVIGATION_LABELS)
+}
+
+fn fallback_memory_navigation_labels(
+    snapshot: PresentationSnapshot,
+    profile: &AgentProfileVersion,
+) -> Result<[&'static str; 6], TuiError> {
+    let mut model = TuiModel::new(snapshot, false);
+    model.select_view(View::Agents);
+    model
+        .agents
+        .memory
+        .bind_profile(
+            MemoryProfileIdentityView {
+                profile: profile.reference(),
+                display_name: profile.display_name().to_owned(),
+            },
+            profile.memory_namespace_id(),
+        )
+        .map_err(TuiError::MemoryState)?;
+    model.agents.pane = AgentsPane::Memory;
+    model.set_terminal_size(140, 40);
+    render_memory_navigation_labels(&model)
+}
+
+fn host_parity_result(
+    recorded: Arc<Mutex<Option<RecordedHostMutation>>>,
+    navigation_labels: [&'static str; 6],
+) -> HostParityResult {
+    let recorded = recorded
+        .lock()
+        .ok()
+        .and_then(|recorded| recorded.clone())
+        .unwrap_or_else(|| panic!("host parity mutation was not recorded"));
+    HostParityResult {
+        command: recorded.command,
+        event_payload: recorded.event_payload,
+        view: recorded.view,
+        navigation_labels,
+    }
+}
+
+pub fn run_fallback_memory_set_scenario() -> HostParityResult {
+    let mut fixture = aligned_memory_host_fixture()
+        .unwrap_or_else(|error| panic!("fallback parity fixture failed: {}", error.code()));
+    execute_aligned_memory_prerequisite_reads(&mut fixture.service, &fixture.profile)
+        .unwrap_or_else(|error| panic!("fallback prerequisite read failed: {}", error.code()));
+    let navigation_labels =
+        fallback_memory_navigation_labels(fixture.snapshot.clone(), &fixture.profile)
+            .unwrap_or_else(|_| panic!("fallback parity navigation was not rendered"));
+    let recorded = Arc::new(Mutex::new(None));
+    let confirmation = Arc::new(Mutex::new(None));
+    let input = DynamicFallbackInput::memory_set(&fixture.profile, Arc::clone(&confirmation));
+    let runtime = ApplicationRuntime::spawn(
+        RecordingMemoryExecutor {
+            service: fixture.service,
+            recorded: Arc::clone(&recorded),
+            confirmation,
+            target: RecordedHostTarget::Set,
+        },
+        32,
+    )
+    .unwrap_or_else(|_| panic!("fallback parity runtime did not start"));
+    let runner = FallbackRunner::new(runtime.client(), false);
+    let mut output = Vec::new();
+    let run = runner.run(input, &mut output);
+    let reason = run
+        .as_ref()
+        .copied()
+        .unwrap_or(ShutdownReason::ApplicationError);
+    let finish = runtime.finish_and_join(reason);
+    if run.is_err() || finish.is_err() {
+        panic!("fallback parity host did not close cleanly");
+    }
+    host_parity_result(recorded, navigation_labels)
+}
+
+struct ParityScreen {
+    latest: Arc<Mutex<Option<TuiModel>>>,
+    navigation_labels: Arc<Mutex<Option<[&'static str; 6]>>>,
+    restore_calls: Arc<AtomicUsize>,
+}
+
+impl Screen for ParityScreen {
+    fn size(&self) -> Result<Rect, TuiError> {
+        Ok(Rect::new(0, 0, 140, 40))
+    }
+
+    fn draw(&mut self, model: &TuiModel, _theme: &Theme) -> Result<(), TuiError> {
+        if model.active_view == View::Agents && model.agents.pane == AgentsPane::Memory {
+            let labels = render_memory_navigation_labels(model)?;
+            *self
+                .navigation_labels
+                .lock()
+                .map_err(|_| TuiError::TerminalOutput)? = Some(labels);
+        }
+        *self.latest.lock().map_err(|_| TuiError::TerminalOutput)? = Some(model.clone());
+        Ok(())
+    }
+
+    fn restore(&mut self) -> Result<(), TuiError> {
+        self.restore_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+struct MemorySetParityEvents {
+    stage: u8,
+    latest: Arc<Mutex<Option<TuiModel>>>,
+    idle_polls: usize,
+    total_polls: usize,
+    deadline: Instant,
+}
+
+impl MemorySetParityEvents {
+    fn key(code: KeyCode) -> TuiEvent {
+        TuiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn latest(&self) -> Option<TuiModel> {
+        self.latest.lock().ok().and_then(|latest| latest.clone())
+    }
+
+    fn idle(&mut self, timeout: Duration) -> Result<Option<TuiEvent>, TuiError> {
+        self.idle_polls = self.idle_polls.saturating_add(1);
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if self.idle_polls >= 100_000 || remaining.is_zero() {
+            return Err(TuiError::TerminalInput);
+        }
+        thread::sleep(timeout.min(Duration::from_millis(1)).min(remaining));
+        Ok(None)
+    }
+
+    fn advance(&mut self, event: TuiEvent) -> Result<Option<TuiEvent>, TuiError> {
+        self.stage = self.stage.saturating_add(1);
+        self.idle_polls = 0;
+        Ok(Some(event))
+    }
+}
+
+impl EventSource for MemorySetParityEvents {
+    fn next_event(&mut self, timeout: Duration) -> Result<Option<TuiEvent>, TuiError> {
+        self.total_polls = self.total_polls.saturating_add(1);
+        if self.total_polls >= 100_000 || Instant::now() >= self.deadline {
+            return Err(TuiError::TerminalInput);
+        }
+        let model = self.latest();
+        match self.stage {
+            0 => self.advance(Self::key(KeyCode::Char('a'))),
+            1 if model.as_ref().is_some_and(|model| {
+                model.active_view == View::Agents
+                    && model.agents.pane == AgentsPane::List
+                    && !model.command_in_flight
+                    && !model.agents.profiles.profiles.is_empty()
+            }) =>
+            {
+                self.advance(Self::key(KeyCode::Enter))
+            }
+            2 if model.as_ref().is_some_and(|model| {
+                model.agents.pane == AgentsPane::Detail
+                    && model.agents.detail.is_some()
+                    && !model.command_in_flight
+            }) =>
+            {
+                self.advance(Self::key(KeyCode::Right))
+            }
+            3 if model.as_ref().is_some_and(|model| {
+                model.agents.selected_detail_action == AgentDetailAction::Memory
+            }) =>
+            {
+                self.advance(Self::key(KeyCode::Enter))
+            }
+            4 if model.as_ref().is_some_and(|model| {
+                model.agents.pane == AgentsPane::Memory
+                    && model.agents.memory.pane == MemoryPane::EntryList
+                    && model.agents.memory.entries.is_some()
+                    && !model.command_in_flight
+            }) =>
+            {
+                self.advance(Self::key(KeyCode::Enter))
+            }
+            5 if model.as_ref().is_some_and(|model| {
+                model.agents.memory.pane == MemoryPane::EntryDetail
+                    && model.agents.memory.entry_detail.is_some()
+                    && !model.command_in_flight
+            }) =>
+            {
+                self.advance(Self::key(KeyCode::Enter))
+            }
+            6 if model.as_ref().is_some_and(|model| {
+                model.agents.memory.pane == MemoryPane::Editor
+                    && model
+                        .agents
+                        .memory
+                        .editor
+                        .as_ref()
+                        .is_some_and(|editor| editor.step() == MemoryEditorStep::Value)
+            }) =>
+            {
+                if model
+                    .as_ref()
+                    .is_some_and(|model| model.command.text().is_empty())
+                {
+                    self.advance(TuiEvent::Paste(HOST_PARITY_SET_VALUE.to_owned()))
+                } else {
+                    self.idle_polls = 0;
+                    Ok(Some(Self::key(KeyCode::Backspace)))
+                }
+            }
+            7 if model.as_ref().is_some_and(|model| {
+                model.agents.memory.pane == MemoryPane::Editor
+                    && model.command.text() == HOST_PARITY_SET_VALUE
+            }) =>
+            {
+                self.advance(Self::key(KeyCode::Enter))
+            }
+            8 if model.as_ref().is_some_and(|model| {
+                model
+                    .agents
+                    .memory
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.step() == MemoryEditorStep::PurposeTags)
+                    && model.command.text() == HOST_PARITY_TAG
+            }) =>
+            {
+                self.advance(Self::key(KeyCode::Enter))
+            }
+            9 if model.as_ref().is_some_and(|model| {
+                model.agents.memory.pane == MemoryPane::MutationReview
+                    && model.agents.memory.review_registered
+                    && !model.command_in_flight
+            }) =>
+            {
+                self.advance(Self::key(KeyCode::Enter))
+            }
+            10 if model.as_ref().is_some_and(|model| {
+                model.agents.memory.pane == MemoryPane::Confirmation
+                    && model.agents.memory.confirmation.is_some()
+            }) =>
+            {
+                self.advance(Self::key(KeyCode::Enter))
+            }
+            11 if model.as_ref().is_some_and(|model| {
+                model.agents.memory.pane == MemoryPane::Result && !model.command_in_flight
+            }) =>
+            {
+                self.advance(TuiEvent::Interrupt)
+            }
+            _ => self.idle(timeout),
+        }
+    }
+}
+
+pub fn run_tui_memory_set_scenario() -> HostParityResult {
+    let fixture = aligned_memory_host_fixture()
+        .unwrap_or_else(|error| panic!("TUI parity fixture failed: {}", error.code()));
+    let recorded = Arc::new(Mutex::new(None));
+    let confirmation = Arc::new(Mutex::new(None));
+    let runtime = ApplicationRuntime::spawn(
+        RecordingMemoryExecutor {
+            service: fixture.service,
+            recorded: Arc::clone(&recorded),
+            confirmation,
+            target: RecordedHostTarget::Set,
+        },
+        32,
+    )
+    .unwrap_or_else(|_| panic!("TUI parity runtime did not start"));
+    let latest = Arc::new(Mutex::new(None));
+    let navigation_labels = Arc::new(Mutex::new(None));
+    let restore_calls = Arc::new(AtomicUsize::new(0));
+    let mut screen = ParityScreen {
+        latest: Arc::clone(&latest),
+        navigation_labels: Arc::clone(&navigation_labels),
+        restore_calls: Arc::clone(&restore_calls),
+    };
+    let mut events = MemorySetParityEvents {
+        stage: 0,
+        latest,
+        idle_polls: 0,
+        total_polls: 0,
+        deadline: Instant::now() + Duration::from_secs(10),
+    };
+    run_tui_with_screen(
+        runtime,
+        fixture.snapshot,
+        false,
+        &mut screen,
+        &mut events,
+        &Theme::from_no_color(true),
+    )
+    .unwrap_or_else(|_| panic!("TUI parity host did not close cleanly"));
+    if restore_calls.load(Ordering::SeqCst) != 1 {
+        panic!("TUI parity screen was not restored exactly once");
+    }
+    let labels = navigation_labels
+        .lock()
+        .ok()
+        .and_then(|labels| *labels)
+        .unwrap_or_else(|| panic!("TUI parity navigation was not rendered"));
+    host_parity_result(recorded, labels)
+}
+
+pub fn run_fallback_memory_resolution_scenario(action: MemoryResolutionAction) -> HostParityResult {
+    let mut fixture = aligned_memory_host_fixture()
+        .unwrap_or_else(|error| panic!("fallback resolution fixture failed: {}", error.code()));
+    execute_aligned_memory_prerequisite_reads(&mut fixture.service, &fixture.profile)
+        .unwrap_or_else(|error| panic!("fallback prerequisite read failed: {}", error.code()));
+    fixture
+        .service
+        .execute_user(ApplicationCommand::ListMemoryProposals {
+            selector: AgentProfileSelector::from(fixture.profile.profile_id()),
+            filter: ai_stock_forum::memory::MemoryProposalFilter::Pending,
+        })
+        .unwrap_or_else(|error| panic!("fallback proposal read failed: {}", error.code()));
+    let navigation_labels =
+        fallback_memory_navigation_labels(fixture.snapshot.clone(), &fixture.profile)
+            .unwrap_or_else(|_| panic!("fallback resolution navigation was not rendered"));
+    let recorded = Arc::new(Mutex::new(None));
+    let confirmation = Arc::new(Mutex::new(None));
+    let input = DynamicFallbackInput::memory_resolution(
+        fixture.proposal_id,
+        action,
+        Arc::clone(&confirmation),
+    );
+    let runtime = ApplicationRuntime::spawn(
+        RecordingMemoryExecutor {
+            service: fixture.service,
+            recorded: Arc::clone(&recorded),
+            confirmation,
+            target: RecordedHostTarget::Resolution(action),
+        },
+        32,
+    )
+    .unwrap_or_else(|_| panic!("fallback resolution runtime did not start"));
+    let runner = FallbackRunner::new(runtime.client(), false);
+    let mut output = Vec::new();
+    let run = runner.run(input, &mut output);
+    let reason = run
+        .as_ref()
+        .copied()
+        .unwrap_or(ShutdownReason::ApplicationError);
+    let finish = runtime.finish_and_join(reason);
+    if run.is_err() || finish.is_err() {
+        panic!("fallback resolution host did not close cleanly");
+    }
+    host_parity_result(recorded, navigation_labels)
+}
+
+struct MemoryResolutionParityEvents {
+    action: MemoryResolutionAction,
+    stage: u8,
+    latest: Arc<Mutex<Option<TuiModel>>>,
+    idle_polls: usize,
+    total_polls: usize,
+    deadline: Instant,
+}
+
+impl MemoryResolutionParityEvents {
+    fn key(code: KeyCode) -> TuiEvent {
+        TuiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn latest(&self) -> Option<TuiModel> {
+        self.latest.lock().ok().and_then(|latest| latest.clone())
+    }
+
+    fn idle(&mut self, timeout: Duration) -> Result<Option<TuiEvent>, TuiError> {
+        self.idle_polls = self.idle_polls.saturating_add(1);
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if self.idle_polls >= 100_000 || remaining.is_zero() {
+            return Err(TuiError::TerminalInput);
+        }
+        thread::sleep(timeout.min(Duration::from_millis(1)).min(remaining));
+        Ok(None)
+    }
+
+    fn advance(&mut self, event: TuiEvent) -> Result<Option<TuiEvent>, TuiError> {
+        self.stage = self.stage.saturating_add(1);
+        self.idle_polls = 0;
+        Ok(Some(event))
+    }
+}
+
+impl EventSource for MemoryResolutionParityEvents {
+    fn next_event(&mut self, timeout: Duration) -> Result<Option<TuiEvent>, TuiError> {
+        self.total_polls = self.total_polls.saturating_add(1);
+        if self.total_polls >= 100_000 || Instant::now() >= self.deadline {
+            return Err(TuiError::TerminalInput);
+        }
+        let model = self.latest();
+        match self.stage {
+            0 => self.advance(Self::key(KeyCode::Char('a'))),
+            1 if model.as_ref().is_some_and(|model| {
+                model.active_view == View::Agents
+                    && model.agents.pane == AgentsPane::List
+                    && !model.command_in_flight
+                    && !model.agents.profiles.profiles.is_empty()
+            }) =>
+            {
+                self.advance(Self::key(KeyCode::Enter))
+            }
+            2 if model.as_ref().is_some_and(|model| {
+                model.agents.pane == AgentsPane::Detail
+                    && model.agents.detail.is_some()
+                    && !model.command_in_flight
+            }) =>
+            {
+                self.advance(Self::key(KeyCode::Right))
+            }
+            3 if model.as_ref().is_some_and(|model| {
+                model.agents.selected_detail_action == AgentDetailAction::Memory
+            }) =>
+            {
+                self.advance(Self::key(KeyCode::Enter))
+            }
+            4 if model.as_ref().is_some_and(|model| {
+                model.agents.pane == AgentsPane::Memory
+                    && model.agents.memory.pane == MemoryPane::EntryList
+                    && model.agents.memory.entries.is_some()
+                    && !model.command_in_flight
+            }) =>
+            {
+                self.advance(Self::key(KeyCode::Char('p')))
+            }
+            5 if model.as_ref().is_some_and(|model| {
+                model.agents.memory.pane == MemoryPane::Proposals
+                    && model.agents.memory.proposals.is_some()
+                    && !model.command_in_flight
+            }) =>
+            {
+                self.advance(Self::key(KeyCode::Enter))
+            }
+            6 if model.as_ref().is_some_and(|model| {
+                model.agents.memory.pane == MemoryPane::ProposalDetail
+                    && model.agents.memory.proposal_detail.is_some()
+                    && !model.command_in_flight
+            }) =>
+            {
+                let selected_action = model
+                    .as_ref()
+                    .map(|model| model.agents.memory.selected_proposal_detail_action);
+                let desired_action = match self.action {
+                    MemoryResolutionAction::Approve => MemoryProposalDetailAction::Approve,
+                    MemoryResolutionAction::Reject => MemoryProposalDetailAction::Reject,
+                };
+                if selected_action == Some(desired_action) {
+                    self.advance(Self::key(KeyCode::Enter))
+                } else {
+                    self.idle_polls = 0;
+                    Ok(Some(Self::key(KeyCode::Right)))
+                }
+            }
+            7 if model.as_ref().is_some_and(|model| {
+                model.agents.memory.pane == MemoryPane::ProposalResolutionReview
+                    && model.agents.memory.review_registered
+                    && !model.command_in_flight
+            }) =>
+            {
+                self.advance(Self::key(KeyCode::Enter))
+            }
+            8 if model.as_ref().is_some_and(|model| {
+                model.agents.memory.pane == MemoryPane::Confirmation
+                    && model.agents.memory.confirmation.is_some()
+            }) =>
+            {
+                self.advance(Self::key(KeyCode::Enter))
+            }
+            9 if model.as_ref().is_some_and(|model| {
+                model.agents.memory.pane == MemoryPane::Result && !model.command_in_flight
+            }) =>
+            {
+                self.advance(TuiEvent::Interrupt)
+            }
+            _ => self.idle(timeout),
+        }
+    }
+}
+
+pub fn run_tui_memory_resolution_scenario(action: MemoryResolutionAction) -> HostParityResult {
+    let fixture = aligned_memory_host_fixture()
+        .unwrap_or_else(|error| panic!("TUI resolution fixture failed: {}", error.code()));
+    let recorded = Arc::new(Mutex::new(None));
+    let confirmation = Arc::new(Mutex::new(None));
+    let runtime = ApplicationRuntime::spawn(
+        RecordingMemoryExecutor {
+            service: fixture.service,
+            recorded: Arc::clone(&recorded),
+            confirmation,
+            target: RecordedHostTarget::Resolution(action),
+        },
+        32,
+    )
+    .unwrap_or_else(|_| panic!("TUI resolution runtime did not start"));
+    let latest = Arc::new(Mutex::new(None));
+    let navigation_labels = Arc::new(Mutex::new(None));
+    let restore_calls = Arc::new(AtomicUsize::new(0));
+    let mut screen = ParityScreen {
+        latest: Arc::clone(&latest),
+        navigation_labels: Arc::clone(&navigation_labels),
+        restore_calls: Arc::clone(&restore_calls),
+    };
+    let mut events = MemoryResolutionParityEvents {
+        action,
+        stage: 0,
+        latest,
+        idle_polls: 0,
+        total_polls: 0,
+        deadline: Instant::now() + Duration::from_secs(10),
+    };
+    run_tui_with_screen(
+        runtime,
+        fixture.snapshot,
+        false,
+        &mut screen,
+        &mut events,
+        &Theme::from_no_color(true),
+    )
+    .unwrap_or_else(|_| panic!("TUI resolution host did not close cleanly"));
+    if restore_calls.load(Ordering::SeqCst) != 1 {
+        panic!("TUI resolution screen was not restored exactly once");
+    }
+    let labels = navigation_labels
+        .lock()
+        .ok()
+        .and_then(|labels| *labels)
+        .unwrap_or_else(|| panic!("TUI resolution navigation was not rendered"));
+    host_parity_result(recorded, labels)
 }
 
 #[derive(Clone)]
