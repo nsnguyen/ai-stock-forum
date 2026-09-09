@@ -1,6 +1,7 @@
 mod agents;
 mod audit;
 mod help;
+mod memory;
 mod overview;
 mod setup;
 mod skills;
@@ -123,6 +124,31 @@ pub(super) fn safe_text(value: &str) -> String {
         .collect()
 }
 
+pub(super) fn memory_escape_bounded(value: &str, max_bytes: usize) -> String {
+    let escaped_bytes = value
+        .chars()
+        .map(|character| character.escape_default().len())
+        .fold(0_usize, usize::saturating_add);
+    let truncated = escaped_bytes > max_bytes;
+    let content_limit = if truncated && max_bytes >= 3 {
+        max_bytes - 3
+    } else {
+        max_bytes
+    };
+    let mut escaped = String::with_capacity(max_bytes.min(escaped_bytes));
+    for character in value.chars() {
+        let fragment = character.escape_default().to_string();
+        if escaped.len().saturating_add(fragment.len()) > content_limit {
+            break;
+        }
+        escaped.push_str(&fragment);
+    }
+    if truncated && max_bytes >= 3 {
+        escaped.push_str("...");
+    }
+    escaped
+}
+
 pub(super) fn actor_name(actor: &crate::domain::Actor) -> &'static str {
     match actor {
         crate::domain::Actor::Human => "Human",
@@ -143,4 +169,29 @@ fn contextual_lines<'a>(heading: &'a str, detail: &'a str, theme: &Theme) -> Vec
 
 pub(super) fn workspace_focused(model: &TuiModel) -> bool {
     model.focus == Focus::Workspace
+}
+
+#[cfg(test)]
+mod memory_text_tests {
+    use ratatui::text::Line;
+
+    use super::memory_escape_bounded;
+
+    #[test]
+    fn memory_escape_is_visible_fragment_safe_and_bounded_after_escaping() {
+        let escaped = memory_escape_bounded("a\\\n\u{1b}\u{202e}\u{e9}z", 25);
+        assert_eq!(escaped, "a\\\\\\n\\u{1b}\\u{202e}...");
+        assert!(escaped.len() <= 25);
+        assert!(Line::from(escaped.clone()).width() <= 25);
+        assert!(!escaped.contains('\n'));
+        assert!(!escaped.contains('\u{1b}'));
+        assert!(!escaped.contains('\u{202e}'));
+        assert!(!escaped.contains('\u{e9}'));
+    }
+
+    #[test]
+    fn memory_escape_does_not_split_an_escape_fragment_at_the_cap() {
+        assert_eq!(memory_escape_bounded("ab\u{202e}c", 9), "ab...");
+        assert_eq!(memory_escape_bounded("plain", 5), "plain");
+    }
 }

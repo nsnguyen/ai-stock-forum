@@ -235,6 +235,10 @@ impl MemoryEditor {
         &self.selector
     }
 
+    pub(crate) fn seed(&self) -> Option<&MemoryEntryVersion> {
+        self.seed.as_ref()
+    }
+
     pub fn key_input(&self) -> &str {
         &self.key
     }

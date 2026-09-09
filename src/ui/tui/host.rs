@@ -7,6 +7,8 @@ use super::{
     model::{
         AgentOutcomeIntent, MemoryOutcomeIntent, MemoryPane, MemoryResultOrigin, MemoryViewState,
         NavigationTab, RuntimeStatus, SkillOperationOrigin, SkillWorkspaceOrigin, TuiModel,
+        absent_set_diff_matches, canonical_memory_edit_diff, delete_diff_matches,
+        deleted_set_diff_matches, expected_state_matches_namespace_key, seeded_present_set_diff,
     },
     terminal::{CrosstermScreen, Screen},
     theme::Theme,
@@ -20,9 +22,8 @@ use crate::{
     },
     memory::{
         ExpectedMemoryEntryState, MemoryEntryDraft, MemoryEntryState, MemoryEntryVersion,
-        MemoryField, MemoryFieldDiff, MemoryFieldValue, MemoryMutationKind, MemoryNoChange,
-        MemoryPlaintextAcknowledgement, MemoryProposalOperation, MemoryProposalRef,
-        MemoryResolutionAction,
+        MemoryMutationKind, MemoryNoChange, MemoryPlaintextAcknowledgement,
+        MemoryProposalOperation, MemoryProposalRef, MemoryResolutionAction,
     },
     panic_boundary::catch_sensitive_unwind,
     runtime::{ApplicationRuntime, PendingOutcome, RuntimeClient, RuntimeError},
@@ -195,7 +196,7 @@ fn install_set_preview_for_host(
             memory.edit_review = Some(review);
             memory.resolution_review = None;
             memory.confirmation = None;
-            memory.pane = MemoryPane::MutationReview;
+            memory.transition_to(MemoryPane::MutationReview);
             model.clear_message();
             Ok(())
         }
@@ -219,7 +220,7 @@ fn install_delete_preview_for_host(
                 return Err(TuiError::UnexpectedControllerEffect.into());
             }
             memory.review_registered = false;
-            memory.pane = MemoryPane::EntryDetail;
+            memory.transition_to(MemoryPane::EntryDetail);
             model.set_message(super::model::Severity::Info, "No change");
             Ok(())
         }
@@ -234,7 +235,7 @@ fn install_delete_preview_for_host(
             memory.edit_review = Some(review);
             memory.resolution_review = None;
             memory.confirmation = None;
-            memory.pane = MemoryPane::MutationReview;
+            memory.transition_to(MemoryPane::MutationReview);
             model.clear_message();
             Ok(())
         }
@@ -268,7 +269,7 @@ fn install_resolution_preview_for_host(
     memory.edit_review = None;
     memory.resolution_review = Some(review);
     memory.confirmation = None;
-    memory.pane = MemoryPane::ProposalResolutionReview;
+    memory.transition_to(MemoryPane::ProposalResolutionReview);
     model.clear_message();
     Ok(())
 }
@@ -308,7 +309,8 @@ fn install_resolution_preview(
 }
 
 fn memory_set_request_is_current(memory: &MemoryViewState, request: &MemoryPreviewRequest) -> bool {
-    memory.profile_selector().ok().as_ref() == Some(&request.selector)
+    memory.editor_is_authenticated()
+        && memory.profile_selector().ok().as_ref() == Some(&request.selector)
         && memory.editor.as_ref().is_some_and(|editor| {
             editor.selector() == &request.selector
                 && editor.preview_request().ok().as_ref() == Some(request)
@@ -316,9 +318,7 @@ fn memory_set_request_is_current(memory: &MemoryViewState, request: &MemoryPrevi
 }
 
 fn retained_set_seed(memory: &MemoryViewState) -> Option<&MemoryEntryVersion> {
-    (memory.editor_origin == super::model::MemoryEditorOrigin::Edit)
-        .then(|| memory.entry_detail.as_ref().map(|detail| &detail.entry))
-        .flatten()
+    memory.editor.as_ref().and_then(|editor| editor.seed())
 }
 
 fn memory_set_review_matches_request(
@@ -333,6 +333,11 @@ fn memory_set_review_matches_request(
         || memory.namespace_id != Some(review.namespace_id)
         || review.plaintext_acknowledgement
             != MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1
+        || !expected_state_matches_namespace_key(
+            &review.expected,
+            review.namespace_id,
+            &request.candidate.normalized_key(),
+        )
         || !canonical_memory_edit_diff(&review.diff)
     {
         return false;
@@ -391,6 +396,11 @@ fn memory_delete_review_matches_request(
         && memory.namespace_id == Some(review.namespace_id)
         && review.plaintext_acknowledgement
             == MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1
+        && expected_state_matches_namespace_key(
+            &review.expected,
+            review.namespace_id,
+            requested_entry.reference().normalized_key(),
+        )
         && canonical_memory_edit_diff(&review.diff)
         && matches!(
             &review.expected,
@@ -476,153 +486,12 @@ fn memory_accepted_proposal_entry_matches(
     }
 }
 
-fn canonical_memory_edit_diff(diff: &[MemoryFieldDiff]) -> bool {
-    if diff.is_empty() || diff.len() > 4 {
-        return false;
-    }
-    diff.iter().all(|item| {
-        item.before != item.after
-            && memory_field_value_matches(item.field, &item.before)
-            && memory_field_value_matches(item.field, &item.after)
-    }) && diff
-        .windows(2)
-        .all(|items| memory_field_rank(items[0].field) < memory_field_rank(items[1].field))
-}
-
-fn memory_field_rank(field: MemoryField) -> u8 {
-    match field {
-        MemoryField::DisplayKey => 0,
-        MemoryField::State => 1,
-        MemoryField::Value => 2,
-        MemoryField::PurposeTags => 3,
-    }
-}
-
-fn memory_field_value_matches(field: MemoryField, value: &MemoryFieldValue) -> bool {
-    matches!(
-        (field, value),
-        (
-            MemoryField::DisplayKey | MemoryField::Value,
-            MemoryFieldValue::Missing
-        ) | (
-            MemoryField::DisplayKey | MemoryField::Value,
-            MemoryFieldValue::Text(_)
-        ) | (MemoryField::State, MemoryFieldValue::Missing)
-            | (MemoryField::State, MemoryFieldValue::State(_))
-            | (MemoryField::PurposeTags, MemoryFieldValue::Missing)
-            | (MemoryField::PurposeTags, MemoryFieldValue::Tags(_))
-    )
-}
-
-fn absent_set_diff_matches(diff: &[MemoryFieldDiff], candidate: &MemoryEntryDraft) -> bool {
-    diff.len() == 4
-        && diff[0].field == MemoryField::DisplayKey
-        && diff[0].before == MemoryFieldValue::Missing
-        && text_value_matches(&diff[0].after, candidate.display_key())
-        && diff[1].field == MemoryField::State
-        && diff[1].before == MemoryFieldValue::Missing
-        && diff[1].after == MemoryFieldValue::State(MemoryEntryState::Present)
-        && diff[2].field == MemoryField::Value
-        && diff[2].before == MemoryFieldValue::Missing
-        && text_value_matches(&diff[2].after, candidate.value())
-        && diff[3].field == MemoryField::PurposeTags
-        && diff[3].before == MemoryFieldValue::Missing
-        && tags_value_matches(&diff[3].after, candidate.purpose_tags())
-}
-
-fn seeded_present_set_diff(
-    seed: &MemoryEntryVersion,
-    candidate: &MemoryEntryDraft,
-) -> Option<Vec<MemoryFieldDiff>> {
-    if seed.reference().state() != MemoryEntryState::Present
-        || seed.reference().normalized_key() != &candidate.normalized_key()
-    {
-        return None;
-    }
-    let before = [
-        MemoryFieldValue::Text(seed.display_key().to_owned()),
-        MemoryFieldValue::State(MemoryEntryState::Present),
-        MemoryFieldValue::Text(seed.value()?.to_owned()),
-        MemoryFieldValue::Tags(seed.purpose_tags().to_vec()),
-    ];
-    let after = [
-        MemoryFieldValue::Text(candidate.display_key().to_owned()),
-        MemoryFieldValue::State(MemoryEntryState::Present),
-        MemoryFieldValue::Text(candidate.value().to_owned()),
-        MemoryFieldValue::Tags(candidate.purpose_tags().to_vec()),
-    ];
-    Some(
-        [
-            MemoryField::DisplayKey,
-            MemoryField::State,
-            MemoryField::Value,
-            MemoryField::PurposeTags,
-        ]
-        .into_iter()
-        .zip(before)
-        .zip(after)
-        .filter_map(|((field, before), after)| {
-            (before != after).then_some(MemoryFieldDiff {
-                field,
-                before,
-                after,
-            })
-        })
-        .collect(),
-    )
-}
-
 fn memory_identical_content_matches_request(
     seed: Option<&MemoryEntryVersion>,
     candidate: &MemoryEntryDraft,
 ) -> bool {
     seed.and_then(|seed| seeded_present_set_diff(seed, candidate))
         .is_some_and(|diff| diff.is_empty())
-}
-
-fn deleted_set_diff_matches(diff: &[MemoryFieldDiff], candidate: &MemoryEntryDraft) -> bool {
-    let required = if diff.first().is_some_and(|item| {
-        item.field == MemoryField::DisplayKey
-            && matches!(item.before, MemoryFieldValue::Text(_))
-            && text_value_matches(&item.after, candidate.display_key())
-    }) {
-        &diff[1..]
-    } else {
-        diff
-    };
-    required.len() == 3
-        && required[0].field == MemoryField::State
-        && required[0].before == MemoryFieldValue::State(MemoryEntryState::Deleted)
-        && required[0].after == MemoryFieldValue::State(MemoryEntryState::Present)
-        && required[1].field == MemoryField::Value
-        && required[1].before == MemoryFieldValue::Missing
-        && text_value_matches(&required[1].after, candidate.value())
-        && required[2].field == MemoryField::PurposeTags
-        && required[2].before == MemoryFieldValue::Missing
-        && tags_value_matches(&required[2].after, candidate.purpose_tags())
-}
-
-fn delete_diff_matches(diff: &[MemoryFieldDiff], requested_entry: &MemoryEntryVersion) -> bool {
-    diff.len() == 3
-        && diff[0].field == MemoryField::State
-        && diff[0].before == MemoryFieldValue::State(MemoryEntryState::Present)
-        && diff[0].after == MemoryFieldValue::State(MemoryEntryState::Deleted)
-        && diff[1].field == MemoryField::Value
-        && requested_entry
-            .value()
-            .is_some_and(|value| text_value_matches(&diff[1].before, value))
-        && diff[1].after == MemoryFieldValue::Missing
-        && diff[2].field == MemoryField::PurposeTags
-        && tags_value_matches(&diff[2].before, requested_entry.purpose_tags())
-        && diff[2].after == MemoryFieldValue::Missing
-}
-
-fn text_value_matches(value: &MemoryFieldValue, expected: &str) -> bool {
-    matches!(value, MemoryFieldValue::Text(actual) if actual == expected)
-}
-
-fn tags_value_matches(value: &MemoryFieldValue, expected: &[String]) -> bool {
-    matches!(value, MemoryFieldValue::Tags(actual) if actual == expected)
 }
 
 #[doc(hidden)]
@@ -2096,16 +1965,17 @@ impl TuiRunner {
         let memory = &mut self.model.agents.memory;
         memory.confirmation = None;
         if memory.edit_review.take().is_some() {
-            memory.pane = if memory.editor.is_some() {
+            let pane = if memory.editor.is_some() {
                 MemoryPane::Editor
             } else {
                 MemoryPane::EntryDetail
             };
+            memory.transition_to(pane);
             if let Some(editor) = memory.editor.as_mut() {
                 editor.clear_review();
             }
         } else if memory.resolution_review.take().is_some() {
-            memory.pane = MemoryPane::ProposalDetail;
+            memory.transition_to(MemoryPane::ProposalDetail);
         }
         synchronize_memory_editor_input(&mut self.model);
     }
@@ -2150,7 +2020,7 @@ impl TuiRunner {
             memory.confirmation = None;
             memory.editor = None;
             memory.result_origin = result_origin;
-            memory.pane = MemoryPane::Result;
+            memory.transition_to(MemoryPane::Result);
         }
         match (intent, view) {
             (MemoryOutcomeIntent::Mutation, CommandView::MemoryEntryMutation(_)) => {
@@ -2223,13 +2093,13 @@ impl TuiRunner {
                 if let Some(editor) = memory.editor.as_mut() {
                     editor.clear_review();
                 }
-                memory.pane = MemoryPane::Editor;
+                memory.transition_to(MemoryPane::Editor);
                 true
             } else {
                 if had_edit_review {
-                    memory.pane = MemoryPane::EntryDetail;
+                    memory.transition_to(MemoryPane::EntryDetail);
                 } else if had_resolution_review {
-                    memory.pane = MemoryPane::ProposalDetail;
+                    memory.transition_to(MemoryPane::ProposalDetail);
                 }
                 false
             }
@@ -2475,8 +2345,8 @@ mod tests {
             ControllerEffect, EventSource, MemoryOutcomeIntent, MemoryPane, MemoryViewState,
             Screen, TuiError, TuiEvent, handle_event,
             model::{
-                AgentDetailAction, AgentsPane, LayoutMode, RuntimeStatus, SkillConfirmation,
-                SkillOperationOrigin, SkillsPane, TuiModel, View,
+                AgentDetailAction, AgentsPane, LayoutMode, MemoryEditorOrigin, RuntimeStatus,
+                SkillConfirmation, SkillOperationOrigin, SkillsPane, TuiModel, View,
             },
             theme::Theme,
         },
@@ -3195,6 +3065,7 @@ mod tests {
     fn memory_proposal_summary(proposal: &MemoryProposal) -> MemoryProposalSummary {
         MemoryProposalSummary {
             proposal: proposal.reference(),
+            namespace_id: proposal.namespace_id(),
             proposer: proposal.proposer().clone(),
             operation: MemoryProposalOperationKind::Set,
             display_key: proposal.display_key().to_owned(),
@@ -3266,6 +3137,8 @@ mod tests {
     #[derive(Clone)]
     struct MemoryReadCase {
         name: &'static str,
+        pane: MemoryPane,
+        resets_detail_scroll: bool,
         effect: ControllerEffect,
         command: ApplicationCommand,
         intent: MemoryOutcomeIntent,
@@ -3282,6 +3155,8 @@ mod tests {
         vec![
             MemoryReadCase {
                 name: "entries",
+                pane: MemoryPane::EntryList,
+                resets_detail_scroll: false,
                 effect: ControllerEffect::LoadAgentMemory(selector.clone()),
                 command: ApplicationCommand::ListMemoryEntries {
                     selector: selector.clone(),
@@ -3294,6 +3169,8 @@ mod tests {
             },
             MemoryReadCase {
                 name: "entry detail",
+                pane: MemoryPane::EntryDetail,
+                resets_detail_scroll: true,
                 effect: ControllerEffect::LoadMemoryEntry {
                     selector: selector.clone(),
                     key: entry.display_key().to_owned(),
@@ -3310,6 +3187,8 @@ mod tests {
             },
             MemoryReadCase {
                 name: "entry history",
+                pane: MemoryPane::EntryHistory,
+                resets_detail_scroll: false,
                 effect: ControllerEffect::LoadMemoryEntryHistory {
                     selector: selector.clone(),
                     key: entry.display_key().to_owned(),
@@ -3323,6 +3202,8 @@ mod tests {
             },
             MemoryReadCase {
                 name: "entry version",
+                pane: MemoryPane::EntryHistory,
+                resets_detail_scroll: true,
                 effect: ControllerEffect::LoadMemoryEntryVersion {
                     selector: selector.clone(),
                     key: entry.display_key().to_owned(),
@@ -3347,6 +3228,8 @@ mod tests {
             },
             MemoryReadCase {
                 name: "proposals",
+                pane: MemoryPane::Proposals,
+                resets_detail_scroll: false,
                 effect: ControllerEffect::LoadMemoryProposals {
                     selector: selector.clone(),
                     filter: MemoryProposalFilter::Pending,
@@ -3363,6 +3246,8 @@ mod tests {
             },
             MemoryReadCase {
                 name: "proposal detail",
+                pane: MemoryPane::ProposalDetail,
+                resets_detail_scroll: true,
                 effect: ControllerEffect::LoadMemoryProposal(proposal.reference().proposal_id()),
                 command: ApplicationCommand::ShowMemoryProposal {
                     proposal_id: proposal.reference().proposal_id(),
@@ -3372,6 +3257,8 @@ mod tests {
             },
             MemoryReadCase {
                 name: "episodes",
+                pane: MemoryPane::EpisodicSummaries,
+                resets_detail_scroll: false,
                 effect: ControllerEffect::LoadEpisodicSummaries(selector.clone()),
                 command: ApplicationCommand::ListEpisodicSummaries {
                     selector: selector.clone(),
@@ -3384,6 +3271,8 @@ mod tests {
             },
             MemoryReadCase {
                 name: "episode detail",
+                pane: MemoryPane::EpisodicDetail,
+                resets_detail_scroll: true,
                 effect: ControllerEffect::LoadEpisodicSummary(episode.reference().summary_id()),
                 command: ApplicationCommand::ShowEpisodicSummary {
                     summary_id: episode.reference().summary_id(),
@@ -3468,6 +3357,57 @@ mod tests {
                 after: MemoryFieldValue::Tags(candidate.purpose_tags().to_vec()),
             },
         ]
+    }
+
+    fn deleted_set_diff_with_prior_key(
+        candidate: &MemoryEntryDraft,
+        prior_key: &str,
+    ) -> Vec<MemoryFieldDiff> {
+        let mut diff = deleted_set_diff(candidate);
+        diff.insert(
+            0,
+            MemoryFieldDiff {
+                field: MemoryField::DisplayKey,
+                before: MemoryFieldValue::Text(prior_key.to_owned()),
+                after: MemoryFieldValue::Text(candidate.display_key().to_owned()),
+            },
+        );
+        diff
+    }
+
+    fn present_set_diff(
+        seed: &MemoryEntryVersion,
+        candidate: &MemoryEntryDraft,
+    ) -> Vec<MemoryFieldDiff> {
+        let before = [
+            MemoryFieldValue::Text(seed.display_key().to_owned()),
+            MemoryFieldValue::State(MemoryEntryState::Present),
+            MemoryFieldValue::Text(seed.value().expect("present value").to_owned()),
+            MemoryFieldValue::Tags(seed.purpose_tags().to_vec()),
+        ];
+        let after = [
+            MemoryFieldValue::Text(candidate.display_key().to_owned()),
+            MemoryFieldValue::State(MemoryEntryState::Present),
+            MemoryFieldValue::Text(candidate.value().to_owned()),
+            MemoryFieldValue::Tags(candidate.purpose_tags().to_vec()),
+        ];
+        [
+            MemoryField::DisplayKey,
+            MemoryField::State,
+            MemoryField::Value,
+            MemoryField::PurposeTags,
+        ]
+        .into_iter()
+        .zip(before)
+        .zip(after)
+        .filter_map(|((field, before), after)| {
+            (before != after).then_some(MemoryFieldDiff {
+                field,
+                before,
+                after,
+            })
+        })
+        .collect()
     }
 
     fn delete_diff(entry: &MemoryEntryVersion) -> Vec<MemoryFieldDiff> {
@@ -3607,6 +3547,9 @@ mod tests {
         seed: u128,
     ) -> (ApplicationCommand, MemoryEntryVersion) {
         bind_memory(model, profile);
+        model.agents.memory.entries =
+            Some(memory_entries_view(profile, std::slice::from_ref(entry)));
+        model.agents.memory.selected_entry = 0;
         model.agents.memory.entry_detail = Some(MemoryEntryView {
             profile: profile.reference(),
             entry: entry.clone(),
@@ -3634,6 +3577,10 @@ mod tests {
             command: command.clone(),
             generation: model.agents.memory.generation,
         });
+        assert!(
+            model.agents.memory.confirmed_command().is_some(),
+            "confirmed delete fixture must be authenticated",
+        );
         let deleted = entry
             .next_deleted(
                 MemoryEntryVersionId::from_uuid(Uuid::from_u128(seed + 1)),
@@ -3882,6 +3829,85 @@ mod tests {
         (runtime, cancellations)
     }
 
+    fn begin_create_set_request(
+        model: &mut TuiModel,
+        profile: &AgentProfileVersion,
+        candidate: &MemoryEntryDraft,
+    ) -> crate::ui::memory_editor::MemoryPreviewRequest {
+        bind_memory(model, profile);
+        model
+            .agents
+            .memory
+            .open_create_editor(profile.profile_id().into())
+            .expect("create editor");
+        let editor = model.agents.memory.editor.as_mut().expect("editor");
+        editor
+            .submit_line(candidate.display_key().to_owned())
+            .expect("candidate key");
+        editor
+            .submit_line(candidate.value().to_owned())
+            .expect("candidate value");
+        let crate::ui::memory_editor::MemoryEditorEffect::Preview(request) = editor
+            .submit_line(candidate.purpose_tags().join(","))
+            .expect("candidate tags")
+        else {
+            panic!("create editor must produce a preview request")
+        };
+        model
+            .agents
+            .memory
+            .begin_review_request()
+            .expect("outer review generation");
+        request
+    }
+
+    fn begin_seeded_set_request(
+        model: &mut TuiModel,
+        profile: &AgentProfileVersion,
+        seed: MemoryEntryVersion,
+        value: &str,
+        tags: &str,
+    ) -> crate::ui::memory_editor::MemoryPreviewRequest {
+        bind_memory(model, profile);
+        model
+            .agents
+            .memory
+            .open_edit_editor(profile.profile_id().into(), seed)
+            .expect("seeded editor");
+        let editor = model.agents.memory.editor.as_mut().expect("editor");
+        editor
+            .submit_line(value.to_owned())
+            .expect("candidate value");
+        let crate::ui::memory_editor::MemoryEditorEffect::Preview(request) =
+            editor.submit_line(tags.to_owned()).expect("candidate tags")
+        else {
+            panic!("seeded editor must produce a preview request")
+        };
+        model
+            .agents
+            .memory
+            .begin_review_request()
+            .expect("outer review generation");
+        request
+    }
+
+    fn install_returned_set_review(
+        model: &mut TuiModel,
+        request: crate::ui::memory_editor::MemoryPreviewRequest,
+        review: MemoryEditReview,
+    ) -> (Result<(), TuiError>, usize) {
+        let (runtime, cancellations) = preview_runtime(
+            MemoryPreviewResponse::Set(MemoryEditPreview::Review(review)),
+            false,
+        );
+        let result = install_set_preview(&runtime.client(), model, request);
+        let cancellation_count = cancellations.load(Ordering::SeqCst);
+        runtime
+            .finish_and_join(ShutdownReason::Interrupted)
+            .expect("finish preview runtime");
+        (result, cancellation_count)
+    }
+
     #[test]
     fn memory_command_classifier_accepts_only_confirmable_mutations_and_resolutions() {
         let profile = refresh_profile(79_000, 0);
@@ -4106,6 +4132,8 @@ mod tests {
             runner.model.agents.pane = AgentsPane::Memory;
             runner.model.agents.memory.entries =
                 Some(memory_entries_view(&profile, std::slice::from_ref(&entry)));
+            runner.model.agents.memory.pane = case.pane;
+            runner.model.agents.memory.detail_scroll = usize::MAX;
 
             assert!(
                 matches!(
@@ -4145,6 +4173,16 @@ mod tests {
                 case.name
             );
             assert_read_view_installed(&runner.model.agents.memory, &case.view);
+            assert_eq!(
+                runner.model.agents.memory.detail_scroll,
+                if case.resets_detail_scroll {
+                    0
+                } else {
+                    usize::MAX
+                },
+                "{}",
+                case.name
+            );
             assert!(runner.pending.is_none(), "{}", case.name);
             assert!(runner.pending_memory.is_none(), "{}", case.name);
             assert_eq!(
@@ -4193,6 +4231,8 @@ mod tests {
             runner.model.agents.pane = AgentsPane::Memory;
             runner.model.agents.memory.entries =
                 Some(memory_entries_view(&profile, std::slice::from_ref(&entry)));
+            runner.model.agents.memory.pane = case.pane;
+            runner.model.agents.memory.detail_scroll = 91;
 
             runner
                 .apply_effect(case.effect)
@@ -4537,11 +4577,13 @@ mod tests {
             .memory
             .begin_review_request()
             .expect("outer generation");
+        model.agents.memory.detail_scroll = usize::MAX;
 
         install_set_preview(&runtime.client(), &mut model, request)
             .expect("deleted recreation review");
         assert_eq!(model.agents.memory.edit_review, Some(review));
         assert!(model.agents.memory.review_registered);
+        assert_eq!(model.agents.memory.detail_scroll, 0);
         assert_eq!(cancellations.load(Ordering::SeqCst), 0);
         runtime
             .finish_and_join(ShutdownReason::Interrupted)
@@ -4584,6 +4626,7 @@ mod tests {
             .memory
             .begin_review_request()
             .expect("outer generation");
+        model.agents.memory.detail_scroll = 73;
 
         assert!(matches!(
             install_set_preview(&runtime.client(), &mut model, request),
@@ -4591,9 +4634,459 @@ mod tests {
         ));
         assert_eq!(cancellations.load(Ordering::SeqCst), 1);
         assert!(!model.agents.memory.review_registered);
+        assert_eq!(model.agents.memory.detail_scroll, 73);
         runtime
             .finish_and_join(ShutdownReason::Interrupted)
             .expect("finish malformed runtime");
+    }
+
+    #[test]
+    fn deleted_recreation_prior_display_key_is_authenticated_before_host_installation() {
+        let profile = refresh_profile(79_835, 0);
+        let tombstone = deleted_memory_entry(
+            &profile,
+            79_836,
+            MemoryEntryDraft::new(
+                "Recreated Key".to_owned(),
+                "Prior deleted value".to_owned(),
+                vec!["prior".to_owned()],
+            )
+            .expect("prior entry"),
+        );
+        let candidate = MemoryEntryDraft::new(
+            "recreated key".to_owned(),
+            "Recreated value".to_owned(),
+            vec!["recreated".to_owned()],
+        )
+        .expect("recreated candidate");
+
+        for (index, (name, prior_key, valid)) in [
+            ("canonical same-normalized prior key", "Recreated Key", true),
+            ("foreign normalized prior key", "FOREIGN_PRIOR_KEY", false),
+            ("unsafe prior key", "UNSAFE_PRIOR\u{202e}_KEY", false),
+            ("noncanonical prior key", "recreated  key", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut model = TuiModel::new(snapshot(), false);
+            let request = begin_create_set_request(&mut model, &profile, &candidate);
+            let review = set_review(
+                &profile,
+                ExpectedMemoryEntryState::Deleted(tombstone.reference()),
+                candidate.clone(),
+                deleted_set_diff_with_prior_key(&candidate, prior_key),
+                79_837 + u128::try_from(index).expect("case index"),
+            );
+
+            let (result, cancellations) =
+                install_returned_set_review(&mut model, request, review.clone());
+
+            if valid {
+                assert!(result.is_ok(), "case={name}: {result:?}");
+                assert_eq!(cancellations, 0, "case={name}");
+                assert_eq!(model.agents.memory.edit_review, Some(review), "case={name}");
+                assert!(
+                    model.agents.memory.edit_review_command().is_some(),
+                    "case={name}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(TuiError::UnexpectedControllerEffect)),
+                    "case={name}: {result:?}",
+                );
+                assert_eq!(cancellations, 1, "case={name}");
+                assert!(!model.agents.memory.review_registered, "case={name}");
+                assert!(model.agents.memory.edit_review.is_none(), "case={name}");
+                assert!(
+                    model.agents.memory.edit_review_command().is_none(),
+                    "case={name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn seeded_set_review_uses_the_immutable_editor_seed_when_detail_cache_changes() {
+        let profile = refresh_profile(79_840, 0);
+        let foreign = refresh_profile(79_850, 1);
+        let seed = memory_entry(
+            &profile,
+            79_860,
+            MemoryEntryDraft::new(
+                "Retained seed key".to_owned(),
+                "Retained seed value".to_owned(),
+                vec!["retained".to_owned()],
+            )
+            .expect("retained seed"),
+        );
+        let same_profile_replacement = memory_entry(
+            &profile,
+            79_870,
+            MemoryEntryDraft::new(
+                "Different cached key".to_owned(),
+                "Different cached value".to_owned(),
+                Vec::new(),
+            )
+            .expect("same-profile replacement"),
+        );
+        let foreign_replacement = memory_entry(
+            &foreign,
+            79_880,
+            MemoryEntryDraft::new(
+                "Foreign cached key".to_owned(),
+                "Foreign cached value".to_owned(),
+                Vec::new(),
+            )
+            .expect("foreign replacement"),
+        );
+
+        for (name, cached_detail) in [
+            ("absent", None),
+            (
+                "different same-profile entry",
+                Some(MemoryEntryView {
+                    profile: profile.reference(),
+                    entry: same_profile_replacement.clone(),
+                }),
+            ),
+            (
+                "foreign entry",
+                Some(MemoryEntryView {
+                    profile: foreign.reference(),
+                    entry: foreign_replacement.clone(),
+                }),
+            ),
+        ] {
+            let mut model = TuiModel::new(snapshot(), false);
+            let request = begin_seeded_set_request(
+                &mut model,
+                &profile,
+                seed.clone(),
+                "Updated retained value",
+                "updated",
+            );
+            let candidate = request.candidate.clone();
+            model.agents.memory.entry_detail = cached_detail;
+            let review = set_review(
+                &profile,
+                ExpectedMemoryEntryState::Present(seed.reference()),
+                candidate.clone(),
+                present_set_diff(&seed, &candidate),
+                79_890,
+            );
+
+            let (result, cancellations) =
+                install_returned_set_review(&mut model, request, review.clone());
+
+            assert!(result.is_ok(), "cache case={name}: {result:?}");
+            assert_eq!(cancellations, 0, "cache case={name}");
+            assert_eq!(model.agents.memory.edit_review, Some(review), "case={name}");
+            assert_eq!(model.agents.memory.pane, MemoryPane::MutationReview);
+            assert!(
+                model.agents.memory.edit_review_command().is_some(),
+                "case={name}"
+            );
+        }
+    }
+
+    #[test]
+    fn seeded_set_review_rejects_cache_inferred_absent_deleted_and_present_states_once() {
+        let profile = refresh_profile(79_900, 0);
+        let seed = memory_entry(
+            &profile,
+            79_910,
+            MemoryEntryDraft::new(
+                "Protected seed key".to_owned(),
+                "Protected seed value".to_owned(),
+                vec!["protected".to_owned()],
+            )
+            .expect("protected seed"),
+        );
+
+        for name in [
+            "absent without cache",
+            "deleted without cache",
+            "replacement cache",
+        ] {
+            let mut model = TuiModel::new(snapshot(), false);
+            let request = begin_seeded_set_request(
+                &mut model,
+                &profile,
+                seed.clone(),
+                "Updated protected value",
+                "updated",
+            );
+            let candidate = request.candidate.clone();
+            let review = match name {
+                "absent without cache" => set_review(
+                    &profile,
+                    ExpectedMemoryEntryState::Absent,
+                    candidate.clone(),
+                    absent_set_diff(&candidate),
+                    79_920,
+                ),
+                "deleted without cache" => {
+                    let tombstone = deleted_memory_entry(&profile, 79_930, candidate.clone());
+                    set_review(
+                        &profile,
+                        ExpectedMemoryEntryState::Deleted(tombstone.reference()),
+                        candidate.clone(),
+                        deleted_set_diff(&candidate),
+                        79_940,
+                    )
+                }
+                "replacement cache" => {
+                    let replacement = memory_entry(
+                        &profile,
+                        79_950,
+                        MemoryEntryDraft::new(
+                            seed.display_key().to_owned(),
+                            "Cached replacement value".to_owned(),
+                            vec!["cached".to_owned()],
+                        )
+                        .expect("cached replacement"),
+                    );
+                    let diff = present_set_diff(&replacement, &candidate);
+                    model.agents.memory.entry_detail = Some(MemoryEntryView {
+                        profile: profile.reference(),
+                        entry: replacement.clone(),
+                    });
+                    set_review(
+                        &profile,
+                        ExpectedMemoryEntryState::Present(replacement.reference()),
+                        candidate.clone(),
+                        diff,
+                        79_960,
+                    )
+                }
+                _ => unreachable!("fixed cache case"),
+            };
+
+            let (result, cancellations) = install_returned_set_review(&mut model, request, review);
+
+            assert!(
+                matches!(result, Err(TuiError::UnexpectedControllerEffect)),
+                "cache case={name}: {result:?}",
+            );
+            assert_eq!(cancellations, 1, "cache case={name}");
+            assert!(!model.agents.memory.review_registered, "case={name}");
+            assert!(model.agents.memory.edit_review.is_none(), "case={name}");
+            assert!(
+                model.agents.memory.edit_review_command().is_none(),
+                "case={name}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_set_review_ignores_unrelated_detail_cache_but_keeps_create_state_exact() {
+        let profile = refresh_profile(79_970, 0);
+        let foreign = refresh_profile(79_980, 1);
+        let unrelated = memory_entry(
+            &foreign,
+            79_990,
+            MemoryEntryDraft::new(
+                "Unrelated detail key".to_owned(),
+                "Unrelated detail value".to_owned(),
+                Vec::new(),
+            )
+            .expect("unrelated entry"),
+        );
+
+        for (name, expected_valid) in [
+            ("absent create", true),
+            ("deleted recreation", true),
+            ("present cache substitution", false),
+        ] {
+            let candidate = MemoryEntryDraft::new(
+                format!("Create cache key {name}"),
+                "Create cache value".to_owned(),
+                vec!["create".to_owned()],
+            )
+            .expect("create candidate");
+            let mut model = TuiModel::new(snapshot(), false);
+            let request = begin_create_set_request(&mut model, &profile, &candidate);
+            model.agents.memory.entry_detail = Some(MemoryEntryView {
+                profile: foreign.reference(),
+                entry: unrelated.clone(),
+            });
+            let review = match name {
+                "absent create" => set_review(
+                    &profile,
+                    ExpectedMemoryEntryState::Absent,
+                    candidate.clone(),
+                    absent_set_diff(&candidate),
+                    80_000,
+                ),
+                "deleted recreation" => {
+                    let tombstone = deleted_memory_entry(&profile, 80_010, candidate.clone());
+                    set_review(
+                        &profile,
+                        ExpectedMemoryEntryState::Deleted(tombstone.reference()),
+                        candidate.clone(),
+                        deleted_set_diff(&candidate),
+                        80_020,
+                    )
+                }
+                "present cache substitution" => set_review(
+                    &profile,
+                    ExpectedMemoryEntryState::Present(unrelated.reference()),
+                    candidate.clone(),
+                    present_set_diff(&unrelated, &candidate),
+                    80_030,
+                ),
+                _ => unreachable!("fixed create case"),
+            };
+
+            let (result, cancellations) = install_returned_set_review(&mut model, request, review);
+
+            if expected_valid {
+                assert!(result.is_ok(), "create case={name}: {result:?}");
+                assert_eq!(cancellations, 0, "create case={name}");
+                assert!(
+                    model.agents.memory.edit_review_command().is_some(),
+                    "case={name}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(TuiError::UnexpectedControllerEffect)),
+                    "create case={name}: {result:?}",
+                );
+                assert_eq!(cancellations, 1, "create case={name}");
+                assert!(
+                    model.agents.memory.edit_review_command().is_none(),
+                    "case={name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_editor_provenance_cannot_install_or_execute_a_returned_set_review() {
+        let profile = refresh_profile(80_040, 0);
+        let foreign = refresh_profile(80_050, 1);
+
+        let seed = memory_entry(
+            &profile,
+            80_060,
+            MemoryEntryDraft::new(
+                "Malformed provenance key".to_owned(),
+                "Original value".to_owned(),
+                Vec::new(),
+            )
+            .expect("seed"),
+        );
+        let mut seeded_wrong_origin = TuiModel::new(snapshot(), false);
+        let request = begin_seeded_set_request(
+            &mut seeded_wrong_origin,
+            &profile,
+            seed.clone(),
+            "Updated value",
+            "updated",
+        );
+        let candidate = request.candidate.clone();
+        seeded_wrong_origin.agents.memory.editor_origin = MemoryEditorOrigin::Create;
+        seeded_wrong_origin.agents.memory.entry_detail = Some(MemoryEntryView {
+            profile: profile.reference(),
+            entry: seed.clone(),
+        });
+        let review = set_review(
+            &profile,
+            ExpectedMemoryEntryState::Present(seed.reference()),
+            candidate.clone(),
+            present_set_diff(&seed, &candidate),
+            80_070,
+        );
+        let (result, cancellations) =
+            install_returned_set_review(&mut seeded_wrong_origin, request, review);
+        assert!(matches!(result, Err(TuiError::UnexpectedControllerEffect)));
+        assert_eq!(cancellations, 1);
+        assert!(
+            seeded_wrong_origin
+                .agents
+                .memory
+                .edit_review_command()
+                .is_none()
+        );
+
+        let cached_seed = memory_entry(
+            &profile,
+            80_080,
+            MemoryEntryDraft::new(
+                "Seedless editor key".to_owned(),
+                "Cached value".to_owned(),
+                Vec::new(),
+            )
+            .expect("cached seed"),
+        );
+        let mut seedless_edit = TuiModel::new(snapshot(), false);
+        let create_candidate = MemoryEntryDraft::new(
+            cached_seed.display_key().to_owned(),
+            "Seedless updated value".to_owned(),
+            vec!["updated".to_owned()],
+        )
+        .expect("seedless candidate");
+        let request = begin_create_set_request(&mut seedless_edit, &profile, &create_candidate);
+        seedless_edit.agents.memory.editor_origin = MemoryEditorOrigin::Edit;
+        seedless_edit.agents.memory.entry_detail = Some(MemoryEntryView {
+            profile: profile.reference(),
+            entry: cached_seed.clone(),
+        });
+        let review = set_review(
+            &profile,
+            ExpectedMemoryEntryState::Present(cached_seed.reference()),
+            create_candidate.clone(),
+            present_set_diff(&cached_seed, &create_candidate),
+            80_090,
+        );
+        let (result, cancellations) =
+            install_returned_set_review(&mut seedless_edit, request, review);
+        assert!(matches!(result, Err(TuiError::UnexpectedControllerEffect)));
+        assert_eq!(cancellations, 1);
+        assert!(seedless_edit.agents.memory.edit_review_command().is_none());
+
+        let foreign_seed = memory_entry(
+            &foreign,
+            80_100,
+            MemoryEntryDraft::new(
+                "Foreign seed key".to_owned(),
+                "Foreign seed value".to_owned(),
+                Vec::new(),
+            )
+            .expect("foreign seed"),
+        );
+        let mut foreign_seed_editor = TuiModel::new(snapshot(), false);
+        let request = begin_seeded_set_request(
+            &mut foreign_seed_editor,
+            &profile,
+            foreign_seed.clone(),
+            "Foreign updated value",
+            "updated",
+        );
+        let candidate = request.candidate.clone();
+        foreign_seed_editor.agents.memory.entry_detail = Some(MemoryEntryView {
+            profile: foreign.reference(),
+            entry: foreign_seed.clone(),
+        });
+        let review = set_review(
+            &profile,
+            ExpectedMemoryEntryState::Present(foreign_seed.reference()),
+            candidate.clone(),
+            present_set_diff(&foreign_seed, &candidate),
+            80_110,
+        );
+        let (result, cancellations) =
+            install_returned_set_review(&mut foreign_seed_editor, request, review);
+        assert!(matches!(result, Err(TuiError::UnexpectedControllerEffect)));
+        assert_eq!(cancellations, 1);
+        assert!(
+            foreign_seed_editor
+                .agents
+                .memory
+                .edit_review_command()
+                .is_none()
+        );
     }
 
     #[test]
@@ -4740,11 +5233,13 @@ mod tests {
             profile: profile.reference(),
             entry: entry.clone(),
         });
+        model.agents.memory.pane = MemoryPane::EntryDetail;
         let generation = model
             .agents
             .memory
             .begin_review_request()
             .expect("delete generation");
+        model.agents.memory.detail_scroll = usize::MAX;
 
         install_delete_preview(
             &runtime.client(),
@@ -4757,6 +5252,7 @@ mod tests {
         assert_eq!(model.agents.memory.edit_review, Some(exact_review));
         assert_eq!(model.agents.memory.pane, MemoryPane::MutationReview);
         assert!(model.agents.memory.review_registered);
+        assert_eq!(model.agents.memory.detail_scroll, 0);
         cancel_tui_memory_review_once(&runtime.client(), &mut model.agents.memory)
             .expect("cancel exact review");
         assert_eq!(cancellations.load(Ordering::SeqCst), 1);
@@ -4778,11 +5274,13 @@ mod tests {
                 profile: profile.reference(),
                 entry: entry.clone(),
             });
+            model.agents.memory.pane = MemoryPane::EntryDetail;
             let generation = model
                 .agents
                 .memory
                 .begin_review_request()
                 .expect("delete generation");
+            model.agents.memory.detail_scroll = 71;
             let result = install_delete_preview(
                 &runtime.client(),
                 &mut model,
@@ -4792,6 +5290,7 @@ mod tests {
             );
             assert_eq!(result.is_ok(), accepted, "{name}");
             assert!(!model.agents.memory.review_registered, "{name}");
+            assert_eq!(model.agents.memory.detail_scroll, 71, "{name}");
             assert_eq!(cancellations.load(Ordering::SeqCst), 0, "{name}");
             runtime
                 .finish_and_join(ShutdownReason::Interrupted)
@@ -4829,11 +5328,13 @@ mod tests {
                     super::super::model::MemoryProposalDetailAction::Reject
                 }
             };
+            model.agents.memory.pane = MemoryPane::ProposalDetail;
             let generation = model
                 .agents
                 .memory
                 .begin_review_request()
                 .expect("resolution generation");
+            model.agents.memory.detail_scroll = usize::MAX;
 
             install_resolution_preview(
                 &runtime.client(),
@@ -4849,6 +5350,7 @@ mod tests {
                 MemoryPane::ProposalResolutionReview
             );
             assert!(model.agents.memory.review_registered);
+            assert_eq!(model.agents.memory.detail_scroll, 0);
             cancel_tui_memory_review_once(&runtime.client(), &mut model.agents.memory)
                 .expect("cancel resolution review");
             assert_eq!(cancellations.load(Ordering::SeqCst), 1);
@@ -4903,6 +5405,7 @@ mod tests {
         ]);
         let mut runner = TuiRunner::new(runtime, snapshot(), false);
         let (command, _) = install_confirmed_set(&mut runner.model, &profile, 80_410);
+        runner.model.agents.memory.detail_scroll = 83;
         let initial_generation = runner.model.agents.memory.generation;
         let retained_review = runner.model.agents.memory.edit_review.clone();
         let retained_draft = runner
@@ -4956,6 +5459,7 @@ mod tests {
             retained_draft,
         );
         assert!(runner.model.agents.memory.confirmed_command().is_some());
+        assert_eq!(runner.model.agents.memory.detail_scroll, 83);
         assert_eq!(cancellations.load(Ordering::SeqCst), 0);
         assert!(runner.pending.is_none());
         assert!(runner.pending_memory.is_none());
@@ -4987,6 +5491,7 @@ mod tests {
         assert!(runner.model.agents.memory.confirmation.is_none());
         assert!(runner.model.agents.memory.editor.is_none());
         assert_eq!(runner.model.agents.memory.pane, MemoryPane::Result);
+        assert_eq!(runner.model.agents.memory.detail_scroll, 0);
         assert_eq!(runner.deferred_memory_refreshes.len(), 1);
         runner
             .finish(ShutdownReason::Interrupted)
@@ -5000,6 +5505,7 @@ mod tests {
             memory_action_runtime([Err(AppError::MemoryEntryNotFound)]);
         let mut runner = TuiRunner::new(runtime, snapshot(), false);
         let (command, _) = install_confirmed_set(&mut runner.model, &profile, 80_510);
+        runner.model.agents.memory.detail_scroll = usize::MAX;
         let retained_draft = runner
             .model
             .agents
@@ -5025,6 +5531,7 @@ mod tests {
         assert!(runner.model.agents.memory.resolution_review.is_none());
         assert!(runner.model.agents.memory.confirmation.is_none());
         assert_eq!(runner.model.agents.memory.pane, MemoryPane::Editor);
+        assert_eq!(runner.model.agents.memory.detail_scroll, 0);
         assert_eq!(
             runner
                 .model
@@ -5190,6 +5697,7 @@ mod tests {
                 action,
                 80_840,
             );
+            runner.model.agents.memory.detail_scroll = usize::MAX;
             runner
                 .apply_effect(ControllerEffect::ExecuteMemory(command.clone()))
                 .expect("resolution submission");
@@ -5215,6 +5723,11 @@ mod tests {
             );
             assert_eq!(runner.model.agents.memory.pending_intent, None, "{name}");
             assert!(runner.deferred_memory_refreshes.is_empty(), "{name}");
+            assert_eq!(
+                runner.model.agents.memory.detail_scroll,
+                usize::MAX,
+                "{name}"
+            );
             runner
                 .cancel_active_memory_review()
                 .expect("cancel malformed result review");
@@ -5267,6 +5780,7 @@ mod tests {
                 action,
                 80_940,
             );
+            runner.model.agents.memory.detail_scroll = usize::MAX;
             runner
                 .apply_effect(ControllerEffect::ExecuteMemory(command))
                 .expect("resolution submission");
@@ -5285,6 +5799,7 @@ mod tests {
                 MemoryPane::Result,
                 "{action:?}"
             );
+            assert_eq!(runner.model.agents.memory.detail_scroll, 0, "{action:?}");
             assert!(!runner.model.agents.memory.review_registered, "{action:?}");
             assert!(
                 runner.model.agents.memory.resolution_review.is_none(),
@@ -5345,6 +5860,7 @@ mod tests {
                         &[memory_proposal(&profile, 81_040)],
                     ));
                 }
+                runner.model.agents.memory.detail_scroll = usize::MAX;
 
                 runner
                     .complete_memory_outcome(
@@ -5370,6 +5886,7 @@ mod tests {
                     super::super::model::MemoryResultOrigin::Mutation,
                 );
                 assert_eq!(runner.model.agents.memory.pane, MemoryPane::Result);
+                assert_eq!(runner.model.agents.memory.detail_scroll, 0);
                 assert!(!runner.model.agents.memory.review_registered);
                 assert!(runner.model.agents.memory.edit_review.is_none());
                 assert!(runner.model.agents.memory.confirmation.is_none());
@@ -5580,6 +6097,7 @@ mod tests {
                 }
                 _ => unreachable!(),
             };
+            runner.model.agents.memory.detail_scroll = usize::MAX;
 
             assert!(
                 matches!(
@@ -5599,6 +6117,7 @@ mod tests {
                 runner.model.agents.memory.confirmation.is_none(),
                 "{origin}"
             );
+            assert_eq!(runner.model.agents.memory.detail_scroll, 0, "{origin}");
             match origin {
                 "set" => {
                     assert_eq!(runner.model.agents.memory.pane, MemoryPane::Editor);
@@ -5644,6 +6163,7 @@ mod tests {
         let mut runner = TuiRunner::new(runtime, snapshot(), false);
         install_confirmed_set(&mut runner.model, &profile, 81_410);
         runner.model.agents.memory.pane = MemoryPane::MutationReview;
+        runner.model.agents.memory.detail_scroll = usize::MAX;
         runner
             .model
             .command

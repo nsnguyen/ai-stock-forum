@@ -3102,6 +3102,7 @@ fn prepare_memory_read(
                     .into_iter()
                     .map(|record| MemoryProposalSummary {
                         proposal: record.proposal,
+                        namespace_id: profile.memory_namespace_id(),
                         proposer: record.proposer,
                         operation: record.operation,
                         display_key: record.display_key,
@@ -4072,6 +4073,7 @@ fn materialize_memory_view(
                 }
                 summaries.push(MemoryProposalSummary {
                     proposal: proposal.reference(),
+                    namespace_id: proposal.namespace_id(),
                     proposer: proposal.proposer().clone(),
                     operation: match proposal.operation() {
                         MemoryProposalOperation::Set { .. } => MemoryProposalOperationKind::Set,

@@ -316,6 +316,7 @@ pub struct MemoryEntryVersionView {
 #[serde(deny_unknown_fields)]
 pub struct MemoryProposalSummary {
     pub proposal: MemoryProposalRef,
+    pub namespace_id: MemoryNamespaceId,
     pub proposer: crate::agents::AgentProfileVersionRef,
     pub operation: MemoryProposalOperationKind,
     pub display_key: String,

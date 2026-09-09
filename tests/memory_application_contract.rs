@@ -542,6 +542,7 @@ fn memory_views() -> Vec<CommandView> {
             filter: MemoryProposalFilter::Pending,
             proposals: vec![MemoryProposalSummary {
                 proposal: proposal_ref.clone(),
+                namespace_id: profile.memory_namespace_id(),
                 proposer: profile.reference(),
                 operation: MemoryProposalOperationKind::Set,
                 display_key: proposal.display_key().into(),

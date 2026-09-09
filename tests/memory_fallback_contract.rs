@@ -3268,6 +3268,7 @@ fn memory_list_renderers_cap_rows_escape_terminal_text_and_omit_detail_prose() {
     let mut proposals = (0..100)
         .map(|index| MemoryProposalSummary {
             proposal: proposal.reference(),
+            namespace_id: proposal.namespace_id(),
             proposer: profile.reference(),
             operation: MemoryProposalOperationKind::Set,
             display_key: format!("Proposal Key {index}"),
@@ -3277,6 +3278,7 @@ fn memory_list_renderers_cap_rows_escape_terminal_text_and_omit_detail_prose() {
         .collect::<Vec<_>>();
     proposals.push(MemoryProposalSummary {
         proposal: proposal.reference(),
+        namespace_id: proposal.namespace_id(),
         proposer: profile.reference(),
         operation: MemoryProposalOperationKind::Set,
         display_key: "PROPOSAL_SENTINEL_MUST_NOT_RENDER".into(),

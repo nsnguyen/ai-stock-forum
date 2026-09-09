@@ -767,6 +767,12 @@ fn proposal_reads_filter_order_redact_lists_and_expose_deliberate_detail() {
     );
     assert_eq!(all.proposals[0].proposal, rejected.reference());
     assert_eq!(all.proposals[1].proposal, pending.reference());
+    for summary in &all.proposals {
+        assert_eq!(
+            serde_json::to_value(summary).unwrap()["namespace_id"],
+            serde_json::Value::String(owner.memory_namespace_id().to_string())
+        );
+    }
     let list_json = serde_json::to_string(&all).unwrap();
     assert!(!list_json.contains("candidate plaintext"));
     assert!(!list_json.contains("private rationale"));

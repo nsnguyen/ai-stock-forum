@@ -27,6 +27,13 @@ pub struct AgentWorkspaceLayout {
     pub active: Rect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryWorkspaceLayout {
+    pub primary: Rect,
+    pub detail: Option<Rect>,
+    pub context: Option<Rect>,
+}
+
 pub type SkillWorkspaceLayout = AgentWorkspaceLayout;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,8 +44,21 @@ pub struct ViewGeometry {
 }
 
 pub fn view_geometry(area: Rect, view: View, inspector_open: bool) -> ViewGeometry {
+    view_geometry_for_state(area, view, inspector_open, false)
+}
+
+pub fn view_geometry_for_state(
+    area: Rect,
+    view: View,
+    inspector_open: bool,
+    memory_active: bool,
+) -> ViewGeometry {
     let cockpit = if view == View::Agents {
-        calculate_agents(area, inspector_open)
+        if memory_active {
+            calculate_agents_memory(area)
+        } else {
+            calculate_agents(area, inspector_open)
+        }
     } else {
         calculate(area, inspector_open)
     };
@@ -98,6 +118,16 @@ pub fn agent_layout_mode(area: Rect) -> LayoutMode {
     }
 }
 
+pub fn memory_layout_mode(area: Rect) -> LayoutMode {
+    if area.width >= WIDE_WIDTH {
+        LayoutMode::Wide
+    } else if area.width >= MEDIUM_WIDTH {
+        LayoutMode::Medium
+    } else {
+        LayoutMode::Narrow
+    }
+}
+
 pub fn agent_workspace(area: Rect, mode: LayoutMode) -> AgentWorkspaceLayout {
     match mode {
         LayoutMode::Narrow | LayoutMode::TooSmall => AgentWorkspaceLayout {
@@ -114,6 +144,43 @@ pub fn agent_workspace(area: Rect, mode: LayoutMode) -> AgentWorkspaceLayout {
             }
         }
     }
+}
+
+pub fn memory_workspace(area: Rect, mode: LayoutMode) -> MemoryWorkspaceLayout {
+    match mode {
+        LayoutMode::TooSmall | LayoutMode::Narrow => MemoryWorkspaceLayout {
+            primary: area,
+            detail: None,
+            context: None,
+        },
+        LayoutMode::Medium => {
+            let columns =
+                Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)])
+                    .split(area);
+            MemoryWorkspaceLayout {
+                primary: columns[0],
+                detail: Some(columns[1]),
+                context: None,
+            }
+        }
+        LayoutMode::Wide => {
+            let columns = Layout::horizontal([
+                Constraint::Percentage(30),
+                Constraint::Percentage(44),
+                Constraint::Percentage(26),
+            ])
+            .split(area);
+            MemoryWorkspaceLayout {
+                primary: columns[0],
+                detail: Some(columns[1]),
+                context: Some(columns[2]),
+            }
+        }
+    }
+}
+
+pub fn memory_list_visible_items(area: Rect) -> usize {
+    usize::from(area.height.saturating_sub(7) / 2).max(1)
 }
 
 pub fn skill_layout_mode(area: Rect) -> LayoutMode {
@@ -140,17 +207,22 @@ pub fn skill_workspace(area: Rect, mode: LayoutMode) -> SkillWorkspaceLayout {
 
 pub fn calculate(area: Rect, inspector_open: bool) -> CockpitLayout {
     let mode = layout_mode(area);
-    calculate_for_mode(area, inspector_open, mode, 3)
+    calculate_for_mode(area, inspector_open, mode, 3, true)
 }
 
 pub fn calculate_agents(area: Rect, inspector_open: bool) -> CockpitLayout {
     let mode = agent_layout_mode(area);
-    calculate_for_mode(area, inspector_open, mode, 4)
+    calculate_for_mode(area, inspector_open, mode, 4, true)
+}
+
+pub fn calculate_agents_memory(area: Rect) -> CockpitLayout {
+    let mode = agent_layout_mode(area);
+    calculate_for_mode(area, false, mode, 4, false)
 }
 
 pub fn calculate_skills(area: Rect, inspector_open: bool) -> CockpitLayout {
     let mode = skill_layout_mode(area);
-    calculate_for_mode(area, inspector_open, mode, 4)
+    calculate_for_mode(area, inspector_open, mode, 4, true)
 }
 
 fn calculate_for_mode(
@@ -158,6 +230,7 @@ fn calculate_for_mode(
     inspector_open: bool,
     mode: LayoutMode,
     header_height: u16,
+    inspector_available: bool,
 ) -> CockpitLayout {
     if mode == LayoutMode::TooSmall {
         return CockpitLayout {
@@ -185,7 +258,7 @@ fn calculate_for_mode(
     let command = bands[3];
 
     let (navigation, workspace, inspector) = match mode {
-        LayoutMode::Wide => {
+        LayoutMode::Wide if inspector_available => {
             let columns = Layout::horizontal([
                 Constraint::Length(20),
                 Constraint::Min(0),
@@ -194,6 +267,11 @@ fn calculate_for_mode(
             .split(content);
             (Some(columns[0]), columns[1], Some(columns[2]))
         }
+        LayoutMode::Wide => {
+            let columns =
+                Layout::horizontal([Constraint::Length(20), Constraint::Min(0)]).split(content);
+            (Some(columns[0]), columns[1], None)
+        }
         LayoutMode::Medium => {
             let columns =
                 Layout::horizontal([Constraint::Length(20), Constraint::Min(0)]).split(content);
@@ -201,13 +279,13 @@ fn calculate_for_mode(
             (
                 Some(columns[0]),
                 workspace,
-                inspector_open.then(|| centered_overlay(workspace)),
+                (inspector_available && inspector_open).then(|| centered_overlay(workspace)),
             )
         }
         LayoutMode::Narrow => (
             None,
             content,
-            inspector_open.then(|| centered_overlay(content)),
+            (inspector_available && inspector_open).then(|| centered_overlay(content)),
         ),
         LayoutMode::TooSmall => unreachable!("too-small mode returns before splitting"),
     };

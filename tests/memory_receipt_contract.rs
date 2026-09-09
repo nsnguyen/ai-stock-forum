@@ -6,6 +6,7 @@ use ai_stock_forum::{
         AppError, ApplicationCommand, ApplicationEvent, AuthorizationDecision, CommandEnvelope,
         CommandOutcome, CommandView, EVENT_SCHEMA_VERSION, MemoryEntryMutationView,
         MemoryProposalCreatedView, MemoryProposalResolutionView, PendingEvent, ShutdownDisposition,
+        ShutdownReason,
     },
     domain::{
         Actor, ApprovalId, CausationId, CommandId, CorrelationId, EventId, MemoryEntryId,
@@ -18,8 +19,8 @@ use ai_stock_forum::{
         MemoryRetrievalScope,
     },
     persistence::{
-        CommandReceiptRecord, CommandReceiptRepository, EventRepository, MemoryRepository,
-        ProjectionRepository,
+        CommandReceiptRecord, CommandReceiptRepository, Database, EventRepository,
+        MemoryRepository, PersistenceError, ProjectionRepository,
     },
     policy::{ApprovalAction, ApprovalRecord, ApprovalStatus, Capability},
     recovery::reduce,
@@ -179,6 +180,50 @@ fn insert_success_receipt(
     outcome
 }
 
+fn receipt_outcome_json(database: &Database, command_id: CommandId) -> String {
+    database
+        .connection()
+        .query_row(
+            "SELECT outcome_json FROM command_receipts WHERE command_id = ?1",
+            [command_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn proposal_summary_rows(value: &mut serde_json::Value) -> &mut Vec<serde_json::Value> {
+    value
+        .pointer_mut("/data/outcome/view/data/proposals")
+        .and_then(serde_json::Value::as_array_mut)
+        .expect("stored proposal-list rows")
+}
+
+fn rewrite_first_proposal_summary(
+    database: &Database,
+    command_id: CommandId,
+    rewrite: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+) {
+    database
+        .connection()
+        .execute_batch("DROP TRIGGER IF EXISTS command_receipts_no_update;")
+        .unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_str(&receipt_outcome_json(database, command_id)).unwrap();
+    rewrite(
+        proposal_summary_rows(&mut value)[0]
+            .as_object_mut()
+            .expect("proposal summary object"),
+    );
+    let canonical = String::from_utf8(canonical_json_bytes(&value).unwrap()).unwrap();
+    database
+        .connection()
+        .execute(
+            "UPDATE command_receipts SET outcome_json = ?1 WHERE command_id = ?2",
+            rusqlite::params![canonical, command_id.to_string()],
+        )
+        .unwrap();
+}
+
 fn pending_proposal(
     profile: &AgentProfileVersion,
     id: u128,
@@ -212,6 +257,43 @@ fn pending_proposal(
         .build()
         .unwrap();
     (proposal, approval)
+}
+
+fn seed_pending_proposals(app: &support::TestApp, proposals: &[(MemoryProposal, ApprovalRecord)]) {
+    let mut database = app.open_database();
+    let tx = database.immediate_transaction().unwrap();
+    let mut projection = ProjectionRepository::load_in(&tx).unwrap();
+    for (proposal, approval) in proposals {
+        let committed = EventRepository::append(
+            &tx,
+            PendingEvent {
+                event_id: proposal.creation_event_id(),
+                event_schema_version: EVENT_SCHEMA_VERSION,
+                actor: Actor::Agent(proposal.proposer().profile_id()),
+                occurred_at_ms: proposal.created_at_ms(),
+                correlation_id: CorrelationId::from_uuid(Uuid::from_u128(
+                    proposal.creation_event_id().as_uuid().as_u128() + 1_000_000,
+                )),
+                causation_id: None,
+                object: Some(proposal.object_ref().unwrap()),
+                event: ApplicationEvent::MemoryProposalCreated {
+                    proposal: proposal.clone(),
+                    approval: approval.clone(),
+                },
+            },
+        )
+        .unwrap();
+        reduce(&mut projection, &committed).unwrap();
+        MemoryRepository::insert_proposal_with_approval(
+            &tx,
+            committed.sequence,
+            proposal,
+            approval,
+        )
+        .unwrap();
+    }
+    ProjectionRepository::store(&tx, &projection).unwrap();
+    tx.commit().unwrap();
 }
 
 fn commit_entry_command_event(
@@ -494,6 +576,217 @@ fn proposal_created_receipt_replays_pending_after_live_terminal_resolution() {
     assert_eq!(app.execute(list_command).unwrap(), listed_pending);
     assert_eq!(app.execute(show_command).unwrap(), shown_pending);
     assert_eq!(policy.calls(), policy_calls);
+}
+
+#[test]
+fn proposal_list_receipt_replays_exact_namespace_after_resolution_and_service_reopen() {
+    let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
+    let fixture = support::persistent_fixture();
+    let mut first = fixture.service_with_policy(Arc::new(policy.clone()));
+    let created_profile = first
+        .execute(envelope(
+            450,
+            Actor::Human,
+            ApplicationCommand::CreateAgentProfile {
+                draft: AgentProfileDraft::new(
+                    "Receipt Reopen Owner".into(),
+                    "Receipt contract profile.".into(),
+                    AgentRole::Custom,
+                    "research".into(),
+                    vec![],
+                    "Careful.".into(),
+                    "Keep exact receipts.".into(),
+                    AgentBindings::default(),
+                    vec![],
+                    vec![],
+                )
+                .unwrap(),
+                template_provenance: None,
+            },
+        ))
+        .unwrap();
+    let profile_id = match created_profile.view {
+        CommandView::AgentProfileCreated(view) => view.profile_id,
+        other => panic!("expected created profile, got {other:?}"),
+    };
+    let profile = fixture.active_profile(profile_id);
+    let proposed = first
+        .execute(envelope(
+            451,
+            Actor::Agent(profile.profile_id()),
+            ApplicationCommand::ProposeMemoryMutation {
+                proposer: profile.reference(),
+                expected: ExpectedMemoryEntryState::Absent,
+                operation: MemoryProposalOperation::Set {
+                    candidate: MemoryEntryDraft::new(
+                        "Receipt Namespace Proposal".into(),
+                        "proposal candidate plaintext".into(),
+                        vec![],
+                    )
+                    .unwrap(),
+                },
+                rationale: "receipt namespace rationale".into(),
+            },
+        ))
+        .unwrap();
+    let proposal = match proposed.view {
+        CommandView::MemoryProposalCreated(view) => view.proposal,
+        other => panic!("expected proposal created, got {other:?}"),
+    };
+    let list_command = envelope(
+        452,
+        Actor::Human,
+        ApplicationCommand::ListMemoryProposals {
+            selector: profile.profile_id().into(),
+            filter: MemoryProposalFilter::Pending,
+        },
+    );
+    let historical = first.execute(list_command.clone()).unwrap();
+    let CommandView::MemoryProposals(list) = &historical.view else {
+        panic!("expected proposal list");
+    };
+    assert_eq!(list.proposals.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&list.proposals[0]).unwrap()["namespace_id"],
+        serde_json::Value::String(profile.memory_namespace_id().to_string())
+    );
+    let database = fixture.open_database();
+    let mut stored: serde_json::Value =
+        serde_json::from_str(&receipt_outcome_json(&database, list_command.command_id)).unwrap();
+    assert_eq!(
+        proposal_summary_rows(&mut stored)[0]["namespace_id"],
+        serde_json::Value::String(profile.memory_namespace_id().to_string())
+    );
+    drop(database);
+
+    let review = first
+        .preview_memory_proposal_rejection(proposal.clone())
+        .unwrap();
+    let review_proposal = review.proposal.reference();
+    first
+        .execute(envelope(
+            453,
+            Actor::Human,
+            ApplicationCommand::RejectMemoryProposal {
+                proposal: review_proposal,
+                approval_id: review.approval_id,
+                expected_approval_status: review.expected_approval_status,
+                expected_entry: review.expected_entry,
+                review_token: review.review_token,
+                review_digest: review.review_digest,
+            },
+        ))
+        .unwrap();
+    first.finish(ShutdownReason::UserQuit).unwrap();
+    drop(first);
+
+    let mut reopened = fixture.service_with_policy(Arc::new(policy.clone()));
+    policy.set_decision(AuthorizationDecision::Denied(
+        ai_stock_forum::policy::PolicyDecision::Denied,
+    ));
+    let side_effects = fixture.side_effect_calls();
+    let policy_calls = policy.calls();
+    let event_count = fixture.count_rows("event_stream");
+    let receipt_count = fixture.count_rows("command_receipts");
+
+    assert_eq!(reopened.execute(list_command).unwrap(), historical);
+    assert_eq!(fixture.side_effect_calls(), side_effects);
+    assert_eq!(policy.calls(), policy_calls);
+    assert_eq!(fixture.count_rows("event_stream"), event_count);
+    assert_eq!(fixture.count_rows("command_receipts"), receipt_count);
+}
+
+#[test]
+fn proposal_list_receipt_missing_namespace_fails_before_dependencies_or_writes() {
+    let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
+    let mut app = support::app_with_policy(Arc::new(policy.clone()));
+    let profile = create_profile(&mut app, 460);
+    let proposal = pending_proposal(
+        &profile,
+        6_100_100,
+        EventId::from_uuid(Uuid::from_u128(6_100_000)),
+    );
+    seed_pending_proposals(&app, std::slice::from_ref(&proposal));
+    let command = envelope(
+        461,
+        Actor::Human,
+        ApplicationCommand::ListMemoryProposals {
+            selector: profile.profile_id().into(),
+            filter: MemoryProposalFilter::Pending,
+        },
+    );
+    app.execute(command.clone()).unwrap();
+    let database = app.open_database();
+    rewrite_first_proposal_summary(&database, command.command_id, |summary| {
+        assert!(
+            summary.remove("namespace_id").is_some(),
+            "namespace provenance must be required in stored proposal rows"
+        );
+    });
+    drop(database);
+    policy.set_decision(AuthorizationDecision::Denied(
+        ai_stock_forum::policy::PolicyDecision::Denied,
+    ));
+    let database_before = app.raw_database_snapshot();
+    let policy_calls = policy.calls();
+    let clock_calls = app.clock.calls();
+    let id_calls = app.ids.calls();
+
+    assert_eq!(
+        app.execute(command),
+        Err(AppError::Persistence(PersistenceError::InvalidEventRecord))
+    );
+    assert_eq!(app.raw_database_snapshot(), database_before);
+    assert_eq!(policy.calls(), policy_calls);
+    assert_eq!(app.clock.calls(), clock_calls);
+    assert_eq!(app.ids.calls(), id_calls);
+}
+
+#[test]
+fn proposal_list_receipt_foreign_valid_namespace_fails_before_dependencies_or_writes() {
+    let policy = support::RecordingPolicy::new(AuthorizationDecision::Granted);
+    let mut app = support::app_with_policy(Arc::new(policy.clone()));
+    let owner = create_profile(&mut app, 470);
+    let other = create_profile(&mut app, 471);
+    let proposal = pending_proposal(
+        &owner,
+        6_200_100,
+        EventId::from_uuid(Uuid::from_u128(6_200_000)),
+    );
+    seed_pending_proposals(&app, std::slice::from_ref(&proposal));
+    let command = envelope(
+        472,
+        Actor::Human,
+        ApplicationCommand::ListMemoryProposals {
+            selector: owner.profile_id().into(),
+            filter: MemoryProposalFilter::Pending,
+        },
+    );
+    app.execute(command.clone()).unwrap();
+    let database = app.open_database();
+    rewrite_first_proposal_summary(&database, command.command_id, |summary| {
+        summary.insert(
+            "namespace_id".into(),
+            serde_json::Value::String(other.memory_namespace_id().to_string()),
+        );
+    });
+    drop(database);
+    policy.set_decision(AuthorizationDecision::Denied(
+        ai_stock_forum::policy::PolicyDecision::Denied,
+    ));
+    let database_before = app.raw_database_snapshot();
+    let policy_calls = policy.calls();
+    let clock_calls = app.clock.calls();
+    let id_calls = app.ids.calls();
+
+    assert_eq!(
+        app.execute(command),
+        Err(AppError::Persistence(PersistenceError::InvalidEventRecord))
+    );
+    assert_eq!(app.raw_database_snapshot(), database_before);
+    assert_eq!(policy.calls(), policy_calls);
+    assert_eq!(app.clock.calls(), clock_calls);
+    assert_eq!(app.ids.calls(), id_calls);
 }
 
 #[test]

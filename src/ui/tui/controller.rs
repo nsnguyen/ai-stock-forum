@@ -2,10 +2,11 @@ use super::{
     TuiEvent,
     model::{
         AgentDetailAction, AgentOutcomeIntent, AgentSkillAction, AgentsPane, AssignmentKind, Focus,
-        LayoutMode, MemoryConfirmation, MemoryEditorOrigin, MemoryEntryDetailAction, MemoryPane,
-        MemoryProposalDetailAction, MemoryResultOrigin, MemoryViewState, NavigationTab,
-        ProfileConfirmation, RuntimeStatus, Severity, SkillConfirmation, SkillDetailAction,
-        SkillOperationOrigin, SkillWorkspaceOrigin, SkillsPane, TuiModel, View,
+        LayoutMode, MEMORY_RETAINED_ROW_CAP, MemoryConfirmation, MemoryEditorOrigin,
+        MemoryEntryDetailAction, MemoryPane, MemoryProposalDetailAction, MemoryResultOrigin,
+        MemoryViewState, NavigationTab, ProfileConfirmation, RuntimeStatus, Severity,
+        SkillConfirmation, SkillDetailAction, SkillOperationOrigin, SkillWorkspaceOrigin,
+        SkillsPane, TuiModel, View,
     },
     views,
 };
@@ -491,6 +492,16 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         return effect;
     }
 
+    if !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane == AgentsPane::Memory
+        && model.focus != Focus::Command
+        && key.code == KeyCode::Char('i')
+        && no_modifiers(key.modifiers)
+    {
+        return ControllerEffect::Redraw;
+    }
+
     if active_confirmation(model) {
         return handle_confirmation_key(model, key);
     }
@@ -511,6 +522,13 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
     }
 
     if active_memory_editor(model) {
+        if !model.agents.memory.local_layer_cache_is_authenticated() {
+            return if key.code == KeyCode::Esc && no_modifiers(key.modifiers) {
+                handle_memory_editor_key(model, key)
+            } else {
+                ControllerEffect::Redraw
+            };
+        }
         let effect = handle_memory_editor_key(model, key);
         if effect != ControllerEffect::None {
             return effect;
@@ -790,6 +808,21 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
 }
 
 fn handle_paste(model: &mut TuiModel, text: &str) -> ControllerEffect {
+    if model.focus != Focus::Command
+        && !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane == AgentsPane::Memory
+        && matches!(
+            model.agents.memory.pane,
+            MemoryPane::Editor
+                | MemoryPane::MutationReview
+                | MemoryPane::ProposalResolutionReview
+                | MemoryPane::Confirmation
+        )
+        && !model.agents.memory.local_layer_cache_is_authenticated()
+    {
+        return ControllerEffect::Redraw;
+    }
     if !active_profile_editor(model)
         && !active_skill_editor(model)
         && !memory_text_entry_active(model)
@@ -1417,6 +1450,7 @@ fn active_memory_editor(model: &TuiModel) -> bool {
 
 fn memory_text_entry_active(model: &TuiModel) -> bool {
     active_memory_editor(model)
+        && model.agents.memory.local_layer_cache_is_authenticated()
         && model
             .agents
             .memory
@@ -1514,6 +1548,13 @@ fn handle_memory_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEf
         KeyCode::End if no_modifiers(key.modifiers) && !on_review => {
             edit(model, |model| model.command.move_end())
         }
+        KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+            if no_modifiers(key.modifiers) && !on_review =>
+        {
+            let (_, detail_page) = memory_page_sizes(model);
+            move_memory_detail_scroll(&mut model.agents.memory, key.code, detail_page);
+            ControllerEffect::Redraw
+        }
         _ => ControllerEffect::None,
     }
 }
@@ -1555,16 +1596,17 @@ fn apply_memory_editor_effect(
                 command: registered_command,
                 generation: model.agents.memory.generation,
             });
-            model.agents.memory.pane = MemoryPane::Confirmation;
+            set_memory_pane(&mut model.agents.memory, MemoryPane::Confirmation);
             ControllerEffect::Redraw
         }
         MemoryEditorEffect::Cancelled => {
             model.command.clear();
             model.agents.memory.editor = None;
-            model.agents.memory.pane = match model.agents.memory.editor_origin {
+            let pane = match model.agents.memory.editor_origin {
                 MemoryEditorOrigin::Create => MemoryPane::EntryList,
                 MemoryEditorOrigin::Edit => MemoryPane::EntryDetail,
             };
+            set_memory_pane(&mut model.agents.memory, pane);
             ControllerEffect::Redraw
         }
     }
@@ -1601,9 +1643,7 @@ fn memory_failure(model: &mut TuiModel, error: crate::domain::DomainError) -> Co
 
 fn reconcile_memory_entry_detail(memory: &mut MemoryViewState) {
     let selected_id = memory
-        .entries
-        .as_ref()
-        .and_then(|view| view.entries.get(memory.selected_entry))
+        .authenticated_selected_entry()
         .map(|summary| summary.entry.entry_id());
     if memory
         .entry_detail
@@ -1619,9 +1659,7 @@ fn reconcile_memory_entry_detail(memory: &mut MemoryViewState) {
 
 fn reconcile_memory_history_detail(memory: &mut MemoryViewState) {
     let selected_id = memory
-        .entry_history
-        .as_ref()
-        .and_then(|view| view.versions.get(memory.selected_history_version))
+        .authenticated_selected_history()
         .map(|summary| summary.entry.entry_version_id());
     if memory
         .entry_version
@@ -1635,9 +1673,7 @@ fn reconcile_memory_history_detail(memory: &mut MemoryViewState) {
 
 fn reconcile_memory_proposal_detail(memory: &mut MemoryViewState) {
     let selected_id = memory
-        .proposals
-        .as_ref()
-        .and_then(|view| view.proposals.get(memory.selected_proposal))
+        .authenticated_selected_proposal()
         .map(|summary| summary.proposal.proposal_id());
     if memory
         .proposal_detail
@@ -1651,9 +1687,7 @@ fn reconcile_memory_proposal_detail(memory: &mut MemoryViewState) {
 
 fn reconcile_memory_episode_detail(memory: &mut MemoryViewState) {
     let selected_id = memory
-        .episodes
-        .as_ref()
-        .and_then(|view| view.summaries.get(memory.selected_episode))
+        .authenticated_selected_episode()
         .map(|summary| summary.summary.summary_id());
     if memory
         .episode_detail
@@ -1665,75 +1699,207 @@ fn reconcile_memory_episode_detail(memory: &mut MemoryViewState) {
     }
 }
 
-fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
-    let memory = &mut model.agents.memory;
-    match (memory.pane, key.code) {
-        (
-            MemoryPane::EntryDetail
-            | MemoryPane::ProposalDetail
-            | MemoryPane::EpisodicDetail
-            | MemoryPane::MutationReview
-            | MemoryPane::ProposalResolutionReview
-            | MemoryPane::Confirmation
-            | MemoryPane::Result,
-            KeyCode::Down,
-        ) if no_modifiers(key.modifiers) => {
+#[derive(Clone, Copy)]
+enum MemoryListMovement {
+    Previous,
+    Next,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+}
+
+fn memory_page_sizes(model: &TuiModel) -> (usize, usize) {
+    let terminal = ratatui::layout::Rect::new(0, 0, model.terminal_width, model.terminal_height);
+    let workspace =
+        super::layout::view_geometry_for_state(terminal, View::Agents, model.inspector_open, true)
+            .cockpit
+            .workspace;
+    let nested =
+        super::layout::memory_workspace(workspace, super::layout::memory_layout_mode(workspace));
+    let list_page = super::layout::memory_list_visible_items(nested.primary);
+    let detail = nested.detail.unwrap_or(nested.primary);
+    let detail_page = usize::from(detail.height.saturating_sub(2).max(1));
+    (list_page, detail_page)
+}
+
+fn move_memory_list_selection(
+    selection: &mut usize,
+    first_visible: &mut usize,
+    raw_len: usize,
+    visible_items: usize,
+    movement: MemoryListMovement,
+) -> bool {
+    let retained_len = raw_len.min(MEMORY_RETAINED_ROW_CAP);
+    if retained_len == 0 {
+        let changed = *selection != 0;
+        *selection = 0;
+        *first_visible = 0;
+        return changed;
+    }
+
+    let original = *selection;
+    let previous = original.min(retained_len.saturating_sub(1));
+    let page = visible_items.max(1);
+    let last = retained_len.saturating_sub(1);
+    let next = match movement {
+        MemoryListMovement::Previous => previous.saturating_sub(1),
+        MemoryListMovement::Next => previous.saturating_add(1).min(last),
+        MemoryListMovement::PageUp => previous.saturating_sub(page),
+        MemoryListMovement::PageDown => previous.saturating_add(page).min(last),
+        MemoryListMovement::Home => 0,
+        MemoryListMovement::End => last,
+    };
+    *selection = next;
+
+    let max_first = retained_len.saturating_sub(page);
+    let mut first = (*first_visible).min(max_first);
+    if next < first {
+        first = next;
+    } else if next >= first.saturating_add(page) {
+        first = next.saturating_add(1).saturating_sub(page).min(max_first);
+    }
+    *first_visible = first;
+    next != original
+}
+
+fn memory_list_movement(code: KeyCode) -> Option<MemoryListMovement> {
+    match code {
+        KeyCode::Up => Some(MemoryListMovement::Previous),
+        KeyCode::Down => Some(MemoryListMovement::Next),
+        KeyCode::PageUp => Some(MemoryListMovement::PageUp),
+        KeyCode::PageDown => Some(MemoryListMovement::PageDown),
+        KeyCode::Home => Some(MemoryListMovement::Home),
+        KeyCode::End => Some(MemoryListMovement::End),
+        _ => None,
+    }
+}
+
+fn exact_history_version_is_installed(memory: &MemoryViewState) -> bool {
+    matches!(memory.authenticated_history_version(), Ok(Some(_)))
+}
+
+fn memory_pane_local_key(pane: MemoryPane, code: KeyCode) -> bool {
+    let scroll = matches!(
+        code,
+        KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
+    );
+    match pane {
+        MemoryPane::EntryList => {
+            scroll || matches!(code, KeyCode::Enter | KeyCode::Char('c' | 'p' | 'e'))
+        }
+        MemoryPane::EntryDetail | MemoryPane::ProposalDetail => {
+            scroll || matches!(code, KeyCode::Left | KeyCode::Right | KeyCode::Enter)
+        }
+        MemoryPane::EntryHistory | MemoryPane::Proposals | MemoryPane::EpisodicSummaries => {
+            scroll || code == KeyCode::Enter
+        }
+        MemoryPane::EpisodicDetail => scroll,
+        MemoryPane::Editor
+        | MemoryPane::MutationReview
+        | MemoryPane::Confirmation
+        | MemoryPane::ProposalResolutionReview
+        | MemoryPane::Result => false,
+    }
+}
+
+fn memory_detail_scroll_owned(memory: &MemoryViewState) -> bool {
+    match memory.pane {
+        MemoryPane::EntryHistory => exact_history_version_is_installed(memory),
+        MemoryPane::EntryDetail
+        | MemoryPane::Editor
+        | MemoryPane::MutationReview
+        | MemoryPane::Confirmation
+        | MemoryPane::Result
+        | MemoryPane::ProposalDetail
+        | MemoryPane::ProposalResolutionReview
+        | MemoryPane::EpisodicDetail => true,
+        MemoryPane::EntryList | MemoryPane::Proposals | MemoryPane::EpisodicSummaries => false,
+    }
+}
+
+fn set_memory_pane(memory: &mut MemoryViewState, pane: MemoryPane) {
+    memory.transition_to(pane);
+}
+
+fn move_memory_detail_scroll(
+    memory: &mut MemoryViewState,
+    code: KeyCode,
+    detail_page: usize,
+) -> bool {
+    match code {
+        KeyCode::Down => {
             memory.detail_scroll = memory.detail_scroll.saturating_add(1);
-            ControllerEffect::Redraw
+            true
         }
-        (
-            MemoryPane::EntryDetail
-            | MemoryPane::ProposalDetail
-            | MemoryPane::EpisodicDetail
-            | MemoryPane::MutationReview
-            | MemoryPane::ProposalResolutionReview
-            | MemoryPane::Confirmation
-            | MemoryPane::Result,
-            KeyCode::Up,
-        ) if no_modifiers(key.modifiers) => {
+        KeyCode::Up => {
             memory.detail_scroll = memory.detail_scroll.saturating_sub(1);
-            ControllerEffect::Redraw
+            true
         }
-        (
-            MemoryPane::EntryDetail
-            | MemoryPane::ProposalDetail
-            | MemoryPane::EpisodicDetail
-            | MemoryPane::MutationReview
-            | MemoryPane::ProposalResolutionReview
-            | MemoryPane::Confirmation
-            | MemoryPane::Result,
-            KeyCode::PageDown,
-        ) if no_modifiers(key.modifiers) => {
-            memory.detail_scroll = memory.detail_scroll.saturating_add(10);
-            ControllerEffect::Redraw
+        KeyCode::PageDown => {
+            memory.detail_scroll = memory.detail_scroll.saturating_add(detail_page);
+            true
         }
-        (
-            MemoryPane::EntryDetail
-            | MemoryPane::ProposalDetail
-            | MemoryPane::EpisodicDetail
-            | MemoryPane::MutationReview
-            | MemoryPane::ProposalResolutionReview
-            | MemoryPane::Confirmation
-            | MemoryPane::Result,
-            KeyCode::PageUp,
-        ) if no_modifiers(key.modifiers) => {
-            memory.detail_scroll = memory.detail_scroll.saturating_sub(10);
-            ControllerEffect::Redraw
+        KeyCode::PageUp => {
+            memory.detail_scroll = memory.detail_scroll.saturating_sub(detail_page);
+            true
         }
-        (MemoryPane::EntryList, KeyCode::Down) if no_modifiers(key.modifiers) => {
-            let last = memory
-                .entries
-                .as_ref()
-                .map(|view| view.entries.len().saturating_sub(1))
-                .unwrap_or(0);
-            memory.selected_entry = memory.selected_entry.saturating_add(1).min(last);
-            memory.entry_scroll = memory.selected_entry;
-            reconcile_memory_entry_detail(memory);
-            ControllerEffect::Redraw
+        KeyCode::Home => {
+            memory.detail_scroll = 0;
+            true
         }
-        (MemoryPane::EntryList, KeyCode::Up) if no_modifiers(key.modifiers) => {
-            memory.selected_entry = memory.selected_entry.saturating_sub(1);
-            memory.entry_scroll = memory.selected_entry;
+        KeyCode::End => {
+            memory.detail_scroll = usize::MAX;
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
+    let (list_page, detail_page) = memory_page_sizes(model);
+    if no_modifiers(key.modifiers)
+        && key.code != KeyCode::Esc
+        && (memory_pane_local_key(model.agents.memory.pane, key.code)
+            || matches!(
+                model.agents.memory.pane,
+                MemoryPane::Editor
+                    | MemoryPane::MutationReview
+                    | MemoryPane::Confirmation
+                    | MemoryPane::ProposalResolutionReview
+            ))
+        && !model.agents.memory.local_layer_cache_is_authenticated()
+    {
+        return ControllerEffect::Redraw;
+    }
+    let memory = &mut model.agents.memory;
+    if no_modifiers(key.modifiers)
+        && memory_detail_scroll_owned(memory)
+        && move_memory_detail_scroll(memory, key.code, detail_page)
+    {
+        return ControllerEffect::Redraw;
+    }
+    match (memory.pane, key.code) {
+        (MemoryPane::EntryList, code)
+            if no_modifiers(key.modifiers) && memory_list_movement(code).is_some() =>
+        {
+            let movement = memory_list_movement(code).expect("guard checked movement");
+            let len = memory.entries.as_ref().map_or(0, |view| view.entries.len());
+            let changed = move_memory_list_selection(
+                &mut memory.selected_entry,
+                &mut memory.entry_scroll,
+                len,
+                list_page,
+                movement,
+            );
+            if changed {
+                memory.detail_scroll = 0;
+            }
             reconcile_memory_entry_detail(memory);
             ControllerEffect::Redraw
         }
@@ -1742,6 +1908,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
             let selection = memory.entries.as_ref().and_then(|view| {
                 view.entries
                     .get(memory.selected_entry)
+                    .filter(|_| memory.selected_entry < MEMORY_RETAINED_ROW_CAP)
                     .map(|summary| summary.display_key.clone())
             });
             let (Ok(selector), Some(key)) = (memory.profile_selector(), selection) else {
@@ -1750,7 +1917,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                     crate::domain::DomainError::MemorySelectionUnavailable,
                 );
             };
-            memory.pane = MemoryPane::EntryDetail;
+            set_memory_pane(memory, MemoryPane::EntryDetail);
             ControllerEffect::LoadMemoryEntry { selector, key }
         }
         (MemoryPane::EntryList, KeyCode::Char('c')) if no_modifiers(key.modifiers) => {
@@ -1759,6 +1926,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                 .and_then(|selector| memory.open_create_editor(selector))
             {
                 Ok(()) => {
+                    memory.detail_scroll = 0;
                     model.command.clear();
                     ControllerEffect::Redraw
                 }
@@ -1772,7 +1940,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                     crate::domain::DomainError::MemorySelectionUnavailable,
                 );
             };
-            memory.pane = MemoryPane::Proposals;
+            set_memory_pane(memory, MemoryPane::Proposals);
             ControllerEffect::LoadMemoryProposals {
                 selector,
                 filter: MemoryProposalFilter::Pending,
@@ -1785,7 +1953,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                     crate::domain::DomainError::MemorySelectionUnavailable,
                 );
             };
-            memory.pane = MemoryPane::EpisodicSummaries;
+            set_memory_pane(memory, MemoryPane::EpisodicSummaries);
             ControllerEffect::LoadEpisodicSummaries(selector)
         }
         (MemoryPane::EntryDetail, KeyCode::Right) if no_modifiers(key.modifiers) => {
@@ -1822,6 +1990,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
             match memory.selected_entry_detail_action {
                 MemoryEntryDetailAction::Edit => match memory.open_edit_editor(selector, entry) {
                     Ok(()) => {
+                        memory.detail_scroll = 0;
                         synchronize_memory_editor_input(model);
                         ControllerEffect::Redraw
                     }
@@ -1836,26 +2005,31 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                     Err(error) => memory_failure(model, error),
                 },
                 MemoryEntryDetailAction::History => {
-                    memory.pane = MemoryPane::EntryHistory;
+                    set_memory_pane(memory, MemoryPane::EntryHistory);
                     ControllerEffect::LoadMemoryEntryHistory { selector, key }
                 }
             }
         }
-        (MemoryPane::EntryHistory, KeyCode::Down) if no_modifiers(key.modifiers) => {
-            let last = memory
+        (MemoryPane::EntryHistory, code)
+            if no_modifiers(key.modifiers)
+                && !exact_history_version_is_installed(memory)
+                && memory_list_movement(code).is_some() =>
+        {
+            let movement = memory_list_movement(code).expect("guard checked movement");
+            let len = memory
                 .entry_history
                 .as_ref()
-                .map(|view| view.versions.len().saturating_sub(1))
-                .unwrap_or(0);
-            memory.selected_history_version =
-                memory.selected_history_version.saturating_add(1).min(last);
-            memory.history_scroll = memory.selected_history_version;
-            reconcile_memory_history_detail(memory);
-            ControllerEffect::Redraw
-        }
-        (MemoryPane::EntryHistory, KeyCode::Up) if no_modifiers(key.modifiers) => {
-            memory.selected_history_version = memory.selected_history_version.saturating_sub(1);
-            memory.history_scroll = memory.selected_history_version;
+                .map_or(0, |view| view.versions.len());
+            let changed = move_memory_list_selection(
+                &mut memory.selected_history_version,
+                &mut memory.history_scroll,
+                len,
+                list_page,
+                movement,
+            );
+            if changed {
+                memory.detail_scroll = 0;
+            }
             reconcile_memory_history_detail(memory);
             ControllerEffect::Redraw
         }
@@ -1865,6 +2039,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                 history
                     .versions
                     .get(memory.selected_history_version)
+                    .filter(|_| memory.selected_history_version < MEMORY_RETAINED_ROW_CAP)
                     .map(|summary| {
                         (
                             summary.display_key.clone(),
@@ -1888,20 +2063,24 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                 expected_entry_version_id,
             }
         }
-        (MemoryPane::Proposals, KeyCode::Down) if no_modifiers(key.modifiers) => {
-            let last = memory
+        (MemoryPane::Proposals, code)
+            if no_modifiers(key.modifiers) && memory_list_movement(code).is_some() =>
+        {
+            let movement = memory_list_movement(code).expect("guard checked movement");
+            let len = memory
                 .proposals
                 .as_ref()
-                .map(|view| view.proposals.len().saturating_sub(1))
-                .unwrap_or(0);
-            memory.selected_proposal = memory.selected_proposal.saturating_add(1).min(last);
-            memory.proposal_scroll = memory.selected_proposal;
-            reconcile_memory_proposal_detail(memory);
-            ControllerEffect::Redraw
-        }
-        (MemoryPane::Proposals, KeyCode::Up) if no_modifiers(key.modifiers) => {
-            memory.selected_proposal = memory.selected_proposal.saturating_sub(1);
-            memory.proposal_scroll = memory.selected_proposal;
+                .map_or(0, |view| view.proposals.len());
+            let changed = move_memory_list_selection(
+                &mut memory.selected_proposal,
+                &mut memory.proposal_scroll,
+                len,
+                list_page,
+                movement,
+            );
+            if changed {
+                memory.detail_scroll = 0;
+            }
             reconcile_memory_proposal_detail(memory);
             ControllerEffect::Redraw
         }
@@ -1911,6 +2090,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                 .proposals
                 .as_ref()
                 .and_then(|view| view.proposals.get(memory.selected_proposal))
+                .filter(|_| memory.selected_proposal < MEMORY_RETAINED_ROW_CAP)
                 .map(|summary| summary.proposal.proposal_id());
             let Some(proposal_id) = selected else {
                 return memory_failure(
@@ -1918,7 +2098,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                     crate::domain::DomainError::MemorySelectionUnavailable,
                 );
             };
-            memory.pane = MemoryPane::ProposalDetail;
+            set_memory_pane(memory, MemoryPane::ProposalDetail);
             ControllerEffect::LoadMemoryProposal(proposal_id)
         }
         (MemoryPane::ProposalDetail, KeyCode::Right) if no_modifiers(key.modifiers) => {
@@ -1953,20 +2133,24 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                 Err(error) => memory_failure(model, error),
             }
         }
-        (MemoryPane::EpisodicSummaries, KeyCode::Down) if no_modifiers(key.modifiers) => {
-            let last = memory
+        (MemoryPane::EpisodicSummaries, code)
+            if no_modifiers(key.modifiers) && memory_list_movement(code).is_some() =>
+        {
+            let movement = memory_list_movement(code).expect("guard checked movement");
+            let len = memory
                 .episodes
                 .as_ref()
-                .map(|view| view.summaries.len().saturating_sub(1))
-                .unwrap_or(0);
-            memory.selected_episode = memory.selected_episode.saturating_add(1).min(last);
-            memory.episode_scroll = memory.selected_episode;
-            reconcile_memory_episode_detail(memory);
-            ControllerEffect::Redraw
-        }
-        (MemoryPane::EpisodicSummaries, KeyCode::Up) if no_modifiers(key.modifiers) => {
-            memory.selected_episode = memory.selected_episode.saturating_sub(1);
-            memory.episode_scroll = memory.selected_episode;
+                .map_or(0, |view| view.summaries.len());
+            let changed = move_memory_list_selection(
+                &mut memory.selected_episode,
+                &mut memory.episode_scroll,
+                len,
+                list_page,
+                movement,
+            );
+            if changed {
+                memory.detail_scroll = 0;
+            }
             reconcile_memory_episode_detail(memory);
             ControllerEffect::Redraw
         }
@@ -1976,6 +2160,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                 .episodes
                 .as_ref()
                 .and_then(|view| view.summaries.get(memory.selected_episode))
+                .filter(|_| memory.selected_episode < MEMORY_RETAINED_ROW_CAP)
                 .map(|summary| summary.summary.summary_id());
             let Some(summary_id) = selected else {
                 return memory_failure(
@@ -1983,7 +2168,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                     crate::domain::DomainError::MemorySelectionUnavailable,
                 );
             };
-            memory.pane = MemoryPane::EpisodicDetail;
+            set_memory_pane(memory, MemoryPane::EpisodicDetail);
             ControllerEffect::LoadEpisodicSummary(summary_id)
         }
         (MemoryPane::MutationReview | MemoryPane::ProposalResolutionReview, KeyCode::Esc)
@@ -2001,7 +2186,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                 command,
                 generation: memory.generation,
             });
-            memory.pane = MemoryPane::Confirmation;
+            set_memory_pane(memory, MemoryPane::Confirmation);
             ControllerEffect::Redraw
         }
         (MemoryPane::ProposalResolutionReview, KeyCode::Enter)
@@ -2014,7 +2199,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                 command,
                 generation: memory.generation,
             });
-            memory.pane = MemoryPane::Confirmation;
+            set_memory_pane(memory, MemoryPane::Confirmation);
             ControllerEffect::Redraw
         }
         (MemoryPane::Confirmation, KeyCode::Enter)
@@ -2026,7 +2211,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                 .unwrap_or(ControllerEffect::Redraw)
         }
         (MemoryPane::Confirmation, KeyCode::Esc) if no_modifiers(key.modifiers) => {
-            memory.pane = if memory.resolution_review.is_some() {
+            let pane = if memory.resolution_review.is_some() {
                 MemoryPane::ProposalResolutionReview
             } else if memory
                 .editor
@@ -2037,43 +2222,48 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
             } else {
                 MemoryPane::MutationReview
             };
+            set_memory_pane(memory, pane);
             ControllerEffect::Redraw
         }
         (MemoryPane::Result, KeyCode::Enter | KeyCode::Esc) if no_modifiers(key.modifiers) => {
-            memory.pane = match memory.result_origin {
+            let pane = match memory.result_origin {
                 MemoryResultOrigin::Mutation => MemoryPane::EntryList,
                 MemoryResultOrigin::Resolution => MemoryPane::Proposals,
             };
+            set_memory_pane(memory, pane);
             ControllerEffect::Redraw
         }
         (MemoryPane::EntryHistory, KeyCode::Esc) if no_modifiers(key.modifiers) => {
             if memory.entry_version.take().is_none() {
-                memory.pane = MemoryPane::EntryDetail;
+                set_memory_pane(memory, MemoryPane::EntryDetail);
+            } else {
+                memory.detail_scroll = 0;
             }
             ControllerEffect::Redraw
         }
         (MemoryPane::EntryDetail, KeyCode::Esc) if no_modifiers(key.modifiers) => {
-            memory.pane = MemoryPane::EntryList;
+            set_memory_pane(memory, MemoryPane::EntryList);
             ControllerEffect::Redraw
         }
         (MemoryPane::Proposals, KeyCode::Esc) if no_modifiers(key.modifiers) => {
-            memory.pane = MemoryPane::EntryList;
+            set_memory_pane(memory, MemoryPane::EntryList);
             ControllerEffect::Redraw
         }
         (MemoryPane::ProposalDetail, KeyCode::Esc) if no_modifiers(key.modifiers) => {
-            memory.pane = MemoryPane::Proposals;
+            set_memory_pane(memory, MemoryPane::Proposals);
             ControllerEffect::Redraw
         }
         (MemoryPane::EpisodicSummaries, KeyCode::Esc) if no_modifiers(key.modifiers) => {
-            memory.pane = MemoryPane::EntryList;
+            set_memory_pane(memory, MemoryPane::EntryList);
             ControllerEffect::Redraw
         }
         (MemoryPane::EpisodicDetail, KeyCode::Esc) if no_modifiers(key.modifiers) => {
-            memory.pane = MemoryPane::EpisodicSummaries;
+            set_memory_pane(memory, MemoryPane::EpisodicSummaries);
             ControllerEffect::Redraw
         }
         (MemoryPane::EntryList, KeyCode::Esc) if no_modifiers(key.modifiers) => {
             model.agents.pane = AgentsPane::Detail;
+            model.synchronize_geometry();
             ControllerEffect::Redraw
         }
         _ => ControllerEffect::None,
@@ -2156,6 +2346,7 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
                         return Some(ControllerEffect::Redraw);
                     }
                     model.agents.pane = AgentsPane::Memory;
+                    model.synchronize_geometry();
                     ControllerEffect::LoadAgentMemory(profile_id.into())
                 }
             }
@@ -2466,6 +2657,17 @@ fn visible_focus_order(model: &TuiModel) -> &'static [Focus] {
     const NARROW: &[Focus] = &[Focus::Workspace, Focus::Command];
     const NARROW_INSPECTOR: &[Focus] = &[Focus::Workspace, Focus::Inspector, Focus::Command];
 
+    if !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane == AgentsPane::Memory
+    {
+        return match model.layout_mode {
+            LayoutMode::Wide | LayoutMode::Medium => MEDIUM,
+            LayoutMode::Narrow => NARROW,
+            LayoutMode::TooSmall => &[Focus::Workspace],
+        };
+    }
+
     match (model.layout_mode, model.inspector_open) {
         (LayoutMode::Wide, _) => WIDE,
         (LayoutMode::Medium, true) => MEDIUM_INSPECTOR,
@@ -2572,6 +2774,12 @@ fn workspace_max_scroll(model: &TuiModel) -> u16 {
 }
 
 fn clamp_workspace_scroll(model: &mut TuiModel) {
+    if !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane == AgentsPane::Memory
+    {
+        return;
+    }
     model.workspace_scroll = model.workspace_scroll.min(workspace_max_scroll(model));
 }
 
