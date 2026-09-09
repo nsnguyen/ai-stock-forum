@@ -904,7 +904,7 @@ fn refresh_profile_state(
         .iter()
         .position(|summary| summary.profile_id == profile_id)
     {
-        model.agents.selected_profile = index;
+        model.agents.select_profile_index(index);
     }
     let detail = submit_agent_command(
         client,
@@ -1427,20 +1427,26 @@ mod tests {
     use ratatui::layout::Rect;
     use uuid::Uuid;
 
-    use super::{TuiRunner, run_with_screen};
+    use super::{TuiRunner, execute_agent_effect, run_with_screen};
     use crate::{
+        agents::{AgentProfileVersion, AgentReadiness, builtin_profile_templates},
         app::{
-            AppError, ApplicationCommand, CommandOutcome, CommandView, HelpView,
-            PresentationSnapshot, ShutdownDisposition, ShutdownReason, ShutdownView, StatusView,
+            AgentProfileCreatedView, AgentProfileHistoryEntry, AgentProfileHistoryView,
+            AgentProfileSummary, AgentProfileView, AgentProfilesView, AppError, ApplicationCommand,
+            CommandOutcome, CommandView, HelpView, MemoryProfileIdentityView, PresentationSnapshot,
+            ShutdownDisposition, ShutdownReason, ShutdownView, StatusView,
         },
-        domain::{CommandId, CorrelationId, InstallationId, SessionId, SkillId},
+        domain::{
+            AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, InstallationId,
+            MemoryNamespaceId, SessionId, SkillId,
+        },
         runtime::{ApplicationRuntime, CommandExecutor, RuntimeError},
         setup::SetupStatus,
         ui::tui::{
             ControllerEffect, EventSource, Screen, TuiError, TuiEvent, handle_event,
             model::{
-                LayoutMode, RuntimeStatus, SkillConfirmation, SkillOperationOrigin, SkillsPane,
-                TuiModel, View,
+                AgentDetailAction, AgentsPane, LayoutMode, RuntimeStatus, SkillConfirmation,
+                SkillOperationOrigin, SkillsPane, TuiModel, View,
             },
             theme::Theme,
         },
@@ -1759,6 +1765,203 @@ mod tests {
             view,
             shutdown,
         }
+    }
+
+    fn refresh_profile(seed: u128, template_index: usize) -> AgentProfileVersion {
+        let template = &builtin_profile_templates()[template_index];
+        AgentProfileVersion::create(
+            AgentProfileId::from_uuid(Uuid::from_u128(seed)),
+            AgentProfileVersionId::from_uuid(Uuid::from_u128(seed + 1)),
+            MemoryNamespaceId::from_uuid(Uuid::from_u128(seed + 2)),
+            1_800_000_000_000,
+            template.copy_to_draft().expect("profile draft"),
+            Some(template.provenance()),
+        )
+        .expect("profile")
+    }
+
+    fn refresh_profile_summary(profile: &AgentProfileVersion) -> AgentProfileSummary {
+        AgentProfileSummary {
+            profile_id: profile.profile_id(),
+            profile_version_id: profile.profile_version_id(),
+            version: profile.version(),
+            display_name: profile.display_name().to_owned(),
+            role: profile.role(),
+            primary_specialty: profile.primary_specialty().to_owned(),
+            readiness: AgentReadiness::Unbound,
+            content_digest: profile.content_digest().clone(),
+        }
+    }
+
+    fn refresh_profile_history(profile: &AgentProfileVersion) -> AgentProfileHistoryView {
+        AgentProfileHistoryView {
+            profile_id: profile.profile_id(),
+            active_version_id: profile.profile_version_id(),
+            versions: vec![AgentProfileHistoryEntry {
+                profile_version_id: profile.profile_version_id(),
+                version: profile.version(),
+                supersedes: profile.supersedes(),
+                created_at_ms: profile.created_at_ms(),
+                readiness: AgentReadiness::Unbound,
+                content_digest: profile.content_digest().clone(),
+            }],
+            total_count: 1,
+            returned_count: 1,
+            truncated: false,
+        }
+    }
+
+    struct ProfileCreationRefreshExecutor {
+        first: AgentProfileVersion,
+        created: AgentProfileVersion,
+        commands: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl CommandExecutor for ProfileCreationRefreshExecutor {
+        fn execute_user(
+            &mut self,
+            command: ApplicationCommand,
+        ) -> Result<CommandOutcome, AppError> {
+            let (label, view) = match command {
+                ApplicationCommand::CreateAgentProfile { .. } => (
+                    "create",
+                    CommandView::AgentProfileCreated(AgentProfileCreatedView {
+                        profile_id: self.created.profile_id(),
+                        profile_version_id: self.created.profile_version_id(),
+                        version: self.created.version(),
+                        readiness: AgentReadiness::Unbound,
+                    }),
+                ),
+                ApplicationCommand::ListAgentProfiles => (
+                    "list",
+                    CommandView::AgentProfiles(AgentProfilesView {
+                        profiles: vec![
+                            refresh_profile_summary(&self.first),
+                            refresh_profile_summary(&self.created),
+                        ],
+                        total_count: 2,
+                        returned_count: 2,
+                        truncated: false,
+                    }),
+                ),
+                ApplicationCommand::ShowAgentProfile { selector }
+                    if selector == self.created.profile_id().into() =>
+                {
+                    (
+                        "detail",
+                        CommandView::AgentProfile(AgentProfileView {
+                            profile: self.created.clone(),
+                            readiness: AgentReadiness::Unbound,
+                        }),
+                    )
+                }
+                ApplicationCommand::ShowAgentProfileHistory { selector }
+                    if selector == self.created.profile_id().into() =>
+                {
+                    (
+                        "history",
+                        CommandView::AgentProfileHistory(refresh_profile_history(&self.created)),
+                    )
+                }
+                _ => return Err(AppError::AgentProfileNotFound),
+            };
+            self.commands.lock().unwrap().push(label);
+            Ok(CommandOutcome {
+                command_id: CommandId::from_uuid(Uuid::from_u128(80_000)),
+                correlation_id: CorrelationId::from_uuid(Uuid::from_u128(80_001)),
+                committed_events: Vec::new(),
+                view,
+                shutdown: ShutdownDisposition::Continue,
+            })
+        }
+
+        fn finish(&mut self, _reason: ShutdownReason) -> Result<(), AppError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn created_profile_refresh_uses_identity_transition_from_memory_action() {
+        let first = refresh_profile(81_000, 0);
+        let created = refresh_profile(82_000, 1);
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let runtime = ApplicationRuntime::spawn(
+            ProfileCreationRefreshExecutor {
+                first: first.clone(),
+                created: created.clone(),
+                commands: commands.clone(),
+            },
+            4,
+        )
+        .expect("runtime");
+        let mut model = TuiModel::new(snapshot(), false);
+        model.select_view(View::Agents);
+        model.skills.library_loaded = true;
+        model.agents.profiles = AgentProfilesView {
+            profiles: vec![refresh_profile_summary(&first)],
+            total_count: 1,
+            returned_count: 1,
+            truncated: false,
+        };
+        model.agents.detail = Some(AgentProfileView {
+            profile: first.clone(),
+            readiness: AgentReadiness::Unbound,
+        });
+        model.agents.pane = AgentsPane::Memory;
+        model.agents.selected_detail_action = AgentDetailAction::Memory;
+        model
+            .agents
+            .memory
+            .bind_profile(
+                MemoryProfileIdentityView {
+                    profile: first.reference(),
+                    display_name: first.display_name().to_owned(),
+                },
+                first.memory_namespace_id(),
+            )
+            .expect("bind first profile memory");
+
+        execute_agent_effect(
+            &runtime.client(),
+            &mut model,
+            ControllerEffect::ExecuteProfile(ApplicationCommand::CreateAgentProfile {
+                draft: builtin_profile_templates()[1]
+                    .copy_to_draft()
+                    .expect("create draft"),
+                template_provenance: Some(builtin_profile_templates()[1].provenance()),
+            }),
+        )
+        .expect("create and refresh");
+
+        assert_eq!(
+            commands.lock().unwrap().as_slice(),
+            ["create", "list", "detail", "history"],
+        );
+        assert_eq!(model.agents.selected_profile, 1);
+        assert_eq!(
+            model
+                .agents
+                .selected_summary()
+                .map(|summary| summary.profile_id),
+            Some(created.profile_id()),
+        );
+        assert_eq!(
+            model
+                .agents
+                .detail
+                .as_ref()
+                .map(|detail| detail.profile.profile_id()),
+            Some(created.profile_id()),
+        );
+        assert_eq!(
+            model.agents.selected_detail_action,
+            AgentDetailAction::AssignedSkills,
+        );
+        assert!(model.agents.memory.profile.is_none());
+        assert_eq!(model.agents.pane, AgentsPane::Detail);
+        runtime
+            .finish_and_join(ShutdownReason::UserQuit)
+            .expect("finish runtime");
     }
 
     fn key(character: char) -> EventStep {
