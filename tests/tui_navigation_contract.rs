@@ -176,8 +176,8 @@ fn option_alt_shortcuts_are_not_navigation_fallbacks() {
 }
 
 #[test]
-fn bare_five_six_and_function_keys_never_switch_tabs() {
-    for character in ['5', '6'] {
+fn unassigned_bare_keys_and_function_keys_never_switch_tabs() {
+    for character in ['5', '6', '7', 'm', 'q'] {
         let mut model = model();
         let before = model.clone();
 

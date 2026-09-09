@@ -135,6 +135,23 @@ pub fn execute_agent_effect(
             client.cancel_agent_profile_edit()?;
             model.clear_message();
         }
+        ControllerEffect::LoadAgentMemory(_)
+        | ControllerEffect::LoadMemoryEntry { .. }
+        | ControllerEffect::LoadMemoryEntryHistory { .. }
+        | ControllerEffect::LoadMemoryEntryVersion { .. }
+        | ControllerEffect::RequestMemorySetPreview(_)
+        | ControllerEffect::RequestMemoryDeletePreview { .. }
+        | ControllerEffect::LoadMemoryProposals { .. }
+        | ControllerEffect::LoadMemoryProposal(_)
+        | ControllerEffect::RequestMemoryProposalResolutionPreview { .. }
+        | ControllerEffect::LoadEpisodicSummaries(_)
+        | ControllerEffect::LoadEpisodicSummary(_)
+        | ControllerEffect::ExecuteMemory(_)
+        | ControllerEffect::CancelMemoryReview => {
+            return Err(RuntimeError::Application(
+                AppError::WrongMemoryCommandDispatcher,
+            ));
+        }
         ControllerEffect::None
         | ControllerEffect::Redraw
         | ControllerEffect::Submit(_)
@@ -359,6 +376,23 @@ pub fn execute_skill_effect(
             }
         }
         ControllerEffect::CancelSkillReview => cancel_skill_review_once(client, model)?,
+        ControllerEffect::LoadAgentMemory(_)
+        | ControllerEffect::LoadMemoryEntry { .. }
+        | ControllerEffect::LoadMemoryEntryHistory { .. }
+        | ControllerEffect::LoadMemoryEntryVersion { .. }
+        | ControllerEffect::RequestMemorySetPreview(_)
+        | ControllerEffect::RequestMemoryDeletePreview { .. }
+        | ControllerEffect::LoadMemoryProposals { .. }
+        | ControllerEffect::LoadMemoryProposal(_)
+        | ControllerEffect::RequestMemoryProposalResolutionPreview { .. }
+        | ControllerEffect::LoadEpisodicSummaries(_)
+        | ControllerEffect::LoadEpisodicSummary(_)
+        | ControllerEffect::ExecuteMemory(_)
+        | ControllerEffect::CancelMemoryReview => {
+            return Err(RuntimeError::Application(
+                AppError::WrongMemoryCommandDispatcher,
+            ));
+        }
         _ => {}
     }
     Ok(())
@@ -622,10 +656,18 @@ fn apply_agent_outcome(model: &mut TuiModel, outcome: CommandOutcome) {
     let view = outcome.view.clone();
     let _ = apply_outcome(model, outcome);
     match view {
-        CommandView::AgentProfiles(profiles) => model.agents.replace_profiles(profiles),
-        CommandView::AgentProfile(detail) => model.agents.replace_detail(detail),
-        CommandView::AgentProfileHistory(history) => model.agents.replace_history(history),
-        CommandView::AgentProfileVersion(version) => model.agents.replace_version_detail(version),
+        CommandView::AgentProfiles(profiles) => {
+            model.agents.replace_profiles(profiles);
+        }
+        CommandView::AgentProfile(detail) => {
+            model.agents.replace_detail(detail);
+        }
+        CommandView::AgentProfileHistory(history) => {
+            model.agents.replace_history(history);
+        }
+        CommandView::AgentProfileVersion(version) => {
+            model.agents.replace_version_detail(version);
+        }
         _ => {}
     }
 }
@@ -1196,6 +1238,21 @@ impl TuiRunner {
             | ControllerEffect::CancelSkillReview) => {
                 execute_skill_effect(&self.client, &mut self.model, effect)?;
                 Ok(LoopControl::Continue { redraw: true })
+            }
+            ControllerEffect::LoadAgentMemory(_)
+            | ControllerEffect::LoadMemoryEntry { .. }
+            | ControllerEffect::LoadMemoryEntryHistory { .. }
+            | ControllerEffect::LoadMemoryEntryVersion { .. }
+            | ControllerEffect::RequestMemorySetPreview(_)
+            | ControllerEffect::RequestMemoryDeletePreview { .. }
+            | ControllerEffect::LoadMemoryProposals { .. }
+            | ControllerEffect::LoadMemoryProposal(_)
+            | ControllerEffect::RequestMemoryProposalResolutionPreview { .. }
+            | ControllerEffect::LoadEpisodicSummaries(_)
+            | ControllerEffect::LoadEpisodicSummary(_)
+            | ControllerEffect::ExecuteMemory(_)
+            | ControllerEffect::CancelMemoryReview => {
+                Err(RuntimeError::Application(AppError::WrongMemoryCommandDispatcher).into())
             }
         }
     }

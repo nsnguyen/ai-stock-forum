@@ -50,6 +50,11 @@ fn render_active(
         AgentsPane::Editor => render_editor(frame, area, model, theme),
         AgentsPane::Confirmation => render_confirmation(frame, area, model, theme),
         AgentsPane::History => render_history(frame, area, model, theme),
+        AgentsPane::Memory => frame.render_widget(
+            Paragraph::new("Memory view routing is not available yet.")
+                .block(panel("Memory", false, theme)),
+            area,
+        ),
         AgentsPane::List | AgentsPane::Detail => render_detail(frame, area, model, theme),
     }
 }

@@ -92,6 +92,10 @@ pub enum DomainError {
     InvalidMemorySnapshot,
     #[error("memory retrieval accounting overflowed")]
     MemoryRetrievalOverflow,
+    #[error("memory view generation overflowed")]
+    MemoryGenerationOverflow,
+    #[error("memory selection is unavailable")]
+    MemorySelectionUnavailable,
 }
 
 impl DomainError {
@@ -142,6 +146,8 @@ impl DomainError {
             Self::InvalidMemoryRetrievalBudget => "invalid_memory_retrieval_budget",
             Self::InvalidMemorySnapshot => "invalid_memory_snapshot",
             Self::MemoryRetrievalOverflow => "memory_retrieval_overflow",
+            Self::MemoryGenerationOverflow => "memory_generation_overflow",
+            Self::MemorySelectionUnavailable => "memory_selection_unavailable",
         }
     }
 }
