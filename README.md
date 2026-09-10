@@ -7,7 +7,9 @@ command adapter. Phase 0B adds an interactive full-screen cockpit while
 preserving that fallback. Phase 2 Agent Profiles Milestone 1 adds local,
 versioned profile management. Phase 2 Declarative Skills Milestone 2 adds an
 inert, versioned skill library and exact agent assignments without running
-models, agents, or market work.
+models, agents, or market work. Phase 2 Hybrid Memory Milestone 3 adds local
+reviewed memory, durable agent proposals, source-qualified episodic summaries,
+and bounded deterministic retrieval without adding inference or chat.
 
 ## Sources of truth
 
@@ -17,6 +19,8 @@ models, agents, or market work.
 - [Phase 2 Agent Profile testing guide](docs/testing/phase-2-agent-profile-foundation.md)
 - [Phase 2 Declarative Skills design](docs/superpowers/specs/2026-09-05-declarative-skills-design.md)
 - [Declarative Skills testing and workflow guide](docs/testing/declarative-skills.md)
+- [Phase 2 Hybrid Memory design](docs/superpowers/specs/2026-09-07-phase-2-hybrid-memory-design.md)
+- [Phase 2 Hybrid Memory testing guide](docs/testing/phase-2-hybrid-memory.md)
 - [Approved design specification](docs/superpowers/specs/2026-08-31-phase-0-rust-foundation-design.md)
 - [Phase 0 implementation plan](docs/superpowers/plans/2026-08-31-phase-0-rust-foundation.md)
 
@@ -47,10 +51,12 @@ network behavior. When both stdin and stdout are terminals, the default launch
 opens the Adaptive Cockpit in the alternate screen; otherwise the existing
 line-oriented command host is selected automatically.
 
-The cockpit has four native, non-transcript views: Overview, Setup, Audit, and
-Help. It requires at least `60x18` terminal cells. At matching height
-thresholds it is Narrow from `60x18`, Medium from `80x24`, and Wide from
-`120x30`; any smaller width or height uses the TooSmall guidance screen.
+Phase 0B introduced four native views: Overview, Setup, Audit, and Help. The
+current global destination rail has exactly six destinations: Overview, Setup,
+Audit, Help, Agents, and Skills. These are non-transcript views. The cockpit
+requires at least `60x18` terminal cells. At matching height thresholds it is
+Narrow from `60x18`, Medium from `80x24`, and Wide from `120x30`; any smaller
+width or height uses the TooSmall guidance screen.
 
 | Control | Result |
 | --- | --- |
@@ -164,6 +170,106 @@ shutdown. Inference and chat remain deferred to Phase 3. See the
 for the exact workflow, isolated local commands, persistence checks, and manual
 acceptance checklist.
 
+## Phase 2 Hybrid Memory Milestone 3
+
+Hybrid Memory is local per-agent memory nested at **Agents → Memory**. It
+supports reviewed Human set, overwrite, and delete actions; durable Agent
+proposals; distinct Human approval or rejection; bounded entry, history,
+proposal, and episodic reads; and bounded deterministic retrieval for internal
+application use. Direct Human edits are reviewed before commit. Agent-authored
+changes become pending proposals: proposal creation is durable, but it cannot
+create an accepted entry version without a distinct Human approval. Rejection
+records the decision without modifying an entry.
+
+The application does not encrypt Hybrid Memory at rest. Application-managed
+records are local plaintext; owner-only permissions are access control, not
+encryption. Entry and history rows, proposals and rationales, summaries and
+source links, mutation events, request/outcome receipts, SQLite WAL/journal
+sidecars, and copied backups can retain plaintext. Deliberate detail views
+display plaintext. Never store passwords, API keys, access tokens, private
+keys, seed phrases, session cookies, or other credentials in memory. The
+bounded credential deny-list is best-effort and cannot prove that text contains
+no secret.
+
+Overwrite appends an immutable version. Delete adds a tombstone and is not
+secure erasure: earlier plaintext remains in immutable history. Immutable
+versions, events, and receipts accumulate monotonically, and repeated edits
+consume additional local capacity; SQLite may reuse pages, so physical file
+size need not grow monotonically. A capacity or full-disk failure rolls the
+whole SQLite `BEGIN IMMEDIATE` transaction back with no partial memory row,
+event, approval, projection, audit record, or receipt. Protect the state
+directory and every copied backup as sensitive plaintext.
+
+Lists deliberately omit entry values, proposal candidate text and rationale,
+and episodic bodies. A deliberate detail view reveals the requested record and
+escapes terminal controls. Episodic detail is read-only, is labelled
+`Summary — verify sources`, and retains bounded exact source references so the
+summary is never presented as an unqualified fact. Generic Help, Status, Audit,
+and error views contain no memory prose. Startup verifies the immutable event
+stream and authenticated mirrors, reconstructs only permitted missing mirrors
+and derived pointers, and must fail closed for altered, conflicting, or
+unexplained immutable data.
+
+The global destination rail remains exactly:
+
+```text
+1 Overview
+2 Setup
+3 Audit
+4 Help
+a Agents
+s Skills
+```
+
+There is no seventh Memory destination: Memory stays nested under Agents, and
+bare `m` and bare `7` do not navigate there. Modified shortcuts are inert.
+While a Memory text editor owns input, typed shortcut characters remain editor
+text. `?` remains a Help alias but is not a destination label. Switching away
+and back preserves the nested Memory state.
+
+### Hybrid Memory fallback commands
+
+The fallback host accepts exactly these eleven forms, in this order. Quoted
+agent names and keys use the existing command quoting rules.
+
+```text
+/memory list <agent>
+/memory get <agent> <key>
+/memory history <agent> <key> [positive-version]
+/memory set <agent> <key>
+/memory delete <agent> <key>
+/memory proposals <agent> [pending|all]
+/memory proposal <proposal-id>
+/memory approve <proposal-id>
+/memory reject <proposal-id>
+/memory episodes <agent>
+/memory episode <summary-id>
+```
+
+Set/delete and approve/reject open local review flows and require the exact
+displayed action plus review digest. There is no production `/memory propose`,
+summary-write, or snapshot presentation route. Snapshot construction is an
+internal source-bounded interface and is deterministic for the same verified
+state and request.
+
+### Recovery and deferred Hybrid Memory boundaries
+
+Recovery authenticates the immutable event stream, request/outcome receipts,
+and durable mirrors before rebuilding derived current pointers and projections.
+An existing immutable row must match its verified event byte-for-byte. A
+permitted missing mirror may be recreated, but altered or unexplained immutable
+data makes startup fail closed. There is no production proposal creator,
+summary writer, or snapshot presentation route. Inference/chat, automatic memory extraction,
+semantic/vector search, embeddings, autonomous proposal generation, remote
+sync, encryption at rest, credential vaulting, retention pruning, secure
+erasure, production proposal creation, summary mutation, and snapshot
+presentation remain deferred.
+
+Run `cargo test --test hybrid_memory_acceptance` for the focused automated
+acceptance contract. See the [Phase 2 Hybrid Memory testing
+guide](docs/testing/phase-2-hybrid-memory.md) for disposable-state and manual
+acceptance procedures.
+
 ## Build, run, and test
 
 ```bash
@@ -196,7 +302,7 @@ bare `agent` alias for compatibility:
 
 | Form | Output/effect | Continuation |
 | --- | --- | --- |
-| `/help` | Outputs `Available commands:` followed by `/help`, `/status`, `/setup status`, `/audit tail [limit: 1-100]`, and `/quit`; commits `HelpViewed`. | Continues. |
+| `/help` | Outputs `Available commands:` followed by the complete supported Phase 0, Skills, and Hybrid Memory grammar; explicitly states that internal Memory producers are unavailable; commits `HelpViewed`. | Continues. |
 | `/status` | Outputs exactly `Installation: ready` and `Session: active`; commits `StatusViewed`. | Continues. |
 | `/audit tail` | Outputs `Audit tail (limit 20):` plus the selected entries or `No audit entries.`; commits `AuditTailViewed(limit=20)`. | Continues. |
 | `/audit tail N` | Outputs `Audit tail (limit N):` plus the selected entries or `No audit entries.` for `N` from 1 through 100; commits `AuditTailViewed(limit=N)`. | Continues. |
@@ -212,6 +318,17 @@ bare `agent` alias for compatibility:
 | `/skill show <name-or-id> [version]` | Shows the active or requested exact historical skill version. | Continues. |
 | `/skill assign <skill> <agent> [version]` | Stages an assign or upgrade review for the displayed exact version; it does not mutate directly. | Continues until confirmation or cancel. |
 | `/skill unassign <skill> <agent>` | Stages an unassign review for the agent's exact pin; it does not mutate directly. | Continues until confirmation or cancel. |
+| `/memory list <agent>` | Lists bounded current entry metadata without values. | Continues. |
+| `/memory get <agent> <key>` | Shows one deliberately requested current entry and its authenticated metadata. | Continues. |
+| `/memory history <agent> <key> [positive-version]` | Lists bounded newest-first history metadata or shows one exact immutable version. | Continues. |
+| `/memory set <agent> <key>` | Opens the guided value/tag editor and exact Human mutation review. | Continues until confirmation or cancel. |
+| `/memory delete <agent> <key>` | Opens an exact Human tombstone review. | Continues until confirmation or cancel. |
+| `/memory proposals <agent> [pending\|all]` | Lists bounded proposal metadata for the agent namespace. | Continues. |
+| `/memory proposal <proposal-id>` | Shows one deliberately requested proposal and its authenticated state. | Continues. |
+| `/memory approve <proposal-id>` | Opens an exact Human proposal-approval review. | Continues until confirmation or cancel. |
+| `/memory reject <proposal-id>` | Opens an exact Human proposal-rejection review. | Continues until confirmation or cancel. |
+| `/memory episodes <agent>` | Lists bounded episodic-summary metadata without bodies. | Continues. |
+| `/memory episode <summary-id>` | Shows one read-only source-qualified episodic summary. | Continues. |
 | `/quit` | Outputs exactly `Shutting down.`; commits `ShutdownRequested` and ends the session with `UserQuit`. | Ends normally. |
 
 In fallback line-command mode, creation requires the exact phrase `create` and
@@ -255,6 +372,17 @@ views. Do not enter API keys or credentials; Phase 2 has no secret-storage or
 provider-connection workflow. Generic audit entries and errors omit profile or
 skill prose, provider material, and rejected hostile text.
 
+Hybrid Memory is also application-managed local plaintext and is not encrypted
+at rest. Current and historical entries, proposals and rationales, summaries
+and source links, mutation events, receipts, SQLite WAL/journal sidecars,
+deliberate detail displays, and copied backups can retain plaintext. Owner-only
+filesystem permissions limit access but are not encryption. The bounded
+credential deny-list is only a best-effort guard and cannot prove arbitrary
+text contains no secret. A deletion adds an immutable tombstone; it does not
+securely erase earlier versions. Immutable rows, events, and receipts
+accumulate and repeated edits consume capacity even though SQLite may reuse
+pages.
+
 ## Startup and sessions
 
 On startup the application creates or resumes its local state, applies the
@@ -279,12 +407,15 @@ Windows runtime verification has not been performed for this milestone.
 
 ## Explicit non-goals
 
-Phase 2 Milestones 1 and 2 do not add agent orchestration, skill execution,
-hybrid memory, model execution, model providers, live or market data, rooms,
-debates, network access, credential entry, OAuth, MCP, external runtimes,
-broker connectivity, order placement, trading recommendations, financial
-calculations, guided setup application, web or mobile clients, multi-user
-access, remote access, or an autonomous/background service.
+Phase 2 does not add agent orchestration, skill execution, inference/chat,
+model execution, model providers, automatic memory extraction, semantic/vector
+search, embeddings, autonomous proposal generation, remote sync, encryption at
+rest, credential vaulting, retention pruning, secure erasure, production
+proposal/summary/snapshot producer routes, live or market data, rooms, debates,
+network access, credential entry, OAuth, MCP, external runtimes, broker
+connectivity, order placement, trading recommendations, guided setup
+application, web or mobile clients, multi-user access, remote access, or an
+autonomous/background service.
 
 ## Quality gates
 
