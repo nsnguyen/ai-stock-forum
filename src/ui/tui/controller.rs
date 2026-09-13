@@ -1852,7 +1852,14 @@ fn memory_pane_local_key(pane: MemoryPane, code: KeyCode) -> bool {
     }
 }
 
-fn memory_detail_scroll_owned(memory: &MemoryViewState, interaction_pane: MemoryPane) -> bool {
+fn memory_detail_scroll_owned(
+    memory: &MemoryViewState,
+    interaction_pane: MemoryPane,
+    focus: Focus,
+) -> bool {
+    if focus != Focus::Workspace {
+        return false;
+    }
     match interaction_pane {
         MemoryPane::EntryHistory => exact_history_version_is_installed(memory),
         MemoryPane::EntryDetail
@@ -1956,7 +1963,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
     }
     let memory = &mut model.agents.memory;
     if no_modifiers(key.modifiers)
-        && memory_detail_scroll_owned(memory, interaction_pane)
+        && memory_detail_scroll_owned(memory, interaction_pane, model.focus)
         && move_memory_detail_scroll(memory, key.code, detail_page)
     {
         return ControllerEffect::Redraw;
@@ -2091,7 +2098,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         }
         (MemoryPane::EntryHistory, code)
             if no_modifiers(key.modifiers)
-                && !exact_history_version_is_installed(memory)
+                && (model.focus == Focus::List || !exact_history_version_is_installed(memory))
                 && memory_list_movement(code).is_some() =>
         {
             let movement = memory_list_movement(code).expect("guard checked movement");

@@ -1950,6 +1950,113 @@ fn logical_list_focus_routes_memory_keys_to_the_visible_primary_list() {
     assert_eq!(model.agents.memory.pane, MemoryPane::EntryDetail);
 }
 
+#[test]
+fn logical_history_list_focus_owns_navigation_when_an_exact_version_is_loaded() {
+    let owner = profile(91_000);
+    let first = entry(&owner, 91_100, "Visible history");
+    let second = first
+        .next_present(
+            MemoryEntryVersionId::from_uuid(Uuid::from_u128(91_110)),
+            MemoryEntryDraft::new(
+                "Visible history".to_owned(),
+                "second value".to_owned(),
+                Vec::new(),
+            )
+            .expect("second version draft"),
+            Actor::Human,
+            91_110,
+            None,
+            EventId::from_uuid(Uuid::from_u128(91_111)),
+        )
+        .expect("second version");
+    let third = second
+        .next_present(
+            MemoryEntryVersionId::from_uuid(Uuid::from_u128(91_120)),
+            MemoryEntryDraft::new(
+                "Visible history".to_owned(),
+                "third value".to_owned(),
+                Vec::new(),
+            )
+            .expect("third version draft"),
+            Actor::Human,
+            91_120,
+            None,
+            EventId::from_uuid(Uuid::from_u128(91_121)),
+        )
+        .expect("third version");
+    let versions = [third.clone(), second.clone(), first.clone()];
+    let mut model = memory_model(&owner);
+    model.agents.memory.entries =
+        Some(populated_entries_view(&owner, std::slice::from_ref(&third)));
+    model.agents.memory.entry_history = Some(history_view(&owner, &third, &versions));
+    model.agents.memory.pane = MemoryPane::EntryHistory;
+    model.agents.memory.entry_version = Some(MemoryEntryVersionView {
+        profile: owner.reference(),
+        entry: third.clone(),
+    });
+    model.agents.memory.detail_scroll = 7;
+    model.set_focus(Focus::List);
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Char('s'))),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.agents.memory.selected_history_version, 1);
+    assert_eq!(model.agents.memory.detail_scroll, 0);
+
+    model.agents.memory.entry_version = Some(MemoryEntryVersionView {
+        profile: owner.reference(),
+        entry: second.clone(),
+    });
+    model.agents.memory.detail_scroll = 7;
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Char('w'))),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.agents.memory.selected_history_version, 0);
+    assert_eq!(model.agents.memory.detail_scroll, 0);
+
+    model.agents.memory.entry_version = Some(MemoryEntryVersionView {
+        profile: owner.reference(),
+        entry: third,
+    });
+    model.agents.memory.detail_scroll = 7;
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::End)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.agents.memory.selected_history_version, 2);
+    assert_eq!(model.agents.memory.detail_scroll, 0);
+
+    model.agents.memory.entry_version = Some(MemoryEntryVersionView {
+        profile: owner.reference(),
+        entry: first,
+    });
+    model.agents.memory.detail_scroll = 7;
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Home)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.agents.memory.selected_history_version, 0);
+    assert_eq!(model.agents.memory.detail_scroll, 0);
+
+    model.agents.memory.selected_history_version = 1;
+    model.agents.memory.entry_version = Some(MemoryEntryVersionView {
+        profile: owner.reference(),
+        entry: second.clone(),
+    });
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::LoadMemoryEntryVersion {
+            selector: AgentProfileSelector::Id(owner.profile_id()),
+            key: second.display_key().to_owned(),
+            version: second.reference().version(),
+            expected_entry_version_id: second.reference().entry_version_id(),
+        }
+    );
+    assert_eq!(model.focus, Focus::Workspace);
+}
+
 fn invalid_editor_model(
     owner: &AgentProfileVersion,
     selector: AgentProfileSelector,
