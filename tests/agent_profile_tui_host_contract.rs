@@ -692,7 +692,7 @@ fn shutdown_cancels_service_review_before_terminal_restoration() {
     };
     let mut events = OneInterrupt {
         events: VecDeque::from([
-            TuiEvent::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            TuiEvent::Key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)),
             TuiEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
             TuiEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
         ]),
@@ -781,7 +781,7 @@ fn host_initializes_and_round_trips_view_geometry_without_resize() {
         };
         let mut events = OneInterrupt {
             events: VecDeque::from([
-                TuiEvent::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+                TuiEvent::Key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)),
                 TuiEvent::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
                 TuiEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             ]),

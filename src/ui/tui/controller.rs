@@ -32,9 +32,9 @@ const COMMAND_IN_FLIGHT_MESSAGE: &str = "A command is already running.";
 const COMMAND_REJECTED_MESSAGE: &str = "Command rejected. Check the command and try again.";
 const MEMORY_OUTCOME_MESSAGE: &str = "Memory command completed.";
 const PROTECTED_AGENTS_MESSAGE: &str =
-    "Press a outside text input to finish the protected Agents workflow.";
+    "Press 3 outside text input to finish the protected Agents workflow.";
 const PROTECTED_SKILLS_MESSAGE: &str =
-    "Press s outside text input to finish the protected Skills workflow.";
+    "Press 4 outside text input to finish the protected Skills workflow.";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControllerEffect {
     None,
@@ -480,6 +480,10 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         return ControllerEffect::RequestShutdown(ShutdownReason::Interrupted);
     }
 
+    if key.kind == KeyEventKind::Repeat && key.code == KeyCode::Enter {
+        return ControllerEffect::None;
+    }
+
     if memory_text_entry_active(model) {
         return handle_memory_editor_key(model, key);
     }
@@ -514,7 +518,7 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         return handle_command_key(model, key);
     }
 
-    if is_plain_char(key, '/') {
+    if is_plain_char(key, '/') && !active_skill_editor(model) {
         model.command.clear();
         model.command.insert('/');
         model.set_focus(Focus::Command);
@@ -541,6 +545,15 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
 
     if active_skill_editor(model) {
         return handle_skill_editor_key(model, key);
+    }
+
+    let key = normalize_nav_direction(key);
+
+    if key.code == KeyCode::Tab && no_modifiers(key.modifiers) {
+        return cycle_focus(model, true);
+    }
+    if key.code == KeyCode::BackTab && backtab_modifiers(key.modifiers) {
+        return cycle_focus(model, false);
     }
 
     if model.focus == Focus::Navigation {
@@ -600,16 +613,35 @@ fn handle_global_navigation_shortcut(
         return None;
     }
 
-    let effect = match key.code {
-        KeyCode::Char('1') => switch_to_tab(model, NavigationTab::Overview),
-        KeyCode::Char('2') => switch_to_tab(model, NavigationTab::Setup),
-        KeyCode::Char('3') => switch_to_tab(model, NavigationTab::Audit),
-        KeyCode::Char('4') => switch_to_tab(model, NavigationTab::Help),
-        KeyCode::Char('a') => switch_to_tab(model, NavigationTab::Agents),
-        KeyCode::Char('s') => switch_to_skills(model),
-        _ => return None,
+    let KeyCode::Char(number) = key.code else {
+        return None;
     };
-    Some(effect)
+    NavigationTab::for_number(number).map(|tab| switch_to_destination(model, tab))
+}
+
+fn switch_to_destination(model: &mut TuiModel, tab: NavigationTab) -> ControllerEffect {
+    if tab == NavigationTab::Skills {
+        switch_to_skills(model)
+    } else {
+        switch_to_tab(model, tab)
+    }
+}
+
+fn normalize_nav_direction(mut key: KeyEvent) -> KeyEvent {
+    let shifted = key.modifiers == KeyModifiers::SHIFT;
+    let unmodified = key.modifiers == KeyModifiers::NONE;
+    if !shifted && !unmodified {
+        return key;
+    }
+    key.code = match key.code {
+        KeyCode::Char('w' | 'W') => KeyCode::Up,
+        KeyCode::Char('a' | 'A') => KeyCode::Left,
+        KeyCode::Char('s' | 'S') => KeyCode::Down,
+        KeyCode::Char('d' | 'D') => KeyCode::Right,
+        _ => return key,
+    };
+    key.modifiers = KeyModifiers::NONE;
+    key
 }
 
 fn switch_to_tab(model: &mut TuiModel, tab: NavigationTab) -> ControllerEffect {
@@ -2625,10 +2657,13 @@ fn dismiss(model: &mut TuiModel) -> ControllerEffect {
 
 fn cycle_focus(model: &mut TuiModel, forward: bool) -> ControllerEffect {
     let order = visible_focus_order(model);
-    let current = order
-        .iter()
-        .position(|focus| *focus == model.focus)
-        .unwrap_or(0);
+    let Some(current) = order.iter().position(|focus| *focus == model.focus) else {
+        if model.focus == Focus::Inspector {
+            model.inspector_open = false;
+        }
+        model.set_focus(Focus::Workspace);
+        return ControllerEffect::Redraw;
+    };
     let next = if forward {
         current.saturating_add(1) % order.len()
     } else if current == 0 {
@@ -2641,40 +2676,16 @@ fn cycle_focus(model: &mut TuiModel, forward: bool) -> ControllerEffect {
 }
 
 fn visible_focus_order(model: &TuiModel) -> &'static [Focus] {
-    const WIDE: &[Focus] = &[
-        Focus::Navigation,
-        Focus::Workspace,
-        Focus::Inspector,
-        Focus::Command,
-    ];
-    const MEDIUM: &[Focus] = &[Focus::Navigation, Focus::Workspace, Focus::Command];
-    const MEDIUM_INSPECTOR: &[Focus] = &[
-        Focus::Navigation,
-        Focus::Workspace,
-        Focus::Inspector,
-        Focus::Command,
-    ];
-    const NARROW: &[Focus] = &[Focus::Workspace, Focus::Command];
-    const NARROW_INSPECTOR: &[Focus] = &[Focus::Workspace, Focus::Inspector, Focus::Command];
+    const DOCUMENT: &[Focus] = &[Focus::Navigation, Focus::Workspace];
+    const TWO_PANE: &[Focus] = &[Focus::Navigation, Focus::List, Focus::Workspace];
 
-    if !model.skills.active
-        && model.active_view == View::Agents
-        && model.agents.pane == AgentsPane::Memory
-    {
-        return match model.layout_mode {
-            LayoutMode::Wide | LayoutMode::Medium => MEDIUM,
-            LayoutMode::Narrow => NARROW,
-            LayoutMode::TooSmall => &[Focus::Workspace],
-        };
+    if model.layout_mode == LayoutMode::TooSmall {
+        return &[Focus::Workspace];
     }
-
-    match (model.layout_mode, model.inspector_open) {
-        (LayoutMode::Wide, _) => WIDE,
-        (LayoutMode::Medium, true) => MEDIUM_INSPECTOR,
-        (LayoutMode::Medium, false) => MEDIUM,
-        (LayoutMode::Narrow, true) => NARROW_INSPECTOR,
-        (LayoutMode::Narrow, false) => NARROW,
-        (LayoutMode::TooSmall, _) => &[Focus::Workspace],
+    if model.skills.active || model.active_view == View::Agents {
+        TWO_PANE
+    } else {
+        DOCUMENT
     }
 }
 
@@ -2742,7 +2753,7 @@ fn move_navigation_selection(model: &mut TuiModel, forward: bool) -> ControllerE
     } else {
         switch_to_tab(model, target)
     };
-    if matches!(model.layout_mode, LayoutMode::Wide | LayoutMode::Medium) {
+    if model.layout_mode != LayoutMode::TooSmall {
         model.set_focus(Focus::Navigation);
     }
     effect
@@ -2750,16 +2761,12 @@ fn move_navigation_selection(model: &mut TuiModel, forward: bool) -> ControllerE
 
 fn select_navigation_bound(model: &mut TuiModel, end: bool) -> ControllerEffect {
     let target = if end {
-        NavigationTab::Skills
+        NavigationTab::Help
     } else {
         NavigationTab::Overview
     };
-    let effect = if target == NavigationTab::Skills {
-        switch_to_skills(model)
-    } else {
-        switch_to_tab(model, target)
-    };
-    if matches!(model.layout_mode, LayoutMode::Wide | LayoutMode::Medium) {
+    let effect = switch_to_destination(model, target);
+    if model.layout_mode != LayoutMode::TooSmall {
         model.set_focus(Focus::Navigation);
     }
     effect
@@ -2954,11 +2961,12 @@ mod tests {
     }
 
     #[test]
-    fn global_keys_switch_views_focus_inspector_and_leave_bare_q_inert() {
+    fn global_keys_switch_numbered_views_allow_explicit_details_and_leave_bare_q_inert() {
         let mut model = model();
-        assert_redraw_and_view(&mut model, key('2'), View::Setup);
-        assert_redraw_and_view(&mut model, key('3'), View::Audit);
-        assert_redraw_and_view(&mut model, key('4'), View::Help);
+        assert_redraw_and_view(&mut model, key('2'), View::Chat);
+        assert_redraw_and_view(&mut model, key('7'), View::Setup);
+        assert_redraw_and_view(&mut model, key('8'), View::Audit);
+        assert_redraw_and_view(&mut model, key('9'), View::Help);
         assert_eq!(handle_event(&mut model, key('i')), ControllerEffect::Redraw);
         assert!(model.inspector_open);
         assert_eq!(model.focus, Focus::Inspector);
@@ -3212,7 +3220,7 @@ mod tests {
             handle_event(&mut model, key_code(KeyCode::Tab, KeyModifiers::NONE)),
             ControllerEffect::Redraw
         );
-        assert_eq!(model.focus, Focus::Inspector);
+        assert_eq!(model.focus, Focus::Navigation);
         assert_eq!(
             handle_event(&mut model, key_code(KeyCode::BackTab, KeyModifiers::SHIFT)),
             ControllerEffect::Redraw
@@ -3388,7 +3396,7 @@ mod tests {
         let mut model = model();
         model.replace_audit((1..=100).map(audit_entry).collect());
         model.set_command_in_flight(true);
-        assert_eq!(handle_event(&mut model, key('3')), ControllerEffect::Redraw);
+        assert_eq!(handle_event(&mut model, key('8')), ControllerEffect::Redraw);
         model.audit_selection = Some(75);
 
         apply_outcome(

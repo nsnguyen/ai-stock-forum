@@ -36,6 +36,9 @@ pub const COMMAND_HISTORY_CAPACITY: usize = 100;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Overview,
+    Chat,
+    Connections,
+    Activity,
     Setup,
     Audit,
     Help,
@@ -2034,9 +2037,17 @@ impl AgentsViewState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Navigation,
+    List,
     Workspace,
+    Actions,
     Inspector,
     Command,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputMode {
+    Nav,
+    Type,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2290,11 +2301,14 @@ fn bounded_multiline_prefix(input: &str, byte_limit: usize) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NavigationTab {
     Overview,
+    Chat,
+    Agents,
+    Skills,
+    Connections,
+    Activity,
     Setup,
     Audit,
     Help,
-    Agents,
-    Skills,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2304,20 +2318,74 @@ enum PendingOutcomeNavigation {
 }
 
 impl NavigationTab {
+    pub(super) const ALL: [Self; 9] = [
+        Self::Overview,
+        Self::Chat,
+        Self::Agents,
+        Self::Skills,
+        Self::Connections,
+        Self::Activity,
+        Self::Setup,
+        Self::Audit,
+        Self::Help,
+    ];
+
     const fn index(self) -> usize {
         match self {
             Self::Overview => 0,
-            Self::Setup => 1,
-            Self::Audit => 2,
-            Self::Help => 3,
-            Self::Agents => 4,
-            Self::Skills => 5,
+            Self::Chat => 1,
+            Self::Agents => 2,
+            Self::Skills => 3,
+            Self::Connections => 4,
+            Self::Activity => 5,
+            Self::Setup => 6,
+            Self::Audit => 7,
+            Self::Help => 8,
         }
+    }
+
+    pub(super) const fn key(self) -> char {
+        match self {
+            Self::Overview => '1',
+            Self::Chat => '2',
+            Self::Agents => '3',
+            Self::Skills => '4',
+            Self::Connections => '5',
+            Self::Activity => '6',
+            Self::Setup => '7',
+            Self::Audit => '8',
+            Self::Help => '9',
+        }
+    }
+
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Home",
+            Self::Chat => "Chat",
+            Self::Agents => "Agents",
+            Self::Skills => "Skills",
+            Self::Connections => "Connections",
+            Self::Activity => "Activity",
+            Self::Setup => "Setup",
+            Self::Audit => "Audit",
+            Self::Help => "Help",
+        }
+    }
+
+    pub(super) fn for_number(number: char) -> Option<Self> {
+        number
+            .to_digit(10)
+            .and_then(|number| number.checked_sub(1))
+            .and_then(|index| Self::ALL.get(index as usize))
+            .copied()
     }
 
     pub(super) const fn for_view(view: View) -> Self {
         match view {
             View::Overview => Self::Overview,
+            View::Chat => Self::Chat,
+            View::Connections => Self::Connections,
+            View::Activity => Self::Activity,
             View::Setup => Self::Setup,
             View::Audit => Self::Audit,
             View::Help => Self::Help,
@@ -2326,20 +2394,22 @@ impl NavigationTab {
     }
 
     pub(super) const fn adjacent(self, forward: bool) -> Self {
-        match (self, forward) {
-            (Self::Overview, true) | (Self::Audit, false) => Self::Setup,
-            (Self::Setup, true) | (Self::Help, false) => Self::Audit,
-            (Self::Audit, true) | (Self::Agents, false) => Self::Help,
-            (Self::Help, true) | (Self::Skills, false) => Self::Agents,
-            (Self::Agents, true) | (Self::Overview, false) => Self::Skills,
-            (Self::Skills, true) | (Self::Setup, false) => Self::Overview,
-        }
+        let index = self.index();
+        let next = if forward {
+            (index + 1) % Self::ALL.len()
+        } else if index == 0 {
+            Self::ALL.len() - 1
+        } else {
+            index - 1
+        };
+        Self::ALL[next]
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TabState {
     focus: Focus,
+    input_mode: InputMode,
     inspector_open: bool,
     workspace_scroll: u16,
     command_draft: CommandDraft,
@@ -2349,6 +2419,7 @@ impl Default for TabState {
     fn default() -> Self {
         Self {
             focus: Focus::Workspace,
+            input_mode: InputMode::Nav,
             inspector_open: false,
             workspace_scroll: 0,
             command_draft: CommandDraft::default(),
@@ -2364,6 +2435,7 @@ pub(super) struct NavigationStateSnapshot {
     skills_workspace_origin: Option<SkillWorkspaceOrigin>,
     agents_pane: AgentsPane,
     focus: Focus,
+    input_mode: InputMode,
     inspector_open: bool,
     command: CommandEditor,
     workspace_scroll: u16,
@@ -2371,7 +2443,7 @@ pub(super) struct NavigationStateSnapshot {
     pending_agent_outcome: Option<AgentOutcomeIntent>,
     navigation_generation: u64,
     pending_outcome_navigation: Option<PendingOutcomeNavigation>,
-    tab_states: [TabState; 6],
+    tab_states: [TabState; 9],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2381,6 +2453,7 @@ pub struct TuiModel {
     pub skills: SkillsViewState,
     pub pending_agent_outcome: Option<AgentOutcomeIntent>,
     pub focus: Focus,
+    pub input_mode: InputMode,
     pub layout_mode: LayoutMode,
     pub inspector_open: bool,
     pub command: CommandEditor,
@@ -2402,7 +2475,7 @@ pub struct TuiModel {
     pub previous_session_interrupted: bool,
     navigation_generation: u64,
     pending_outcome_navigation: Option<PendingOutcomeNavigation>,
-    tab_states: [TabState; 6],
+    tab_states: [TabState; 9],
 }
 
 impl TuiModel {
@@ -2430,6 +2503,7 @@ impl TuiModel {
             skills: SkillsViewState::default(),
             pending_agent_outcome: None,
             focus: Focus::Workspace,
+            input_mode: InputMode::Nav,
             layout_mode: LayoutMode::Wide,
             inspector_open: false,
             command: CommandEditor::default(),
@@ -2475,6 +2549,18 @@ impl TuiModel {
                 self.skills.active = false;
                 self.active_view = View::Overview;
             }
+            NavigationTab::Chat => {
+                self.skills.active = false;
+                self.active_view = View::Chat;
+            }
+            NavigationTab::Connections => {
+                self.skills.active = false;
+                self.active_view = View::Connections;
+            }
+            NavigationTab::Activity => {
+                self.skills.active = false;
+                self.active_view = View::Activity;
+            }
             NavigationTab::Setup => {
                 self.skills.active = false;
                 self.active_view = View::Setup;
@@ -2504,6 +2590,9 @@ impl TuiModel {
         }
         match self.active_view {
             View::Overview => NavigationTab::Overview,
+            View::Chat => NavigationTab::Chat,
+            View::Connections => NavigationTab::Connections,
+            View::Activity => NavigationTab::Activity,
             View::Setup => NavigationTab::Setup,
             View::Audit => NavigationTab::Audit,
             View::Help => NavigationTab::Help,
@@ -2514,6 +2603,7 @@ impl TuiModel {
     fn swap_tab_state(&mut self, tab: NavigationTab) {
         let state = &mut self.tab_states[tab.index()];
         std::mem::swap(&mut self.focus, &mut state.focus);
+        std::mem::swap(&mut self.input_mode, &mut state.input_mode);
         std::mem::swap(&mut self.inspector_open, &mut state.inspector_open);
         std::mem::swap(&mut self.workspace_scroll, &mut state.workspace_scroll);
         self.command.swap_draft(&mut state.command_draft);
@@ -2527,6 +2617,7 @@ impl TuiModel {
             skills_workspace_origin: self.skills.workspace_origin,
             agents_pane: self.agents.pane,
             focus: self.focus,
+            input_mode: self.input_mode,
             inspector_open: self.inspector_open,
             command: self.command.clone(),
             workspace_scroll: self.workspace_scroll,
@@ -2545,6 +2636,7 @@ impl TuiModel {
         self.skills.workspace_origin = snapshot.skills_workspace_origin;
         self.agents.pane = snapshot.agents_pane;
         self.focus = snapshot.focus;
+        self.input_mode = snapshot.input_mode;
         self.inspector_open = snapshot.inspector_open;
         self.command = snapshot.command;
         self.workspace_scroll = snapshot.workspace_scroll;
@@ -2559,6 +2651,16 @@ impl TuiModel {
 
     pub fn set_focus(&mut self, focus: Focus) {
         self.focus = focus;
+        self.input_mode = if focus == Focus::Command {
+            InputMode::Type
+        } else {
+            InputMode::Nav
+        };
+        self.synchronize_geometry();
+    }
+
+    pub fn set_input_mode(&mut self, input_mode: InputMode) {
+        self.input_mode = input_mode;
     }
 
     pub fn set_layout_mode(&mut self, layout_mode: LayoutMode) {
@@ -2595,20 +2697,52 @@ impl TuiModel {
 
     pub fn synchronize_geometry(&mut self) {
         let area = ratatui::layout::Rect::new(0, 0, self.terminal_width, self.terminal_height);
-        let geometry = if self.skills.active {
-            super::layout::skill_geometry(area, self.inspector_open)
+        let cockpit = super::layout::calculate_with_input(
+            area,
+            self.inspector_is_visible(),
+            self.input_is_visible(),
+        );
+        let (workspace_body_width, workspace_body_height) = if cockpit.mode == LayoutMode::TooSmall
+        {
+            (0, 0)
         } else {
-            super::layout::view_geometry_for_state(
-                area,
-                self.active_view,
-                self.inspector_open,
-                self.active_view == View::Agents && self.agents.pane == AgentsPane::Memory,
+            (
+                cockpit.workspace.width.saturating_sub(2),
+                cockpit.workspace.height.saturating_sub(2),
             )
         };
-        self.layout_mode = geometry.cockpit.mode;
-        self.workspace_body_width = geometry.workspace_body_width;
-        self.workspace_body_height = geometry.workspace_body_height;
+        self.layout_mode = cockpit.mode;
+        self.workspace_body_width = workspace_body_width;
+        self.workspace_body_height = workspace_body_height;
         self.normalize_visible_focus();
+    }
+
+    pub(super) fn input_is_visible(&self) -> bool {
+        self.focus == Focus::Command
+            || (!self.skills.active
+                && self.active_view == View::Agents
+                && self.agents.pane == AgentsPane::Editor)
+            || (self.skills.active && self.skills.pane == SkillsPane::Editor)
+            || (!self.skills.active
+                && self.active_view == View::Agents
+                && self.agents.pane == AgentsPane::Memory
+                && self.agents.memory.pane == MemoryPane::Editor
+                && self.agents.memory.local_layer_cache_is_authenticated()
+                && self.agents.memory.editor.as_ref().is_some_and(|editor| {
+                    matches!(
+                        editor.step(),
+                        MemoryEditorStep::Key
+                            | MemoryEditorStep::Value
+                            | MemoryEditorStep::PurposeTags
+                    )
+                }))
+    }
+
+    pub(super) fn inspector_is_visible(&self) -> bool {
+        self.inspector_open
+            && !(!self.skills.active
+                && self.active_view == View::Agents
+                && self.agents.pane == AgentsPane::Memory)
     }
 
     fn normalize_visible_focus(&mut self) {
@@ -2624,11 +2758,8 @@ impl TuiModel {
             return;
         }
         let visible = match self.layout_mode {
-            LayoutMode::Wide => true,
-            LayoutMode::Medium => self.focus != Focus::Inspector || self.inspector_open,
-            LayoutMode::Narrow => {
-                self.focus != Focus::Navigation
-                    && (self.focus != Focus::Inspector || self.inspector_open)
+            LayoutMode::Wide | LayoutMode::Medium | LayoutMode::Narrow => {
+                self.focus != Focus::Inspector || self.inspector_open
             }
             LayoutMode::TooSmall => self.focus == Focus::Workspace,
         };

@@ -17,7 +17,7 @@ use crate::{
         memory_editor::{MEMORY_PLAINTEXT_WARNING, MemoryEditorStep},
         tui::{
             layout::{memory_layout_mode, memory_list_visible_items, memory_workspace},
-            model::{MemoryPageCounts, MemoryPane, TuiModel},
+            model::{Focus, MemoryPageCounts, MemoryPane, TuiModel},
             theme::Theme,
         },
     },
@@ -45,7 +45,7 @@ struct PanelContent {
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     let layout = memory_workspace(area, memory_layout_mode(area));
     if layout.detail.is_none() {
-        if narrow_uses_primary(model) {
+        if model.focus == Focus::List || narrow_uses_primary(model) {
             render_primary(frame, layout.primary, model, theme);
         } else {
             render_detail(frame, layout.primary, model, theme);
@@ -69,27 +69,27 @@ pub(super) fn content_height(model: &TuiModel, width: u16) -> u16 {
 
 fn render_primary(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     let content = primary_content(model, area, theme);
-    render_panel(frame, area, model, theme, content);
+    render_panel(frame, area, model.focus == Focus::List, theme, content);
 }
 
 fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
-    let content = detail_content(model, panel_inner_width(area), theme);
-    render_panel(frame, area, model, theme, content);
+    let content = active_content(model, panel_inner_width(area), theme);
+    render_panel(frame, area, workspace_focused(model), theme, content);
 }
 
 fn render_context(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     let content = context_content(model, panel_inner_width(area), theme);
-    render_panel(frame, area, model, theme, content);
+    render_panel(frame, area, false, theme, content);
 }
 
 fn render_panel(
     frame: &mut Frame<'_>,
     area: Rect,
-    model: &TuiModel,
+    focused: bool,
     theme: &Theme,
     mut content: PanelContent,
 ) {
-    let block = panel(content.title, workspace_focused(model), theme);
+    let block = panel(content.title, focused, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -217,8 +217,17 @@ fn memory_content_lines(model: &TuiModel, width: u16) -> Vec<Line<'static>> {
     if narrow_uses_primary(model) {
         primary_content(model, Rect::new(0, 0, width, u16::MAX), &theme).lines
     } else {
-        detail_content(model, usize::from(width.saturating_sub(2).max(1)), &theme).lines
+        active_content(model, usize::from(width.saturating_sub(2).max(1)), &theme).lines
     }
+}
+
+fn active_content(model: &TuiModel, width: usize, theme: &Theme) -> PanelContent {
+    let mut detail = detail_content(model, width, theme);
+    let context = context_content(model, width, theme);
+    detail.lines.push(Line::default());
+    detail.lines.push(Line::styled(context.title, theme.accent));
+    detail.lines.extend(context.lines);
+    detail
 }
 
 fn narrow_uses_primary(model: &TuiModel) -> bool {
@@ -2366,7 +2375,7 @@ mod tests {
             profile: profile.reference(),
             entry: stale,
         });
-        assert_eq!(content_height(&model, 60), 3);
+        assert_eq!(content_height(&model, 60), 9);
     }
 
     #[test]

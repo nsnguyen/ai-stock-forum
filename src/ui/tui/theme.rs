@@ -2,6 +2,7 @@ use ratatui::style::{Color, Modifier, Style};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
+    pub base: Style,
     pub accent: Style,
     pub focus: Style,
     pub muted: Style,
@@ -14,6 +15,7 @@ impl Theme {
     pub fn from_no_color(no_color: bool) -> Self {
         if no_color {
             return Self {
+                base: Style::default(),
                 accent: Style::default().add_modifier(Modifier::BOLD),
                 focus: Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
                 muted: Style::default().add_modifier(Modifier::DIM),
@@ -24,6 +26,7 @@ impl Theme {
         }
 
         Self {
+            base: Style::default().fg(Color::Gray).bg(Color::Rgb(24, 24, 27)),
             accent: Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -42,8 +45,9 @@ impl Theme {
         }
     }
 
-    pub fn styles(self) -> [Style; 6] {
+    pub fn styles(self) -> [Style; 7] {
         [
+            self.base,
             self.accent,
             self.focus,
             self.muted,

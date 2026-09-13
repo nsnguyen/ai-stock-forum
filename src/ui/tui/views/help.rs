@@ -25,12 +25,15 @@ pub(super) fn content_height(width: u16) -> u16 {
 fn content(theme: &Theme) -> Vec<Line<'static>> {
     vec![
         Line::styled("KEYS", theme.accent),
-        Line::raw("1-4 / a / s         Open a view outside active text entry"),
-        Line::raw("                    1 Overview / 2 Setup / 3 Audit / 4 Help"),
-        Line::raw("                    a Agents / s Skills"),
+        Line::raw("1-9                 Open a destination while in NAV"),
+        Line::raw("                    1 Home / 2 Chat / 3 Agents / 4 Skills"),
+        Line::raw("                    5 Connections / 6 Activity / 7 Setup"),
+        Line::raw("                    8 Audit / 9 Help"),
         Line::raw("q                   Inert; does not quit"),
         Line::raw("Tab / Shift+Tab     Move focus forward / backward"),
-        Line::raw("Arrow keys          Move within the focused list or field"),
+        Line::raw("W/S                 Move up / down in NAV; literal text in TYPE"),
+        Line::raw("A/D                 Move left / right in NAV; literal text in TYPE"),
+        Line::raw("Arrow keys          Quiet equivalents for WASD in NAV"),
         Line::raw("PageUp / PageDown   Move by one visible page"),
         Line::raw("Home/End            Move to the bounded start / end"),
         Line::raw("/                   Focus the command bar"),
@@ -39,7 +42,6 @@ fn content(theme: &Theme) -> Vec<Line<'static>> {
         Line::raw("                    Enter opens the selected nested workspace"),
         Line::raw("Up/Down             Browse command history in the command bar"),
         Line::raw("Esc                 Close, cancel, or clear"),
-        Line::raw("i                   Toggle or focus the inspector"),
         Line::raw("?                   Open Help"),
         Line::raw("Ctrl+C              Emergency interrupt from any focus"),
         Line::default(),
@@ -52,5 +54,9 @@ fn content(theme: &Theme) -> Vec<Line<'static>> {
         Line::raw("/skill list          List saved skills"),
         Line::raw("/skill add           Open the guided skill creator"),
         Line::raw("/quit               Request normal shutdown"),
+        Line::default(),
+        Line::styled("TRANSITIONAL EDITORS", theme.accent),
+        Line::raw("Profile, Memory, and Skills keep their current guided controls."),
+        Line::raw("Their validation, review, confirmation, and Esc behavior are unchanged."),
     ]
 }

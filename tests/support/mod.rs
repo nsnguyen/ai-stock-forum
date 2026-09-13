@@ -792,13 +792,16 @@ pub fn seed_manual_memory_acceptance(
     Ok(seed)
 }
 
-const HOST_PARITY_NAVIGATION_LABELS: [&str; 6] = [
-    "1 Overview",
-    "2 Setup",
-    "3 Audit",
-    "4 Help",
-    "a Agents",
-    "s Skills",
+const HOST_PARITY_NAVIGATION_LABELS: [&str; 9] = [
+    "1 Home",
+    "2 Chat",
+    "3 Agents",
+    "4 Skills",
+    "5 Connections",
+    "6 Activity",
+    "7 Setup",
+    "8 Audit",
+    "9 Help",
 ];
 const HOST_PARITY_KEY: &str = "HK701X Thesis";
 const HOST_PARITY_INITIAL_VALUE: &str = "HI702X Initial aligned value.";
@@ -816,7 +819,7 @@ pub struct HostParityResult {
     pub command: ApplicationCommand,
     pub event_payload: ApplicationEvent,
     pub view: CommandView,
-    pub navigation_labels: [&'static str; 6],
+    pub navigation_labels: [&'static str; 9],
 }
 
 #[derive(Clone)]
@@ -1147,7 +1150,7 @@ impl BufRead for DynamicFallbackInput {
     }
 }
 
-fn render_memory_navigation_labels(model: &TuiModel) -> Result<[&'static str; 6], TuiError> {
+fn render_memory_navigation_labels(model: &TuiModel) -> Result<[&'static str; 9], TuiError> {
     let width = model.terminal_width.max(140);
     let height = model.terminal_height.max(40);
     let backend = TestBackend::new(width, height);
@@ -1155,58 +1158,27 @@ fn render_memory_navigation_labels(model: &TuiModel) -> Result<[&'static str; 6]
     terminal
         .draw(|frame| render::render(frame, model, &Theme::from_no_color(true)))
         .map_err(|_| TuiError::TerminalOutput)?;
-    let navigation = ai_stock_forum::ui::tui::layout::view_geometry_for_state(
-        Rect::new(0, 0, width, height),
-        model.active_view,
-        model.inspector_open,
-        true,
-    )
-    .cockpit
-    .navigation
-    .ok_or(TuiError::TerminalOutput)?;
-    let rows = terminal
+    let text = terminal
         .backend()
         .buffer()
         .content()
-        .chunks(usize::from(width))
-        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-        .collect::<Vec<_>>();
-    let inner_rows = rows
         .iter()
-        .skip(usize::from(navigation.y.saturating_add(1)))
-        .take(usize::from(navigation.height.saturating_sub(2)))
-        .map(|row| {
-            row.chars()
-                .skip(usize::from(navigation.x.saturating_add(1)))
-                .take(usize::from(navigation.width.saturating_sub(2)))
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>();
-    let views_row = inner_rows
-        .iter()
-        .position(|row| row.trim() == "VIEWS")
-        .ok_or(TuiError::TerminalOutput)?;
-    let entire_navigation = inner_rows.join("\n");
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    let header = text
+        .chars()
+        .take(usize::from(width) * 3)
+        .collect::<String>();
     if HOST_PARITY_NAVIGATION_SENTINELS
         .iter()
-        .any(|sentinel| entire_navigation.contains(sentinel))
+        .any(|sentinel| header.contains(sentinel))
     {
         return Err(TuiError::TerminalOutput);
     }
-    let mut labels = Vec::new();
-    let mut started = false;
-    for row in inner_rows.iter().skip(views_row + 1) {
-        let row = row.trim();
-        if row.is_empty() {
-            if started {
-                break;
-            }
-            continue;
-        }
-        started = true;
-        labels.push(row.strip_prefix("> ").unwrap_or(row));
-    }
-    if labels.as_slice() != HOST_PARITY_NAVIGATION_LABELS {
+    if HOST_PARITY_NAVIGATION_LABELS
+        .iter()
+        .any(|label| !header.contains(label))
+    {
         return Err(TuiError::TerminalOutput);
     }
     Ok(HOST_PARITY_NAVIGATION_LABELS)
@@ -1215,7 +1187,7 @@ fn render_memory_navigation_labels(model: &TuiModel) -> Result<[&'static str; 6]
 fn fallback_memory_navigation_labels(
     snapshot: PresentationSnapshot,
     profile: &AgentProfileVersion,
-) -> Result<[&'static str; 6], TuiError> {
+) -> Result<[&'static str; 9], TuiError> {
     let mut model = TuiModel::new(snapshot, false);
     model.select_view(View::Agents);
     model
@@ -1236,7 +1208,7 @@ fn fallback_memory_navigation_labels(
 
 fn host_parity_result(
     recorded: Arc<Mutex<Option<RecordedHostMutation>>>,
-    navigation_labels: [&'static str; 6],
+    navigation_labels: [&'static str; 9],
 ) -> HostParityResult {
     let recorded = recorded
         .lock()
@@ -1288,7 +1260,7 @@ pub fn run_fallback_memory_set_scenario() -> HostParityResult {
 
 struct ParityScreen {
     latest: Arc<Mutex<Option<TuiModel>>>,
-    navigation_labels: Arc<Mutex<Option<[&'static str; 6]>>>,
+    navigation_labels: Arc<Mutex<Option<[&'static str; 9]>>>,
     restore_calls: Arc<AtomicUsize>,
 }
 
@@ -1357,7 +1329,7 @@ impl EventSource for MemorySetParityEvents {
         }
         let model = self.latest();
         match self.stage {
-            0 => self.advance(Self::key(KeyCode::Char('a'))),
+            0 => self.advance(Self::key(KeyCode::Char('3'))),
             1 if model.as_ref().is_some_and(|model| {
                 model.active_view == View::Agents
                     && model.agents.pane == AgentsPane::List
@@ -1602,7 +1574,7 @@ impl EventSource for MemoryResolutionParityEvents {
         }
         let model = self.latest();
         match self.stage {
-            0 => self.advance(Self::key(KeyCode::Char('a'))),
+            0 => self.advance(Self::key(KeyCode::Char('3'))),
             1 if model.as_ref().is_some_and(|model| {
                 model.active_view == View::Agents
                     && model.agents.pane == AgentsPane::List

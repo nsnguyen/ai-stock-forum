@@ -51,22 +51,22 @@ network behavior. When both stdin and stdout are terminals, the default launch
 opens the Adaptive Cockpit in the alternate screen; otherwise the existing
 line-oriented command host is selected automatically.
 
-Phase 0B introduced four native views: Overview, Setup, Audit, and Help. The
-current global destination rail has exactly six destinations: Overview, Setup,
-Audit, Help, Agents, and Skills. These are non-transcript views. The cockpit
-requires at least `60x18` terminal cells. At matching height thresholds it is
-Narrow from `60x18`, Medium from `80x24`, and Wide from `120x30`; any smaller
-width or height uses the TooSmall guidance screen.
+Phase 0B introduced native, non-transcript views. The current top navigation has
+exactly nine destinations: Home, Chat, Agents, Skills, Connections, Activity,
+Setup, Audit, and Help. Chat and Connections honestly remain Phase 3
+placeholders. The cockpit requires at least `60x18` terminal cells. Widths from
+60 through 99 show one logical pane; widths from 100 show a two-pane list and
+workspace. Widths from 120 use the Wide density. Any smaller width or height
+uses the TooSmall guidance screen.
 
 | Control | Result |
 | --- | --- |
-| Bare `1`-`4` | Open Overview, Setup, Audit, or Help from any non-text browsing pane or confirmation. |
-| Bare `a` | Open Agents from any non-text browsing pane or confirmation. |
-| Bare `s` | Open Skills from any non-text browsing pane or confirmation. |
+| Bare `1`-`9` | Open Home, Chat, Agents, Skills, Connections, Activity, Setup, Audit, or Help from NAV. |
 | `?` | Open Help. |
 | `Tab`, `Shift+Tab` | Move focus forward or backward among visible regions. |
-| Arrow keys, `PageUp`, `PageDown`, `Home`, `End` | Navigate the focused view or Audit selection. |
-| `i`, `Esc` | Open/focus the inspector; then dismiss the inspector or message. |
+| `WASD` | Move through the focused NAV region; shifted uppercase WASD is equivalent. |
+| Arrow keys, `PageUp`, `PageDown`, `Home`, `End` | Quiet navigation equivalents or bounded page movement. |
+| `Esc` | Go back, cancel, or clear the current interaction. |
 | `/` | Focus the command editor with `/` prefilled. |
 | Command editor: text, `Enter`, arrows, `Home`, `End`, `Backspace`, `Delete`, `Up`, `Down`, `Tab`, `Shift+Tab`, `Esc` | Edit, submit, recall in-memory history, move focus, or cancel command entry. |
 | Agent profile editor: `Up`, `Down`, `Enter`, `Esc` | Choose a template, accept the current field, advance, or go back without requiring colon controls. |
@@ -115,10 +115,10 @@ restart.
 
 ### Keyboard-first profile editor
 
-In the Adaptive Cockpit, press bare `a` to open Agents, then press `c` to
-create a profile. Bare `1`-`4`, `a`, and `s` work from non-text browsing panes
-and confirmations; while command, profile, or skill text entry owns input,
-those characters remain text.
+In the Adaptive Cockpit, press bare `3` to open Agents, then press `c` to
+create a profile. Bare `1`-`9` work from non-text browsing panes and
+confirmations; while command, profile, or skill text entry owns input, those
+characters remain text.
 Use `Up` and `Down` to choose a complete built-in template. Press `Enter` to
 accept it, then press `Enter` on each prefilled field to keep its current value
 and continue. Typing a replacement before `Enter` saves that replacement and
@@ -161,7 +161,7 @@ unassign reviews, schema version 3 persistence, recovery, and compact-to-wide
 Adaptive Cockpit views. Skills are inert accepted context: they cannot execute
 or grant shell, filesystem, Git, MCP, provider, browser, or network access.
 
-Normal use is keyboard-first: press bare `s` to open Skills, navigate with
+Normal use is keyboard-first: press bare `4` to open Skills, navigate with
 arrows, and use `Enter` and `Esc` through visible review and confirmation steps. Optional `/skill`
 commands open the same typed workflows; mutation shortcuts stage review rather
 than writing directly. Bare `q` remains inert and `/quit` remains normal
@@ -210,19 +210,22 @@ stream and authenticated mirrors, reconstructs only permitted missing mirrors
 and derived pointers, and must fail closed for altered, conflicting, or
 unexplained immutable data.
 
-The global destination rail remains exactly:
+The global destinations are exactly:
 
 ```text
-1 Overview
-2 Setup
-3 Audit
-4 Help
-a Agents
-s Skills
+1 Home
+2 Chat
+3 Agents
+4 Skills
+5 Connections
+6 Activity
+7 Setup
+8 Audit
+9 Help
 ```
 
-There is no seventh Memory destination: Memory stays nested under Agents, and
-bare `m` and bare `7` do not navigate there. Modified shortcuts are inert.
+There is no dedicated Memory destination: Memory stays nested under Agents,
+and bare `m` does not navigate there. Modified shortcuts are inert.
 While a Memory text editor owns input, typed shortcut characters remain editor
 text. `?` remains a Help alias but is not a destination label. Switching away
 and back preserves the nested Memory state.

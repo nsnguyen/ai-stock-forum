@@ -69,19 +69,22 @@ terminal_before="$(stty -g)"
 target/release/ai-stock-forum
 ```
 
-The current cockpit is keyboard-first. Its global destination rail contains
+The current cockpit is keyboard-first. Its global destinations contain
 exactly these ordered labels:
 
 ```text
-1 Overview
-2 Setup
-3 Audit
-4 Help
-a Agents
-s Skills
+1 Home
+2 Chat
+3 Agents
+4 Skills
+5 Connections
+6 Activity
+7 Setup
+8 Audit
+9 Help
 ```
 
-There is no seventh Memory destination; Memory is nested under Agents.
+There is no dedicated Memory destination; Memory is nested under Agents.
 Modified shortcuts are inert. In command, profile, skill, or Memory text
 editors, typed shortcut characters remain editor text. Bare `q` is inert and
 `/quit` requests normal shutdown. `?` is a Help alias but is not a destination
@@ -89,11 +92,11 @@ label.
 
 Perform this exact flow in the cockpit:
 
-1. Press bare `a` and confirm Agents opens. Use bare `1`, `2`, `3`, and `4` in
-   turn, use bare `s` to open Skills, then return with bare `a`. Each shortcut
+1. Press bare `3` and confirm Agents opens. Use bare `1` through `9` in
+   turn, use bare `4` to open Skills, then return with bare `3`. Each shortcut
    must work from every non-text browsing pane and confirmation, and Agents must
    return to the same pane and selection. While text entry owns input, type
-   `1234as` and verify the characters remain text rather than navigating.
+   `wasd123456789` and verify the characters remain text rather than navigating.
    Switching preserves tab state, drafts, and pending confirmations.
 2. Press `c` to copy the selected pinned template. Keep bindings empty, rename
    the draft `Research North`, walk every guided step, and inspect the Review
@@ -114,7 +117,7 @@ Perform this exact flow in the cockpit:
    its complete accepted content, immutable metadata, and predecessor diff.
    Inspection must not move the active pointer.
 9. Resize to at least `70x24`, `100x30`, and `140x40`. Confirm the Agents view
-   respectively uses one-pane narrow, two-pane medium, and three-pane wide
+   respectively uses one-pane narrow, two-pane medium, and two-pane wide
    presentation without losing selection, editor/detail state, or history.
 10. Resize below `60x18`; press `Esc` and confirm the app remains open, then
     press bare `q` and confirm it is inert. Open command entry with `/`, type

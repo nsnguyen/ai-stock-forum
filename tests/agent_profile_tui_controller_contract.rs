@@ -166,11 +166,11 @@ fn advance_editor_to_review_with_enter(model: &mut TuiModel) {
 }
 
 #[test]
-fn bare_a_opens_agents_and_remains_text_when_command_entry_owns_input() {
+fn three_opens_agents_and_remains_text_when_command_entry_owns_input() {
     let mut model = model();
 
     assert_eq!(
-        handle_event(&mut model, navigation_key('a')),
+        handle_event(&mut model, navigation_key('3')),
         ControllerEffect::LoadAgentProfiles
     );
     assert_eq!(model.active_view, View::Agents);
@@ -200,7 +200,7 @@ fn option_alt_numeric_keys_do_not_navigate() {
 #[test]
 fn agents_local_navigation_tracks_panes_selection_and_effects() {
     let mut model = model();
-    handle_event(&mut model, navigation_key('a'));
+    handle_event(&mut model, navigation_key('3'));
     model.agents.replace_profiles(AgentProfilesView {
         profiles: vec![profile_summary(10), profile_summary(11)],
         total_count: 2,
@@ -367,14 +367,14 @@ fn agent_list_scroll_accounts_for_wrapped_cards_without_repinning_each_selection
     handle_event(&mut model, key(KeyCode::Down));
     assert_eq!(
         (model.agents.selected_profile, model.agents.list_scroll),
-        (1, 1),
-        "the wrapped first card must not hide the selected second card"
+        (1, 0),
+        "the full-width compact list keeps both cards visible"
     );
 
     handle_event(&mut model, key(KeyCode::Down));
     assert_eq!(
         (model.agents.selected_profile, model.agents.list_scroll),
-        (2, 1),
+        (2, 0),
         "the viewport must stay put when the next short card already fits"
     );
 }
@@ -472,12 +472,12 @@ fn every_view_transition_recomputes_geometry_without_resize_and_preserves_agents
 
         for (code, view) in [
             (KeyCode::Char('1'), View::Overview),
-            (KeyCode::Char('2'), View::Setup),
-            (KeyCode::Char('3'), View::Audit),
-            (KeyCode::Char('4'), View::Help),
+            (KeyCode::Char('7'), View::Setup),
+            (KeyCode::Char('8'), View::Audit),
+            (KeyCode::Char('9'), View::Help),
         ] {
             assert_eq!(
-                handle_event(&mut model, navigation_key('a')),
+                handle_event(&mut model, navigation_key('3')),
                 ControllerEffect::LoadAgentProfiles
             );
             assert_cached_geometry(&model, width, height, View::Agents);
@@ -505,7 +505,7 @@ fn every_view_transition_recomputes_geometry_without_resize_and_preserves_agents
 #[test]
 fn escape_respects_active_agents_layers_and_bare_q_never_quits() {
     let mut model = model();
-    handle_event(&mut model, navigation_key('a'));
+    handle_event(&mut model, navigation_key('3'));
     handle_event(&mut model, key(KeyCode::Char('c')));
     assert!(
         model
@@ -555,7 +555,7 @@ fn escape_respects_active_agents_layers_and_bare_q_never_quits() {
 #[test]
 fn resize_preserves_agents_selection_scroll_and_editor_draft() {
     let mut model = model();
-    handle_event(&mut model, navigation_key('a'));
+    handle_event(&mut model, navigation_key('3'));
     handle_event(&mut model, key(KeyCode::Char('c')));
     assert!(
         model
@@ -587,7 +587,7 @@ fn resize_preserves_agents_selection_scroll_and_editor_draft() {
 #[test]
 fn bare_q_never_requests_shutdown_across_agent_input_owners_or_too_small() {
     let mut editor_model = model();
-    handle_event(&mut editor_model, navigation_key('a'));
+    handle_event(&mut editor_model, navigation_key('3'));
     handle_event(&mut editor_model, key(KeyCode::Char('c')));
     assert!(
         editor_model
@@ -623,7 +623,7 @@ fn bare_q_never_requests_shutdown_across_agent_input_owners_or_too_small() {
     assert_eq!(confirmation_model, confirmation_before_q);
 
     let mut local_model = model();
-    handle_event(&mut local_model, navigation_key('a'));
+    handle_event(&mut local_model, navigation_key('3'));
     let local_before_q = local_model.clone();
     assert_eq!(
         handle_event(&mut local_model, key(KeyCode::Char('q'))),
@@ -668,7 +668,7 @@ fn bare_q_never_requests_shutdown_across_agent_input_owners_or_too_small() {
 #[test]
 fn agents_edit_detail_and_history_navigation_keep_independent_scroll_state() {
     let mut model = model();
-    handle_event(&mut model, navigation_key('a'));
+    handle_event(&mut model, navigation_key('3'));
     model.agents.replace_profiles(AgentProfilesView {
         profiles: vec![profile_summary(40), profile_summary(41)],
         total_count: 2,

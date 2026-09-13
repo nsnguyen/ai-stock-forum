@@ -2560,7 +2560,7 @@ fn memory_editor_field_submissions_never_enter_global_command_history() {
 }
 
 #[test]
-fn all_six_global_shortcuts_preserve_each_non_text_memory_review_and_confirmation_state() {
+fn all_nine_global_shortcuts_preserve_each_non_text_memory_review_and_confirmation_state() {
     let owner = profile(1_300);
     let edit_review = set_review(&owner, 1_310, "protected navigation");
     let mut editor_state = MemoryViewState::default();
@@ -2600,7 +2600,7 @@ fn all_six_global_shortcuts_preserve_each_non_text_memory_review_and_confirmatio
         resolution_state,
         confirmation_state,
     ] {
-        for shortcut in ['1', '2', '3', '4', 'a', 's'] {
+        for shortcut in ['1', '2', '3', '4', '5', '6', '7', '8', '9'] {
             let mut model = memory_model(&owner);
             model.agents.memory = state.clone();
             let before = model.agents.memory.clone();
@@ -2612,7 +2612,7 @@ fn all_six_global_shortcuts_preserve_each_non_text_memory_review_and_confirmatio
             ));
             assert_eq!(model.agents.memory, before, "shortcut={shortcut}");
             assert!(matches!(
-                handle_event(&mut model, key(KeyCode::Char('a'))),
+                handle_event(&mut model, key(KeyCode::Char('3'))),
                 ControllerEffect::Redraw | ControllerEffect::LoadAgentProfiles
             ));
             assert_eq!(model.active_view, View::Agents);
@@ -3198,12 +3198,12 @@ fn detail_scroll_resets_on_memory_identity_changes_but_survives_redraw_resize_an
     );
     assert_eq!(model.agents.memory.detail_scroll, 9);
     assert_eq!(
-        handle_event(&mut model, key(KeyCode::Char('4'))),
+        handle_event(&mut model, key(KeyCode::Char('9'))),
         ControllerEffect::Redraw
     );
     assert_eq!(model.agents.memory.detail_scroll, 9);
     assert_eq!(
-        handle_event(&mut model, key(KeyCode::Char('a'))),
+        handle_event(&mut model, key(KeyCode::Char('3'))),
         ControllerEffect::Redraw
     );
     assert_eq!(model.agents.memory.detail_scroll, 9);
@@ -3566,7 +3566,7 @@ fn memory_keeps_global_help_and_cycles_focus_without_the_latent_inspector() {
         handle_event(&mut focus, key(KeyCode::Tab)),
         ControllerEffect::Redraw,
     );
-    assert_eq!(focus.focus, Focus::Command);
+    assert_eq!(focus.focus, Focus::Navigation);
 }
 
 #[test]
@@ -4979,10 +4979,10 @@ fn assert_exact_memory_list_bound_movements(
 ) {
     model.set_terminal_size(100, 30);
     for (key_code, expected) in [
-        (KeyCode::PageDown, (7, 1)),
-        (KeyCode::PageDown, (14, 8)),
-        (KeyCode::PageUp, (7, 7)),
-        (KeyCode::End, (19, 13)),
+        (KeyCode::PageDown, (8, 1)),
+        (KeyCode::PageDown, (16, 9)),
+        (KeyCode::PageUp, (8, 8)),
+        (KeyCode::End, (19, 12)),
         (KeyCode::Home, (0, 0)),
     ] {
         assert_eq!(handle_event(model, key(key_code)), ControllerEffect::Redraw);

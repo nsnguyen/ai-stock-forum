@@ -266,7 +266,7 @@ impl EventSource for ContractEvents {
         match self.stage {
             0 => {
                 self.stage = 1;
-                Ok(Some(Self::key(KeyCode::Char('a'))))
+                Ok(Some(Self::key(KeyCode::Char('3'))))
             }
             1 => {
                 self.stage = 2;
@@ -293,7 +293,7 @@ impl EventSource for ContractEvents {
             }
             5 => {
                 self.stage = 6;
-                Ok(Some(Self::key(KeyCode::Char('4'))))
+                Ok(Some(Self::key(KeyCode::Char('9'))))
             }
             6 => {
                 self.memory_started

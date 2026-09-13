@@ -17,7 +17,9 @@ use crate::{
         profile_editor::{ProfileEditor, ProfileEditorMode, ProfileEditorStep},
         tui::{
             layout::{agent_layout_mode, agent_workspace, view_geometry},
-            model::{AgentSkillAction, AgentSkillUpgradeAvailability, AgentsPane, TuiModel, View},
+            model::{
+                AgentSkillAction, AgentSkillUpgradeAvailability, AgentsPane, Focus, TuiModel, View,
+            },
             theme::Theme,
         },
     },
@@ -32,6 +34,10 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
     }
     let mode = agent_layout_mode(frame.area());
     let layout = agent_workspace(area, mode);
+    if layout.list.is_none() && model.focus == Focus::List {
+        render_list(frame, area, model, theme);
+        return;
+    }
     if let Some(list) = layout.list {
         render_list(frame, list, model, theme);
     }
@@ -64,7 +70,8 @@ fn render_active(
 }
 
 fn render_list(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
-    let focused = workspace_focused(model) && model.agents.pane == AgentsPane::List;
+    let focused = model.focus == Focus::List
+        || (workspace_focused(model) && model.agents.pane == AgentsPane::List);
     let lines = if model.agents.profiles.profiles.is_empty() {
         vec![
             Line::styled("No agent profiles yet", theme.accent),
@@ -82,7 +89,12 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Them
             .enumerate()
             .skip(first_item)
             .flat_map(|(index, profile)| {
-                profile_summary_lines(profile, index == model.agents.selected_profile, theme)
+                profile_summary_lines(
+                    profile,
+                    index == model.agents.selected_profile,
+                    focused,
+                    theme,
+                )
             })
             .collect()
     };
@@ -122,9 +134,14 @@ fn list_scroll_offset_for_area(model: &TuiModel, area: Rect) -> usize {
     let heights = profiles[first..=selected]
         .iter()
         .map(|profile| {
-            Paragraph::new(profile_summary_lines(profile, false, &measurement_theme))
-                .wrap(Wrap { trim: false })
-                .line_count(inner_width)
+            Paragraph::new(profile_summary_lines(
+                profile,
+                false,
+                false,
+                &measurement_theme,
+            ))
+            .wrap(Wrap { trim: false })
+            .line_count(inner_width)
         })
         .collect::<Vec<_>>();
     let mut visible_height = heights.iter().copied().fold(0usize, usize::saturating_add);
@@ -141,13 +158,20 @@ fn list_scroll_offset_for_area(model: &TuiModel, area: Rect) -> usize {
 fn profile_summary_lines(
     profile: &crate::app::AgentProfileSummary,
     selected: bool,
+    focused: bool,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let marker = if selected { ">" } else { " " };
     vec![
         Line::styled(
             format!("{marker} {}", safe_text(&profile.display_name)),
-            if selected { theme.focus } else { theme.accent },
+            if selected && focused {
+                theme.focus
+            } else if selected {
+                theme.accent
+            } else {
+                theme.muted
+            },
         ),
         Line::from(vec![
             Span::styled(format!("  {} | ", profile.role.as_str()), theme.muted),

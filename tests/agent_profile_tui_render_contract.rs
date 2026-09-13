@@ -166,12 +166,12 @@ fn hidden_profile_editor_does_not_claim_the_skills_command_bar() {
 
     let text = render_text(&model, 100, 30);
 
-    assert!(text.contains(" Command "));
+    assert!(!text.contains(" Command "));
     assert!(!text.contains("Profile input"));
 }
 
 #[test]
-fn agents_layout_uses_one_two_and_three_panes_at_exact_width_breakpoints() {
+fn agents_layout_uses_one_or_two_panes_at_exact_width_breakpoints() {
     let list = model(true, AgentsPane::List);
     let narrow_list = render_text(&list, 79, 24);
     assert!(narrow_list.contains("Agent list"));
@@ -182,7 +182,11 @@ fn agents_layout_uses_one_two_and_three_panes_at_exact_width_breakpoints() {
     assert!(!narrow_detail.contains("Agent list"));
     assert!(narrow_detail.contains("Agent detail"));
 
-    let medium = render_text(&detail, 80, 24);
+    let compact = render_text(&detail, 99, 24);
+    assert!(!compact.contains("Agent list"));
+    assert!(compact.contains("Agent detail"));
+
+    let medium = render_text(&detail, 100, 24);
     assert!(medium.contains("Agent list"));
     assert!(medium.contains("Agent detail"));
     assert!(!medium.contains("Readiness & history"));
@@ -190,9 +194,9 @@ fn agents_layout_uses_one_two_and_three_panes_at_exact_width_breakpoints() {
     let wide = render_text(&detail, 120, 30);
     assert!(wide.contains("Agent list"));
     assert!(wide.contains("Agent detail"));
-    assert!(wide.contains("Readiness & history"));
+    assert!(!wide.contains("Readiness & history"));
 
-    let medium_low = render_text(&detail, 80, 18);
+    let medium_low = render_text(&detail, 100, 18);
     assert!(medium_low.contains("Agent list"));
     assert!(medium_low.contains("Agent detail"));
     assert!(!medium_low.contains("Readiness & history"));
@@ -200,17 +204,17 @@ fn agents_layout_uses_one_two_and_three_panes_at_exact_width_breakpoints() {
     let wide_low = render_text(&detail, 120, 18);
     assert!(wide_low.contains("Agent list"));
     assert!(wide_low.contains("Agent detail"));
-    assert!(wide_low.contains("Readiness & history"));
+    assert!(!wide_low.contains("Readiness & history"));
 }
 
 #[test]
 fn legacy_views_keep_height_aware_modes_at_low_supported_heights() {
     for view in [View::Overview, View::Setup, View::Audit, View::Help] {
-        for width in [80, 120] {
+        for (width, mode) in [(80, "Narrow"), (120, "Wide")] {
             let mut legacy = model(false, AgentsPane::List);
             legacy.active_view = view;
             let text = render_text(&legacy, width, 18);
-            assert!(text.contains("Narrow"), "view={view:?} width={width}");
+            assert!(text.contains(mode), "view={view:?} width={width}");
             assert!(
                 !text.contains(" Navigation "),
                 "view={view:?} width={width}"
@@ -225,12 +229,20 @@ fn narrow_header_rows_are_complete_at_sixty_and_seventy_columns() {
     for width in [60, 70] {
         let rows = render_rows(&model, width, 18);
         assert_eq!(rows[0].trim_end(), "AI STOCK FORUM  /  Agents  /  Narrow");
-        assert_eq!(rows[1].trim_end(), "Active 1  Ready 0  Not Ready 1");
-        assert_eq!(
-            rows[2].trim_end(),
-            "1 Overview 2 Setup 3 Audit 4 Help a Agents s Skills"
-        );
-        assert_eq!(rows[3], "-".repeat(usize::from(width)));
+        let navigation = format!("{} {}", rows[1], rows[2]);
+        for label in [
+            "1 Home",
+            "2 Chat",
+            "3 Agents",
+            "4 Skills",
+            "5 Connections",
+            "6 Activity",
+            "7 Setup",
+            "8 Audit",
+            "9 Help",
+        ] {
+            assert!(navigation.contains(label), "width={width} label={label}");
+        }
     }
 }
 
@@ -242,13 +254,9 @@ fn view_geometry_accounts_for_the_agents_header_height() {
         let agents = view_geometry(area, View::Agents, false);
 
         assert_eq!(legacy.cockpit.header.height, 3);
-        assert_eq!(agents.cockpit.header.height, 4);
-        assert_eq!(legacy.workspace_body_height, 9);
-        assert_eq!(agents.workspace_body_height, 8);
-        assert_eq!(
-            legacy.workspace_body_height.saturating_sub(1),
-            agents.workspace_body_height
-        );
+        assert_eq!(agents.cockpit.header.height, 3);
+        assert_eq!(legacy.workspace_body_height, 10);
+        assert_eq!(agents.workspace_body_height, 10);
     }
 }
 
@@ -257,13 +265,9 @@ fn agents_empty_and_populated_states_render_counts_readiness_and_complete_metada
     let empty = render_text(&model(false, AgentsPane::List), 100, 30);
     assert!(empty.contains("No agent profiles yet"));
     assert!(empty.contains("Press c to create your first profile"));
-    assert!(empty.contains("Active 0"));
 
     let populated = render_text(&model(true, AgentsPane::Detail), 160, 44);
     for expected in [
-        "Active 1",
-        "Ready 0",
-        "Not Ready 1",
         "Long Horizon Analyst",
         "bull",
         "fundamental compounders",

@@ -6727,7 +6727,7 @@ mod tests {
             EventStep::Idle,
             EventStep::Idle,
             EventStep::Event(TuiEvent::Resize(70, 20)),
-            navigation_key('2'),
+            navigation_key('7'),
             EventStep::Idle,
         ];
         steps.extend(command_steps("/quit"));
@@ -6797,7 +6797,7 @@ mod tests {
 
         let effect = handle_event(
             &mut runner.model,
-            TuiEvent::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
+            TuiEvent::Key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE)),
         );
         assert_eq!(effect, ControllerEffect::LoadSkills);
         assert!(runner.model.skills.active);
@@ -6893,7 +6893,7 @@ mod tests {
         assert_eq!(
             handle_event(
                 &mut runner.model,
-                TuiEvent::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE,)),
+                TuiEvent::Key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE,)),
             ),
             ControllerEffect::Redraw
         );
@@ -6990,7 +6990,7 @@ mod tests {
         assert_eq!(
             handle_event(
                 &mut runner.model,
-                TuiEvent::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE,)),
+                TuiEvent::Key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE,)),
             ),
             ControllerEffect::Redraw
         );
