@@ -176,7 +176,7 @@ this documentation preparation.
 
 | Evidence | Result |
 | --- | --- |
-| Current Agents controls | Final-fix wave implemented; 330 covering checks passed; final scoped re-review pending |
+| Current Agents controls | Final-fix wave implemented; 330 covering checks passed; final scoped re-review passed — all eight findings addressed, no open findings |
 | `cargo test --locked` | 1,282 passed; 0 failed; 1 ignored across 99 result summaries |
 | Formatting, lint, and whitespace | `cargo fmt --all -- --check`, all-target Clippy with warnings denied, and `git diff --check` passed |
 | Production-render matrix | All 10 scenes at 5 sizes in color and NO_COLOR emitted the exact requested height; 100 renders passed |
