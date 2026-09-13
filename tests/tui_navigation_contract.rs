@@ -634,6 +634,15 @@ fn bare_shortcut_characters_remain_text_for_each_active_text_owner() {
             .agents
             .start_profile_create(0, builtin_profile_templates())
     );
+    handle_event(
+        &mut profile_model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+    );
+    handle_event(
+        &mut profile_model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    );
+    profile_model.agents.field_input.clear();
     for character in characters.chars() {
         assert_eq!(
             handle_event(&mut profile_model, plain_character(character)),
@@ -644,7 +653,8 @@ fn bare_shortcut_characters_remain_text_for_each_active_text_owner() {
     assert_eq!(profile_model.active_view, View::Agents);
     assert!(!profile_model.skills.active);
     assert_eq!(profile_model.agents.pane, AgentsPane::Editor);
-    assert_eq!(profile_model.command.text(), characters);
+    assert_eq!(profile_model.agents.field_input.text(), characters);
+    assert!(profile_model.command.text().is_empty());
 
     let mut skill_model = model();
     skill_model.skills.active = true;

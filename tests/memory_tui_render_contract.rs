@@ -1174,18 +1174,21 @@ fn loaded_agent_detail_prepends_the_nested_memory_action_selector() {
     model.agents.pane = AgentsPane::Detail;
 
     let text = render_text(&model, 160, 40);
-    assert!(text.contains("Assigned Skills | Memory"));
-    assert!(text.contains("Left/Right: choose | Enter: open"));
+    for label in ["Profile", "Memory", "Skills", "History"] {
+        assert!(text.contains(label));
+    }
+    assert!(text.contains("A/D choose   Enter open"));
 
     model.agents.selected_detail_action = AgentDetailAction::Memory;
     let selected_text = render_text(&model, 160, 40);
-    assert_eq!(selected_text.matches("Assigned Skills | Memory").count(), 1);
-    assert_eq!(
+    assert!(
         selected_text
-            .matches("Left/Right: choose | Enter: open")
-            .count(),
-        1
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains("Profile Memory Skills History")
     );
+    assert_eq!(selected_text.matches("A/D choose   Enter open").count(), 1);
 }
 
 #[test]

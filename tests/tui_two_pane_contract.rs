@@ -249,7 +249,7 @@ fn paste_outside_type_mode_is_inert_and_tab_never_focuses_an_inspector() {
         handle_event(&mut model, key(KeyCode::Tab));
         seen.push(model.focus);
     }
-    assert_eq!(seen, vec![Focus::Navigation, Focus::List, Focus::Workspace]);
+    assert_eq!(seen, vec![Focus::Workspace, Focus::Navigation, Focus::List]);
 }
 
 #[test]

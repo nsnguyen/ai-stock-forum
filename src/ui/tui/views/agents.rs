@@ -14,7 +14,7 @@ use crate::{
     },
     app::ApplicationCommand,
     ui::{
-        profile_editor::{ProfileEditor, ProfileEditorMode, ProfileEditorStep},
+        profile_editor::{ProfileEditor, ProfileEditorMode},
         tui::{
             layout::{agent_layout_mode, agent_workspace, view_geometry},
             model::{
@@ -76,7 +76,7 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Them
         vec![
             Line::styled("No agent profiles yet", theme.accent),
             Line::default(),
-            Line::raw("Press c to create your first profile."),
+            Line::raw("Press N to create your first agent."),
             Line::styled("Templates provide a safe starting point.", theme.muted),
         ]
     } else {
@@ -163,16 +163,26 @@ fn profile_summary_lines(
 ) -> Vec<Line<'static>> {
     let marker = if selected { ">" } else { " " };
     vec![
-        Line::styled(
-            format!("{marker} {}", safe_text(&profile.display_name)),
-            if selected && focused {
-                theme.focus
-            } else if selected {
-                theme.accent
-            } else {
-                theme.muted
-            },
-        ),
+        Line::from(vec![
+            Span::styled(
+                format!("{marker} "),
+                if selected { theme.focus } else { theme.muted },
+            ),
+            Span::styled(
+                monogram(&profile.display_name),
+                theme.agent_monogram(profile.profile_id),
+            ),
+            Span::styled(
+                format!("  {}", safe_text(&profile.display_name)),
+                if selected && focused {
+                    theme.focus
+                } else if selected {
+                    theme.accent
+                } else {
+                    theme.muted
+                },
+            ),
+        ]),
         Line::from(vec![
             Span::styled(format!("  {} | ", profile.role.as_str()), theme.muted),
             Span::styled(
@@ -190,44 +200,49 @@ fn profile_summary_lines(
 }
 
 fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
-    let focused = workspace_focused(model) && model.agents.pane == AgentsPane::Detail;
-    let lines = if model.agents.skill_panel_open {
-        assigned_skill_lines(model, theme)
-    } else {
-        model
-            .agents
-            .detail
-            .as_ref()
-            .map(|detail| {
-                let mut lines = agent_detail_action_lines(model, theme);
+    let mut lines = Vec::new();
+    if let Some(row) = model.agents.selected_summary() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                monogram(&row.display_name),
+                theme.agent_monogram(row.profile_id),
+            ),
+            Span::styled(format!("  {}", safe_text(&row.display_name)), theme.accent),
+        ]));
+        lines.push(Line::styled(safe_text(&row.primary_specialty), theme.muted));
+        lines.push(Line::default());
+        lines.extend(agent_detail_action_lines(model, theme));
+        if let Some(detail) = model.agents.matching_detail() {
+            if model.agents.skill_panel_open {
+                lines.extend(assigned_skill_lines(model, theme));
+            } else {
                 lines.extend(detail_lines(detail, theme));
-                lines
-            })
-            .unwrap_or_else(|| {
-                if model.agents.profiles.profiles.is_empty() {
-                    vec![
-                        Line::styled("No agent profiles yet", theme.accent),
-                        Line::default(),
-                        Line::raw("Press c to create your first profile."),
-                    ]
-                } else {
-                    vec![
-                        Line::styled("No profile selected", theme.accent),
-                        Line::default(),
-                        Line::raw("Choose a profile and press Enter to load its detail."),
-                    ]
-                }
-            })
-    };
+            }
+        } else {
+            lines.push(Line::styled(
+                format!("Loading {}", safe_text(&row.display_name)),
+                theme.muted,
+            ));
+            lines.push(Line::raw(
+                "Actions become available when this profile is loaded.",
+            ));
+        }
+        lines.push(Line::default());
+        lines.push(Line::styled(
+            "N new agent   E edit   H history",
+            theme.focus,
+        ));
+    } else {
+        lines.push(Line::styled("Your agents", theme.accent));
+        lines.push(Line::raw(
+            "No agent profiles yet. Press N to create your first agent.",
+        ));
+    }
     frame.render_widget(
         Paragraph::new(lines)
             .block(panel(
-                if model.agents.skill_panel_open {
-                    "Assigned skills"
-                } else {
-                    "Agent detail"
-                },
-                focused,
+                "Agent workspace",
+                agent_workspace_focused(model),
                 theme,
             ))
             .wrap(Wrap { trim: false })
@@ -236,29 +251,34 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
     );
 }
 
+fn agent_workspace_focused(model: &TuiModel) -> bool {
+    workspace_focused(model) && model.agents.pane != AgentsPane::List
+}
+
 fn agent_detail_action_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
-    let selected = model.agents.selected_detail_action;
+    use crate::ui::tui::model::AgentDetailAction;
+    let mut spans = Vec::new();
+    for (action, label) in [
+        (AgentDetailAction::Profile, "Profile"),
+        (AgentDetailAction::Memory, "Memory"),
+        (AgentDetailAction::AssignedSkills, "Skills"),
+        (AgentDetailAction::History, "History"),
+    ] {
+        spans.push(Span::styled(
+            format!(" {label} "),
+            if model.agents.selected_detail_action == action && agent_workspace_focused(model) {
+                theme.focus
+            } else if model.agents.selected_detail_action == action {
+                theme.accent
+            } else {
+                theme.muted
+            },
+        ));
+        spans.push(Span::raw(" "));
+    }
     vec![
-        Line::from(vec![
-            Span::styled(
-                "Assigned Skills",
-                if selected == crate::ui::tui::model::AgentDetailAction::AssignedSkills {
-                    theme.focus
-                } else {
-                    theme.muted
-                },
-            ),
-            Span::raw(" | "),
-            Span::styled(
-                "Memory",
-                if selected == crate::ui::tui::model::AgentDetailAction::Memory {
-                    theme.focus
-                } else {
-                    theme.muted
-                },
-            ),
-        ]),
-        Line::styled("Left/Right: choose | Enter: open", theme.muted),
+        Line::from(spans),
+        Line::styled("A/D choose   Enter open   W/S scroll", theme.muted),
         Line::default(),
     ]
 }
@@ -364,7 +384,14 @@ fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
                 },
                 index + 1,
                 assigned.version().get(),
-                compact_identifier(&assigned.skill_id().to_string())
+                model
+                    .skills
+                    .library
+                    .skills
+                    .iter()
+                    .find(|skill| skill.skill_ref.skill_id() == assigned.skill_id())
+                    .map(|skill| safe_text(&skill.display_name))
+                    .unwrap_or_else(|| "Assigned skill".to_owned())
             ),
             if index == model.agents.selected_assigned_skill {
                 theme.focus
@@ -377,26 +404,16 @@ fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
         Line::default(),
         Line::styled("PINNED EXACT VERSION", theme.accent),
         label_value("Version", format!("v{}", reference.version().get()), theme),
-        label_value("Skill ID", reference.skill_id().to_string(), theme),
-        label_value(
-            "Version ID",
-            reference.skill_version_id().to_string(),
-            theme,
+        Line::styled(
+            "This exact skill version is pinned to the agent.",
+            theme.muted,
         ),
-        label_value("Digest", reference.content_digest().to_string(), theme),
         Line::styled(
             "No automatic upgrades. Skill text grants no capability.",
             theme.muted,
         ),
     ]);
     lines
-}
-
-fn compact_identifier(value: &str) -> String {
-    if value.len() <= 19 {
-        return value.to_owned();
-    }
-    format!("{}..{}", &value[..8], &value[value.len() - 8..])
 }
 
 fn detail_lines(detail: &crate::app::AgentProfileView, theme: &Theme) -> Vec<Line<'static>> {
@@ -409,18 +426,23 @@ fn profile_version_lines(
     version_label: &'static str,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
+    let historical = version_label.contains("Historical");
     let mut lines = vec![
         Line::styled(safe_text(profile.display_name()), theme.accent),
-        label_value("Profile ID", profile.profile_id().to_string(), theme),
-        label_value(
-            version_label,
+        Line::styled(
             format!(
-                "v{} / {}",
+                "Version {} · {} · {}",
                 profile.version().get(),
-                profile.profile_version_id()
+                if historical {
+                    "Historical · Read-only"
+                } else {
+                    "Current"
+                },
+                readable_date(profile.created_at_ms())
             ),
-            theme,
+            theme.muted,
         ),
+        Line::default(),
         label_value("Role", profile.role().as_str().to_owned(), theme),
         label_value("Specialty", safe_text(profile.primary_specialty()), theme),
         label_value(
@@ -428,84 +450,41 @@ fn profile_version_lines(
             safe_text(&profile.specialty_tags().join(", ")),
             theme,
         ),
-        readiness_line("Readiness", readiness, theme),
+        readiness_line("Connection", readiness, theme),
         Line::default(),
-        Line::styled("ACCEPTED CONTENT", theme.accent),
         label_value("Description", safe_text(profile.description()), theme),
-        label_value("Personality", safe_text(profile.personality()), theme),
-        label_value("Instructions", safe_text(profile.instructions()), theme),
-    ];
-    let skill_refs = profile
-        .skill_refs()
-        .iter()
-        .map(skill_ref_label)
-        .collect::<Vec<_>>();
-    append_references(
-        &mut lines,
-        "Skill refs",
-        skill_refs.iter().map(String::as_str),
-        theme,
-    );
-    append_references(
-        &mut lines,
-        "MCP refs",
-        profile
-            .mcp_refs()
-            .iter()
-            .map(|reference| reference.as_str()),
-        theme,
-    );
-    lines.extend([
         Line::default(),
-        Line::styled("IMMUTABLE METADATA", theme.accent),
-        label_value("Created ms", profile.created_at_ms().to_string(), theme),
-        label_value("Memory", profile.memory_namespace_id().to_string(), theme),
-        label_value("Policy", safe_text(profile.default_policy_ref()), theme),
+        label_value("Personality", safe_text(profile.personality()), theme),
+        Line::default(),
+        label_value("Instructions", safe_text(profile.instructions()), theme),
+        Line::default(),
         label_value(
-            "Supersedes",
-            profile
-                .supersedes()
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "None".to_owned()),
+            "Skills",
+            format!(
+                "{} assigned · open Skills to inspect",
+                profile.skill_refs().len()
+            ),
             theme,
         ),
-        label_value("Digest", profile.content_digest().to_string(), theme),
-        Line::default(),
-        Line::styled("Bindings", theme.accent),
-        label_value("Inference", inference_text(profile.bindings()), theme),
-        label_value("Engineering", engineering_text(profile.bindings()), theme),
-    ]);
-    append_provenance(&mut lines, profile.template_provenance(), theme);
-    lines
-}
-
-fn append_references<'a>(
-    lines: &mut Vec<Line<'static>>,
-    label: &'static str,
-    values: impl Iterator<Item = &'a str>,
-    theme: &Theme,
-) {
-    let values = values.map(safe_text).collect::<Vec<_>>();
-    if values.is_empty() {
-        lines.push(label_value(label, "None".to_owned(), theme));
-        return;
-    }
-    for (index, value) in values.into_iter().enumerate() {
-        lines.push(label_value(
-            if index == 0 { label } else { "" },
-            value,
-            theme,
+        label_value("Bindings", bindings_value(profile.bindings()), theme),
+    ];
+    if profile.role() == crate::agents::AgentRole::Engineering {
+        lines.push(Line::styled(
+            "Engineering requires both inference and engineering bindings.",
+            theme.muted,
         ));
     }
-}
-
-fn skill_ref_label(reference: &crate::skills::SkillVersionRef) -> String {
-    format!(
-        "{}@{}#{}",
-        reference.skill_id(),
-        reference.skill_version_id(),
-        reference.version().get(),
-    )
+    lines.push(Line::styled(
+        "Bindings are read-only here. Configure connections separately.",
+        theme.muted,
+    ));
+    if historical {
+        lines.push(Line::styled(
+            "E edits the current active profile.",
+            theme.focus,
+        ));
+    }
+    lines
 }
 
 fn render_history(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
@@ -523,179 +502,283 @@ fn render_history(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
 }
 
 fn history_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
-    let Some(history) = &model.agents.history else {
-        if let Some(detail) = &model.agents.version_detail {
-            let mut lines = vec![Line::styled("HISTORICAL VERSION", theme.accent)];
-            lines.extend(profile_version_lines(
-                &detail.profile,
-                detail.readiness,
-                "Historical version",
-                theme,
-            ));
-            lines.push(Line::default());
-            lines.push(Line::styled("PREDECESSOR DIFF", theme.accent));
-            append_diffs(&mut lines, &detail.predecessor_diff, theme);
-            return lines;
-        }
-        return vec![
-            Line::styled("No history loaded", theme.accent),
-            Line::raw("Press h from profile detail to load version history."),
-        ];
+    let Some(row) = model.agents.selected_summary() else {
+        return vec![Line::raw("Select an agent to view history.")];
     };
-    let mut lines = Vec::new();
-    if let Some(detail) = &model.agents.version_detail {
-        lines.push(Line::styled("HISTORICAL VERSION", theme.accent));
+    let mut lines = vec![
+        Line::styled(
+            format!("{} · History", safe_text(&row.display_name)),
+            theme.accent,
+        ),
+        Line::default(),
+    ];
+    if let Some(detail) = model
+        .agents
+        .version_detail
+        .as_ref()
+        .filter(|detail| detail.profile.profile_id() == row.profile_id)
+    {
+        let current = detail.profile.profile_version_id() == row.profile_version_id;
         lines.extend(profile_version_lines(
             &detail.profile,
             detail.readiness,
-            "Historical version",
+            if current { "Current" } else { "Historical" },
             theme,
         ));
         lines.push(Line::default());
-        lines.push(Line::styled("PREDECESSOR DIFF", theme.accent));
+        lines.push(Line::styled("Changes from previous version", theme.accent));
         append_diffs(&mut lines, &detail.predecessor_diff, theme);
-        lines.push(Line::default());
+        lines.push(Line::styled(
+            "Esc returns to history · E edits current profile",
+            theme.focus,
+        ));
+        return lines;
     }
-    lines.extend([
-        label_value("Profile ID", history.profile_id.to_string(), theme),
-        label_value(
-            "Active version",
-            history.active_version_id.to_string(),
-            theme,
-        ),
-        label_value("Total versions", history.total_count.to_string(), theme),
-        label_value("Returned", history.returned_count.to_string(), theme),
-        label_value("Truncated", history.truncated.to_string(), theme),
-        Line::default(),
-    ]);
+    let Some(history) = model.agents.history.as_ref().filter(|history| {
+        history.profile_id == row.profile_id && history.active_version_id == row.profile_version_id
+    }) else {
+        lines.push(Line::raw(format!(
+            "Loading history for {}",
+            safe_text(&row.display_name)
+        )));
+        return lines;
+    };
     for (index, entry) in history.versions.iter().enumerate() {
-        let active = entry.profile_version_id == history.active_version_id;
-        let selected = index == model.agents.selected_history_version;
         lines.push(Line::styled(
             format!(
-                "{} v{}  {}{}",
-                if selected { ">" } else { " " },
+                "{} Version {} · {}",
+                if index == model.agents.selected_history_version {
+                    "›"
+                } else {
+                    " "
+                },
                 entry.version.get(),
-                readiness_name(entry.readiness),
-                if active { "  ACTIVE" } else { "" },
+                if entry.profile_version_id == history.active_version_id {
+                    "Current"
+                } else {
+                    "Historical · Read-only"
+                }
             ),
-            if selected {
+            if index == model.agents.selected_history_version {
                 theme.focus
             } else {
-                readiness_style(entry.readiness, theme)
+                theme.muted
             },
         ));
-        lines.push(label_value(
-            "Version ID",
-            entry.profile_version_id.to_string(),
-            theme,
-        ));
-        lines.push(label_value(
-            "Created ms",
-            entry.created_at_ms.to_string(),
-            theme,
-        ));
-        lines.push(label_value(
-            "Supersedes",
-            entry
-                .supersedes
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "None".to_owned()),
-            theme,
-        ));
-        lines.push(label_value(
-            "Digest",
-            entry.content_digest.to_string(),
-            theme,
+        lines.push(Line::styled(
+            format!(
+                "  {} · {}",
+                readable_date(entry.created_at_ms),
+                readiness_name(entry.readiness)
+            ),
+            theme.muted,
         ));
         lines.push(Line::default());
     }
-    if model.agents.version_detail.is_none() && !history.versions.is_empty() {
-        lines.push(Line::styled(
-            "Use Up/Down to select a version, then Enter to inspect it.",
-            theme.muted,
-        ));
-    }
+    lines.push(Line::styled(
+        "W/S choose version   Enter inspect   E edit current   Esc back",
+        theme.focus,
+    ));
     lines
 }
 
 fn render_editor(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    use crate::ui::tui::model::InputMode;
+    let active = model
+        .agents
+        .editor
+        .as_ref()
+        .map(|editor| editor.tui_field());
+    let is_typing = model.input_mode == InputMode::Type;
+    let active_error = model.agents.editor.as_ref().and_then(|editor| {
+        editor.tui_field_error(editor.tui_field()).map(|_| {
+            format!(
+                "{}: invalid; revise before review",
+                field_label(editor.tui_field())
+            )
+        })
+    });
+    let active_height = if is_typing {
+        5.min(area.height)
+    } else if active_error.is_some() {
+        4.min(area.height)
+    } else {
+        3.min(area.height)
+    };
+    if is_typing {
+        let input = &model.agents.field_input;
+        let cursor = input.cursor_byte().min(input.text().len());
+        let prefix = &input.text()[..cursor];
+        let tail = &input.text()[cursor..];
+        let width = usize::from(area.width.saturating_sub(5));
+        let visible_prefix: String = prefix
+            .chars()
+            .rev()
+            .take(width)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let text = format!("{}│{}", safe_text(&visible_prefix), safe_text(tail));
+        let label = active.map(field_label).unwrap_or_default();
+        let mut input_lines = vec![
+            Line::raw(text),
+            Line::styled(
+                "Enter accepts · Esc keeps draft · Tab next field",
+                theme.muted,
+            ),
+        ];
+        if let Some(error) = &active_error {
+            input_lines.push(Line::styled(error.clone(), theme.warning));
+        }
+        frame.render_widget(
+            Paragraph::new(input_lines).block(panel(&format!("TYPE · {label}"), true, theme)),
+            Rect {
+                height: active_height,
+                ..area
+            },
+        );
+    }
+    if !is_typing && let Some(field) = active {
+        let mut guidance = vec![Line::raw(field_guidance(field))];
+        if let Some(error) = active_error {
+            guidance.push(Line::styled(error, theme.warning));
+        }
+        frame.render_widget(
+            Paragraph::new(guidance).block(panel("Selected field", true, theme)),
+            Rect {
+                height: active_height,
+                ..area
+            },
+        );
+    }
+    let area = Rect {
+        y: area.y + active_height,
+        height: area.height.saturating_sub(active_height),
+        ..area
+    };
     let lines = model
         .agents
         .editor
         .as_ref()
         .map(|editor| editor_lines(editor, theme))
         .unwrap_or_else(|| vec![Line::raw("Editor is unavailable. Press Esc to return.")]);
+    let marker = lines
+        .iter()
+        .position(|line| line.to_string().starts_with('›'))
+        .unwrap_or(0);
+    let prefix_height = Paragraph::new(lines[..marker].to_vec())
+        .wrap(Wrap { trim: false })
+        .line_count(area.width.saturating_sub(2));
+    let automatic_scroll = prefix_height.saturating_sub(usize::from(area.height.saturating_sub(8)));
+    let is_review = active == Some(crate::ui::profile_editor::ProfileTuiField::Review);
+    let max_scroll = Paragraph::new(lines.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(area.width.saturating_sub(2))
+        .saturating_sub(usize::from(area.height.saturating_sub(2)));
+    let offset = if is_review {
+        model.agents.detail_scroll.min(max_scroll)
+    } else {
+        automatic_scroll
+    };
     frame.render_widget(
         Paragraph::new(lines)
             .block(panel("Profile editor", workspace_focused(model), theme))
             .wrap(Wrap { trim: false })
-            .scroll((scroll(model.agents.detail_scroll, area.height), 0)),
+            .scroll((scroll(offset, area.height), 0)),
         area,
     );
 }
 
 fn editor_lines(editor: &ProfileEditor, theme: &Theme) -> Vec<Line<'static>> {
-    let step = editor.step();
-    let mode = match editor.mode() {
-        ProfileEditorMode::Create { .. } => "Create",
-        ProfileEditorMode::Edit { .. } => "Edit",
+    use crate::ui::profile_editor::ProfileTuiField;
+    let field = editor.tui_field();
+    let mode = if matches!(editor.mode(), ProfileEditorMode::Create { .. }) {
+        "New agent"
+    } else {
+        "Edit agent"
     };
     let mut lines = vec![
-        Line::styled(format!("{mode} agent profile"), theme.accent),
-        label_value(
-            "Progress",
-            format!("Step {} of 7", step_number(step)),
-            theme,
+        Line::styled(
+            format!("{mode} · {}", safe_text(&editor.draft().display_name)),
+            theme.accent,
         ),
-        label_value("Current step", step.as_str().replace('_', " "), theme),
-        label_value(
-            "Current field",
-            editor.current_field_label().to_owned(),
-            theme,
+        Line::styled(
+            "Tab next field   Shift+Tab previous   Enter edit/select   Esc keep draft",
+            theme.muted,
         ),
+        Line::default(),
     ];
-    lines.extend(
-        step_guidance(editor)
-            .into_iter()
-            .map(|guidance| Line::styled(guidance, theme.muted)),
-    );
-    lines.push(Line::styled(editor_key_guidance(editor), theme.focus));
-    if let Some(message) = editor.local_message() {
-        lines.push(Line::default());
-        lines.push(Line::styled(editor_message(message.code()), theme.warning));
-    }
-    if step == ProfileEditorStep::Review {
-        lines.push(Line::default());
-        lines.push(Line::styled("REVIEW CHANGES", theme.accent));
+    if field == ProfileTuiField::Review {
+        lines.push(Line::styled("Review changes", theme.accent));
         if let Some(review) = editor.review() {
             append_diffs(&mut lines, &review.preview().diffs, theme);
         } else if let Some(baseline) = editor.create_baseline() {
             append_create_diffs(&mut lines, baseline, editor.draft(), theme);
         } else {
+            lines.push(Line::raw("Enter requests an authoritative review."));
+        }
+        lines.push(Line::styled(
+            "Enter continues to a separate confirmation · Esc keeps draft",
+            theme.focus,
+        ));
+        if let Some(message) = editor.local_message() {
+            lines.push(Line::styled(editor_message(message.code()), theme.warning));
+        }
+        return lines;
+    }
+    for (item, label) in [
+        (ProfileTuiField::Template, "Template"),
+        (ProfileTuiField::DisplayName, "Display name"),
+        (ProfileTuiField::Role, "Role"),
+        (ProfileTuiField::Description, "Description"),
+        (ProfileTuiField::PrimarySpecialty, "Specialty"),
+        (ProfileTuiField::Tags, "Tags"),
+        (ProfileTuiField::Personality, "Personality"),
+        (ProfileTuiField::Instructions, "Instructions"),
+        (ProfileTuiField::Bindings, "Bindings"),
+        (ProfileTuiField::Review, "Review changes"),
+        (ProfileTuiField::Discard, "Discard draft"),
+    ] {
+        let value = match item {
+            ProfileTuiField::Template => crate::agents::builtin_profile_templates()
+                .iter()
+                .find(|template| template.id.as_str() == editor.tui_field_text(item))
+                .map(|template| template.suggested_name.to_owned())
+                .unwrap_or_else(|| "Current profile · unchanged".to_owned()),
+            ProfileTuiField::Bindings => {
+                format!("{} · read-only", bindings_value(&editor.draft().bindings))
+            }
+            ProfileTuiField::Review => "Enter to review".to_owned(),
+            ProfileTuiField::Discard => "Enter to discard this draft".to_owned(),
+            _ => safe_text(editor.tui_field_text(item)),
+        };
+        lines.push(Line::styled(
+            format!("{} {label}", if field == item { "›" } else { " " }),
+            if field == item {
+                theme.focus
+            } else {
+                theme.muted
+            },
+        ));
+        lines.push(Line::raw(format!("  {value}")));
+        if editor.tui_field_error(item).is_some() {
             lines.push(Line::styled(
-                "An authoritative preview is required before activation.",
+                "  Please revise this field before reviewing.",
                 theme.warning,
             ));
         }
     }
-    lines.push(Line::default());
-    lines.push(Line::styled("CURRENT CANDIDATE", theme.accent));
-    append_draft(&mut lines, editor.draft(), theme);
+    if matches!(field, ProfileTuiField::Template | ProfileTuiField::Role) {
+        lines.push(Line::styled(
+            "WASD selects a choice; these controls do not accept text.",
+            theme.muted,
+        ));
+    }
+    if let Some(message) = editor.local_message() {
+        lines.push(Line::styled(editor_message(message.code()), theme.warning));
+    }
     lines
-}
-
-fn append_draft(lines: &mut Vec<Line<'static>>, draft: &AgentProfileDraft, theme: &Theme) {
-    lines.extend([
-        label_value("Display name", safe_text(&draft.display_name), theme),
-        label_value("Description", safe_text(&draft.description), theme),
-        label_value("Role", draft.role.as_str().to_owned(), theme),
-        label_value("Specialty", safe_text(&draft.primary_specialty), theme),
-        label_value("Tags", safe_text(&draft.specialty_tags.join(", ")), theme),
-        label_value("Personality", safe_text(&draft.personality), theme),
-        label_value("Instructions", safe_text(&draft.instructions), theme),
-        label_value("Bindings", bindings_value(&draft.bindings), theme),
-    ]);
 }
 
 fn append_diffs(lines: &mut Vec<Line<'static>>, diffs: &[ProfileFieldDiff], theme: &Theme) {
@@ -790,69 +873,49 @@ fn confirmation_lines(model: &TuiModel, theme: &Theme) -> (&'static str, Vec<Lin
     let Some(confirmation) = &model.agents.pending_confirmation else {
         return (
             "Apply",
-            vec![Line::styled(
+            vec![Line::raw(
                 "Profile confirmation is unavailable. Press Esc to return.",
-                theme.warning,
             )],
         );
     };
-    let mut lines = match &confirmation.command {
-        ApplicationCommand::CreateAgentProfile {
-            template_provenance,
-            ..
-        } => {
-            let context = template_provenance.as_ref().map_or_else(
-                || "Custom profile without template provenance".to_owned(),
-                |provenance| {
-                    format!(
-                        "Template {}@{} {}",
-                        safe_text(provenance.template_id.as_str()),
-                        provenance.template_version.get(),
-                        provenance.template_digest
-                    )
-                },
+    let (action, name, explanation) = match &confirmation.command {
+        ApplicationCommand::CreateAgentProfile { draft, .. } => (
+            "Create",
+            safe_text(&draft.display_name),
+            "Create this agent and make Version 1 current.",
+        ),
+        ApplicationCommand::ActivateAgentProfileVersion { .. } => (
+            "Activate",
+            model
+                .agents
+                .editor
+                .as_ref()
+                .map(|editor| safe_text(&editor.draft().display_name))
+                .unwrap_or_else(|| "selected agent".to_owned()),
+            "Make the reviewed changes the current profile version.",
+        ),
+        _ => {
+            return (
+                "Apply",
+                vec![Line::raw(
+                    "Profile confirmation is unavailable. Press Esc to return.",
+                )],
             );
-            vec![
-                Line::styled("Confirm Create", theme.warning),
-                Line::default(),
-                Line::raw("This action creates and activates immutable profile version 1."),
-                label_value("Provenance", context, theme),
-                Line::default(),
-                Line::styled("Enter: create", theme.focus),
-            ]
         }
-        ApplicationCommand::ActivateAgentProfileVersion {
-            expected_active_version_id,
-            review_digest,
-            ..
-        } => vec![
-            Line::styled("Confirm Activate", theme.warning),
+    };
+    (
+        action,
+        vec![
+            Line::styled(format!("Confirm {action} · {name}"), theme.warning),
             Line::default(),
-            Line::raw("This action appends and activates one immutable profile version."),
-            label_value(
-                "Reviewed base",
-                expected_active_version_id.to_string(),
-                theme,
+            Line::raw(explanation),
+            Line::default(),
+            Line::styled(
+                format!("Enter: {}   Esc: return to review", action.to_lowercase()),
+                theme.focus,
             ),
-            label_value("Review digest", review_digest.to_string(), theme),
-            Line::default(),
-            Line::styled("Enter: activate", theme.focus),
         ],
-        _ => vec![Line::styled(
-            "Profile confirmation is unavailable. Press Esc to return.",
-            theme.warning,
-        )],
-    };
-    lines.push(Line::styled(
-        "Enter: confirm | Esc: return to review",
-        theme.muted,
-    ));
-    let action = match confirmation.command {
-        ApplicationCommand::CreateAgentProfile { .. } => "Create",
-        ApplicationCommand::ActivateAgentProfileVersion { .. } => "Activate",
-        _ => "Apply",
-    };
-    (action, lines)
+    )
 }
 
 pub(super) fn inspector_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
@@ -959,9 +1022,9 @@ fn readiness_line(label: &'static str, readiness: AgentReadiness, theme: &Theme)
 
 fn readiness_name(readiness: AgentReadiness) -> &'static str {
     match readiness {
-        AgentReadiness::Unbound => "Unbound",
-        AgentReadiness::BindingUnavailable => "Binding unavailable",
-        AgentReadiness::Ready => "Ready",
+        AgentReadiness::Unbound => "Needs connection",
+        AgentReadiness::BindingUnavailable => "Connection unavailable",
+        AgentReadiness::Ready => "Bindings configured",
     }
 }
 
@@ -983,20 +1046,14 @@ fn bindings_value(bindings: &AgentBindings) -> String {
 fn inference_text(bindings: &AgentBindings) -> String {
     bindings.inference.as_ref().map_or_else(
         || "Not configured".to_owned(),
-        |binding| {
-            format!(
-                "{} / {}",
-                safe_text(binding.connection_id().as_str()),
-                safe_text(binding.model_id().as_str())
-            )
-        },
+        |_| "Inference configured".to_owned(),
     )
 }
 
 fn engineering_text(bindings: &AgentBindings) -> String {
     bindings.engineering.as_ref().map_or_else(
         || "Not configured".to_owned(),
-        |binding| safe_text(binding.runtime_id().as_str()),
+        |_| "Engineering configured".to_owned(),
     )
 }
 
@@ -1022,87 +1079,6 @@ fn diff_name(field: ProfileDiffField) -> &'static str {
         ProfileDiffField::SkillRefsAdded => "Skill references added",
         ProfileDiffField::SkillRefsUpgraded => "Skill references upgraded",
         ProfileDiffField::SkillRefsRemoved => "Skill references removed",
-    }
-}
-
-fn step_number(step: ProfileEditorStep) -> u8 {
-    match step {
-        ProfileEditorStep::Template => 1,
-        ProfileEditorStep::Identity => 2,
-        ProfileEditorStep::Specialty => 3,
-        ProfileEditorStep::Personality => 4,
-        ProfileEditorStep::Instructions => 5,
-        ProfileEditorStep::OptionalBindings => 6,
-        ProfileEditorStep::Review => 7,
-    }
-}
-
-fn step_guidance(editor: &ProfileEditor) -> Vec<String> {
-    match editor.step() {
-        ProfileEditorStep::Template => match editor.mode() {
-            ProfileEditorMode::Create { .. } => vec![
-                "Choose the complete starting profile; the candidate updates immediately."
-                    .to_owned(),
-            ],
-            ProfileEditorMode::Edit { .. } => vec![
-                "The active profile remains the edit baseline.".to_owned(),
-                "Advanced: :role <role>".to_owned(),
-            ],
-        },
-        ProfileEditorStep::Identity => vec![
-            format!("Display name: {DISPLAY_NAME_MAX_BYTES} UTF-8 bytes."),
-            format!("Description: {DESCRIPTION_MAX_BYTES} UTF-8 bytes."),
-        ],
-        ProfileEditorStep::Specialty => vec![
-            format!("Primary specialty: {PRIMARY_SPECIALTY_MAX_BYTES} UTF-8 bytes."),
-            format!(
-                "Add at most {MAX_SPECIALTY_TAGS} tags; {SPECIALTY_TAG_MAX_BYTES} UTF-8 bytes each."
-            ),
-            "Advanced tags: :tag add <tag> or :tag remove <tag>.".to_owned(),
-        ],
-        ProfileEditorStep::Personality => {
-            vec![format!("Limit: {PERSONALITY_MAX_BYTES} UTF-8 bytes.")]
-        }
-        ProfileEditorStep::Instructions => {
-            vec![format!("Limit: {INSTRUCTIONS_MAX_BYTES} UTF-8 bytes.")]
-        }
-        ProfileEditorStep::OptionalBindings => vec![
-            "Use catalog binding-reference IDs.".to_owned(),
-            "connection, model, and runtime IDs must reference catalog entries.".to_owned(),
-            "Unavailable references are rejected; unconfigured is Not Ready.".to_owned(),
-        ],
-        ProfileEditorStep::Review => {
-            vec!["Review ordered accepted-field changes before confirmation.".to_owned()]
-        }
-    }
-}
-
-fn editor_key_guidance(editor: &ProfileEditor) -> &'static str {
-    match editor.step() {
-        ProfileEditorStep::Template => match editor.mode() {
-            ProfileEditorMode::Create { .. } => {
-                "Up/Down: choose template | Enter: continue | Esc: cancel"
-            }
-            ProfileEditorMode::Edit { .. } => "Enter: continue | Esc: cancel",
-        },
-        ProfileEditorStep::Identity
-        | ProfileEditorStep::Specialty
-        | ProfileEditorStep::Personality
-        | ProfileEditorStep::Instructions => {
-            "Type a replacement, or leave blank to keep current | Enter: continue | Esc: back"
-        }
-        ProfileEditorStep::OptionalBindings => {
-            "Enter: keep current bindings and continue | Esc: back"
-        }
-        ProfileEditorStep::Review => match editor.mode() {
-            ProfileEditorMode::Create { .. } => {
-                "Enter: continue to Create confirmation | Esc: back"
-            }
-            ProfileEditorMode::Edit { .. } if editor.review().is_some() => {
-                "Enter: continue to activation confirmation | Esc: back"
-            }
-            ProfileEditorMode::Edit { .. } => "Enter: request authoritative review | Esc: back",
-        },
     }
 }
 
@@ -1136,4 +1112,92 @@ fn scroll(value: usize, area_height: u16) -> u16 {
     u16::try_from(bounded)
         .unwrap_or(10_000)
         .min(u16::MAX.saturating_sub(area_height))
+}
+
+fn monogram(name: &str) -> String {
+    safe_text(name)
+        .split_whitespace()
+        .filter_map(|word| word.chars().next())
+        .take(2)
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
+fn readable_date(milliseconds: i64) -> String {
+    let days = milliseconds.div_euclid(86_400_000) + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_part = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_part + 2) / 5 + 1;
+    let month = month_part + if month_part < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02} UTC")
+}
+
+fn field_guidance(field: crate::ui::profile_editor::ProfileTuiField) -> String {
+    use crate::ui::profile_editor::ProfileTuiField;
+    match field {
+        ProfileTuiField::Template => "Template · WASD choose a starting profile".to_owned(),
+        ProfileTuiField::Role => "Role · WASD choose agent role".to_owned(),
+        ProfileTuiField::DisplayName => {
+            format!("Display name · Up to {DISPLAY_NAME_MAX_BYTES} UTF-8 bytes")
+        }
+        ProfileTuiField::Description => {
+            format!("Description · Up to {DESCRIPTION_MAX_BYTES} UTF-8 bytes")
+        }
+        ProfileTuiField::PrimarySpecialty => {
+            format!("Specialty · Up to {PRIMARY_SPECIALTY_MAX_BYTES} UTF-8 bytes")
+        }
+        ProfileTuiField::Tags => format!(
+            "Tags · At most {MAX_SPECIALTY_TAGS}, comma-separated; {SPECIALTY_TAG_MAX_BYTES} UTF-8 bytes each"
+        ),
+        ProfileTuiField::Personality => {
+            format!("Personality · Up to {PERSONALITY_MAX_BYTES} UTF-8 bytes")
+        }
+        ProfileTuiField::Instructions => {
+            format!("Instructions · Up to {INSTRUCTIONS_MAX_BYTES} UTF-8 bytes")
+        }
+        ProfileTuiField::Bindings => {
+            "Bindings · Read-only; configure connections separately".to_owned()
+        }
+        ProfileTuiField::Review => "Review · Inspect changes before confirming".to_owned(),
+        ProfileTuiField::Discard => "Discard · Enter discards this draft".to_owned(),
+    }
+}
+
+fn field_label(field: crate::ui::profile_editor::ProfileTuiField) -> &'static str {
+    use crate::ui::profile_editor::ProfileTuiField;
+    match field {
+        ProfileTuiField::Template => "Template",
+        ProfileTuiField::DisplayName => "Display name",
+        ProfileTuiField::Role => "Role",
+        ProfileTuiField::Description => "Description",
+        ProfileTuiField::PrimarySpecialty => "Primary specialty",
+        ProfileTuiField::Tags => "Tags",
+        ProfileTuiField::Personality => "Personality",
+        ProfileTuiField::Instructions => "Instructions",
+        ProfileTuiField::Bindings => "Bindings",
+        ProfileTuiField::Review => "Review changes",
+        ProfileTuiField::Discard => "Discard draft",
+    }
+}
+
+pub(super) fn editor_scroll_limit(model: &TuiModel) -> usize {
+    let terminal = Rect::new(0, 0, model.terminal_width, model.terminal_height);
+    let cockpit = crate::ui::tui::layout::calculate_with_input(terminal, false, false);
+    let active = agent_workspace(cockpit.workspace, agent_layout_mode(terminal)).active;
+    let lines = model
+        .agents
+        .editor
+        .as_ref()
+        .map(|editor| editor_lines(editor, &Theme::from_no_color(true)))
+        .unwrap_or_default();
+    Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .line_count(active.width.saturating_sub(2))
+        .saturating_sub(usize::from(active.height.saturating_sub(5)))
 }

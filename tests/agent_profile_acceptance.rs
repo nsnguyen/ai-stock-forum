@@ -410,7 +410,7 @@ fn schema_v1_upgrade_profile_lifecycle_restart_fallback_and_tui_are_accepted() {
         );
         let rendered = render_text(&tui, width, 30);
         assert!(rendered.contains("Research North"), "{expected_mode}");
-        assert!(rendered.contains("Agent detail"), "{expected_mode}");
+        assert!(rendered.contains("Agent workspace"), "{expected_mode}");
         assert_eq!(
             rendered.contains("Agent list"),
             width >= 100,

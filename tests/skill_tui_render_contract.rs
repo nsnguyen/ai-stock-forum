@@ -146,6 +146,21 @@ fn profile_with_skills(
     }
 }
 
+fn select_profile_detail(model: &mut TuiModel, detail: AgentProfileView) {
+    let profile = &detail.profile;
+    model.agents.profiles.profiles = vec![AgentProfileSummary {
+        profile_id: profile.profile_id(),
+        profile_version_id: profile.profile_version_id(),
+        version: profile.version(),
+        display_name: profile.display_name().to_owned(),
+        role: profile.role(),
+        primary_specialty: profile.primary_specialty().to_owned(),
+        readiness: detail.readiness,
+        content_digest: profile.content_digest().clone(),
+    }];
+    model.agents.detail = Some(detail);
+}
+
 fn render_rows(model: &TuiModel, width: u16, height: u16) -> Vec<String> {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -381,7 +396,7 @@ fn agent_skill_panel_shows_exact_pin_upgrade_availability_and_explicit_actions()
     model.active_view = View::Agents;
     model.agents.pane = AgentsPane::Detail;
     model.agents.skill_panel_open = true;
-    model.agents.detail = Some(detail);
+    select_profile_detail(&mut model, detail);
     model.skills.library = SkillsView {
         skills: vec![summary(&second)],
         total_count: 1,
@@ -391,7 +406,7 @@ fn agent_skill_panel_shows_exact_pin_upgrade_availability_and_explicit_actions()
 
     let text = render_text(&model, 180, 60);
     for expected in [
-        "Assigned skills",
+        "Skill 1 of 1",
         "PINNED EXACT VERSION",
         "v1",
         "Upgrade available",
@@ -405,15 +420,8 @@ fn agent_skill_panel_shows_exact_pin_upgrade_availability_and_explicit_actions()
     ] {
         assert!(text.contains(expected), "missing {expected}");
     }
-    for chunk in first
-        .reference()
-        .skill_version_id()
-        .to_string()
-        .as_bytes()
-        .chunks(8)
-    {
-        assert!(text.contains(std::str::from_utf8(chunk).unwrap()));
-    }
+    assert!(!text.contains(&first.reference().skill_version_id().to_string()));
+    assert!(text.contains("Agent Evidence"));
 }
 
 #[test]
@@ -862,7 +870,7 @@ fn agents_multi_skill_panel_shows_position_rows_and_contextual_available_actions
     model.active_view = View::Agents;
     model.agents.pane = AgentsPane::Detail;
     model.agents.skill_panel_open = true;
-    model.agents.detail = Some(detail);
+    select_profile_detail(&mut model, detail);
     model.skills.library = SkillsView {
         skills: vec![summary(&first_active), summary(&second)],
         total_count: 2,

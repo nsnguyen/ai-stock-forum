@@ -57,8 +57,44 @@ pub enum AgentsPane {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentDetailAction {
-    AssignedSkills,
+    Profile,
     Memory,
+    AssignedSkills,
+    History,
+}
+
+impl AgentDetailAction {
+    pub fn moved(self, forward: bool) -> Self {
+        let actions = [
+            Self::Profile,
+            Self::Memory,
+            Self::AssignedSkills,
+            Self::History,
+        ];
+        let index = actions
+            .iter()
+            .position(|action| *action == self)
+            .unwrap_or(0);
+        actions[if forward {
+            (index + 1).min(3)
+        } else {
+            index.saturating_sub(1)
+        }]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentProfileTarget {
+    pub profile_id: crate::domain::AgentProfileId,
+    pub expected_active_version_id: crate::domain::AgentProfileVersionId,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentProfileRead {
+    Detail,
+    History,
+    Version(ObjectVersion),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1735,6 +1771,8 @@ impl SkillsViewState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentsViewState {
+    pub selection_generation: u64,
+    pub field_input: CommandEditor,
     pub selected_profile: usize,
     pub selected_template: usize,
     pub selected_detail_action: AgentDetailAction,
@@ -1758,9 +1796,11 @@ pub struct AgentsViewState {
 impl Default for AgentsViewState {
     fn default() -> Self {
         Self {
+            selection_generation: 0,
+            field_input: CommandEditor::default(),
             selected_profile: 0,
             selected_template: 0,
-            selected_detail_action: AgentDetailAction::AssignedSkills,
+            selected_detail_action: AgentDetailAction::Profile,
             memory: MemoryViewState::default(),
             pane: AgentsPane::List,
             list_scroll: 0,
@@ -1786,6 +1826,64 @@ impl Default for AgentsViewState {
 }
 
 impl AgentsViewState {
+    pub fn profile_target(&self) -> Option<AgentProfileTarget> {
+        self.selected_summary().map(|summary| AgentProfileTarget {
+            profile_id: summary.profile_id,
+            expected_active_version_id: summary.profile_version_id,
+            generation: self.selection_generation,
+        })
+    }
+
+    pub fn matching_detail(&self) -> Option<&AgentProfileView> {
+        let selected = self.selected_summary()?;
+        self.detail.as_ref().filter(|detail| {
+            detail.profile.profile_id() == selected.profile_id
+                && detail.profile.profile_version_id() == selected.profile_version_id
+                && *detail.profile.content_digest() == selected.content_digest
+        })
+    }
+
+    pub fn install_profile_result(
+        &mut self,
+        target: &AgentProfileTarget,
+        view: CommandView,
+    ) -> bool {
+        if self.profile_target().as_ref() != Some(target) {
+            return false;
+        }
+        match view {
+            CommandView::AgentProfile(detail)
+                if detail.profile.profile_id() == target.profile_id
+                    && detail.profile.profile_version_id() == target.expected_active_version_id
+                    && self.selected_summary().is_some_and(|row| {
+                        row.content_digest == *detail.profile.content_digest()
+                    }) =>
+            {
+                self.replace_detail(detail)
+            }
+            CommandView::AgentProfileHistory(history)
+                if history.profile_id == target.profile_id
+                    && history.active_version_id == target.expected_active_version_id =>
+            {
+                self.replace_history(history)
+            }
+            CommandView::AgentProfileVersion(version)
+                if version.profile.profile_id() == target.profile_id =>
+            {
+                self.replace_version_detail(version)
+            }
+            _ => false,
+        }
+    }
+
+    pub fn synchronize_field_input(&mut self) {
+        self.field_input.clear();
+        if let Some(editor) = &self.editor {
+            for character in editor.tui_field_text(editor.tui_field()).chars() {
+                self.field_input.insert(character);
+            }
+        }
+    }
     pub fn select_profile_id(&mut self, profile_id: crate::domain::AgentProfileId) -> bool {
         if let Some(index) = self
             .profiles
@@ -1833,13 +1931,21 @@ impl AgentsViewState {
         self.selected_profile = index;
         self.list_scroll = self.list_scroll.min(self.selected_profile);
         if previous_id != next_id {
-            self.selected_detail_action = AgentDetailAction::AssignedSkills;
+            self.selection_generation = self.selection_generation.wrapping_add(1);
+            self.selected_detail_action = AgentDetailAction::Profile;
+            if self.matching_detail().is_none() {
+                self.detail = None;
+            }
+            self.history = None;
+            self.version_detail = None;
+            self.skill_panel_open = false;
             self.memory.invalidate_profile_context();
         }
         true
     }
 
     pub fn replace_profiles(&mut self, profiles: AgentProfilesView) -> bool {
+        let old_target = self.profile_target();
         let selected_id = self.selected_summary().map(|summary| summary.profile_id);
         if self.memory.has_protected_workflow() {
             let protected_profile = self
@@ -1878,7 +1984,8 @@ impl AgentsViewState {
             self.history = None;
             self.version_detail = None;
             self.skill_panel_open = false;
-            self.selected_detail_action = AgentDetailAction::AssignedSkills;
+            self.selection_generation = self.selection_generation.wrapping_add(1);
+            self.selected_detail_action = AgentDetailAction::Profile;
             self.memory.invalidate_profile_context();
             return true;
         }
@@ -1898,7 +2005,7 @@ impl AgentsViewState {
         let next_summary = self.selected_summary();
         let next_id = next_summary.map(|summary| summary.profile_id);
         if selected_id != next_id {
-            self.selected_detail_action = AgentDetailAction::AssignedSkills;
+            self.selected_detail_action = AgentDetailAction::Profile;
             self.memory.invalidate_profile_context();
         } else if bound_profile.as_ref().is_some_and(|profile| {
             next_summary.is_some_and(|summary| {
@@ -1909,12 +2016,10 @@ impl AgentsViewState {
         }) {
             self.memory.invalidate_profile_context();
         }
-        if self
-            .detail
-            .as_ref()
-            .map(|detail| detail.profile.profile_id())
-            != next_id
-        {
+        if old_target != self.profile_target() {
+            self.selection_generation = self.selection_generation.wrapping_add(1);
+        }
+        if self.matching_detail().is_none() {
             self.detail = None;
             self.history = None;
             self.version_detail = None;
@@ -1923,6 +2028,12 @@ impl AgentsViewState {
     }
 
     pub fn replace_detail(&mut self, detail: AgentProfileView) -> bool {
+        if self
+            .selected_summary()
+            .is_some_and(|row| row.profile_id != detail.profile.profile_id())
+        {
+            return false;
+        }
         if self.memory.has_protected_workflow()
             && self
                 .memory
@@ -1941,14 +2052,6 @@ impl AgentsViewState {
             self.memory.invalidate_profile_context();
         }
         let profile_id = detail.profile.profile_id();
-        if let Some(index) = self
-            .profiles
-            .profiles
-            .iter()
-            .position(|summary| summary.profile_id == profile_id)
-        {
-            self.select_profile_index(index);
-        }
         if self.history.as_ref().map(|history| history.profile_id) != Some(profile_id) {
             self.history = None;
             self.version_detail = None;
@@ -1964,6 +2067,12 @@ impl AgentsViewState {
     }
 
     pub fn replace_history(&mut self, history: AgentProfileHistoryView) -> bool {
+        if self
+            .selected_summary()
+            .is_some_and(|row| row.profile_id != history.profile_id)
+        {
+            return false;
+        }
         if self.memory.has_protected_workflow()
             && self.memory.profile.as_ref().is_none_or(|identity| {
                 identity.profile.profile_id() != history.profile_id
@@ -1978,14 +2087,6 @@ impl AgentsViewState {
         }) {
             self.memory.invalidate_profile_context();
         }
-        if let Some(index) = self
-            .profiles
-            .profiles
-            .iter()
-            .position(|summary| summary.profile_id == history.profile_id)
-        {
-            self.select_profile_index(index);
-        }
         self.selected_history_version = 0;
         self.history_scroll = 0;
         self.version_detail = None;
@@ -1994,6 +2095,12 @@ impl AgentsViewState {
     }
 
     pub fn replace_version_detail(&mut self, version: AgentProfileVersionView) -> bool {
+        if self
+            .selected_summary()
+            .is_some_and(|row| row.profile_id != version.profile.profile_id())
+        {
+            return false;
+        }
         if self.memory.has_protected_workflow()
             && self
                 .memory
@@ -2008,14 +2115,6 @@ impl AgentsViewState {
             self.history = None;
             self.selected_history_version = 0;
             self.history_scroll = 0;
-        }
-        if let Some(index) = self
-            .profiles
-            .profiles
-            .iter()
-            .position(|summary| summary.profile_id == profile_id)
-        {
-            self.select_profile_index(index);
         }
         self.version_detail = Some(version);
         true
@@ -2033,6 +2132,7 @@ impl AgentsViewState {
             return false;
         };
         self.editor = Some(editor);
+        self.synchronize_field_input();
         self.pane = AgentsPane::Editor;
         true
     }
@@ -2723,9 +2823,6 @@ impl TuiModel {
 
     pub(super) fn input_is_visible(&self) -> bool {
         self.focus == Focus::Command
-            || (!self.skills.active
-                && self.active_view == View::Agents
-                && self.agents.pane == AgentsPane::Editor)
             || (self.skills.active && self.skills.pane == SkillsPane::Editor)
             || (!self.skills.active
                 && self.active_view == View::Agents

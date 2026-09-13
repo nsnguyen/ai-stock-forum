@@ -365,7 +365,7 @@ impl CommandExecutor for RouteRecorder {
                         role: ai_stock_forum::agents::builtin_profile_templates()[0].role,
                         primary_specialty: "Research".to_owned(),
                         readiness: ai_stock_forum::agents::AgentReadiness::Unbound,
-                        content_digest: sha256(b"assigned-agent"),
+                        content_digest: assigned_profile_view().profile.content_digest().clone(),
                     }],
                     total_count: 1,
                     returned_count: 1,
@@ -1050,7 +1050,14 @@ fn agent_origin_upgrade_preview_builds_an_explicit_exact_upgrade_command() {
                 role: ai_stock_forum::agents::builtin_profile_templates()[0].role,
                 primary_specialty: "Research".to_owned(),
                 readiness: ai_stock_forum::agents::AgentReadiness::Unbound,
-                content_digest: sha256(b"origin-agent"),
+                content_digest: model
+                    .agents
+                    .detail
+                    .as_ref()
+                    .unwrap()
+                    .profile
+                    .content_digest()
+                    .clone(),
             },
         ],
         total_count: 2,
@@ -1646,6 +1653,8 @@ fn review_regression_agents_load_upgrade_truth_on_first_open() {
     execute_agent_effect(&runtime.client(), &mut model, open).unwrap();
     let detail = handle_event(&mut model, key(KeyCode::Enter));
     execute_agent_effect(&runtime.client(), &mut model, detail).unwrap();
+    handle_event(&mut model, key(KeyCode::Right));
+    handle_event(&mut model, key(KeyCode::Right));
     handle_event(&mut model, key(KeyCode::Enter));
 
     assert!(

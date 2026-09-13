@@ -782,6 +782,7 @@ fn memory_is_nested_under_agents_without_changing_global_shortcuts() {
     model.select_view(View::Agents);
     model.skills.library_loaded = true;
     model.agents.pane = AgentsPane::Detail;
+    model.agents.profiles = profiles_view(&[&profile]);
     model.agents.detail = Some(AgentProfileView {
         readiness: profile.readiness(),
         profile,
@@ -821,6 +822,8 @@ fn assigned_skills_opens_when_empty_and_its_open_panel_owns_left_right() {
     model.select_view(View::Agents);
     model.skills.library_loaded = true;
     model.agents.pane = AgentsPane::Detail;
+    model.agents.profiles = profiles_view(&[&profile]);
+    model.agents.selected_detail_action = AgentDetailAction::AssignedSkills;
     model.agents.detail = Some(AgentProfileView {
         readiness: profile.readiness(),
         profile,
@@ -882,7 +885,7 @@ fn memory_state_defaults_and_safe_errors_define_the_nested_workspace_contract() 
 
     assert_eq!(
         ai_stock_forum::ui::tui::AgentsViewState::default().selected_detail_action,
-        AgentDetailAction::AssignedSkills,
+        AgentDetailAction::Profile,
     );
 }
 
@@ -1460,10 +1463,7 @@ fn profile_refresh_and_selection_transitions_preserve_or_invalidate_memory_by_ex
         )
         .expect("bind successor");
     assert!(agents.select_profile_id(other.profile_id()));
-    assert_eq!(
-        agents.selected_detail_action,
-        AgentDetailAction::AssignedSkills
-    );
+    assert_eq!(agents.selected_detail_action, AgentDetailAction::Profile);
     assert_eq!(agents.memory.profile, None);
     assert_eq!(agents.memory.namespace_id, None);
     assert_eq!(agents.memory.generation, 9);

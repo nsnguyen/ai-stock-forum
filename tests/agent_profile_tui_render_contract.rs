@@ -1,9 +1,9 @@
 use ai_stock_forum::{
     agents::{
         AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentReadiness, AgentRole,
-        DESCRIPTION_MAX_BYTES, DISPLAY_NAME_MAX_BYTES, INSTRUCTIONS_MAX_BYTES, MAX_SPECIALTY_TAGS,
+        DESCRIPTION_MAX_BYTES, DISPLAY_NAME_MAX_BYTES, INSTRUCTIONS_MAX_BYTES,
         PERSONALITY_MAX_BYTES, PRIMARY_SPECIALTY_MAX_BYTES, ProfileDiffField, ProfileEditPreview,
-        ProfileFieldDiff, ProfileFieldValue, SPECIALTY_TAG_MAX_BYTES, builtin_profile_templates,
+        ProfileFieldDiff, ProfileFieldValue, builtin_profile_templates,
     },
     app::{
         AgentProfileHistoryEntry, AgentProfileHistoryView, AgentProfileSummary,
@@ -142,6 +142,40 @@ fn render_text(model: &TuiModel, width: u16, height: u16) -> String {
         .collect()
 }
 
+#[test]
+fn fresh_agents_list_owns_the_only_focused_panel_and_actions_wait_for_tab() {
+    let theme = Theme::from_no_color(false);
+    for (width, height) in [(60, 18), (120, 30)] {
+        let mut model = TuiModel::new(snapshot(true), false);
+        handle_event(&mut model, TuiEvent::Resize(width, height));
+        handle_event(
+            &mut model,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| render::render(frame, &model, &theme))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let style_for = |needle: &str| {
+            (0..height).find_map(|y| {
+                let row = (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>();
+                row.find(needle).map(|byte| {
+                    let x = row[..byte].chars().count() as u16;
+                    buffer[(x, y)].style()
+                })
+            })
+        };
+        assert_eq!(style_for("Agent list").unwrap().fg, theme.focus.fg);
+        if width == 120 {
+            assert_ne!(style_for("Agent workspace").unwrap().fg, theme.focus.fg);
+            assert_ne!(style_for("Profile ").unwrap().fg, theme.focus.fg);
+        }
+    }
+}
+
 fn render_rows(model: &TuiModel, width: u16, height: u16) -> Vec<String> {
     let terminal = rendered(model, width, height);
     terminal
@@ -151,6 +185,181 @@ fn render_rows(model: &TuiModel, width: u16, height: u16) -> Vec<String> {
         .chunks(usize::from(width))
         .map(|row| row.iter().map(|cell| cell.symbol()).collect())
         .collect()
+}
+
+#[test]
+fn friendly_profile_and_history_hide_internal_identity_metadata() {
+    for pane in [AgentsPane::Detail, AgentsPane::History] {
+        let model = model(true, pane);
+        let screen = render_text(&model, 160, 80);
+        for secret in [
+            profile().profile_id().to_string(),
+            profile().profile_version_id().to_string(),
+            profile().memory_namespace_id().to_string(),
+            profile().content_digest().to_string(),
+            profile()
+                .template_provenance()
+                .unwrap()
+                .template_digest
+                .to_string(),
+        ] {
+            assert!(
+                !screen.contains(&secret),
+                "internal identity leaked in {pane:?}"
+            );
+        }
+        assert!(screen.contains("Long Horizon Analyst"));
+        assert!(screen.contains("Version 1"));
+        assert!(screen.contains("Current"));
+    }
+}
+
+#[test]
+fn selected_identity_and_four_choices_render_while_detail_is_loading() {
+    let mut model = model(true, AgentsPane::Detail);
+    model.agents.profiles.profiles[0].display_name = "Selected New Agent".to_owned();
+    model.agents.profiles.profiles[0].profile_id = AgentProfileId::from_uuid(Uuid::from_u128(90));
+    let screen = render_text(&model, 120, 30);
+    assert!(screen.contains("Loading Selected New Agent"));
+    assert!(!screen.contains("Long Horizon Analyst"));
+    for label in ["Profile", "Memory", "Skills", "History"] {
+        assert!(screen.contains(label));
+    }
+}
+
+#[test]
+fn minimum_agents_and_editor_hints_remain_complete_and_review_scrolls_to_last_diff() {
+    use ai_stock_forum::ui::profile_editor::ProfileTuiField;
+    let mut model = model(true, AgentsPane::Detail);
+    let text = render_text(&model, 60, 18);
+    for hint in ["Enter", "Esc", "N new", "E edit", "H history"] {
+        assert!(text.contains(hint), "missing {hint}");
+    }
+    let mut editor = ProfileEditor::for_create(&builtin_profile_templates()[0]).unwrap();
+    editor.set_tui_field(
+        ProfileTuiField::Description,
+        &"Long description. ".repeat(30),
+    );
+    editor.set_tui_field(
+        ProfileTuiField::Instructions,
+        &format!("{} FINAL REVIEW LINE", "Long instructions. ".repeat(120)),
+    );
+    while editor.tui_field() != ProfileTuiField::Review {
+        editor.move_tui_field(true);
+    }
+    model.agents.editor = Some(editor);
+    model.agents.pane = AgentsPane::Editor;
+    model.set_terminal_size(60, 18);
+    let text = render_text(&model, 60, 18);
+    assert!(!text.contains("FINAL REVIEW LINE"));
+    handle_event(
+        &mut model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
+    );
+    let text = render_text(&model, 60, 18);
+    assert!(text.contains("FINAL REVIEW LINE"));
+    assert!(text.contains("Esc keep"));
+    assert!(text.contains("Tab"));
+    assert_eq!(
+        model.agents.editor.as_ref().unwrap().tui_field(),
+        ProfileTuiField::Review
+    );
+}
+
+#[test]
+fn identity_monogram_color_survives_reordering_and_no_color_has_no_palette() {
+    let mut model = model(true, AgentsPane::List);
+    model.agents.profiles.profiles[0].display_name = "Alpha One".to_owned();
+    let mut second = model.agents.profiles.profiles[0].clone();
+    second.profile_id = AgentProfileId::from_uuid(Uuid::from_u128(91));
+    second.display_name = "Beta Two".to_owned();
+    model.agents.profiles.profiles.push(second);
+    let color = |model: &TuiModel, initials: &str| {
+        let terminal = rendered(model, 120, 30);
+        let buffer = terminal.backend().buffer();
+        for y in 4..24 {
+            for x in 1..35 {
+                if format!("{}{}", buffer[(x, y)].symbol(), buffer[(x + 1, y)].symbol()) == initials
+                {
+                    return buffer[(x, y)].fg;
+                }
+            }
+        }
+        panic!("initials not visible");
+    };
+    let first_color = color(&model, "AO");
+    let second_color = color(&model, "BT");
+    assert_ne!(first_color, second_color);
+    model.agents.profiles.profiles.reverse();
+    assert_eq!(color(&model, "AO"), first_color);
+    assert_eq!(color(&model, "BT"), second_color);
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| render::render(frame, &model, &Theme::from_no_color(true)))
+        .unwrap();
+    assert!(
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .all(|cell| cell.fg == ratatui::style::Color::Reset
+                && cell.bg == ratatui::style::Color::Reset)
+    );
+}
+
+#[test]
+fn long_invalid_profile_field_error_stays_visible_in_type_and_nav_at_minimum_size() {
+    use ai_stock_forum::ui::profile_editor::ProfileTuiField;
+    let mut model = model(false, AgentsPane::Editor);
+    model.agents.editor = Some(ProfileEditor::for_create(&builtin_profile_templates()[0]).unwrap());
+    model.set_terminal_size(60, 18);
+    handle_event(
+        &mut model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+    );
+    handle_event(
+        &mut model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    );
+    model.agents.field_input.clear();
+    let raw = "x".repeat(300);
+    handle_event(&mut model, TuiEvent::Paste(raw.clone()));
+    assert!(render_text(&model, 60, 18).contains("Display name: invalid"));
+    handle_event(
+        &mut model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    );
+    assert!(render_text(&model, 60, 18).contains("Display name: invalid"));
+    assert_eq!(
+        model
+            .agents
+            .editor
+            .as_ref()
+            .unwrap()
+            .tui_field_text(ProfileTuiField::DisplayName),
+        raw
+    );
+    assert!(
+        model
+            .agents
+            .editor
+            .as_ref()
+            .unwrap()
+            .tui_field_error(ProfileTuiField::DisplayName)
+            .is_some()
+    );
+    while model.agents.editor.as_ref().unwrap().tui_field() != ProfileTuiField::Review {
+        handle_event(
+            &mut model,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+    }
+    handle_event(
+        &mut model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    );
+    assert!(model.agents.pending_confirmation.is_none());
 }
 
 #[test]
@@ -171,28 +380,25 @@ fn hidden_profile_editor_does_not_claim_the_skills_command_bar() {
 }
 
 #[test]
-fn legacy_profile_editor_footer_matches_its_enter_escape_and_inert_tab_controls() {
+fn profile_editor_footer_matches_nav_and_literal_type_controls() {
     let mut model = model(false, AgentsPane::Editor);
-    model.agents.editor = Some(
-        ProfileEditor::for_create(&builtin_profile_templates()[0]).expect("valid create editor"),
-    );
-    model.command.ingest("literal draft");
-
+    model.agents.editor = Some(ProfileEditor::for_create(&builtin_profile_templates()[0]).unwrap());
     let text = render_text(&model, 100, 30);
-    for hint in ["WASD text", "Enter accept", "Esc back/cancel"] {
-        assert!(text.contains(hint), "missing profile editor hint {hint:?}");
-    }
-    assert!(!text.contains("Tab next field"));
-
-    let before = model.clone();
-    assert_eq!(
-        handle_event(
-            &mut model,
-            TuiEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-        ),
-        ControllerEffect::None
+    assert!(text.contains("NAV"));
+    assert!(text.contains("Tab next field"));
+    handle_event(
+        &mut model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
     );
-    assert_eq!(model, before);
+    handle_event(
+        &mut model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    );
+    let text = render_text(&model, 100, 30);
+    for hint in ["TYPE", "WASD text", "Enter accept", "Esc keep"] {
+        assert!(text.contains(hint), "missing {hint}");
+    }
+    assert!(!text.contains("Profile input"));
 }
 
 #[test]
@@ -200,35 +406,35 @@ fn agents_layout_uses_one_or_two_panes_at_exact_width_breakpoints() {
     let list = model(true, AgentsPane::List);
     let narrow_list = render_text(&list, 79, 24);
     assert!(narrow_list.contains("Agent list"));
-    assert!(!narrow_list.contains("Agent detail"));
+    assert!(!narrow_list.contains("Agent workspace"));
 
     let detail = model(true, AgentsPane::Detail);
     let narrow_detail = render_text(&detail, 79, 24);
     assert!(!narrow_detail.contains("Agent list"));
-    assert!(narrow_detail.contains("Agent detail"));
+    assert!(narrow_detail.contains("Agent workspace"));
 
     let compact = render_text(&detail, 99, 24);
     assert!(!compact.contains("Agent list"));
-    assert!(compact.contains("Agent detail"));
+    assert!(compact.contains("Agent workspace"));
 
     let medium = render_text(&detail, 100, 24);
     assert!(medium.contains("Agent list"));
-    assert!(medium.contains("Agent detail"));
+    assert!(medium.contains("Agent workspace"));
     assert!(!medium.contains("Readiness & history"));
 
     let wide = render_text(&detail, 120, 30);
     assert!(wide.contains("Agent list"));
-    assert!(wide.contains("Agent detail"));
+    assert!(wide.contains("Agent workspace"));
     assert!(!wide.contains("Readiness & history"));
 
     let medium_low = render_text(&detail, 100, 18);
     assert!(medium_low.contains("Agent list"));
-    assert!(medium_low.contains("Agent detail"));
+    assert!(medium_low.contains("Agent workspace"));
     assert!(!medium_low.contains("Readiness & history"));
 
     let wide_low = render_text(&detail, 120, 18);
     assert!(wide_low.contains("Agent list"));
-    assert!(wide_low.contains("Agent detail"));
+    assert!(wide_low.contains("Agent workspace"));
     assert!(!wide_low.contains("Readiness & history"));
 }
 
@@ -286,32 +492,36 @@ fn view_geometry_accounts_for_the_agents_header_height() {
 }
 
 #[test]
-fn agents_empty_and_populated_states_render_counts_readiness_and_complete_metadata() {
+fn agents_empty_and_populated_states_render_readable_identity_and_readiness() {
     let empty = render_text(&model(false, AgentsPane::List), 100, 30);
     assert!(empty.contains("No agent profiles yet"));
-    assert!(empty.contains("Press c to create your first profile"));
-
+    assert!(empty.contains("Press N"));
     let populated = render_text(&model(true, AgentsPane::Detail), 160, 44);
     for expected in [
         "Long Horizon Analyst",
         "bull",
         "fundamental compounders",
         "long-duration, quality",
-        "Active version",
-        "Template",
-        "builtin.bull",
+        "Version 1",
+        "Current",
         "Bindings",
-        "Skill refs",
-        "MCP refs",
-        "Created ms",
+        "Needs connection",
+        "Profile",
         "Memory",
-        "Policy",
-        "Digest",
+        "Skills",
+        "History",
     ] {
-        assert!(populated.contains(expected), "missing {expected:?}");
+        assert!(populated.contains(expected), "missing {expected}");
     }
-    assert!(!populated.contains("Failed"));
-    assert!(!populated.contains("Error: Not Ready"));
+    for hidden in [
+        "IMMUTABLE METADATA",
+        "Created ms",
+        "Profile ID",
+        "Digest",
+        "builtin.bull",
+    ] {
+        assert!(!populated.contains(hidden));
+    }
 }
 
 #[test]
@@ -329,7 +539,7 @@ fn list_scroll_is_an_item_offset_and_keeps_the_last_multiline_row_visible() {
     model.agents.list_scroll = 11;
 
     let text = render_text(&model, 60, 18);
-    assert!(text.contains("> Profile 11"));
+    assert!(text.contains("Profile 11"));
     assert!(!text.contains("Profile 00"));
 }
 
@@ -353,12 +563,15 @@ fn moving_selection_keeps_all_fitting_agent_cards_stationary() {
             &mut model,
             TuiEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
         ),
-        ControllerEffect::Redraw
+        ControllerEffect::LoadSelectedAgentProfile {
+            target: model.agents.profile_target().unwrap(),
+            read: ai_stock_forum::ui::tui::model::AgentProfileRead::Detail
+        }
     );
 
     let text = render_text(&model, 120, 30);
     assert!(text.contains("  Bear Researcher"));
-    assert!(text.contains("> Lnext"));
+    assert!(text.contains("Lnext"));
 }
 
 #[test]
@@ -410,15 +623,18 @@ fn editor_renders_progress_guidance_ordered_review_diffs_and_explicit_confirmati
         },
     );
 
+    while editor.tui_field() != ai_stock_forum::ui::profile_editor::ProfileTuiField::Review {
+        editor.move_tui_field(true);
+    }
     let mut editor_model = model(true, AgentsPane::Editor);
     editor_model.agents.editor = Some(editor.clone());
     let review = render_text(&editor_model, 100, 30);
-    assert!(review.contains("Step 7 of 7"));
+    assert!(!review.contains("Step 7 of 7"));
     assert!(review.contains("Review"));
     assert!(review.contains("Display name"));
     assert!(review.contains("Before"));
     assert!(review.contains("After"));
-    assert!(review.contains("Enter: continue to activation confirmation"));
+    assert!(review.contains("separate confirmation"));
     assert!(
         review.find("Display name").expect("display diff")
             < review.find("Role").expect("role diff")
@@ -433,8 +649,8 @@ fn editor_renders_progress_guidance_ordered_review_diffs_and_explicit_confirmati
     let confirmation = render_text(&confirmation, 100, 30);
     assert!(confirmation.contains("Confirm Activate"));
     assert!(confirmation.contains("Enter: activate"));
-    assert!(confirmation.contains("Reviewed base"));
-    assert!(confirmation.contains("Review digest"));
+    assert!(!confirmation.contains("Reviewed base"));
+    assert!(!confirmation.contains("Review digest"));
     assert!(confirmation.contains("Esc"));
 
     let mut create_editor =
@@ -442,10 +658,10 @@ fn editor_renders_progress_guidance_ordered_review_diffs_and_explicit_confirmati
     let mut create = model(false, AgentsPane::Editor);
     create.agents.editor = Some(create_editor.clone());
     let create_text = render_text(&create, 79, 24);
-    assert!(create_text.contains("Step 1 of 7"));
-    assert!(create_text.contains("Up/Down: choose template"));
-    assert!(create_text.contains("Enter: continue"));
-    assert!(create_text.contains("Current field"));
+    assert!(create_text.contains("New agent"));
+    assert!(create_text.contains("WASD choose"));
+    assert!(create_text.contains("Enter edit/select"));
+    assert!(create_text.contains("Selected field"));
     assert!(create_text.contains("Template"));
 
     let mut edit_template = model(true, AgentsPane::Editor);
@@ -457,8 +673,8 @@ fn editor_renders_progress_guidance_ordered_review_diffs_and_explicit_confirmati
     let edit_text = render_text(&edit_template, 100, 30);
     assert!(!edit_text.contains("Up/Down: choose template"));
     assert!(!edit_text.contains("Choose the complete starting profile"));
-    assert!(edit_text.contains("Enter: continue"));
-    assert!(edit_text.contains("Advanced: :role <role>"));
+    assert!(edit_text.contains("Enter edit/select"));
+    assert!(!edit_text.contains("Advanced: :role <role>"));
 
     for _ in 0..7 {
         assert_eq!(
@@ -466,61 +682,51 @@ fn editor_renders_progress_guidance_ordered_review_diffs_and_explicit_confirmati
             ProfileEditorEffect::None
         );
     }
+    while create_editor.tui_field() != ai_stock_forum::ui::profile_editor::ProfileTuiField::Review {
+        create_editor.move_tui_field(true);
+    }
     create.agents.editor = Some(create_editor);
     let create_review = render_text(&create, 100, 40);
-    assert!(create_review.contains("Enter: continue to Create confirmation"));
+    assert!(create_review.contains("separate confirmation"));
 }
 
 #[test]
-fn guided_editor_renders_exact_domain_limits_at_narrow_medium_and_wide_sizes() {
+fn guided_editor_renders_domain_limits_and_readonly_bindings() {
+    use ai_stock_forum::ui::profile_editor::ProfileTuiField;
     let cases = [
+        (ProfileTuiField::DisplayName, DISPLAY_NAME_MAX_BYTES),
+        (ProfileTuiField::Description, DESCRIPTION_MAX_BYTES),
         (
-            1,
-            vec![
-                format!("{DISPLAY_NAME_MAX_BYTES} UTF-8 bytes"),
-                format!("{DESCRIPTION_MAX_BYTES} UTF-8 bytes"),
-            ],
+            ProfileTuiField::PrimarySpecialty,
+            PRIMARY_SPECIALTY_MAX_BYTES,
         ),
-        (
-            3,
-            vec![
-                format!("{PRIMARY_SPECIALTY_MAX_BYTES} UTF-8 bytes"),
-                format!("at most {MAX_SPECIALTY_TAGS} tags"),
-                format!("{SPECIALTY_TAG_MAX_BYTES} UTF-8 bytes each"),
-            ],
-        ),
-        (4, vec![format!("{PERSONALITY_MAX_BYTES} UTF-8 bytes")]),
-        (5, vec![format!("{INSTRUCTIONS_MAX_BYTES} UTF-8 bytes")]),
-        (
-            6,
-            vec![
-                "catalog binding-reference IDs".to_owned(),
-                "connection, model, and runtime".to_owned(),
-            ],
-        ),
+        (ProfileTuiField::Personality, PERSONALITY_MAX_BYTES),
+        (ProfileTuiField::Instructions, INSTRUCTIONS_MAX_BYTES),
     ];
-
-    for (next_count, expected) in cases {
-        let mut editor =
-            ProfileEditor::for_create(&builtin_profile_templates()[0]).expect("valid editor");
-        for _ in 0..next_count {
-            assert_eq!(editor.submit_line(":next"), ProfileEditorEffect::None);
+    for (field, limit) in cases {
+        let mut editor = ProfileEditor::for_create(&builtin_profile_templates()[0]).unwrap();
+        while editor.tui_field() != field {
+            editor.move_tui_field(true);
         }
         for (width, height) in [(70, 24), (100, 30), (140, 40)] {
-            let mut guided = model(false, AgentsPane::Editor);
-            guided.agents.editor = Some(editor.clone());
-            let text = render_text(&guided, width, height)
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            for expected in &expected {
-                assert!(
-                    text.contains(expected),
-                    "missing {expected:?} after {next_count} steps at {width}x{height}"
-                );
-            }
+            let mut model = model(false, AgentsPane::Editor);
+            model.agents.editor = Some(editor.clone());
+            let text = render_text(&model, width, height);
+            assert!(
+                text.contains(&format!("{limit} UTF-8 bytes")),
+                "{field:?} at {width}"
+            );
         }
     }
+    let mut editor = ProfileEditor::for_create(&builtin_profile_templates()[0]).unwrap();
+    while editor.tui_field() != ProfileTuiField::Bindings {
+        editor.move_tui_field(true);
+    }
+    let mut model = model(false, AgentsPane::Editor);
+    model.agents.editor = Some(editor);
+    let text = render_text(&model, 100, 30);
+    assert!(text.contains("Read-only"));
+    assert!(!text.contains("binding-reference IDs"));
 }
 
 #[test]
@@ -562,7 +768,7 @@ fn confirmation_distinguishes_create_from_activate() {
     assert!(text.contains("Confirm Create"));
     assert!(text.contains("Enter: create"));
     assert!(text.contains("Esc: return to review"));
-    assert!(text.contains("builtin.bull"));
+    assert!(text.contains("Bull Researcher"));
     for chunk in builtin_profile_templates()[0]
         .digest
         .as_str()
@@ -570,7 +776,7 @@ fn confirmation_distinguishes_create_from_activate() {
         .chunks(16)
     {
         let chunk = std::str::from_utf8(chunk).expect("digest chunks are UTF-8");
-        assert!(text.contains(chunk), "missing digest chunk {chunk}");
+        assert!(!text.contains(chunk), "internal digest leaked {chunk}");
     }
 }
 
@@ -625,11 +831,7 @@ fn selected_historical_version_renders_full_content_metadata_and_predecessor_dif
 
     for width in [79, 120] {
         let rendered = render_text(&model, width, 70);
-        for expected in [
-            "HISTORICAL VERSION",
-            "Historical version",
-            "Second historical prose.",
-        ] {
+        for expected in ["Historical", "Read-only", "Second historical prose."] {
             assert!(
                 rendered.contains(expected),
                 "missing {expected:?} at width {width}"
@@ -637,10 +839,7 @@ fn selected_historical_version_renders_full_content_metadata_and_predecessor_dif
         }
         if width == 79 {
             for expected in [
-                "Template provenance",
-                "Memory",
-                "Policy",
-                "PREDECESSOR DIFF",
+                "Changes from previous version",
                 "Description",
                 "Before",
                 "After",
@@ -649,7 +848,10 @@ fn selected_historical_version_renders_full_content_metadata_and_predecessor_dif
             }
             for chunk in second.content_digest().as_str().as_bytes().chunks(8) {
                 let chunk = std::str::from_utf8(chunk).expect("digest chunks are UTF-8");
-                assert!(rendered.contains(chunk), "missing digest chunk {chunk:?}");
+                assert!(
+                    !rendered.contains(chunk),
+                    "internal digest leaked {chunk:?}"
+                );
             }
         }
     }

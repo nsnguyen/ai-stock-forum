@@ -104,10 +104,66 @@ fn numbered_tabs(model: &TuiModel, width: usize, theme: &Theme) -> Vec<Line<'sta
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    if model.focus != Focus::Command
+        && !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane != AgentsPane::Memory
+    {
+        let lines = if model.agents.pane == AgentsPane::Editor {
+            if model.input_mode == super::model::InputMode::Type {
+                [
+                    " TYPE  WASD text  Enter accept  Esc keep & leave",
+                    " Tab next field · Single-line text",
+                ]
+            } else {
+                [
+                    " NAV  Tab next field  Enter edit/select  Esc keep draft",
+                    " WASD move · Review: W/S, PgUp/PgDn, Home/End scroll",
+                ]
+            }
+        } else if model.agents.pane == AgentsPane::Confirmation {
+            [
+                " NAV  Enter confirm  Esc return to review",
+                " Changes apply only after confirmation",
+            ]
+        } else {
+            [
+                " NAV  Tab section  WASD move  Enter open  Esc back",
+                " N new agent   E edit   H history",
+            ]
+        };
+        frame.render_widget(
+            Paragraph::new(
+                lines
+                    .into_iter()
+                    .map(|line| Line::styled(line, theme.muted))
+                    .collect::<Vec<_>>(),
+            ),
+            area,
+        );
+        return;
+    }
     let text = if model.focus == Focus::Command {
         " TYPE  Tab leave input  WASD text  Enter run  Esc clear"
+    } else if !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane == AgentsPane::Editor
+    {
+        if model.input_mode == super::model::InputMode::Type {
+            " TYPE  WASD text  Enter accept  Tab next field  Esc keep & leave"
+        } else {
+            " NAV   Tab next field  WASD move  Enter edit/select  Esc keep draft"
+        }
     } else if model.input_is_visible() {
         " TYPE  WASD text  Enter accept  Esc back/cancel"
+    } else if !model.skills.active
+        && model.active_view == View::Agents
+        && matches!(
+            model.agents.pane,
+            AgentsPane::List | AgentsPane::Detail | AgentsPane::History
+        )
+    {
+        " NAV  Tab section  WASD move  N new  E edit  H history"
     } else {
         " NAV   Tab next section  WASD move  Enter open  Esc back"
     };

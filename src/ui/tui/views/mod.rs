@@ -108,6 +108,10 @@ pub(super) fn render_inspector(frame: &mut Frame<'_>, area: Rect, model: &TuiMod
     );
 }
 
+pub(super) fn agent_editor_scroll_limit(model: &TuiModel) -> usize {
+    agents::editor_scroll_limit(model)
+}
+
 pub(super) fn panel<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
     Block::default()
         .title(format!(" {title} "))

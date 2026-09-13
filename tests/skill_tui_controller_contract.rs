@@ -354,11 +354,17 @@ fn delayed_agent_detail_does_not_replace_a_newer_selection_or_context_after_retu
     model.set_focus(Focus::Workspace);
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Up)),
-        ControllerEffect::Redraw
+        ControllerEffect::LoadSelectedAgentProfile {
+            target: model.agents.profile_target().unwrap(),
+            read: ai_stock_forum::ui::tui::model::AgentProfileRead::Detail
+        }
     );
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Down)),
-        ControllerEffect::Redraw
+        ControllerEffect::LoadSelectedAgentProfile {
+            target: model.agents.profile_target().unwrap(),
+            read: ai_stock_forum::ui::tui::model::AgentProfileRead::Detail
+        }
     );
     model.agents.detail_scroll = 4;
     let expected_agents = model.agents.clone();
@@ -1398,6 +1404,11 @@ fn agent_detail_unassigns_the_selected_exact_current_reference_through_preview()
     let mut model = model();
     model.active_view = View::Agents;
     model.agents.pane = AgentsPane::Detail;
+    let mut row = agent(400, profile.display_name());
+    row.content_digest = profile.content_digest().clone();
+    model.agents.profiles.profiles = vec![row];
+    model.agents.selected_detail_action =
+        ai_stock_forum::ui::tui::model::AgentDetailAction::AssignedSkills;
     model.agents.detail = Some(AgentProfileView {
         readiness: profile.readiness(),
         profile,
