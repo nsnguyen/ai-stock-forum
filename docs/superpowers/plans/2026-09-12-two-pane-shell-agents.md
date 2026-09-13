@@ -107,7 +107,8 @@ Use dark charcoal, near-white, muted secondary text, cyan active focus, NO_COLOR
 **Interfaces:**
 - Consumes Task 1's `Focus::{Navigation,List,Workspace,Actions}`, `InputMode::{Nav,Type}`, nine destinations, two-pane geometry.
 - Expands `AgentDetailAction` to `Profile`, `Memory`, `AssignedSkills`, `History`, default Profile. Preserve existing typed `ControllerEffect::LoadAgentMemory`, `LoadAgentProfileHistory`, `StartProfileEdit`, and existing assignment origin/return behavior.
-- Adds TUI-only literal-field methods to ProfileEditor, named `set_tui_field`, `move_tui_field`, `tui_field_text`, `tui_field_is_multiline`; signatures can use a focused `ProfileTuiField` enum declared in profile_editor.rs. Keep `submit_line` fallback behavior unchanged. TUI navigation and actions call explicit methods, never parse field prose as controls.
+- Adds `ProfileTuiField` in profile_editor.rs for Template, DisplayName, Role, Description, PrimarySpecialty, Tags, Personality, Instructions, Bindings, Review, Discard. TUI-only literal methods: `set_tui_field(&mut self, field: ProfileTuiField, text: &str) -> bool`, `move_tui_field(&mut self, forward: bool) -> ProfileTuiField`, `tui_field(&self) -> ProfileTuiField`, `tui_field_text(&self, field: ProfileTuiField) -> &str`. Store field-keyed raw text/errors separately from the validated draft and a dedicated active-field text buffer/cursor in Agents presentation state, not the global command field. Invalid edits still invalidate old previews. Keep `submit_line` fallback behavior unchanged; do not call `submit_keyboard_line` for TUI field prose.
+- Selection-driven profile loads bind `AgentProfileId` plus a selection generation and expected active version, not a mutable row index. Queue/coalesce passive profile loads in the runner using its existing pending-request pattern. A result may install only for the matching current target/generation, and must not change the user's selection or focus. Explicit command-mode outcomes keep their current command routing contract.
 
 - [ ] **Step 1: Add failing real-controller and editor tests.** Extend actual profile fixtures, not mock renderers. Tests must prove Tab from agent list exposes the workspace without a hidden Enter prerequisite; W/S changes selection but Tab does not; Profile/Memory/Skills/History choices all activate their existing exact target; wrong/late profile result cannot become the new selected agent's body; historical version is clearly read-only and Edit uses the active target.
 
@@ -129,7 +130,7 @@ fn tab_enters_selected_agents_workspace_without_reselecting_it() {
 }
 ```
 
-Additional tests use literal `wasd123456789/n` and `:back` in profile fields, invalid draft retention on Esc/Tab, multiline newline rather than submit, NAV template selection using WASD, global number navigation after leaving TYPE, distinct review/confirm Enter and repeat rejection. Render fixtures include nonzero IDs/digests and assert none leaks to default Agents/detail/history/review/confirmation/error output.
+Additional tests use literal `wasd123456789/n` and `:back` in profile fields, invalid draft retention on Esc/Tab, NAV template selection using WASD, global number navigation after leaving TYPE, distinct review/confirm Enter and repeat rejection. Profile text stays single-line consistent with the existing whitespace-normalizing domain. Render fixtures include nonzero IDs/digests and assert none leaks to default Agents/detail/history/review/confirmation/error output.
 
 Run: `cargo test --locked --test agent_profile_tui_controller_contract --test agent_profile_tui_render_contract --test agent_profile_editor_contract`; first run the new targeted test names to see intended red failures before implementation.
 
@@ -143,16 +144,16 @@ let detail = model.agents.detail.as_ref().filter(|detail| {
 // Render selected identity regardless of whether full detail is loaded.
 ```
 
-Use readable readiness mapping (Needs connection / Connection unavailable / Bindings configured, plus required engineering binding qualification). Keep IDs and digests internal; show Version N · Current or Historical with human dates and readable changed fields. Expose no raw immutable metadata block. Review and confirmation name operations and objects without requiring ID/token entry. Preserve exact internal review/authentication logic and history version selection. Skills and Memory targets use IDs internally and retain existing protected-workflow constraints.
+Use readable readiness mapping (Needs connection / Connection unavailable / Bindings configured, plus required engineering binding qualification). Keep IDs and digests internal; show Version N · Current or Historical with human dates and readable changed fields. Expose no raw immutable metadata block. Review and confirmation name operations and objects without requiring ID/token entry. Preserve exact internal review/authentication logic and history version selection. Skills and Memory targets use IDs internally and retain existing protected-workflow constraints. Full actions stay disabled with a readable loading hint until matching detail exists. Profile/history/version result installation cannot reselect the returned object. Starting Edit captures the selected identity and expected active version before dispatch.
 
-- [ ] **Step 3: Implement deliberate TYPE fields without changing fallback protocol.** Profile fields render in the workspace, retain exact editable buffers including invalid input, and validate beside the affected field. Enter enters TYPE; Esc retains draft and returns NAV; Tab leaves TYPE, moves to the next field/section without saving, and preserves old field input. Templates/reference/binding choices remain NAV. N/E opens the workflow; fields can start TYPE when appropriate, never pickers. Profile single-line Enter accepts field; personality/instructions Enter inserts newline. Existing fallback colon commands remain exclusively in `submit_line`.
+- [ ] **Step 3: Implement deliberate TYPE fields without changing fallback protocol.** Profile fields render in the workspace, retain exact editable buffers including invalid input, and validate beside the affected field. Enter enters TYPE; Esc retains draft and returns NAV; Tab leaves TYPE, moves to the next field/section without saving, and preserves old field input. Templates/reference/binding choices remain NAV. N/E opens the workflow; fields can start TYPE when appropriate, never pickers. Profile Enter accepts its single-line field: all durable profile text currently normalizes whitespace, so do not introduce a domain-level line-break change. Memory Note multiline editing remains part of the later Memory slice. Existing fallback colon commands remain exclusively in `submit_line`.
 
 ```rust
 match (model.input_mode, key.code) {
     (InputMode::Type, KeyCode::Esc) => { /* retain field; return Nav */ }
     (InputMode::Type, KeyCode::Tab) => { /* retain field; next field in Nav */ }
-    (InputMode::Type, KeyCode::Enter) if field_is_multiline => {
-        /* insert newline in this field; never execute a command */
+    (InputMode::Type, KeyCode::Enter) => {
+        /* validate literal field, retain errors, return Nav; no durable write */
     }
     (InputMode::Type, KeyCode::Char(character)) => {
         /* ordinary text, including numbers, slash and leading colon */
