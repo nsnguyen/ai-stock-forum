@@ -1066,7 +1066,7 @@ fn rendered_memory_keeps_the_inspector_latent_and_minimum_frame_legible() {
 
     let minimum = memory_model(60, 18);
     let rows = render_rows(&minimum, 60, 18);
-    assert_eq!(rows[0].trim_end(), "AI STOCK FORUM  /  Agents  /  Narrow");
+    assert_eq!(rows[0].trim_end(), "AI STOCK FORUM  /  Agents  ·  LOCAL");
     let minimum_text = rows.join("\n");
     for label in [
         "1 Home",
@@ -1181,13 +1181,14 @@ fn loaded_agent_detail_prepends_the_nested_memory_action_selector() {
 
     model.agents.selected_detail_action = AgentDetailAction::Memory;
     let selected_text = render_text(&model, 160, 40);
-    assert!(
-        selected_text
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .contains("Profile Memory Skills History")
-    );
+    let rows = render_rows(&model, 160, 40);
+    let actions = rows
+        .iter()
+        .find(|row| row.contains("> Memory"))
+        .expect("selected Memory card");
+    let positions = ["Profile", "Memory", "Skills", "History"]
+        .map(|label| actions.find(label).expect("all four actions share a row"));
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     assert_eq!(selected_text.matches("A/D choose   Enter open").count(), 1);
 }
 

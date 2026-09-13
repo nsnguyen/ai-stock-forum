@@ -651,50 +651,56 @@ fn list_navigation_clamps_empty_one_last_and_refresh_shrink_states() {
 
 #[test]
 fn agent_list_scrolls_only_when_selection_leaves_the_visible_cards() {
-    let mut model = model();
-    model.select_view(View::Agents);
-    model.set_terminal_size(60, 18);
-    model.agents.replace_profiles(AgentProfilesView {
-        profiles: vec![
-            profile_summary(23),
-            profile_summary(24),
-            profile_summary(25),
-        ],
-        total_count: 3,
-        returned_count: 3,
-        truncated: false,
-    });
+    // Each bordered badge card is five rows, with one row between cards.
+    // The 18-row terminal fits one complete card; 19 rows fits two.
+    for (height, second_offset, third_offset) in [(18, 1, 2), (19, 0, 1)] {
+        let mut model = model();
+        model.select_view(View::Agents);
+        model.set_terminal_size(60, height);
+        model.agents.replace_profiles(AgentProfilesView {
+            profiles: vec![
+                profile_summary(23),
+                profile_summary(24),
+                profile_summary(25),
+            ],
+            total_count: 3,
+            returned_count: 3,
+            truncated: false,
+        });
 
-    handle_event(&mut model, key(KeyCode::Down));
-    assert_eq!(
-        (model.agents.selected_profile, model.agents.list_scroll),
-        (1, 0)
-    );
+        handle_event(&mut model, key(KeyCode::Down));
+        assert_eq!(
+            (model.agents.selected_profile, model.agents.list_scroll),
+            (1, second_offset)
+        );
 
-    handle_event(&mut model, key(KeyCode::Down));
-    assert_eq!(
-        (model.agents.selected_profile, model.agents.list_scroll),
-        (2, 1)
-    );
+        handle_event(&mut model, key(KeyCode::Down));
+        assert_eq!(
+            (model.agents.selected_profile, model.agents.list_scroll),
+            (2, third_offset)
+        );
 
-    handle_event(&mut model, key(KeyCode::Up));
-    assert_eq!(
-        (model.agents.selected_profile, model.agents.list_scroll),
-        (1, 1)
-    );
+        handle_event(&mut model, key(KeyCode::Up));
+        assert_eq!(
+            (model.agents.selected_profile, model.agents.list_scroll),
+            (1, 1)
+        );
 
-    handle_event(&mut model, key(KeyCode::Up));
-    assert_eq!(
-        (model.agents.selected_profile, model.agents.list_scroll),
-        (0, 0)
-    );
+        handle_event(&mut model, key(KeyCode::Up));
+        assert_eq!(
+            (model.agents.selected_profile, model.agents.list_scroll),
+            (0, 0)
+        );
+    }
 }
 
 #[test]
 fn agent_list_scroll_accounts_for_wrapped_cards_without_repinning_each_selection() {
     let mut model = model();
     model.select_view(View::Agents);
-    model.set_terminal_size(80, 23);
+    // 60 columns wraps the 64-character fields. The 19-row list viewport
+    // fits the seven-row wrapped card and both five-row short cards plus gaps.
+    model.set_terminal_size(60, 27);
     let mut wrapped = profile_summary(26);
     wrapped.display_name = "W".repeat(64);
     wrapped.primary_specialty = "S".repeat(64);

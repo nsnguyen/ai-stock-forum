@@ -69,6 +69,18 @@ state and shows resize guidance with safe exit available.
 
 ## Agents path
 
+Home now offers three destination cards: Agents, Skills, and Setup. Use
+`A`/`D` (or `W`/`S`) to choose a card, then `Enter` to open it. `Tab`
+moves between the cards and the top menu. First-run guidance uses real local
+state; it does not display raw audit summaries or invent agents.
+
+Agent lists use stable colored initial badges, a shaded selected card, and
+readable connection status. The workspace uses Profile, Memory, Skills, and
+History icon cards when space permits, with compact text choices at the
+minimum terminal size. The artwork uses ordinary terminal characters and
+does not require a special icon font. NO_COLOR keeps explicit selection
+markers. Long names remain available in the scrollable profile.
+
 Use this path without looking up a UUID:
 
 1. Press `3` to open Agents.
@@ -149,10 +161,15 @@ Agents scene with separated option values:
 cargo run --locked --example two_pane_preview -- --scene agents --width 120 --height 30
 ```
 
-Available scenes are `agents`, `empty`, `history`, `editor`, `type`,
-`invalid-field`, `review`, `confirmation`, `chat`, and `connections`. Add
-`--no-color` for the color-free presentation or `--svg` to emit SVG. Options
-such as `--width 120` and `--height 30` require separate values.
+Available scenes are `home`, `home-populated`, `agents`, `empty`, `history`,
+`editor`, `type`, `invalid-field`, `review`, `confirmation`, `chat`, and
+`connections`. `home` models a zero-agent first run. Its synthetic snapshot
+includes the audit summary `agent profiles listed: total_count=0,
+returned_count=0, truncated=false` as input so visual review can verify that
+Home does not expose that internal text. `home-populated` uses the same three
+synthetic profiles as the Agents preview. Add `--no-color` for the color-free
+presentation or `--svg` to emit SVG. Options such as `--width 120` and
+`--height 30` require separate values.
 
 For visual review, inspect representative scenes at `60x18`, `80x24`,
 `100x24`, `120x30`, and `160x40`. Check focus, pane visibility, selected
@@ -160,6 +177,19 @@ identity, wrapping, field text, errors, confirmation controls, footer hints,
 and the absence of routine UUIDs or digests.
 
 Durable production-render evidence is available as native PNG:
+
+- [Home at 120x30](assets/two-pane/visual-fidelity-home-120x30.png)
+- [Populated Home at 120x30](assets/two-pane/visual-fidelity-home-populated-120x30.png)
+- [Home at 160x40](assets/two-pane/visual-fidelity-home-160x40.png)
+- [Home at 60x18](assets/two-pane/visual-fidelity-home-60x18.png)
+- [NO_COLOR Home at 80x24](assets/two-pane/visual-fidelity-home-no-color-80x24.png)
+- [Agents at 120x30](assets/two-pane/visual-fidelity-agents-120x30.png)
+- [Empty Agents at 120x30](assets/two-pane/visual-fidelity-agents-empty-120x30.png)
+- [Agents at 160x40](assets/two-pane/visual-fidelity-agents-160x40.png)
+- [Agents at 60x18](assets/two-pane/visual-fidelity-agents-60x18.png)
+- [NO_COLOR Agents at 80x24](assets/two-pane/visual-fidelity-agents-no-color-80x24.png)
+
+Earlier first-slice evidence remains available for comparison:
 
 - [Agents at 120x30](assets/two-pane/agents-120x30.png)
 - [Profile TYPE at 120x30](assets/two-pane/type-120x30.png)
@@ -176,12 +206,17 @@ this documentation preparation.
 
 | Evidence | Result |
 | --- | --- |
-| Current Agents controls | Final-fix wave implemented; 330 covering checks passed; final scoped re-review passed — all eight findings addressed, no open findings |
-| `cargo test --locked` | 1,282 passed; 0 failed; 1 ignored across 99 result summaries |
-| Formatting, lint, and whitespace | `cargo fmt --all -- --check`, all-target Clippy with warnings denied, and `git diff --check` passed |
-| Production-render matrix | All 10 scenes at 5 sizes in color and NO_COLOR emitted the exact requested height; 100 renders passed |
-| Durable representative renders | Three actual-render PNGs generated and independently inspected |
+| Baseline `cargo test --locked` before the visual-fidelity correction | 1,282 passed; 0 failed; 1 ignored across 99 result summaries |
+| Focused Home and shared visual contracts | 6 passed after integration |
+| Preview example unit tests | 10 passed, including both Home fixtures and the hidden raw-audit-input guard |
+| Visual-fidelity render set | Home and Agents rendered at `120x30`, `160x40`, and `60x18` in color plus `80x24` in NO_COLOR; populated Home and empty Agents also rendered at `120x30`. All 10 PNGs were visually inspected |
+| Final `cargo test --locked --no-fail-fast` after correction | 1,293 passed; 0 failed; 1 ignored across 100 result summaries |
+| Final formatting and lint | `cargo fmt --all -- --check` and `cargo clippy --locked --all-targets --all-features -- -D warnings` passed |
 | Interactive `make dev` usability run | Not performed or claimed here |
 
 Record exact commands, dimensions, results, and any blocked actions during the
 final review. Do not turn an unperformed action into a pass claim.
+
+An earlier suite attempt saw `WorkerExited` in the existing fallback shutdown
+acceptance test. Its isolated recheck and the final complete suite both passed;
+no runtime or persistence change was made for that intermittent failure.

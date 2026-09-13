@@ -5,6 +5,7 @@ mod memory;
 mod overview;
 mod setup;
 mod skills;
+mod visuals;
 
 use ratatui::{
     Frame,
@@ -78,9 +79,9 @@ pub(super) fn wrapped_height(lines: Vec<Line<'static>>, width: u16) -> u16 {
 
 pub(super) fn render_inspector(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     let border_style = if model.focus == Focus::Inspector {
-        theme.focus
+        theme.accent
     } else {
-        theme.muted
+        theme.border()
     };
     let block = Block::default()
         .title(if model.skills.active {
@@ -128,7 +129,11 @@ pub(super) fn panel<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'
     Block::default()
         .title(format!(" {title} "))
         .borders(Borders::ALL)
-        .border_style(if focused { theme.focus } else { theme.muted })
+        .border_style(if focused {
+            theme.accent
+        } else {
+            theme.border()
+        })
 }
 
 pub(super) fn label_value<'a>(label: &'a str, value: String, theme: &Theme) -> Line<'a> {

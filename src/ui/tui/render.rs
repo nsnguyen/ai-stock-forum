@@ -25,7 +25,7 @@ pub fn render(frame: &mut Frame<'_>, model: &TuiModel, theme: &Theme) {
         return;
     }
 
-    render_header(frame, cockpit.header, model, cockpit.mode, theme);
+    render_header(frame, cockpit.header, model, theme);
     views::render(frame, cockpit.workspace, model, theme);
     render_message(frame, cockpit.message, model, theme);
     if cockpit.command.height > 0 {
@@ -38,13 +38,7 @@ pub fn render(frame: &mut Frame<'_>, model: &TuiModel, theme: &Theme) {
     }
 }
 
-fn render_header(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    model: &TuiModel,
-    mode: LayoutMode,
-    theme: &Theme,
-) {
+fn render_header(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     let identity = Line::from(vec![
         Span::styled("AI STOCK FORUM", theme.accent),
         Span::raw("  /  "),
@@ -56,16 +50,21 @@ fn render_header(
             },
             theme.focus,
         ),
-        Span::raw(format!("  /  {}", mode_name(mode))),
+        Span::styled(
+            if model.previous_session_interrupted {
+                "  ! Previous session interrupted"
+            } else {
+                "  ·  LOCAL"
+            },
+            if model.previous_session_interrupted {
+                theme.warning
+            } else {
+                theme.muted
+            },
+        ),
     ]);
     let mut lines = vec![identity];
     lines.extend(numbered_tabs(model, usize::from(area.width), theme));
-    if model.previous_session_interrupted && lines.len() < usize::from(area.height) {
-        lines.push(Line::styled(
-            "WARNING  Previous session interrupted",
-            theme.warning,
-        ));
-    }
     while lines.len() < usize::from(area.height) {
         lines.push(Line::default());
     }
@@ -77,7 +76,11 @@ fn numbered_tabs(model: &TuiModel, width: usize, theme: &Theme) -> Vec<Line<'sta
     let mut spans = Vec::new();
     let mut used = 0_usize;
     for tab in NavigationTab::ALL {
-        let label = format!("{} {}", tab.key(), tab.label());
+        let label = if width >= 120 {
+            format!("  {} {}  ", tab.key(), tab.label())
+        } else {
+            format!(" {} {} ", tab.key(), tab.label())
+        };
         let required = label.len() + usize::from(used > 0);
         if used > 0 && used.saturating_add(required) > width {
             lines.push(Line::from(std::mem::take(&mut spans)));
@@ -104,6 +107,22 @@ fn numbered_tabs(model: &TuiModel, width: usize, theme: &Theme) -> Vec<Line<'sta
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    if !model.skills.active && model.active_view == View::Overview && model.focus != Focus::Command
+    {
+        let hint = if model.focus == Focus::Navigation {
+            " NAV  WASD destination  Enter open  Tab workspace  Esc back"
+        } else {
+            " NAV  WASD choose  Enter open  Tab menu  Esc back"
+        };
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(hint, theme.muted),
+                Line::styled(" 3 Agents   4 Skills   7 Setup   / command", theme.muted),
+            ]),
+            area,
+        );
+        return;
+    }
     if model.focus != Focus::Command
         && !model.skills.active
         && model.active_view == View::Agents
@@ -244,7 +263,11 @@ fn render_command(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(if focused { theme.focus } else { theme.muted });
+        .border_style(if focused {
+            theme.accent
+        } else {
+            theme.border()
+        });
     let (line, cursor_prefix_width) = if focused {
         let cursor = model.command.cursor_byte().min(model.command.text().len());
         let prefix = model
@@ -382,15 +405,6 @@ fn view_name(view: View) -> &'static str {
         View::Audit => "Audit",
         View::Help => "Help",
         View::Agents => "Agents",
-    }
-}
-
-fn mode_name(mode: LayoutMode) -> &'static str {
-    match mode {
-        LayoutMode::Wide => "Wide",
-        LayoutMode::Medium => "Medium",
-        LayoutMode::Narrow => "Narrow",
-        LayoutMode::TooSmall => "Too small",
     }
 }
 
@@ -559,7 +573,7 @@ mod tests {
         assert!(text.contains("Home"));
         assert!(!text.contains("Installation"));
         assert!(!text.contains("Session"));
-        assert!(text.contains("Runtime"));
+        assert!(text.contains("Local app"));
         assert!(text.contains("Local data    Ready"));
         assert!(!text.contains("Type /help"));
         assert!(text.contains("NAV"));
@@ -626,11 +640,11 @@ mod tests {
             let text = render_text(model, 140, 40, false);
 
             assert!(
-                text.contains(&format!("Runtime       {expected_runtime}")),
+                text.contains(&format!("Local app     {expected_runtime}")),
                 "case={case}"
             );
             assert!(
-                text.contains(&format!("Command       {expected_command}")),
+                text.contains(&format!("Task          {expected_command}")),
                 "case={case}"
             );
         }

@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //! `cargo run --example two_pane_preview -- [--width N] [--height N]
-//!      [--scene agents|empty|history|editor|type|invalid-field|review|confirmation|chat|connections]
+//!      [--scene home|home-populated|agents|empty|history|editor|type|invalid-field|review|confirmation|chat|connections]
 //!      [--no-color] [--svg]`
 
 use std::{env, fmt::Write as _, process};
@@ -17,9 +17,10 @@ use ai_stock_forum::{
         AgentProfileVersionView, AgentProfileView, AgentProfilesView, DatabaseReadiness,
         PresentationSnapshot, ProcessGuardOwnership,
     },
+    audit::AuditEntry,
     domain::{
-        AgentProfileId, AgentProfileVersionId, InstallationId, MemoryNamespaceId,
-        ProfileReviewToken, SessionId, sha256,
+        Actor, AgentProfileId, AgentProfileVersionId, CorrelationId, InstallationId,
+        MemoryNamespaceId, ProfileReviewToken, SessionId, sha256,
     },
     setup::SetupStatus,
     ui::{
@@ -42,7 +43,7 @@ use ratatui::{
 use uuid::Uuid;
 
 const USAGE: &str = "Usage: two_pane_preview [--width N] [--height N] \
-    [--scene agents|empty|history|editor|type|invalid-field|review|confirmation|chat|connections] \
+    [--scene home|home-populated|agents|empty|history|editor|type|invalid-field|review|confirmation|chat|connections] \
     [--no-color] [--svg]";
 const CELL_WIDTH: u16 = 8;
 const CELL_HEIGHT: u16 = 16;
@@ -51,6 +52,8 @@ const SVG_RASTER_SCALE: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scene {
+    Home,
+    HomePopulated,
     Agents,
     Empty,
     History,
@@ -66,6 +69,8 @@ enum Scene {
 impl Scene {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
+            "home" => Ok(Self::Home),
+            "home-populated" => Ok(Self::HomePopulated),
             "agents" => Ok(Self::Agents),
             "empty" => Ok(Self::Empty),
             "history" => Ok(Self::History),
@@ -305,6 +310,20 @@ fn empty_snapshot() -> PresentationSnapshot {
     snapshot
 }
 
+fn home_snapshot() -> PresentationSnapshot {
+    let mut snapshot = empty_snapshot();
+    snapshot.recent_audit = vec![AuditEntry {
+        sequence: 1,
+        occurred_at_ms: 1_800_000_000_000,
+        actor: Actor::System,
+        kind: "agent_profiles_listed".to_owned(),
+        correlation_id: CorrelationId::from_uuid(Uuid::from_u128(4)),
+        summary: "agent profiles listed: total_count=0, returned_count=0, truncated=false"
+            .to_owned(),
+    }];
+    snapshot
+}
+
 fn history_entry(profile: &AgentProfileVersion) -> AgentProfileHistoryEntry {
     AgentProfileHistoryEntry {
         profile_version_id: profile.profile_version_id(),
@@ -317,6 +336,10 @@ fn history_entry(profile: &AgentProfileVersion) -> AgentProfileHistoryEntry {
 }
 
 fn model_for_scene(scene: Scene) -> TuiModel {
+    if scene == Scene::Home {
+        return TuiModel::new(home_snapshot(), false);
+    }
+
     if scene == Scene::Empty {
         let mut model = TuiModel::new(empty_snapshot(), false);
         model.active_view = View::Agents;
@@ -327,6 +350,7 @@ fn model_for_scene(scene: Scene) -> TuiModel {
     let fixtures = profile_fixtures();
     let mut model = TuiModel::new(populated_snapshot(&fixtures), false);
     match scene {
+        Scene::HomePopulated => {}
         Scene::Agents => {
             model.active_view = View::Agents;
             model.agents.pane = AgentsPane::Detail;
@@ -363,7 +387,7 @@ fn model_for_scene(scene: Scene) -> TuiModel {
         }
         Scene::Chat => model.active_view = View::Chat,
         Scene::Connections => model.active_view = View::Connections,
-        Scene::Empty => unreachable!("empty scene returned above"),
+        Scene::Home | Scene::Empty => unreachable!("empty snapshot scene returned above"),
     }
     model
 }
@@ -634,6 +658,47 @@ mod tests {
         assert!(parse_args(["--scene", "portfolio"]).is_err());
         assert!(parse_args(["--width", "0"]).is_err());
         assert!(parse_args(["--height", "0"]).is_err());
+    }
+
+    #[test]
+    fn parses_empty_and_populated_home_scenes() {
+        assert!(Scene::parse("home").is_ok());
+        assert!(Scene::parse("home-populated").is_ok());
+    }
+
+    #[test]
+    fn home_scenes_model_empty_first_run_and_populated_workspaces() {
+        let home = model_for_scene(Scene::Home);
+        assert_eq!(home.active_view, View::Overview);
+        assert_eq!(home.agents.profiles.total_count, 0);
+        assert_eq!(home.agents.profiles.returned_count, 0);
+        assert!(!home.agents.profiles.truncated);
+        assert_eq!(
+            home.audit_entries
+                .last()
+                .expect("synthetic audit input")
+                .summary,
+            "agent profiles listed: total_count=0, returned_count=0, truncated=false"
+        );
+
+        let populated = model_for_scene(Scene::HomePopulated);
+        assert_eq!(populated.active_view, View::Overview);
+        assert_eq!(populated.agents.profiles.total_count, 3);
+        assert_eq!(populated.agents.profiles.returned_count, 3);
+        assert!(!populated.agents.profiles.truncated);
+    }
+
+    #[test]
+    fn home_render_hides_the_raw_audit_summary_input() {
+        let terminal = render_scene(Config {
+            scene: Scene::Home,
+            ..Config::default()
+        })
+        .expect("home renders");
+
+        let rendered = cells_to_text(terminal.backend().buffer());
+        assert!(!rendered.contains("agent profiles listed"));
+        assert!(!rendered.contains("total_count=0"));
     }
 
     #[test]

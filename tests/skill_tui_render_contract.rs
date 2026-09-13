@@ -626,16 +626,27 @@ fn list_focus_is_exclusive_and_skills_suppresses_agents_navigation_focus() {
 
     let library_corner = buffer.cell((20, 3)).expect("library corner");
     let detail_corner = buffer.cell((45, 3)).expect("detail corner");
+    // NO_COLOR outlines use bold for focus and dim for an inactive panel;
+    // reverse-video fill is reserved for selected items, not pane borders.
     assert!(
         library_corner
             .modifier
-            .contains(ratatui::style::Modifier::REVERSED)
+            .contains(ratatui::style::Modifier::BOLD)
     );
     assert!(
         !detail_corner
             .modifier
-            .contains(ratatui::style::Modifier::REVERSED)
+            .contains(ratatui::style::Modifier::BOLD)
     );
+    assert!(
+        detail_corner
+            .modifier
+            .contains(ratatui::style::Modifier::DIM)
+    );
+    for corner in [library_corner, detail_corner] {
+        assert_eq!(corner.fg, ratatui::style::Color::Reset);
+        assert_eq!(corner.bg, ratatui::style::Color::Reset);
+    }
 
     let text = render_text(&model, 120, 36);
     assert!(text.contains("4 Skills"));

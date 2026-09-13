@@ -12,6 +12,40 @@ pub struct Theme {
 }
 
 impl Theme {
+    pub fn surface(self) -> Style {
+        if self.base.fg.is_none() {
+            self.base
+        } else {
+            self.base.bg(Color::Rgb(21, 28, 36))
+        }
+    }
+
+    pub fn selected_surface(self) -> Style {
+        if self.base.fg.is_none() {
+            self.base.add_modifier(Modifier::BOLD)
+        } else {
+            self.base.bg(Color::Rgb(12, 43, 51))
+        }
+    }
+
+    pub fn border(self) -> Style {
+        if self.base.fg.is_none() {
+            self.muted
+        } else {
+            Style::default().fg(Color::Rgb(65, 83, 103))
+        }
+    }
+
+    pub fn agent_badge(self, id: crate::domain::AgentProfileId) -> Style {
+        match self.agent_monogram(id).fg {
+            Some(color) => Style::default()
+                .fg(Color::Black)
+                .bg(color)
+                .add_modifier(Modifier::BOLD),
+            None => self.accent,
+        }
+    }
+
     pub fn agent_monogram(self, id: crate::domain::AgentProfileId) -> Style {
         if self.base.fg.is_none() {
             return self.accent;
@@ -45,14 +79,16 @@ impl Theme {
         }
 
         Self {
-            base: Style::default().fg(Color::Gray).bg(Color::Rgb(24, 24, 27)),
+            base: Style::default()
+                .fg(Color::Rgb(228, 234, 241))
+                .bg(Color::Rgb(14, 18, 23)),
             accent: Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
             focus: Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                .add_modifier(Modifier::BOLD),
             muted: Style::default().fg(Color::Rgb(155, 160, 171)),
             success: Style::default()
                 .fg(Color::Green)

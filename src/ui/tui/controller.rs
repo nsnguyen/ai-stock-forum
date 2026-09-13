@@ -595,6 +595,31 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         return effect;
     }
 
+    if model.active_view == View::Overview
+        && model.focus == Focus::Workspace
+        && no_modifiers(key.modifiers)
+    {
+        match key.code {
+            KeyCode::Left | KeyCode::Up => {
+                model.selected_home_action = model.selected_home_action.min(2).saturating_sub(1);
+                return ControllerEffect::Redraw;
+            }
+            KeyCode::Right | KeyCode::Down => {
+                model.selected_home_action = model.selected_home_action.saturating_add(1).min(2);
+                return ControllerEffect::Redraw;
+            }
+            KeyCode::Enter => {
+                let destination = [
+                    NavigationTab::Agents,
+                    NavigationTab::Skills,
+                    NavigationTab::Setup,
+                ][model.selected_home_action.min(2)];
+                return switch_to_destination(model, destination);
+            }
+            _ => {}
+        }
+    }
+
     match key.code {
         KeyCode::Char('?') if text_modifiers(key.modifiers) => select_view(model, View::Help),
         KeyCode::Char('/') if no_modifiers(key.modifiers) => {

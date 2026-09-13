@@ -1,8 +1,8 @@
 use ratatui::{
     Frame,
-    layout::Rect,
+    layout::{Alignment, Rect},
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
 };
 
 use crate::{
@@ -25,6 +25,7 @@ use crate::{
     },
 };
 
+use super::visuals::{ActionCard, Artwork, Icon, render_action_card, render_artwork};
 use super::{label_value, panel, safe_text, workspace_focused};
 
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
@@ -72,37 +73,131 @@ fn render_active(
 fn render_list(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     let focused = model.focus == Focus::List
         || (workspace_focused(model) && model.agents.pane == AgentsPane::List);
-    let lines = if model.agents.profiles.profiles.is_empty() {
-        vec![
-            Line::styled("No agent profiles yet", theme.accent),
-            Line::default(),
-            Line::raw("Press N to create your first agent."),
-            Line::styled("Templates provide a safe starting point.", theme.muted),
-        ]
-    } else {
-        let first_item = list_scroll_offset_for_area(model, area);
-        model
-            .agents
-            .profiles
-            .profiles
-            .iter()
-            .enumerate()
-            .skip(first_item)
-            .flat_map(|(index, profile)| {
-                profile_summary_lines(
-                    profile,
-                    index == model.agents.selected_profile,
-                    focused,
-                    theme,
-                )
+    let block = panel("Agent list", focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if model.agents.profiles.profiles.is_empty() {
+        if area.width < frame.area().width {
+            // The workspace owns the full welcome when both panes are visible.
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::styled("Your crew is empty.", theme.muted),
+                    Line::default(),
+                    Line::styled("N  New agent", theme.accent),
+                ])
+                .wrap(Wrap { trim: false }),
+                Rect::new(
+                    inner.x + 1,
+                    inner.y + 1,
+                    inner.width.saturating_sub(2),
+                    inner.height.saturating_sub(1),
+                ),
+            );
+        } else {
+            render_empty_agents(frame, inner, theme);
+        }
+        return;
+    }
+    let mut y = inner.y;
+    for (index, profile) in model
+        .agents
+        .profiles
+        .profiles
+        .iter()
+        .enumerate()
+        .skip(list_scroll_offset_for_area(model, area))
+    {
+        if inner.bottom().saturating_sub(y) < 3 {
+            break;
+        }
+        let height = profile_card_height(profile, inner.width).min(inner.bottom() - y);
+        let card = Rect::new(inner.x, y, inner.width, height);
+        let selected = index == model.agents.selected_profile;
+        let block = Block::default()
+            .title(if selected { ">" } else { "" })
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .style(if selected {
+                theme.selected_surface()
+            } else {
+                theme.surface()
             })
-            .collect()
+            .border_style(if selected {
+                theme.accent
+            } else {
+                theme.border()
+            });
+        let content = block.inner(card);
+        frame.render_widget(block, card);
+        let badge = Rect::new(
+            content.x,
+            content.y,
+            4.min(content.width),
+            3.min(content.height),
+        );
+        render_badge(
+            frame,
+            badge,
+            &profile.display_name,
+            theme.agent_badge(profile.profile_id),
+        );
+        let text = Rect::new(
+            content.x.saturating_add(5),
+            content.y,
+            content.width.saturating_sub(5),
+            content.height,
+        );
+        frame.render_widget(
+            Paragraph::new(profile_card_lines(profile, selected, theme)).wrap(Wrap { trim: false }),
+            text,
+        );
+        y = y.saturating_add(height).saturating_add(1);
+    }
+}
+
+fn render_badge(frame: &mut Frame<'_>, area: Rect, name: &str, style: ratatui::style::Style) {
+    frame.render_widget(Block::default().style(style), area);
+    if area.height > 0 {
+        frame.render_widget(
+            Paragraph::new(monogram(name))
+                .style(style)
+                .alignment(Alignment::Center),
+            Rect::new(area.x, area.y + area.height / 2, area.width, 1),
+        );
+    }
+}
+
+fn render_empty_agents(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    let art_height = if area.height >= 13 {
+        6
+    } else if area.height >= 10 {
+        5
+    } else {
+        0
     };
+    if art_height > 0 {
+        render_artwork(
+            frame,
+            Rect::new(area.x, area.y, area.width, art_height),
+            Artwork::Bot,
+            theme.accent,
+        );
+    }
+    let lines = vec![
+        Line::styled("No agent profiles yet", theme.accent),
+        Line::default(),
+        Line::raw("Press N to create your first agent."),
+        Line::default(),
+        Line::styled("Start with a template, then make it your own.", theme.muted),
+    ];
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel("Agent list", focused, theme))
-            .wrap(Wrap { trim: false }),
-        area,
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        Rect::new(
+            area.x + 1,
+            area.y + art_height,
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(art_height),
+        ),
     );
 }
 
@@ -129,22 +224,16 @@ fn list_scroll_offset_for_area(model: &TuiModel, area: Rect) -> usize {
     if viewport_height == 0 {
         return selected;
     }
-    let inner_width = area.width.saturating_sub(2).max(1);
-    let measurement_theme = Theme::from_no_color(true);
+    let inner_width = area.width.saturating_sub(2);
     let heights = profiles[first..=selected]
         .iter()
-        .map(|profile| {
-            Paragraph::new(profile_summary_lines(
-                profile,
-                false,
-                false,
-                &measurement_theme,
-            ))
-            .wrap(Wrap { trim: false })
-            .line_count(inner_width)
-        })
+        .map(|profile| usize::from(profile_card_height(profile, inner_width)) + 1)
         .collect::<Vec<_>>();
-    let mut visible_height = heights.iter().copied().fold(0usize, usize::saturating_add);
+    let mut visible_height = heights
+        .iter()
+        .copied()
+        .fold(0usize, usize::saturating_add)
+        .saturating_sub(1);
     for height in heights {
         if visible_height <= viewport_height || first == selected {
             break;
@@ -155,47 +244,35 @@ fn list_scroll_offset_for_area(model: &TuiModel, area: Rect) -> usize {
     first
 }
 
-fn profile_summary_lines(
+fn profile_card_height(profile: &crate::app::AgentProfileSummary, width: u16) -> u16 {
+    let lines = profile_card_lines(profile, false, &Theme::from_no_color(true));
+    let height = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .line_count(width.saturating_sub(7).max(1));
+    u16::try_from(height.max(3))
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+}
+
+fn profile_card_lines(
     profile: &crate::app::AgentProfileSummary,
     selected: bool,
-    focused: bool,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let marker = if selected { ">" } else { " " };
     vec![
-        Line::from(vec![
-            Span::styled(
-                format!("{marker} "),
-                if selected { theme.focus } else { theme.muted },
-            ),
-            Span::styled(
-                monogram(&profile.display_name),
-                theme.agent_monogram(profile.profile_id),
-            ),
-            Span::styled(
-                format!("  {}", safe_text(&profile.display_name)),
-                if selected && focused {
-                    theme.focus
-                } else if selected {
-                    theme.accent
-                } else {
-                    theme.muted
-                },
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(format!("  {} | ", profile.role.as_str()), theme.muted),
-            Span::styled(
-                readiness_name(profile.readiness),
-                readiness_style(profile.readiness, theme),
-            ),
-            Span::styled(format!(" | v{}", profile.version.get()), theme.muted),
-        ]),
         Line::styled(
-            format!("  {}", safe_text(&profile.primary_specialty)),
-            theme.muted,
+            safe_text(&profile.display_name),
+            if selected {
+                theme.accent
+            } else {
+                theme.agent_monogram(profile.profile_id)
+            },
         ),
-        Line::default(),
+        Line::styled(
+            readiness_name(profile.readiness),
+            readiness_style(profile.readiness, theme),
+        ),
+        Line::styled(safe_text(&profile.primary_specialty), theme.muted),
     ]
 }
 
@@ -206,12 +283,12 @@ fn detail_header(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
-                monogram(&row.display_name),
-                theme.agent_monogram(row.profile_id),
+                format!(" {} ", monogram(&row.display_name)),
+                theme.agent_badge(row.profile_id),
             ),
             Span::styled(format!("  {}", safe_text(&row.display_name)), theme.accent),
         ]),
-        Line::styled(safe_text(&row.primary_specialty), theme.muted),
+        readiness_line("Connection", row.readiness, theme),
     ];
     if model.agents.skill_panel_open {
         lines.push(Line::styled(
@@ -286,7 +363,7 @@ fn body_limit(lines: Vec<Line<'static>>, body: Rect) -> usize {
 
 pub(super) fn detail_scroll_geometry(model: &TuiModel) -> (usize, usize) {
     let theme = Theme::from_no_color(true);
-    let (_, body) = document_geometry(active_area(model), detail_header(model, &theme).len());
+    let (_, body) = detail_geometry(active_area(model), model);
     (
         body_limit(detail_body(model, &theme), body),
         usize::from(body.height.max(1)),
@@ -294,14 +371,22 @@ pub(super) fn detail_scroll_geometry(model: &TuiModel) -> (usize, usize) {
 }
 
 fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
-    let header = detail_header(model, theme);
-    let (heading, body) = document_geometry(area, header.len());
+    let (heading, body) = detail_geometry(area, model);
     frame.render_widget(
         panel("Agent workspace", agent_workspace_focused(model), theme),
         area,
     );
     // Keep selected identity and actions visible; only the document body scrolls.
-    frame.render_widget(Paragraph::new(header), heading);
+    if model.agents.selected_summary().is_none() {
+        let inner = panel("", false, theme).inner(area);
+        render_empty_agents(frame, inner, theme);
+        return;
+    }
+    if visual_header_height(area, model).is_some() {
+        render_detail_hero(frame, heading, model, theme);
+    } else {
+        frame.render_widget(Paragraph::new(detail_header(model, theme)), heading);
+    }
     let lines = detail_body(model, theme);
     let offset = model
         .agents
@@ -312,6 +397,152 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
             .wrap(Wrap { trim: false })
             .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0)),
         body,
+    );
+}
+
+fn visual_header_height(area: Rect, model: &TuiModel) -> Option<usize> {
+    if model.agents.skill_panel_open || area.height < 17 || area.width < 62 {
+        None
+    } else if area.height >= 22 {
+        Some(14)
+    } else {
+        Some(10)
+    }
+}
+
+fn detail_geometry(area: Rect, model: &TuiModel) -> (Rect, Rect) {
+    let height = visual_header_height(area, model)
+        .unwrap_or_else(|| detail_header(model, &Theme::from_no_color(true)).len());
+    document_geometry(area, height)
+}
+
+fn render_detail_hero(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    use crate::ui::tui::model::AgentDetailAction;
+    let Some(row) = model.agents.selected_summary() else {
+        return;
+    };
+    let spacious = area.height >= 14;
+    let hero_height = if spacious { 6 } else { 4 };
+    let card_height = if spacious { 7 } else { 5 };
+    let art_width = if spacious && area.width >= 104 { 24 } else { 0 };
+    let accent = theme.agent_monogram(row.profile_id);
+    render_badge(
+        frame,
+        Rect::new(area.x + 1, area.y, 5, 3),
+        &row.display_name,
+        theme.agent_badge(row.profile_id),
+    );
+    let identity = Rect::new(
+        area.x + 8,
+        area.y,
+        area.width.saturating_sub(9 + art_width),
+        3,
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(safe_text(&row.display_name), accent),
+            Line::styled(
+                readiness_name(row.readiness),
+                readiness_style(row.readiness, theme),
+            ),
+            Line::styled(
+                format!(
+                    "{} · {}",
+                    row.role.as_str(),
+                    safe_text(&row.primary_specialty)
+                ),
+                theme.muted,
+            ),
+        ]),
+        identity,
+    );
+    if spacious {
+        let purpose = model
+            .agents
+            .matching_detail()
+            .map(|detail| safe_text(detail.profile.description()))
+            .unwrap_or_else(|| format!("Loading {}", safe_text(&row.display_name)));
+        frame.render_widget(
+            Paragraph::new(purpose)
+                .style(theme.muted)
+                .wrap(Wrap { trim: false }),
+            Rect::new(
+                area.x + 1,
+                area.y + 4,
+                area.width.saturating_sub(2 + art_width),
+                2,
+            ),
+        );
+        if art_width > 0 {
+            let artwork = match row.role {
+                crate::agents::AgentRole::Bear => Artwork::Bear,
+                crate::agents::AgentRole::Bull => Artwork::Bull,
+                _ => Artwork::Bot,
+            };
+            render_artwork(
+                frame,
+                Rect::new(area.right() - art_width, area.y, art_width, 6),
+                artwork,
+                accent,
+            );
+        }
+    }
+    let actions = [
+        (
+            AgentDetailAction::Profile,
+            Icon::Profile,
+            "Profile",
+            "Role & focus",
+        ),
+        (
+            AgentDetailAction::Memory,
+            Icon::Memory,
+            "Memory",
+            "Saved notes",
+        ),
+        (
+            AgentDetailAction::AssignedSkills,
+            Icon::Skills,
+            "Skills",
+            "Agent skills",
+        ),
+        (
+            AgentDetailAction::History,
+            Icon::History,
+            "History",
+            "Past versions",
+        ),
+    ];
+    for (index, (action, icon, title, description)) in actions.into_iter().enumerate() {
+        let start = area.width * index as u16 / 4;
+        let end = area.width * (index as u16 + 1) / 4;
+        render_action_card(
+            frame,
+            Rect::new(
+                area.x + start,
+                area.y + hero_height,
+                end - start - 1,
+                card_height,
+            ),
+            ActionCard {
+                icon,
+                title,
+                description,
+                selected: model.agents.selected_detail_action == action,
+                focused: agent_workspace_focused(model),
+                accent,
+            },
+            theme,
+        );
+    }
+    frame.render_widget(
+        Paragraph::new("A/D choose   Enter open   W/S scroll").style(theme.muted),
+        Rect::new(
+            area.x + 1,
+            area.y + hero_height + card_height,
+            area.width.saturating_sub(2),
+            1,
+        ),
     );
 }
 fn agent_workspace_focused(model: &TuiModel) -> bool {
@@ -480,6 +711,8 @@ fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
 }
 
 fn detail_lines(detail: &crate::app::AgentProfileView, theme: &Theme) -> Vec<Line<'static>> {
+    // The hero can clip a long name in compact layouts. Keep the complete name
+    // in the wrapping, scrollable profile as well as the pinned identity.
     profile_version_lines(&detail.profile, detail.readiness, "Active version", theme)
 }
 

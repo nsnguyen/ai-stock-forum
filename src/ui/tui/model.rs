@@ -2568,6 +2568,7 @@ pub(super) struct NavigationStateSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiModel {
     pub active_view: View,
+    pub selected_home_action: usize,
     pub agents: AgentsViewState,
     pub skills: SkillsViewState,
     pub pending_agent_outcome: Option<AgentOutcomeIntent>,
@@ -2618,6 +2619,7 @@ impl TuiModel {
         };
         let mut model = Self {
             active_view: View::Overview,
+            selected_home_action: 0,
             agents,
             skills: SkillsViewState::default(),
             pending_agent_outcome: None,
