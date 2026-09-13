@@ -205,6 +205,7 @@ struct HostObservation {
     agents_pane: AgentsPane,
     command_in_flight: bool,
     memory_hydrated: bool,
+    profile_hydrated: bool,
 }
 
 struct ContractScreen {
@@ -236,6 +237,7 @@ impl Screen for ContractScreen {
             agents_pane: model.agents.pane,
             command_in_flight: model.command_in_flight,
             memory_hydrated,
+            profile_hydrated: model.agents.matching_detail().is_some(),
         });
         Ok(())
     }
@@ -266,15 +268,28 @@ impl EventSource for ContractEvents {
         match self.stage {
             0 => {
                 self.stage = 1;
-                Ok(Some(Self::key(KeyCode::Char('a'))))
+                Ok(Some(Self::key(KeyCode::Char('3'))))
             }
             1 => {
                 self.stage = 2;
                 Ok(Some(Self::key(KeyCode::Enter)))
             }
             2 => {
-                self.stage = 3;
-                Ok(Some(Self::key(KeyCode::Right)))
+                if self
+                    .latest
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|model| model.profile_hydrated && !model.command_in_flight)
+                {
+                    self.stage = 3;
+                    Ok(Some(Self::key(KeyCode::Right)))
+                } else {
+                    self.idle_polls += 1;
+                    assert!(self.idle_polls < 100_000, "profile outcome was not drawn");
+                    std::thread::yield_now();
+                    Ok(None)
+                }
             }
             3 => {
                 self.stage = 4;
@@ -288,12 +303,15 @@ impl EventSource for ContractEvents {
                     self.stage = 5;
                     Ok(Some(Self::key(KeyCode::Char('p'))))
                 } else {
+                    self.idle_polls += 1;
+                    assert!(self.idle_polls < 100_000, "memory read was not started");
+                    std::thread::yield_now();
                     Ok(None)
                 }
             }
             5 => {
                 self.stage = 6;
-                Ok(Some(Self::key(KeyCode::Char('4'))))
+                Ok(Some(Self::key(KeyCode::Char('9'))))
             }
             6 => {
                 self.memory_started

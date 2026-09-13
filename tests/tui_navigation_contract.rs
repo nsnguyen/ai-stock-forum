@@ -22,7 +22,6 @@ use ai_stock_forum::{
     setup::SetupStatus,
     ui::tui::{
         ControllerEffect, TuiEvent, apply_outcome, handle_event,
-        layout::view_geometry_for_state,
         model::{
             AgentsPane, Focus, LayoutMode, MemoryConfirmation, MemoryPane,
             MemoryProposalDetailAction, ProfileConfirmation, SkillConfirmation,
@@ -33,7 +32,7 @@ use ai_stock_forum::{
     },
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+use ratatui::{Terminal, backend::TestBackend};
 use uuid::Uuid;
 
 fn model() -> TuiModel {
@@ -385,58 +384,38 @@ fn rendered_memory_navigation_labels(model: &TuiModel) -> Vec<String> {
     terminal
         .draw(|frame| render::render(frame, model, &Theme::from_no_color(true)))
         .expect("render Memory navigation");
-    let navigation = view_geometry_for_state(
-        Rect::new(0, 0, width, height),
-        model.active_view,
-        model.inspector_open,
-        true,
-    )
-    .cockpit
-    .navigation
-    .expect("navigation region");
-    let rows = terminal
+    let text = terminal
         .backend()
         .buffer()
         .content()
-        .chunks(usize::from(width))
-        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-        .collect::<Vec<_>>();
-    let inner_rows = rows
         .iter()
-        .skip(usize::from(navigation.y.saturating_add(1)))
-        .take(usize::from(navigation.height.saturating_sub(2)))
-        .map(|row| {
-            row.chars()
-                .skip(usize::from(navigation.x.saturating_add(1)))
-                .take(usize::from(navigation.width.saturating_sub(2)))
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>();
-    let views_row = inner_rows
-        .iter()
-        .position(|row| row.trim() == "VIEWS")
-        .expect("VIEWS heading");
-    let entire_navigation = inner_rows.join("\n");
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    let header = text
+        .chars()
+        .take(usize::from(width) * 3)
+        .collect::<String>();
     assert!(
         MEMORY_NAVIGATION_PROSE_SENTINELS
             .iter()
-            .all(|sentinel| !entire_navigation.contains(sentinel)),
-        "navigation pane exposed Memory prose"
+            .all(|sentinel| !header.contains(sentinel)),
+        "top navigation exposed Memory prose"
     );
-    let mut labels = Vec::new();
-    let mut started = false;
-    for row in inner_rows.iter().skip(views_row + 1) {
-        let row = row.trim();
-        if row.is_empty() {
-            if started {
-                break;
-            }
-            continue;
-        }
-        started = true;
-        labels.push(row.strip_prefix("> ").unwrap_or(row).to_owned());
-    }
-    labels
+    [
+        "1 Home",
+        "2 Chat",
+        "3 Agents",
+        "4 Skills",
+        "5 Connections",
+        "6 Activity",
+        "7 Setup",
+        "8 Audit",
+        "9 Help",
+    ]
+    .into_iter()
+    .filter(|label| text.contains(label))
+    .map(str::to_owned)
+    .collect()
 }
 
 #[test]
@@ -456,7 +435,7 @@ fn bare_shortcuts_switch_every_tab_from_non_text_workspaces() {
     assert!(!model.skills.active);
 
     assert_eq!(
-        handle_event(&mut model, plain_character('s')),
+        handle_event(&mut model, plain_character('4')),
         ControllerEffect::Redraw
     );
     assert!(model.skills.active);
@@ -464,10 +443,13 @@ fn bare_shortcuts_switch_every_tab_from_non_text_workspaces() {
     assert_eq!(model.skills.selected_history_version, 3);
 
     for (shortcut, view) in [
-        ('2', View::Setup),
-        ('a', View::Agents),
-        ('3', View::Audit),
-        ('4', View::Help),
+        ('2', View::Chat),
+        ('3', View::Agents),
+        ('5', View::Connections),
+        ('6', View::Activity),
+        ('7', View::Setup),
+        ('8', View::Audit),
+        ('9', View::Help),
     ] {
         assert_eq!(
             handle_event(&mut model, plain_character(shortcut)),
@@ -483,6 +465,9 @@ fn bare_shortcuts_switch_every_tab_from_non_text_workspaces() {
 fn every_bare_shortcut_works_from_every_tab_and_non_text_focus_region() {
     let sources = [
         Some(View::Overview),
+        Some(View::Chat),
+        Some(View::Connections),
+        Some(View::Activity),
         Some(View::Setup),
         Some(View::Audit),
         Some(View::Help),
@@ -491,11 +476,14 @@ fn every_bare_shortcut_works_from_every_tab_and_non_text_focus_region() {
     ];
     let targets = [
         ('1', Some(View::Overview)),
-        ('2', Some(View::Setup)),
-        ('3', Some(View::Audit)),
-        ('4', Some(View::Help)),
-        ('a', Some(View::Agents)),
-        ('s', None),
+        ('2', Some(View::Chat)),
+        ('3', Some(View::Agents)),
+        ('4', None),
+        ('5', Some(View::Connections)),
+        ('6', Some(View::Activity)),
+        ('7', Some(View::Setup)),
+        ('8', Some(View::Audit)),
+        ('9', Some(View::Help)),
     ];
 
     for source in sources {
@@ -507,7 +495,7 @@ fn every_bare_shortcut_works_from_every_tab_and_non_text_focus_region() {
                     model.select_view(view);
                 } else {
                     assert_eq!(
-                        handle_event(&mut model, plain_character('s')),
+                        handle_event(&mut model, plain_character('4')),
                         ControllerEffect::Redraw
                     );
                 }
@@ -537,7 +525,7 @@ fn every_bare_shortcut_works_from_every_tab_and_non_text_focus_region() {
 
 #[test]
 fn option_alt_shortcuts_are_not_navigation_fallbacks() {
-    for character in ['1', '2', '3', '4', '5', '6', 'a', 's'] {
+    for character in ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 's'] {
         let mut model = model();
         let before = model.clone();
 
@@ -552,7 +540,7 @@ fn option_alt_shortcuts_are_not_navigation_fallbacks() {
 
 #[test]
 fn unassigned_bare_keys_and_function_keys_never_switch_tabs() {
-    for character in ['5', '6', '7', 'm', 'q'] {
+    for character in ['m', 'q'] {
         let mut model = model();
         let before = model.clone();
 
@@ -592,7 +580,7 @@ fn bare_shortcuts_work_from_confirmations_and_preserve_pending_actions() {
     let expected_profile_confirmation = profile_model.agents.pending_confirmation.clone();
 
     assert_eq!(
-        handle_event(&mut profile_model, plain_character('s')),
+        handle_event(&mut profile_model, plain_character('4')),
         ControllerEffect::Redraw
     );
     assert!(profile_model.skills.active);
@@ -612,7 +600,7 @@ fn bare_shortcuts_work_from_confirmations_and_preserve_pending_actions() {
     let expected_skill_confirmation = skill_model.skills.pending_confirmation.clone();
 
     assert_eq!(
-        handle_event(&mut skill_model, plain_character('2')),
+        handle_event(&mut skill_model, plain_character('7')),
         ControllerEffect::Redraw
     );
     assert_eq!(skill_model.active_view, View::Setup);
@@ -625,7 +613,7 @@ fn bare_shortcuts_work_from_confirmations_and_preserve_pending_actions() {
 
 #[test]
 fn bare_shortcut_characters_remain_text_for_each_active_text_owner() {
-    let characters = "1234as";
+    let characters = "wasd123456789/n";
 
     let mut command_model = model();
     command_model.set_focus(Focus::Command);
@@ -646,6 +634,15 @@ fn bare_shortcut_characters_remain_text_for_each_active_text_owner() {
             .agents
             .start_profile_create(0, builtin_profile_templates())
     );
+    handle_event(
+        &mut profile_model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+    );
+    handle_event(
+        &mut profile_model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    );
+    profile_model.agents.field_input.clear();
     for character in characters.chars() {
         assert_eq!(
             handle_event(&mut profile_model, plain_character(character)),
@@ -656,7 +653,8 @@ fn bare_shortcut_characters_remain_text_for_each_active_text_owner() {
     assert_eq!(profile_model.active_view, View::Agents);
     assert!(!profile_model.skills.active);
     assert_eq!(profile_model.agents.pane, AgentsPane::Editor);
-    assert_eq!(profile_model.command.text(), characters);
+    assert_eq!(profile_model.agents.field_input.text(), characters);
+    assert!(profile_model.command.text().is_empty());
 
     let mut skill_model = model();
     skill_model.skills.active = true;
@@ -691,7 +689,7 @@ fn switching_tabs_restores_each_tabs_focus_scroll_and_unsubmitted_input() {
     assert_eq!(model.focus, Focus::Workspace);
 
     assert_eq!(
-        handle_event(&mut model, plain_character('4')),
+        handle_event(&mut model, plain_character('9')),
         ControllerEffect::Redraw
     );
     assert_eq!(model.active_view, View::Help);
@@ -722,7 +720,7 @@ fn switching_tabs_restores_each_tabs_focus_scroll_and_unsubmitted_input() {
     assert_eq!(model.command.cursor_byte(), overview_cursor);
 
     assert_eq!(
-        handle_event(&mut model, plain_character('4')),
+        handle_event(&mut model, plain_character('9')),
         ControllerEffect::Redraw
     );
     assert_eq!(model.active_view, View::Help);
@@ -757,7 +755,7 @@ fn switching_away_from_a_profile_editor_preserves_its_exact_draft_and_input() {
     assert_eq!(model.agents.editor, expected_editor);
 
     assert_eq!(
-        handle_event(&mut model, plain_character('a')),
+        handle_event(&mut model, plain_character('3')),
         ControllerEffect::Redraw
     );
     assert_eq!(model.active_view, View::Agents);
@@ -781,7 +779,7 @@ fn switching_away_from_a_skill_editor_preserves_its_exact_draft_and_input() {
     assert_eq!(model.command.text(), "");
 
     assert_eq!(
-        handle_event(&mut model, plain_character('s')),
+        handle_event(&mut model, plain_character('4')),
         ControllerEffect::Redraw
     );
     assert!(model.skills.active);
@@ -802,7 +800,7 @@ fn switching_away_from_confirmations_keeps_the_exact_pending_actions() {
     let expected_confirmation = profile_model.agents.pending_confirmation.clone();
 
     assert_eq!(
-        handle_event(&mut profile_model, plain_character('s')),
+        handle_event(&mut profile_model, plain_character('4')),
         ControllerEffect::Redraw
     );
     assert!(profile_model.skills.active);
@@ -817,7 +815,7 @@ fn switching_away_from_confirmations_keeps_the_exact_pending_actions() {
     );
 
     assert_eq!(
-        handle_event(&mut profile_model, plain_character('a')),
+        handle_event(&mut profile_model, plain_character('3')),
         ControllerEffect::Redraw
     );
     assert_eq!(profile_model.active_view, View::Agents);
@@ -838,7 +836,7 @@ fn switching_away_from_confirmations_keeps_the_exact_pending_actions() {
     let expected_skill_confirmation = skill_model.skills.pending_confirmation.clone();
 
     assert_eq!(
-        handle_event(&mut skill_model, plain_character('2')),
+        handle_event(&mut skill_model, plain_character('7')),
         ControllerEffect::Redraw
     );
     assert_eq!(skill_model.active_view, View::Setup);
@@ -860,7 +858,7 @@ fn switching_away_from_confirmations_keeps_the_exact_pending_actions() {
     );
 
     assert_eq!(
-        handle_event(&mut skill_model, plain_character('s')),
+        handle_event(&mut skill_model, plain_character('4')),
         ControllerEffect::Redraw
     );
     assert!(skill_model.skills.active);
@@ -889,7 +887,7 @@ fn escape_from_skills_restores_the_originating_tabs_saved_state() {
     assert_eq!(model.focus, Focus::Workspace);
 
     assert_eq!(
-        handle_event(&mut model, plain_character('s')),
+        handle_event(&mut model, plain_character('4')),
         ControllerEffect::Redraw
     );
     assert!(model.skills.active);
@@ -915,17 +913,15 @@ fn escape_from_skills_restores_the_originating_tabs_saved_state() {
 fn help_shortcut_does_not_discard_the_previous_tabs_saved_state() {
     let mut model = model();
     model.set_terminal_size(60, 18);
-    model.set_focus(Focus::Inspector);
-    model.inspector_open = true;
-    model.workspace_scroll = 2;
+    model.set_focus(Focus::Workspace);
+    model.workspace_scroll = 0;
     model.command.ingest("overview draft");
 
     assert_eq!(
-        handle_event(&mut model, plain_character('4')),
+        handle_event(&mut model, plain_character('9')),
         ControllerEffect::Redraw
     );
-    model.set_focus(Focus::Inspector);
-    model.inspector_open = true;
+    model.set_focus(Focus::Workspace);
     model.workspace_scroll = 5;
 
     assert_eq!(
@@ -944,9 +940,8 @@ fn help_shortcut_does_not_discard_the_previous_tabs_saved_state() {
         ControllerEffect::Redraw
     );
     assert_eq!(model.active_view, View::Overview);
-    assert_eq!(model.focus, Focus::Inspector);
-    assert!(model.inspector_open);
-    assert_eq!(model.workspace_scroll, 2);
+    assert_eq!(model.focus, Focus::Workspace);
+    assert_eq!(model.workspace_scroll, 0);
     assert_eq!(model.command.text(), "overview draft");
 
     assert_eq!(
@@ -954,8 +949,7 @@ fn help_shortcut_does_not_discard_the_previous_tabs_saved_state() {
         ControllerEffect::Redraw
     );
     assert_eq!(model.active_view, View::Help);
-    assert_eq!(model.focus, Focus::Inspector);
-    assert!(model.inspector_open);
+    assert_eq!(model.focus, Focus::Workspace);
     assert_eq!(model.workspace_scroll, 5);
 
     let help_state = model.clone();
@@ -972,15 +966,15 @@ fn reopening_skills_from_a_new_cockpit_tab_updates_escape_origin() {
     model.skills.library_loaded = true;
 
     assert_eq!(
-        handle_event(&mut model, plain_character('s')),
+        handle_event(&mut model, plain_character('4')),
         ControllerEffect::Redraw
     );
     assert_eq!(
-        handle_event(&mut model, plain_character('2')),
+        handle_event(&mut model, plain_character('7')),
         ControllerEffect::Redraw
     );
     assert_eq!(
-        handle_event(&mut model, plain_character('s')),
+        handle_event(&mut model, plain_character('4')),
         ControllerEffect::Redraw
     );
     assert_eq!(
@@ -996,20 +990,23 @@ fn reopening_skills_from_a_new_cockpit_tab_updates_escape_origin() {
 }
 
 #[test]
-fn focused_navigation_walks_all_six_tabs_and_home_end_reach_the_bounds() {
+fn focused_navigation_walks_all_nine_tabs_and_home_end_reach_the_bounds() {
     let mut model = model();
     model.skills.library_loaded = true;
     model.set_focus(Focus::Navigation);
 
     for expected in [
+        Some(View::Chat),
+        Some(View::Agents),
+        None,
+        Some(View::Connections),
+        Some(View::Activity),
         Some(View::Setup),
         Some(View::Audit),
         Some(View::Help),
-        Some(View::Agents),
-        None,
     ] {
         assert_eq!(
-            handle_event(&mut model, plain_key(KeyCode::Down)),
+            handle_event(&mut model, plain_key(KeyCode::Right)),
             ControllerEffect::Redraw
         );
         assert_eq!(model.focus, Focus::Navigation);
@@ -1022,17 +1019,18 @@ fn focused_navigation_walks_all_six_tabs_and_home_end_reach_the_bounds() {
     }
 
     assert_eq!(
-        handle_event(&mut model, plain_key(KeyCode::Up)),
+        handle_event(&mut model, plain_key(KeyCode::Left)),
         ControllerEffect::Redraw
     );
     assert!(!model.skills.active);
-    assert_eq!(model.active_view, View::Agents);
+    assert_eq!(model.active_view, View::Audit);
 
     assert_eq!(
         handle_event(&mut model, plain_key(KeyCode::End)),
         ControllerEffect::Redraw
     );
-    assert!(model.skills.active);
+    assert!(!model.skills.active);
+    assert_eq!(model.active_view, View::Help);
     assert_eq!(model.focus, Focus::Navigation);
 
     assert_eq!(
@@ -1062,7 +1060,7 @@ fn delayed_command_outcome_does_not_steal_a_newer_tab_or_reset_either_tabs_state
         ControllerEffect::Redraw
     );
     assert_eq!(
-        handle_event(&mut model, plain_character('4')),
+        handle_event(&mut model, plain_character('9')),
         ControllerEffect::Redraw
     );
 
@@ -1115,7 +1113,7 @@ fn returning_to_the_origin_before_a_delayed_outcome_still_preserves_newer_input_
         ControllerEffect::Redraw
     );
     assert_eq!(
-        handle_event(&mut model, plain_character('4')),
+        handle_event(&mut model, plain_character('9')),
         ControllerEffect::Redraw
     );
     assert_eq!(
@@ -1161,7 +1159,7 @@ fn delayed_skills_refresh_hydrates_in_background_without_changing_the_saved_pane
         ControllerEffect::Redraw
     );
     assert_eq!(
-        handle_event(&mut model, plain_character('2')),
+        handle_event(&mut model, plain_character('7')),
         ControllerEffect::Redraw
     );
     model.set_focus(Focus::Command);
@@ -1195,27 +1193,27 @@ fn delayed_skills_refresh_hydrates_in_background_without_changing_the_saved_pane
 }
 
 #[test]
-fn sidebar_navigation_never_focuses_a_sidebar_hidden_by_the_target_layout() {
+fn compact_navigation_stays_reachable_and_preserves_the_single_visible_workspace() {
     let mut model = model();
     model.skills.library_loaded = true;
     model.set_terminal_size(80, 18);
 
     assert_eq!(
-        handle_event(&mut model, plain_character('a')),
+        handle_event(&mut model, plain_character('3')),
         ControllerEffect::Redraw
     );
-    assert_eq!(model.layout_mode, LayoutMode::Medium);
+    assert_eq!(model.layout_mode, LayoutMode::Narrow);
     model.set_focus(Focus::Navigation);
     assert_eq!(
-        handle_event(&mut model, plain_key(KeyCode::Up)),
+        handle_event(&mut model, plain_key(KeyCode::Left)),
         ControllerEffect::Redraw
     );
-    assert_eq!(model.active_view, View::Help);
+    assert_eq!(model.active_view, View::Chat);
     assert_eq!(model.layout_mode, LayoutMode::Narrow);
-    assert_eq!(model.focus, Focus::Workspace);
+    assert_eq!(model.focus, Focus::Navigation);
 
     assert_eq!(
-        handle_event(&mut model, plain_character('a')),
+        handle_event(&mut model, plain_character('3')),
         ControllerEffect::Redraw
     );
     model.set_focus(Focus::Navigation);
@@ -1225,7 +1223,7 @@ fn sidebar_navigation_never_focuses_a_sidebar_hidden_by_the_target_layout() {
     );
     assert_eq!(model.active_view, View::Overview);
     assert_eq!(model.layout_mode, LayoutMode::Narrow);
-    assert_eq!(model.focus, Focus::Workspace);
+    assert_eq!(model.focus, Focus::Navigation);
 }
 
 #[test]
@@ -1247,15 +1245,15 @@ fn restoring_a_tab_after_resize_normalizes_hidden_focus_and_uses_skills_geometry
         handle_event(&mut model, plain_character('1')),
         ControllerEffect::Redraw
     );
-    assert_eq!(model.focus, Focus::Workspace);
+    assert_eq!(model.focus, Focus::Navigation);
 
-    for (width, expected_mode) in [(80, LayoutMode::Medium), (120, LayoutMode::Wide)] {
+    for (width, expected_mode) in [(80, LayoutMode::Narrow), (120, LayoutMode::Wide)] {
         assert_eq!(
             handle_event(&mut model, TuiEvent::Resize(width, 18)),
             ControllerEffect::Redraw
         );
         assert_eq!(
-            handle_event(&mut model, plain_character('s')),
+            handle_event(&mut model, plain_character('4')),
             ControllerEffect::Redraw
         );
         assert_eq!(model.layout_mode, expected_mode);
@@ -1267,7 +1265,7 @@ fn restoring_a_tab_after_resize_normalizes_hidden_focus_and_uses_skills_geometry
 }
 
 #[test]
-fn skills_inspector_owns_close_escape_and_focus_cycle_keys() {
+fn explicit_skills_inspector_is_not_a_tab_stop() {
     let mut model = model();
     model.skills.active = true;
     model.skills.library_loaded = true;
@@ -1296,7 +1294,8 @@ fn skills_inspector_owns_close_escape_and_focus_cycle_keys() {
         handle_event(&mut model, plain_key(KeyCode::Tab)),
         ControllerEffect::Redraw
     );
-    assert_eq!(model.focus, Focus::Command);
+    assert_eq!(model.focus, Focus::Workspace);
+    assert!(!model.inspector_open);
     assert_eq!(
         handle_event(
             &mut model,
@@ -1304,25 +1303,22 @@ fn skills_inspector_owns_close_escape_and_focus_cycle_keys() {
         ),
         ControllerEffect::Redraw
     );
-    assert_eq!(model.focus, Focus::Inspector);
-    assert_eq!(
-        handle_event(&mut model, plain_key(KeyCode::Esc)),
-        ControllerEffect::Redraw
-    );
-    assert!(!model.inspector_open);
-    assert_eq!(model.focus, Focus::Workspace);
+    assert_eq!(model.focus, Focus::List);
     assert_eq!(model.skills.pane, SkillsPane::List);
 }
 
 #[test]
-fn memory_non_text_layers_keep_exactly_six_global_destinations_and_restore_exact_state() {
+fn memory_non_text_layers_keep_all_nine_global_destinations_and_restore_exact_state() {
     let targets = [
         ('1', Some(View::Overview)),
-        ('2', Some(View::Setup)),
-        ('3', Some(View::Audit)),
-        ('4', Some(View::Help)),
-        ('a', Some(View::Agents)),
-        ('s', None),
+        ('2', Some(View::Chat)),
+        ('3', Some(View::Agents)),
+        ('4', None),
+        ('5', Some(View::Connections)),
+        ('6', Some(View::Activity)),
+        ('7', Some(View::Setup)),
+        ('8', Some(View::Audit)),
+        ('9', Some(View::Help)),
     ];
 
     for (layer, initial) in authentic_memory_non_text_models() {
@@ -1349,10 +1345,10 @@ fn memory_non_text_layers_keep_exactly_six_global_destinations_and_restore_exact
                 );
             }
 
-            if shortcut != 'a' {
+            if shortcut != '3' {
                 assert!(
                     matches!(
-                        handle_event(&mut model, plain_character('a')),
+                        handle_event(&mut model, plain_character('3')),
                         ControllerEffect::Redraw
                     ),
                     "layer={layer} shortcut={shortcut} return"
@@ -1379,7 +1375,7 @@ fn memory_non_text_layers_ignore_unassigned_and_modified_global_keys() {
     ];
 
     for (layer, initial) in authentic_memory_non_text_models() {
-        for character in ['m', '7', 'q'] {
+        for character in ['m', 'q'] {
             let mut model = initial.clone();
             let before = model.clone();
             assert!(
@@ -1412,7 +1408,7 @@ fn memory_non_text_layers_ignore_unassigned_and_modified_global_keys() {
         }
 
         for modifier in modifiers {
-            for character in ['1', '2', '3', '4', 'a', 's'] {
+            for character in ['1', '2', '3', '4', '5', '6', '7', '8', '9'] {
                 let mut model = initial.clone();
                 let before = model.clone();
                 assert!(
@@ -1432,8 +1428,8 @@ fn memory_non_text_layers_ignore_unassigned_and_modified_global_keys() {
 }
 
 #[test]
-fn memory_text_editor_stages_own_all_six_shortcut_characters() {
-    let text = "1234as";
+fn memory_text_editor_stages_own_all_navigation_shortcut_characters() {
+    let text = "wasd123456789/n";
 
     for (stage, mut model) in authentic_memory_text_editor_models() {
         for character in text.chars() {
@@ -1455,7 +1451,7 @@ fn memory_text_editor_stages_own_all_six_shortcut_characters() {
     }
 
     for (stage, initial) in authentic_memory_text_editor_models() {
-        for character in ['m', '7', 'q'] {
+        for character in ['m', 'q'] {
             let mut model = initial.clone();
             let _ = handle_event(&mut model, plain_character(character));
             assert_eq!(model.active_view, View::Agents, "stage={stage}");
@@ -1472,7 +1468,7 @@ fn memory_text_editor_stages_own_all_six_shortcut_characters() {
             KeyModifiers::META,
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         ] {
-            for character in ['1', '2', '3', '4', 'a', 's'] {
+            for character in ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 's'] {
                 let mut model = initial.clone();
                 let _ = handle_event(&mut model, modified_character(character, modifier));
                 assert_eq!(model.active_view, View::Agents, "stage={stage}");
@@ -1484,14 +1480,17 @@ fn memory_text_editor_stages_own_all_six_shortcut_characters() {
 }
 
 #[test]
-fn rendered_memory_navigation_is_exactly_the_existing_six_ordered_labels() {
+fn rendered_memory_navigation_is_the_nine_ordered_labels() {
     let expected = [
-        "1 Overview",
-        "2 Setup",
-        "3 Audit",
-        "4 Help",
-        "a Agents",
-        "s Skills",
+        "1 Home",
+        "2 Chat",
+        "3 Agents",
+        "4 Skills",
+        "5 Connections",
+        "6 Activity",
+        "7 Setup",
+        "8 Audit",
+        "9 Help",
     ];
 
     for (layer, model) in authentic_memory_non_text_models() {

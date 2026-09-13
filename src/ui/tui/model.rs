@@ -36,6 +36,9 @@ pub const COMMAND_HISTORY_CAPACITY: usize = 100;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Overview,
+    Chat,
+    Connections,
+    Activity,
     Setup,
     Audit,
     Help,
@@ -54,8 +57,44 @@ pub enum AgentsPane {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentDetailAction {
-    AssignedSkills,
+    Profile,
     Memory,
+    AssignedSkills,
+    History,
+}
+
+impl AgentDetailAction {
+    pub fn moved(self, forward: bool) -> Self {
+        let actions = [
+            Self::Profile,
+            Self::Memory,
+            Self::AssignedSkills,
+            Self::History,
+        ];
+        let index = actions
+            .iter()
+            .position(|action| *action == self)
+            .unwrap_or(0);
+        actions[if forward {
+            (index + 1).min(3)
+        } else {
+            index.saturating_sub(1)
+        }]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentProfileTarget {
+    pub profile_id: crate::domain::AgentProfileId,
+    pub expected_active_version_id: crate::domain::AgentProfileVersionId,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentProfileRead {
+    Detail,
+    History,
+    Version(ObjectVersion),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -844,7 +883,11 @@ impl MemoryViewState {
     }
 
     pub(crate) fn local_layer_cache_is_authenticated(&self) -> bool {
-        match self.pane {
+        self.layer_cache_is_authenticated(self.pane)
+    }
+
+    pub(crate) fn layer_cache_is_authenticated(&self, pane: MemoryPane) -> bool {
+        match pane {
             MemoryPane::EntryList => self.authenticated_entries().is_some_and(|(_, counts)| {
                 counts.displayed == 0 || self.authenticated_selected_entry().is_some()
             }),
@@ -1728,6 +1771,8 @@ impl SkillsViewState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentsViewState {
+    pub selection_generation: u64,
+    pub field_input: CommandEditor,
     pub selected_profile: usize,
     pub selected_template: usize,
     pub selected_detail_action: AgentDetailAction,
@@ -1736,6 +1781,7 @@ pub struct AgentsViewState {
     pub list_scroll: usize,
     pub detail_scroll: usize,
     pub history_scroll: usize,
+    pub version_scroll: usize,
     pub selected_history_version: usize,
     pub skill_panel_open: bool,
     pub selected_assigned_skill: usize,
@@ -1751,14 +1797,17 @@ pub struct AgentsViewState {
 impl Default for AgentsViewState {
     fn default() -> Self {
         Self {
+            selection_generation: 0,
+            field_input: CommandEditor::default(),
             selected_profile: 0,
             selected_template: 0,
-            selected_detail_action: AgentDetailAction::AssignedSkills,
+            selected_detail_action: AgentDetailAction::Profile,
             memory: MemoryViewState::default(),
             pane: AgentsPane::List,
             list_scroll: 0,
             detail_scroll: 0,
             history_scroll: 0,
+            version_scroll: 0,
             selected_history_version: 0,
             skill_panel_open: false,
             selected_assigned_skill: 0,
@@ -1779,6 +1828,64 @@ impl Default for AgentsViewState {
 }
 
 impl AgentsViewState {
+    pub fn profile_target(&self) -> Option<AgentProfileTarget> {
+        self.selected_summary().map(|summary| AgentProfileTarget {
+            profile_id: summary.profile_id,
+            expected_active_version_id: summary.profile_version_id,
+            generation: self.selection_generation,
+        })
+    }
+
+    pub fn matching_detail(&self) -> Option<&AgentProfileView> {
+        let selected = self.selected_summary()?;
+        self.detail.as_ref().filter(|detail| {
+            detail.profile.profile_id() == selected.profile_id
+                && detail.profile.profile_version_id() == selected.profile_version_id
+                && *detail.profile.content_digest() == selected.content_digest
+        })
+    }
+
+    pub fn install_profile_result(
+        &mut self,
+        target: &AgentProfileTarget,
+        view: CommandView,
+    ) -> bool {
+        if self.profile_target().as_ref() != Some(target) {
+            return false;
+        }
+        match view {
+            CommandView::AgentProfile(detail)
+                if detail.profile.profile_id() == target.profile_id
+                    && detail.profile.profile_version_id() == target.expected_active_version_id
+                    && self.selected_summary().is_some_and(|row| {
+                        row.content_digest == *detail.profile.content_digest()
+                    }) =>
+            {
+                self.replace_detail(detail)
+            }
+            CommandView::AgentProfileHistory(history)
+                if history.profile_id == target.profile_id
+                    && history.active_version_id == target.expected_active_version_id =>
+            {
+                self.replace_history(history)
+            }
+            CommandView::AgentProfileVersion(version)
+                if version.profile.profile_id() == target.profile_id =>
+            {
+                self.replace_version_detail(version)
+            }
+            _ => false,
+        }
+    }
+
+    pub fn synchronize_field_input(&mut self) {
+        self.field_input.clear();
+        if let Some(editor) = &self.editor {
+            for character in editor.tui_field_text(editor.tui_field()).chars() {
+                self.field_input.insert(character);
+            }
+        }
+    }
     pub fn select_profile_id(&mut self, profile_id: crate::domain::AgentProfileId) -> bool {
         if let Some(index) = self
             .profiles
@@ -1826,13 +1933,27 @@ impl AgentsViewState {
         self.selected_profile = index;
         self.list_scroll = self.list_scroll.min(self.selected_profile);
         if previous_id != next_id {
-            self.selected_detail_action = AgentDetailAction::AssignedSkills;
+            self.selection_generation = self.selection_generation.wrapping_add(1);
+            self.detail_scroll = 0;
+            self.history_scroll = 0;
+            self.version_scroll = 0;
+            self.selected_detail_action = AgentDetailAction::Profile;
+            if self.pane == AgentsPane::History {
+                self.pane = AgentsPane::Detail;
+            }
+            if self.matching_detail().is_none() {
+                self.detail = None;
+            }
+            self.history = None;
+            self.version_detail = None;
+            self.skill_panel_open = false;
             self.memory.invalidate_profile_context();
         }
         true
     }
 
     pub fn replace_profiles(&mut self, profiles: AgentProfilesView) -> bool {
+        let old_target = self.profile_target();
         let selected_id = self.selected_summary().map(|summary| summary.profile_id);
         if self.memory.has_protected_workflow() {
             let protected_profile = self
@@ -1871,7 +1992,8 @@ impl AgentsViewState {
             self.history = None;
             self.version_detail = None;
             self.skill_panel_open = false;
-            self.selected_detail_action = AgentDetailAction::AssignedSkills;
+            self.selection_generation = self.selection_generation.wrapping_add(1);
+            self.selected_detail_action = AgentDetailAction::Profile;
             self.memory.invalidate_profile_context();
             return true;
         }
@@ -1891,7 +2013,13 @@ impl AgentsViewState {
         let next_summary = self.selected_summary();
         let next_id = next_summary.map(|summary| summary.profile_id);
         if selected_id != next_id {
-            self.selected_detail_action = AgentDetailAction::AssignedSkills;
+            self.detail_scroll = 0;
+            self.history_scroll = 0;
+            self.version_scroll = 0;
+            self.selected_detail_action = AgentDetailAction::Profile;
+            if self.pane == AgentsPane::History {
+                self.pane = AgentsPane::Detail;
+            }
             self.memory.invalidate_profile_context();
         } else if bound_profile.as_ref().is_some_and(|profile| {
             next_summary.is_some_and(|summary| {
@@ -1902,12 +2030,10 @@ impl AgentsViewState {
         }) {
             self.memory.invalidate_profile_context();
         }
-        if self
-            .detail
-            .as_ref()
-            .map(|detail| detail.profile.profile_id())
-            != next_id
-        {
+        if old_target != self.profile_target() {
+            self.selection_generation = self.selection_generation.wrapping_add(1);
+        }
+        if self.matching_detail().is_none() {
             self.detail = None;
             self.history = None;
             self.version_detail = None;
@@ -1916,6 +2042,12 @@ impl AgentsViewState {
     }
 
     pub fn replace_detail(&mut self, detail: AgentProfileView) -> bool {
+        if self
+            .selected_summary()
+            .is_some_and(|row| row.profile_id != detail.profile.profile_id())
+        {
+            return false;
+        }
         if self.memory.has_protected_workflow()
             && self
                 .memory
@@ -1934,14 +2066,6 @@ impl AgentsViewState {
             self.memory.invalidate_profile_context();
         }
         let profile_id = detail.profile.profile_id();
-        if let Some(index) = self
-            .profiles
-            .profiles
-            .iter()
-            .position(|summary| summary.profile_id == profile_id)
-        {
-            self.select_profile_index(index);
-        }
         if self.history.as_ref().map(|history| history.profile_id) != Some(profile_id) {
             self.history = None;
             self.version_detail = None;
@@ -1957,6 +2081,12 @@ impl AgentsViewState {
     }
 
     pub fn replace_history(&mut self, history: AgentProfileHistoryView) -> bool {
+        if self
+            .selected_summary()
+            .is_some_and(|row| row.profile_id != history.profile_id)
+        {
+            return false;
+        }
         if self.memory.has_protected_workflow()
             && self.memory.profile.as_ref().is_none_or(|identity| {
                 identity.profile.profile_id() != history.profile_id
@@ -1971,14 +2101,6 @@ impl AgentsViewState {
         }) {
             self.memory.invalidate_profile_context();
         }
-        if let Some(index) = self
-            .profiles
-            .profiles
-            .iter()
-            .position(|summary| summary.profile_id == history.profile_id)
-        {
-            self.select_profile_index(index);
-        }
         self.selected_history_version = 0;
         self.history_scroll = 0;
         self.version_detail = None;
@@ -1987,6 +2109,12 @@ impl AgentsViewState {
     }
 
     pub fn replace_version_detail(&mut self, version: AgentProfileVersionView) -> bool {
+        if self
+            .selected_summary()
+            .is_some_and(|row| row.profile_id != version.profile.profile_id())
+        {
+            return false;
+        }
         if self.memory.has_protected_workflow()
             && self
                 .memory
@@ -2002,15 +2130,8 @@ impl AgentsViewState {
             self.selected_history_version = 0;
             self.history_scroll = 0;
         }
-        if let Some(index) = self
-            .profiles
-            .profiles
-            .iter()
-            .position(|summary| summary.profile_id == profile_id)
-        {
-            self.select_profile_index(index);
-        }
         self.version_detail = Some(version);
+        self.version_scroll = 0;
         true
     }
 
@@ -2026,6 +2147,7 @@ impl AgentsViewState {
             return false;
         };
         self.editor = Some(editor);
+        self.synchronize_field_input();
         self.pane = AgentsPane::Editor;
         true
     }
@@ -2034,9 +2156,17 @@ impl AgentsViewState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Navigation,
+    List,
     Workspace,
+    Actions,
     Inspector,
     Command,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputMode {
+    Nav,
+    Type,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2290,11 +2420,14 @@ fn bounded_multiline_prefix(input: &str, byte_limit: usize) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NavigationTab {
     Overview,
+    Chat,
+    Agents,
+    Skills,
+    Connections,
+    Activity,
     Setup,
     Audit,
     Help,
-    Agents,
-    Skills,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2304,20 +2437,74 @@ enum PendingOutcomeNavigation {
 }
 
 impl NavigationTab {
+    pub(super) const ALL: [Self; 9] = [
+        Self::Overview,
+        Self::Chat,
+        Self::Agents,
+        Self::Skills,
+        Self::Connections,
+        Self::Activity,
+        Self::Setup,
+        Self::Audit,
+        Self::Help,
+    ];
+
     const fn index(self) -> usize {
         match self {
             Self::Overview => 0,
-            Self::Setup => 1,
-            Self::Audit => 2,
-            Self::Help => 3,
-            Self::Agents => 4,
-            Self::Skills => 5,
+            Self::Chat => 1,
+            Self::Agents => 2,
+            Self::Skills => 3,
+            Self::Connections => 4,
+            Self::Activity => 5,
+            Self::Setup => 6,
+            Self::Audit => 7,
+            Self::Help => 8,
         }
+    }
+
+    pub(super) const fn key(self) -> char {
+        match self {
+            Self::Overview => '1',
+            Self::Chat => '2',
+            Self::Agents => '3',
+            Self::Skills => '4',
+            Self::Connections => '5',
+            Self::Activity => '6',
+            Self::Setup => '7',
+            Self::Audit => '8',
+            Self::Help => '9',
+        }
+    }
+
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Home",
+            Self::Chat => "Chat",
+            Self::Agents => "Agents",
+            Self::Skills => "Skills",
+            Self::Connections => "Connections",
+            Self::Activity => "Activity",
+            Self::Setup => "Setup",
+            Self::Audit => "Audit",
+            Self::Help => "Help",
+        }
+    }
+
+    pub(super) fn for_number(number: char) -> Option<Self> {
+        number
+            .to_digit(10)
+            .and_then(|number| number.checked_sub(1))
+            .and_then(|index| Self::ALL.get(index as usize))
+            .copied()
     }
 
     pub(super) const fn for_view(view: View) -> Self {
         match view {
             View::Overview => Self::Overview,
+            View::Chat => Self::Chat,
+            View::Connections => Self::Connections,
+            View::Activity => Self::Activity,
             View::Setup => Self::Setup,
             View::Audit => Self::Audit,
             View::Help => Self::Help,
@@ -2326,20 +2513,22 @@ impl NavigationTab {
     }
 
     pub(super) const fn adjacent(self, forward: bool) -> Self {
-        match (self, forward) {
-            (Self::Overview, true) | (Self::Audit, false) => Self::Setup,
-            (Self::Setup, true) | (Self::Help, false) => Self::Audit,
-            (Self::Audit, true) | (Self::Agents, false) => Self::Help,
-            (Self::Help, true) | (Self::Skills, false) => Self::Agents,
-            (Self::Agents, true) | (Self::Overview, false) => Self::Skills,
-            (Self::Skills, true) | (Self::Setup, false) => Self::Overview,
-        }
+        let index = self.index();
+        let next = if forward {
+            (index + 1) % Self::ALL.len()
+        } else if index == 0 {
+            Self::ALL.len() - 1
+        } else {
+            index - 1
+        };
+        Self::ALL[next]
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TabState {
     focus: Focus,
+    input_mode: InputMode,
     inspector_open: bool,
     workspace_scroll: u16,
     command_draft: CommandDraft,
@@ -2349,6 +2538,7 @@ impl Default for TabState {
     fn default() -> Self {
         Self {
             focus: Focus::Workspace,
+            input_mode: InputMode::Nav,
             inspector_open: false,
             workspace_scroll: 0,
             command_draft: CommandDraft::default(),
@@ -2364,6 +2554,7 @@ pub(super) struct NavigationStateSnapshot {
     skills_workspace_origin: Option<SkillWorkspaceOrigin>,
     agents_pane: AgentsPane,
     focus: Focus,
+    input_mode: InputMode,
     inspector_open: bool,
     command: CommandEditor,
     workspace_scroll: u16,
@@ -2371,7 +2562,7 @@ pub(super) struct NavigationStateSnapshot {
     pending_agent_outcome: Option<AgentOutcomeIntent>,
     navigation_generation: u64,
     pending_outcome_navigation: Option<PendingOutcomeNavigation>,
-    tab_states: [TabState; 6],
+    tab_states: [TabState; 9],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2381,6 +2572,7 @@ pub struct TuiModel {
     pub skills: SkillsViewState,
     pub pending_agent_outcome: Option<AgentOutcomeIntent>,
     pub focus: Focus,
+    pub input_mode: InputMode,
     pub layout_mode: LayoutMode,
     pub inspector_open: bool,
     pub command: CommandEditor,
@@ -2402,7 +2594,7 @@ pub struct TuiModel {
     pub previous_session_interrupted: bool,
     navigation_generation: u64,
     pending_outcome_navigation: Option<PendingOutcomeNavigation>,
-    tab_states: [TabState; 6],
+    tab_states: [TabState; 9],
 }
 
 impl TuiModel {
@@ -2430,6 +2622,7 @@ impl TuiModel {
             skills: SkillsViewState::default(),
             pending_agent_outcome: None,
             focus: Focus::Workspace,
+            input_mode: InputMode::Nav,
             layout_mode: LayoutMode::Wide,
             inspector_open: false,
             command: CommandEditor::default(),
@@ -2475,6 +2668,18 @@ impl TuiModel {
                 self.skills.active = false;
                 self.active_view = View::Overview;
             }
+            NavigationTab::Chat => {
+                self.skills.active = false;
+                self.active_view = View::Chat;
+            }
+            NavigationTab::Connections => {
+                self.skills.active = false;
+                self.active_view = View::Connections;
+            }
+            NavigationTab::Activity => {
+                self.skills.active = false;
+                self.active_view = View::Activity;
+            }
             NavigationTab::Setup => {
                 self.skills.active = false;
                 self.active_view = View::Setup;
@@ -2504,6 +2709,9 @@ impl TuiModel {
         }
         match self.active_view {
             View::Overview => NavigationTab::Overview,
+            View::Chat => NavigationTab::Chat,
+            View::Connections => NavigationTab::Connections,
+            View::Activity => NavigationTab::Activity,
             View::Setup => NavigationTab::Setup,
             View::Audit => NavigationTab::Audit,
             View::Help => NavigationTab::Help,
@@ -2514,6 +2722,7 @@ impl TuiModel {
     fn swap_tab_state(&mut self, tab: NavigationTab) {
         let state = &mut self.tab_states[tab.index()];
         std::mem::swap(&mut self.focus, &mut state.focus);
+        std::mem::swap(&mut self.input_mode, &mut state.input_mode);
         std::mem::swap(&mut self.inspector_open, &mut state.inspector_open);
         std::mem::swap(&mut self.workspace_scroll, &mut state.workspace_scroll);
         self.command.swap_draft(&mut state.command_draft);
@@ -2527,6 +2736,7 @@ impl TuiModel {
             skills_workspace_origin: self.skills.workspace_origin,
             agents_pane: self.agents.pane,
             focus: self.focus,
+            input_mode: self.input_mode,
             inspector_open: self.inspector_open,
             command: self.command.clone(),
             workspace_scroll: self.workspace_scroll,
@@ -2545,6 +2755,7 @@ impl TuiModel {
         self.skills.workspace_origin = snapshot.skills_workspace_origin;
         self.agents.pane = snapshot.agents_pane;
         self.focus = snapshot.focus;
+        self.input_mode = snapshot.input_mode;
         self.inspector_open = snapshot.inspector_open;
         self.command = snapshot.command;
         self.workspace_scroll = snapshot.workspace_scroll;
@@ -2559,6 +2770,16 @@ impl TuiModel {
 
     pub fn set_focus(&mut self, focus: Focus) {
         self.focus = focus;
+        self.input_mode = if focus == Focus::Command {
+            InputMode::Type
+        } else {
+            InputMode::Nav
+        };
+        self.synchronize_geometry();
+    }
+
+    pub fn set_input_mode(&mut self, input_mode: InputMode) {
+        self.input_mode = input_mode;
     }
 
     pub fn set_layout_mode(&mut self, layout_mode: LayoutMode) {
@@ -2595,20 +2816,49 @@ impl TuiModel {
 
     pub fn synchronize_geometry(&mut self) {
         let area = ratatui::layout::Rect::new(0, 0, self.terminal_width, self.terminal_height);
-        let geometry = if self.skills.active {
-            super::layout::skill_geometry(area, self.inspector_open)
+        let cockpit = super::layout::calculate_with_input(
+            area,
+            self.inspector_is_visible(),
+            self.input_is_visible(),
+        );
+        let (workspace_body_width, workspace_body_height) = if cockpit.mode == LayoutMode::TooSmall
+        {
+            (0, 0)
         } else {
-            super::layout::view_geometry_for_state(
-                area,
-                self.active_view,
-                self.inspector_open,
-                self.active_view == View::Agents && self.agents.pane == AgentsPane::Memory,
+            (
+                cockpit.workspace.width.saturating_sub(2),
+                cockpit.workspace.height.saturating_sub(2),
             )
         };
-        self.layout_mode = geometry.cockpit.mode;
-        self.workspace_body_width = geometry.workspace_body_width;
-        self.workspace_body_height = geometry.workspace_body_height;
+        self.layout_mode = cockpit.mode;
+        self.workspace_body_width = workspace_body_width;
+        self.workspace_body_height = workspace_body_height;
         self.normalize_visible_focus();
+    }
+
+    pub(super) fn input_is_visible(&self) -> bool {
+        self.focus == Focus::Command
+            || (self.skills.active && self.skills.pane == SkillsPane::Editor)
+            || (!self.skills.active
+                && self.active_view == View::Agents
+                && self.agents.pane == AgentsPane::Memory
+                && self.agents.memory.pane == MemoryPane::Editor
+                && self.agents.memory.local_layer_cache_is_authenticated()
+                && self.agents.memory.editor.as_ref().is_some_and(|editor| {
+                    matches!(
+                        editor.step(),
+                        MemoryEditorStep::Key
+                            | MemoryEditorStep::Value
+                            | MemoryEditorStep::PurposeTags
+                    )
+                }))
+    }
+
+    pub(super) fn inspector_is_visible(&self) -> bool {
+        self.inspector_open
+            && !(!self.skills.active
+                && self.active_view == View::Agents
+                && self.agents.pane == AgentsPane::Memory)
     }
 
     fn normalize_visible_focus(&mut self) {
@@ -2624,11 +2874,8 @@ impl TuiModel {
             return;
         }
         let visible = match self.layout_mode {
-            LayoutMode::Wide => true,
-            LayoutMode::Medium => self.focus != Focus::Inspector || self.inspector_open,
-            LayoutMode::Narrow => {
-                self.focus != Focus::Navigation
-                    && (self.focus != Focus::Inspector || self.inspector_open)
+            LayoutMode::Wide | LayoutMode::Medium | LayoutMode::Narrow => {
+                self.focus != Focus::Inspector || self.inspector_open
             }
             LayoutMode::TooSmall => self.focus == Focus::Workspace,
         };

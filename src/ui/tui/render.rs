@@ -6,37 +6,32 @@ use ratatui::{
 };
 
 use super::{
-    layout::{MIN_HEIGHT, MIN_WIDTH, calculate_skills},
-    model::{AgentsPane, Focus, LayoutMode, Severity, TuiModel, View},
+    layout::{MIN_HEIGHT, MIN_WIDTH, calculate_with_input},
+    model::{AgentsPane, Focus, LayoutMode, NavigationTab, Severity, TuiModel, View},
     theme::Theme,
     views,
 };
 
 pub fn render(frame: &mut Frame<'_>, model: &TuiModel, theme: &Theme) {
-    let cockpit = if model.skills.active {
-        calculate_skills(frame.area(), model.inspector_open)
-    } else {
-        super::layout::view_geometry_for_state(
-            frame.area(),
-            model.active_view,
-            model.inspector_open,
-            model.active_view == View::Agents && model.agents.pane == AgentsPane::Memory,
-        )
-        .cockpit
-    };
+    let cockpit = calculate_with_input(
+        frame.area(),
+        model.inspector_is_visible(),
+        model.input_is_visible(),
+    );
     frame.render_widget(Clear, cockpit.viewport);
+    frame.render_widget(Block::default().style(theme.base), cockpit.viewport);
     if cockpit.mode == LayoutMode::TooSmall {
         render_too_small(frame, cockpit.viewport, model, theme);
         return;
     }
 
     render_header(frame, cockpit.header, model, cockpit.mode, theme);
-    if let Some(navigation) = cockpit.navigation {
-        render_navigation(frame, navigation, model, theme);
-    }
     views::render(frame, cockpit.workspace, model, theme);
     render_message(frame, cockpit.message, model, theme);
-    render_command(frame, cockpit.command, model, theme);
+    if cockpit.command.height > 0 {
+        render_command(frame, cockpit.command, model, theme);
+    }
+    render_footer(frame, cockpit.footer, model, theme);
     if let Some(inspector) = cockpit.inspector {
         frame.render_widget(Clear, inspector);
         views::render_inspector(frame, inspector, model, theme);
@@ -64,159 +59,142 @@ fn render_header(
         Span::raw(format!("  /  {}", mode_name(mode))),
     ]);
     let mut lines = vec![identity];
-    if model.skills.active {
-        let total = model.skills.library.total_count;
-        let built_in = model
-            .skills
-            .library
-            .skills
-            .iter()
-            .filter(|skill| {
-                matches!(
-                    skill.provenance,
-                    crate::skills::SkillProvenance::BuiltIn { .. }
-                )
-            })
-            .count();
-        let custom = model.skills.library.skills.len().saturating_sub(built_in);
-        lines.push(Line::from(vec![
-            Span::raw(format!("Library {total}  ")),
-            Span::styled(format!("Built-in {built_in}"), theme.accent),
-            Span::raw("  "),
-            Span::styled(format!("Custom {custom}"), theme.success),
-        ]));
-    } else if model.active_view == View::Agents {
-        let active = model.agents.profiles.profiles.len();
-        let ready = model
-            .agents
-            .profiles
-            .profiles
-            .iter()
-            .filter(|profile| profile.readiness == crate::agents::AgentReadiness::Ready)
-            .count();
-        let not_ready = active.saturating_sub(ready);
-        lines.push(Line::from(vec![
-            Span::raw(format!("Active {active}  ")),
-            Span::styled(format!("Ready {ready}"), theme.success),
-            Span::raw("  "),
-            Span::styled(format!("Not Ready {not_ready}"), theme.warning),
-        ]));
+    lines.extend(numbered_tabs(model, usize::from(area.width), theme));
+    if model.previous_session_interrupted && lines.len() < usize::from(area.height) {
+        lines.push(Line::styled(
+            "WARNING  Previous session interrupted",
+            theme.warning,
+        ));
     }
-    let second = if mode == LayoutMode::Narrow {
-        numbered_tabs(model, theme)
-    } else if model.previous_session_interrupted {
-        Line::styled("WARNING  Previous session interrupted", theme.warning)
-    } else {
-        Line::styled(
-            "Local cockpit  |  native views  |  typed audit",
-            theme.muted,
-        )
-    };
-    let third = if mode == LayoutMode::Narrow && model.previous_session_interrupted {
-        Line::styled("WARNING  Previous session interrupted", theme.warning)
-    } else {
-        Line::styled("-".repeat(usize::from(area.width)), theme.muted)
-    };
-    lines.extend([second, third]);
+    while lines.len() < usize::from(area.height) {
+        lines.push(Line::default());
+    }
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn numbered_tabs(model: &TuiModel, theme: &Theme) -> Line<'static> {
-    let tabs = [
-        (
-            "1",
-            "Overview",
-            !model.skills.active && model.active_view == View::Overview,
-        ),
-        (
-            "2",
-            "Setup",
-            !model.skills.active && model.active_view == View::Setup,
-        ),
-        (
-            "3",
-            "Audit",
-            !model.skills.active && model.active_view == View::Audit,
-        ),
-        (
-            "4",
-            "Help",
-            !model.skills.active && model.active_view == View::Help,
-        ),
-        (
-            "a",
-            "Agents",
-            !model.skills.active && model.active_view == View::Agents,
-        ),
-        ("s", "Skills", model.skills.active),
-    ];
+fn numbered_tabs(model: &TuiModel, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
     let mut spans = Vec::new();
-    for (index, (key, name, selected)) in tabs.into_iter().enumerate() {
-        if index > 0 {
+    let mut used = 0_usize;
+    for tab in NavigationTab::ALL {
+        let label = format!("{} {}", tab.key(), tab.label());
+        let required = label.len() + usize::from(used > 0);
+        if used > 0 && used.saturating_add(required) > width {
+            lines.push(Line::from(std::mem::take(&mut spans)));
+            used = 0;
+        }
+        if used > 0 {
             spans.push(Span::raw(" "));
+            used += 1;
         }
         spans.push(Span::styled(
-            format!("{key} {name}"),
-            if selected { theme.focus } else { theme.muted },
+            label.clone(),
+            if model.active_navigation_tab() == tab {
+                theme.focus
+            } else {
+                theme.muted
+            },
         ));
+        used += label.len();
     }
-    Line::from(spans)
+    if !spans.is_empty() {
+        lines.push(Line::from(spans));
+    }
+    lines
 }
 
-fn render_navigation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
-    let border_style = if model.focus == Focus::Navigation {
-        theme.focus
-    } else {
-        theme.muted
-    };
-    let tabs = [
-        (
-            "1",
-            "Overview",
-            !model.skills.active && model.active_view == View::Overview,
-        ),
-        (
-            "2",
-            "Setup",
-            !model.skills.active && model.active_view == View::Setup,
-        ),
-        (
-            "3",
-            "Audit",
-            !model.skills.active && model.active_view == View::Audit,
-        ),
-        (
-            "4",
-            "Help",
-            !model.skills.active && model.active_view == View::Help,
-        ),
-        (
-            "a",
-            "Agents",
-            !model.skills.active && model.active_view == View::Agents,
-        ),
-        ("s", "Skills", model.skills.active),
-    ];
-    let mut lines = vec![Line::styled("VIEWS", theme.accent), Line::default()];
-    for (key, name, selected) in tabs {
-        lines.push(Line::styled(
-            format!("{} {} {}", if selected { ">" } else { " " }, key, name),
-            if selected { theme.focus } else { theme.muted },
-        ));
+fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    if model.focus != Focus::Command
+        && !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane != AgentsPane::Memory
+    {
+        let lines = if model.focus == Focus::Navigation {
+            vec![
+                " NAV  Tab section  WASD destination  Enter open  Esc back".to_owned(),
+                " 1–9 destination · / command".to_owned(),
+            ]
+        } else if model.agents.pane == AgentsPane::Editor && model.focus != Focus::List {
+            if model.input_mode == super::model::InputMode::Type {
+                vec![
+                    " TYPE  WASD text  Enter accept  Esc keep & leave".to_owned(),
+                    " Tab next field · Single-line text".to_owned(),
+                ]
+            } else {
+                vec![
+                    " NAV  Tab next field/section  Enter select  Esc keep draft".to_owned(),
+                    " Review: W/S, PgUp/PgDn, Home/End scroll".to_owned(),
+                ]
+            }
+        } else if model.agents.pane == AgentsPane::Confirmation {
+            vec![
+                " NAV  Enter confirm  Esc return to review".to_owned(),
+                " Changes apply only after confirmation".to_owned(),
+            ]
+        } else if model.agents.skill_panel_open && model.focus != Focus::List {
+            vec![
+                if model.agents.selected_assigned_skill_ref().is_some() {
+                    " NAV  W/S skill  A/D action  Enter open  Esc profile".to_owned()
+                } else {
+                    " NAV  No assigned skills  Esc profile".to_owned()
+                },
+                " R reload skills · Tab section".to_owned(),
+            ]
+        } else {
+            let actions = super::controller::agents_actions(model)
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("   ");
+            let hint = if model.agents.pane == AgentsPane::History && model.focus != Focus::List {
+                " NAV  W/S browse  Enter inspect  Esc back  Tab section"
+            } else if model.focus == Focus::List || model.agents.pane == AgentsPane::List {
+                " NAV  W/S agent  Tab workspace  Enter open  Esc back"
+            } else {
+                " NAV Tab section A/D choice W/S scroll Enter open Esc back"
+            };
+            vec![hint.to_owned(), format!(" {actions}")]
+        };
+        frame.render_widget(
+            Paragraph::new(
+                lines
+                    .into_iter()
+                    .map(|line| Line::styled(line, theme.muted))
+                    .collect::<Vec<_>>(),
+            ),
+            area,
+        );
+        return;
     }
-    lines.extend([
-        Line::default(),
-        Line::styled("/ command", theme.muted),
-        Line::styled("? help", theme.muted),
-        Line::styled("q inert", theme.muted),
-        Line::styled("/quit exit", theme.muted),
-    ]);
+    let text = if model.focus == Focus::Command {
+        " TYPE  Tab leave input  WASD text  Enter run  Esc clear"
+    } else if !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane == AgentsPane::Editor
+    {
+        if model.input_mode == super::model::InputMode::Type {
+            " TYPE  WASD text  Enter accept  Tab next field  Esc keep & leave"
+        } else {
+            " NAV   Tab next field  WASD move  Enter edit/select  Esc keep draft"
+        }
+    } else if model.input_is_visible() {
+        " TYPE  WASD text  Enter accept  Esc back/cancel"
+    } else if !model.skills.active
+        && model.active_view == View::Agents
+        && matches!(
+            model.agents.pane,
+            AgentsPane::List | AgentsPane::Detail | AgentsPane::History
+        )
+    {
+        " NAV  Tab section  WASD move  N new  E edit  H history"
+    } else {
+        " NAV   Tab next section  WASD move  Enter open  Esc back"
+    };
     frame.render_widget(
-        Paragraph::new(lines).block(
+        Paragraph::new(Line::styled(text, theme.muted)).block(
             Block::default()
-                .title(" Navigation ")
-                .borders(Borders::ALL)
-                .border_style(border_style),
+                .borders(Borders::TOP)
+                .border_style(theme.muted),
         ),
         area,
     );
@@ -396,7 +374,10 @@ fn render_too_small(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: 
 
 fn view_name(view: View) -> &'static str {
     match view {
-        View::Overview => "Overview",
+        View::Overview => "Home",
+        View::Chat => "Chat",
+        View::Connections => "Connections",
+        View::Activity => "Activity",
         View::Setup => "Setup",
         View::Audit => "Audit",
         View::Help => "Help",
@@ -572,16 +553,16 @@ mod tests {
     }
 
     #[test]
-    fn wide_overview_renders_identity_health_navigation_and_command_bar() {
+    fn wide_home_renders_friendly_health_navigation_and_no_idle_command_bar() {
         let text = render_text(model(View::Overview), 140, 40, false);
         assert!(text.contains("AI STOCK FORUM"));
-        assert!(text.contains("Overview"));
-        assert!(text.contains("Installation"));
-        assert!(text.contains("Session"));
+        assert!(text.contains("Home"));
+        assert!(!text.contains("Installation"));
+        assert!(!text.contains("Session"));
         assert!(text.contains("Runtime"));
-        assert!(text.contains("Database      Ready"));
-        assert!(text.contains("Process guard Held"));
-        assert!(text.contains("Type /help"));
+        assert!(text.contains("Local data    Ready"));
+        assert!(!text.contains("Type /help"));
+        assert!(text.contains("NAV"));
     }
 
     #[test]
@@ -595,7 +576,7 @@ mod tests {
             );
             let end = model.workspace_scroll;
             assert!(
-                render_text(model.clone(), width, height, true).contains("/quit"),
+                render_text(model.clone(), width, height, true).contains("contextual hints"),
                 "size={width}x{height}, scroll={end}"
             );
 
@@ -606,7 +587,7 @@ mod tests {
                 );
             }
             assert_eq!(model.workspace_scroll, end, "size={width}x{height}");
-            assert!(render_text(model, width, height, true).contains("/quit"));
+            assert!(render_text(model, width, height, true).contains("contextual hints"));
         }
     }
 
@@ -700,7 +681,7 @@ mod tests {
         assert!(setup.contains("Phase 0B"));
 
         let audit = render_text(model(View::Audit), 140, 40, false);
-        for heading in ["Sequence", "Kind", "Actor", "Summary", "Correlation"] {
+        for heading in ["Sequence", "Kind", "Actor", "Summary"] {
             assert!(audit.contains(heading), "missing audit heading: {heading}");
         }
 
@@ -714,7 +695,7 @@ mod tests {
         ] {
             assert!(help.contains(command), "missing command: {command}");
         }
-        for key in ["1-4 / a / s", "Tab", "Enter", "Esc", "Up/Down", "Home/End"] {
+        for key in ["1-9", "Tab", "W/S", "A/D", "Enter", "Esc", "Home/End"] {
             assert!(help.contains(key), "missing key: {key}");
         }
         assert!(!help.contains("q                   Request shutdown"));
@@ -725,12 +706,15 @@ mod tests {
         let mut model = model(View::Audit);
         model.set_message(Severity::Warning, "Setup needs attention");
         let text = render_text(model, 70, 20, true);
-        assert!(text.contains("1 Overview"));
-        assert!(text.contains("2 Setup"));
-        assert!(text.contains("3 Audit"));
-        assert!(text.contains("4 Help"));
-        assert!(text.contains("a Agents"));
-        assert!(text.contains("s Skills"));
+        assert!(text.contains("1 Home"));
+        assert!(text.contains("2 Chat"));
+        assert!(text.contains("3 Agents"));
+        assert!(text.contains("4 Skills"));
+        assert!(text.contains("5 Connections"));
+        assert!(text.contains("6 Activity"));
+        assert!(text.contains("7 Setup"));
+        assert!(text.contains("8 Audit"));
+        assert!(text.contains("9 Help"));
         assert!(!text.contains("Alt"));
         assert!(text.contains("WARNING"));
         assert!(text.contains("Setup needs attention"));
@@ -746,7 +730,7 @@ mod tests {
         let mut terminal = rendered(model, 100, 30, false);
         assert_eq!(
             terminal.get_cursor_position().expect("cursor position"),
-            Position::new(5, 28)
+            Position::new(5, 26)
         );
     }
 

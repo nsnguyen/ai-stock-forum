@@ -31,13 +31,16 @@ const EXPECTED_MEMORY_COMMANDS: [&str; 11] = [
     "/memory episodes <agent>",
     "/memory episode <summary-id>",
 ];
-const EXPECTED_NAVIGATION_DESTINATIONS: [&str; 6] = [
-    "1 Overview",
-    "2 Setup",
-    "3 Audit",
-    "4 Help",
-    "a Agents",
-    "s Skills",
+const EXPECTED_NAVIGATION_DESTINATIONS: [&str; 9] = [
+    "1 Home",
+    "2 Chat",
+    "3 Agents",
+    "4 Skills",
+    "5 Connections",
+    "6 Activity",
+    "7 Setup",
+    "8 Audit",
+    "9 Help",
 ];
 const EXPECTED_MEMORY_ROUTE_NAMES: [&str; 11] = [
     "list",
@@ -838,8 +841,8 @@ fn keyboard_guide_matches_the_shipped_pane_specific_controller_contract() {
     let keyboard = markdown_section(&guide, "## Keyboard-first workflow");
     let panes = markdown_section(&guide, "### Pane controls");
 
-    assert!(keyboard.contains("press bare `s` to open Skills"));
-    assert!(keyboard.contains("Bare `1`-`4`, `a`, and `s` navigate from non-text browsing panes"));
+    assert!(keyboard.contains("press bare `4` to open Skills"));
+    assert!(keyboard.contains("Bare `1`-`9` navigate from non-text browsing panes"));
     assert!(keyboard.contains("characters remain text"));
     assert!(keyboard.contains("pending confirmation"));
     assert!(!keyboard.contains("Option+"));
@@ -1068,8 +1071,8 @@ fn readme_documents_hybrid_memory_plaintext_review_and_exact_fallback_grammar() 
         cockpit,
         "README Adaptive Cockpit navigation summary",
         &[
-            "Phase 0B introduced four native views: Overview, Setup, Audit, and Help",
-            "The current global destination rail has exactly six destinations: Overview, Setup, Audit, Help, Agents, and Skills",
+            "The current top navigation has exactly nine destinations: Home, Chat, Agents, Skills, Connections, Activity, Setup, Audit, and Help",
+            "Widths from 60 through 99 show one logical pane",
         ],
     );
     assert!(!cockpit.contains("The cockpit has four native, non-transcript views"));
@@ -1119,9 +1122,8 @@ fn readme_documents_hybrid_memory_plaintext_review_and_exact_fallback_grammar() 
             "bounded deterministic retrieval",
             "Startup",
             "fail closed",
-            "There is no seventh Memory destination",
+            "There is no dedicated Memory destination",
             "bare `m`",
-            "bare `7`",
             "Modified shortcuts are inert",
             "typed shortcut characters remain editor text",
             "`?` remains a Help alias",
@@ -1436,10 +1438,9 @@ fn hybrid_memory_acceptance_guide_is_safe_exact_and_reproducible() {
             "fresh empty namespace",
             "60x18",
             "100x24",
-            "80-column Memory workspace",
+            "28-column list",
             "140x30",
-            "120-column Memory workspace",
-            "navigation rail consumes 20 columns",
+            "clamped 36-column list",
             "Modified shortcuts are inert",
             "typed shortcut characters remain editor text",
             "Bare `q` is inert",
@@ -1505,13 +1506,12 @@ fn hybrid_memory_acceptance_guide_is_safe_exact_and_reproducible() {
         &[
             "`60x18`: one-pane Memory layout",
             "`100x24`",
-            "80-column Memory workspace and two panes",
+            "28-column list and 72-column active workspace",
             "`140x30`",
-            "120-column Memory workspace and three panes",
+            "clamped 36-column list and 104-column active workspace",
             "bare `m`",
-            "bare `7`",
             "`?` remains a Help alias",
-            "type `1234as`",
+            "type `wasd123456789`",
             "Bare `q` is inert",
             "`/quit` requests normal shutdown",
             "exactly one review cancellation",
@@ -1611,7 +1611,7 @@ fn profile_foundation_guide_uses_current_navigation_and_shutdown_controls() {
         "Agent Profile Foundation testing guide",
         &[
             "keyboard-first",
-            "There is no seventh Memory destination",
+            "There is no dedicated Memory destination",
             "Modified shortcuts are inert",
             "typed shortcut characters remain editor text",
             "Bare `q` is inert",
@@ -1624,7 +1624,7 @@ fn profile_foundation_guide_uses_current_navigation_and_shutdown_controls() {
             "Agent Profile Foundation testing guide is missing navigation destination: {destination}"
         );
     }
-    let adaptive = markdown_section(&guide, "## Adaptive Cockpit flow");
+    let adaptive = markdown_section(&guide, "## Specialized isolated TUI persistence flow");
     assert_eq!(
         fenced_text_lines(adaptive),
         EXPECTED_NAVIGATION_DESTINATIONS

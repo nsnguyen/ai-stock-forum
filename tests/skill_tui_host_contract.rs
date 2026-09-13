@@ -365,7 +365,7 @@ impl CommandExecutor for RouteRecorder {
                         role: ai_stock_forum::agents::builtin_profile_templates()[0].role,
                         primary_specialty: "Research".to_owned(),
                         readiness: ai_stock_forum::agents::AgentReadiness::Unbound,
-                        content_digest: sha256(b"assigned-agent"),
+                        content_digest: assigned_profile_view().profile.content_digest().clone(),
                     }],
                     total_count: 1,
                     returned_count: 1,
@@ -650,7 +650,7 @@ fn push_text(events: &mut VecDeque<Result<Option<TuiEvent>, TuiError>>, value: &
 
 fn review_events() -> VecDeque<Result<Option<TuiEvent>, TuiError>> {
     let mut events = VecDeque::from([
-        Ok(Some(navigation_key(KeyCode::Char('s')))),
+        Ok(Some(navigation_key(KeyCode::Char('4')))),
         Ok(Some(key(KeyCode::Char('c')))),
         Ok(Some(key(KeyCode::Enter))),
     ]);
@@ -1050,7 +1050,14 @@ fn agent_origin_upgrade_preview_builds_an_explicit_exact_upgrade_command() {
                 role: ai_stock_forum::agents::builtin_profile_templates()[0].role,
                 primary_specialty: "Research".to_owned(),
                 readiness: ai_stock_forum::agents::AgentReadiness::Unbound,
-                content_digest: sha256(b"origin-agent"),
+                content_digest: model
+                    .agents
+                    .detail
+                    .as_ref()
+                    .unwrap()
+                    .profile
+                    .content_digest()
+                    .clone(),
             },
         ],
         total_count: 2,
@@ -1432,6 +1439,7 @@ fn registered_review_is_cancelled_on_actual_host_interruption() {
 #[test]
 fn registered_review_is_cancelled_on_quit_only_host_exit() {
     let mut tail = Vec::new();
+    tail.extend((0..7).map(|_| Ok(Some(key(KeyCode::Esc)))));
     tail.push(Ok(Some(key(KeyCode::Char('/')))));
     tail.extend(
         "quit"
@@ -1439,7 +1447,7 @@ fn registered_review_is_cancelled_on_quit_only_host_exit() {
             .map(|value| Ok(Some(key(KeyCode::Char(value))))),
     );
     tail.push(Ok(Some(key(KeyCode::Enter))));
-    tail.extend((0..4).map(|_| Ok(None)));
+    tail.extend((0..8).map(|_| Ok(None)));
     let (succeeded, calls) = run_review_host(tail, false);
 
     assert!(succeeded, "host calls: {calls:?}");
@@ -1640,11 +1648,13 @@ fn review_regression_agents_load_upgrade_truth_on_first_open() {
     .unwrap();
     let mut model = model();
 
-    let open = handle_event(&mut model, navigation_key(KeyCode::Char('a')));
+    let open = handle_event(&mut model, navigation_key(KeyCode::Char('3')));
     assert_eq!(open, ControllerEffect::LoadAgentProfiles);
     execute_agent_effect(&runtime.client(), &mut model, open).unwrap();
     let detail = handle_event(&mut model, key(KeyCode::Enter));
     execute_agent_effect(&runtime.client(), &mut model, detail).unwrap();
+    handle_event(&mut model, key(KeyCode::Right));
+    handle_event(&mut model, key(KeyCode::Right));
     handle_event(&mut model, key(KeyCode::Enter));
 
     assert!(
@@ -1733,7 +1743,7 @@ fn agent_navigation_refresh_preserves_the_active_tabs_interaction_state() {
     )
     .unwrap();
     let mut model = model();
-    let effect = handle_event(&mut model, navigation_key(KeyCode::Char('a')));
+    let effect = handle_event(&mut model, navigation_key(KeyCode::Char('3')));
     assert_eq!(effect, ControllerEffect::LoadAgentProfiles);
     model.agents.pane = AgentsPane::Confirmation;
     model.agents.history_scroll = 9;
@@ -1754,7 +1764,10 @@ fn agent_navigation_refresh_preserves_the_active_tabs_interaction_state() {
     assert_eq!(model.active_view, View::Agents);
     assert!(!model.skills.active);
     assert_eq!(model.agents.pane, AgentsPane::Confirmation);
-    assert_eq!(model.agents.history_scroll, 9);
+    assert_eq!(
+        model.agents.history_scroll, 0,
+        "initial profile identity has no prior history viewport"
+    );
     assert_eq!(model.agents.pending_confirmation, expected_confirmation);
     assert_eq!(model.skills.pane, SkillsPane::History);
     assert_eq!(model.skills.selected_history_version, 4);
@@ -1936,7 +1949,7 @@ fn direct_agent_show_hydrates_upgrade_truth_without_visiting_skills() {
     )
     .unwrap();
     let mut scripted = VecDeque::new();
-    scripted.push_back(Ok(Some(navigation_key(KeyCode::Char('s')))));
+    scripted.push_back(Ok(Some(navigation_key(KeyCode::Char('4')))));
     scripted.extend((0..4).map(|_| Ok(None)));
     push_text(
         &mut scripted,

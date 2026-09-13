@@ -782,6 +782,7 @@ fn memory_is_nested_under_agents_without_changing_global_shortcuts() {
     model.select_view(View::Agents);
     model.skills.library_loaded = true;
     model.agents.pane = AgentsPane::Detail;
+    model.agents.profiles = profiles_view(&[&profile]);
     model.agents.detail = Some(AgentProfileView {
         readiness: profile.readiness(),
         profile,
@@ -821,6 +822,8 @@ fn assigned_skills_opens_when_empty_and_its_open_panel_owns_left_right() {
     model.select_view(View::Agents);
     model.skills.library_loaded = true;
     model.agents.pane = AgentsPane::Detail;
+    model.agents.profiles = profiles_view(&[&profile]);
+    model.agents.selected_detail_action = AgentDetailAction::AssignedSkills;
     model.agents.detail = Some(AgentProfileView {
         readiness: profile.readiness(),
         profile,
@@ -882,7 +885,7 @@ fn memory_state_defaults_and_safe_errors_define_the_nested_workspace_contract() 
 
     assert_eq!(
         ai_stock_forum::ui::tui::AgentsViewState::default().selected_detail_action,
-        AgentDetailAction::AssignedSkills,
+        AgentDetailAction::Profile,
     );
 }
 
@@ -1460,10 +1463,7 @@ fn profile_refresh_and_selection_transitions_preserve_or_invalidate_memory_by_ex
         )
         .expect("bind successor");
     assert!(agents.select_profile_id(other.profile_id()));
-    assert_eq!(
-        agents.selected_detail_action,
-        AgentDetailAction::AssignedSkills
-    );
+    assert_eq!(agents.selected_detail_action, AgentDetailAction::Profile);
     assert_eq!(agents.memory.profile, None);
     assert_eq!(agents.memory.namespace_id, None);
     assert_eq!(agents.memory.generation, 9);
@@ -1911,6 +1911,150 @@ fn memory_model(profile: &AgentProfileVersion) -> TuiModel {
         .bind_profile(memory_identity(profile), profile.memory_namespace_id())
         .expect("bind memory model");
     model
+}
+
+#[test]
+fn logical_list_focus_routes_memory_keys_to_the_visible_primary_list() {
+    let owner = profile(90_000);
+    let first = entry(&owner, 90_100, "First visible memory");
+    let second = entry(&owner, 90_200, "Second visible memory");
+    let selector = AgentProfileSelector::Id(owner.profile_id());
+    let mut model = memory_model(&owner);
+    model.agents.memory.entries = Some(populated_entries_view(
+        &owner,
+        &[first.clone(), second.clone()],
+    ));
+    model.agents.memory.entry_detail = Some(MemoryEntryView {
+        profile: owner.reference(),
+        entry: first,
+    });
+    model.agents.memory.pane = MemoryPane::EntryDetail;
+    model.agents.memory.detail_scroll = 7;
+    model.set_focus(Focus::List);
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Char('s'))),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.agents.memory.selected_entry, 1);
+    assert_eq!(model.agents.memory.detail_scroll, 0);
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::LoadMemoryEntry {
+            selector,
+            key: "Second visible memory".to_owned(),
+        }
+    );
+    assert_eq!(model.focus, Focus::Workspace);
+    assert_eq!(model.agents.memory.pane, MemoryPane::EntryDetail);
+}
+
+#[test]
+fn logical_history_list_focus_owns_navigation_when_an_exact_version_is_loaded() {
+    let owner = profile(91_000);
+    let first = entry(&owner, 91_100, "Visible history");
+    let second = first
+        .next_present(
+            MemoryEntryVersionId::from_uuid(Uuid::from_u128(91_110)),
+            MemoryEntryDraft::new(
+                "Visible history".to_owned(),
+                "second value".to_owned(),
+                Vec::new(),
+            )
+            .expect("second version draft"),
+            Actor::Human,
+            91_110,
+            None,
+            EventId::from_uuid(Uuid::from_u128(91_111)),
+        )
+        .expect("second version");
+    let third = second
+        .next_present(
+            MemoryEntryVersionId::from_uuid(Uuid::from_u128(91_120)),
+            MemoryEntryDraft::new(
+                "Visible history".to_owned(),
+                "third value".to_owned(),
+                Vec::new(),
+            )
+            .expect("third version draft"),
+            Actor::Human,
+            91_120,
+            None,
+            EventId::from_uuid(Uuid::from_u128(91_121)),
+        )
+        .expect("third version");
+    let versions = [third.clone(), second.clone(), first.clone()];
+    let mut model = memory_model(&owner);
+    model.agents.memory.entries =
+        Some(populated_entries_view(&owner, std::slice::from_ref(&third)));
+    model.agents.memory.entry_history = Some(history_view(&owner, &third, &versions));
+    model.agents.memory.pane = MemoryPane::EntryHistory;
+    model.agents.memory.entry_version = Some(MemoryEntryVersionView {
+        profile: owner.reference(),
+        entry: third.clone(),
+    });
+    model.agents.memory.detail_scroll = 7;
+    model.set_focus(Focus::List);
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Char('s'))),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.agents.memory.selected_history_version, 1);
+    assert_eq!(model.agents.memory.detail_scroll, 0);
+
+    model.agents.memory.entry_version = Some(MemoryEntryVersionView {
+        profile: owner.reference(),
+        entry: second.clone(),
+    });
+    model.agents.memory.detail_scroll = 7;
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Char('w'))),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.agents.memory.selected_history_version, 0);
+    assert_eq!(model.agents.memory.detail_scroll, 0);
+
+    model.agents.memory.entry_version = Some(MemoryEntryVersionView {
+        profile: owner.reference(),
+        entry: third,
+    });
+    model.agents.memory.detail_scroll = 7;
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::End)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.agents.memory.selected_history_version, 2);
+    assert_eq!(model.agents.memory.detail_scroll, 0);
+
+    model.agents.memory.entry_version = Some(MemoryEntryVersionView {
+        profile: owner.reference(),
+        entry: first,
+    });
+    model.agents.memory.detail_scroll = 7;
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Home)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.agents.memory.selected_history_version, 0);
+    assert_eq!(model.agents.memory.detail_scroll, 0);
+
+    model.agents.memory.selected_history_version = 1;
+    model.agents.memory.entry_version = Some(MemoryEntryVersionView {
+        profile: owner.reference(),
+        entry: second.clone(),
+    });
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::LoadMemoryEntryVersion {
+            selector: AgentProfileSelector::Id(owner.profile_id()),
+            key: second.display_key().to_owned(),
+            version: second.reference().version(),
+            expected_entry_version_id: second.reference().entry_version_id(),
+        }
+    );
+    assert_eq!(model.focus, Focus::Workspace);
 }
 
 fn invalid_editor_model(
@@ -2560,7 +2704,7 @@ fn memory_editor_field_submissions_never_enter_global_command_history() {
 }
 
 #[test]
-fn all_six_global_shortcuts_preserve_each_non_text_memory_review_and_confirmation_state() {
+fn all_nine_global_shortcuts_preserve_each_non_text_memory_review_and_confirmation_state() {
     let owner = profile(1_300);
     let edit_review = set_review(&owner, 1_310, "protected navigation");
     let mut editor_state = MemoryViewState::default();
@@ -2600,7 +2744,7 @@ fn all_six_global_shortcuts_preserve_each_non_text_memory_review_and_confirmatio
         resolution_state,
         confirmation_state,
     ] {
-        for shortcut in ['1', '2', '3', '4', 'a', 's'] {
+        for shortcut in ['1', '2', '3', '4', '5', '6', '7', '8', '9'] {
             let mut model = memory_model(&owner);
             model.agents.memory = state.clone();
             let before = model.agents.memory.clone();
@@ -2612,7 +2756,7 @@ fn all_six_global_shortcuts_preserve_each_non_text_memory_review_and_confirmatio
             ));
             assert_eq!(model.agents.memory, before, "shortcut={shortcut}");
             assert!(matches!(
-                handle_event(&mut model, key(KeyCode::Char('a'))),
+                handle_event(&mut model, key(KeyCode::Char('3'))),
                 ControllerEffect::Redraw | ControllerEffect::LoadAgentProfiles
             ));
             assert_eq!(model.active_view, View::Agents);
@@ -3198,12 +3342,12 @@ fn detail_scroll_resets_on_memory_identity_changes_but_survives_redraw_resize_an
     );
     assert_eq!(model.agents.memory.detail_scroll, 9);
     assert_eq!(
-        handle_event(&mut model, key(KeyCode::Char('4'))),
+        handle_event(&mut model, key(KeyCode::Char('9'))),
         ControllerEffect::Redraw
     );
     assert_eq!(model.agents.memory.detail_scroll, 9);
     assert_eq!(
-        handle_event(&mut model, key(KeyCode::Char('a'))),
+        handle_event(&mut model, key(KeyCode::Char('3'))),
         ControllerEffect::Redraw
     );
     assert_eq!(model.agents.memory.detail_scroll, 9);
@@ -3566,7 +3710,7 @@ fn memory_keeps_global_help_and_cycles_focus_without_the_latent_inspector() {
         handle_event(&mut focus, key(KeyCode::Tab)),
         ControllerEffect::Redraw,
     );
-    assert_eq!(focus.focus, Focus::Command);
+    assert_eq!(focus.focus, Focus::Navigation);
 }
 
 #[test]
@@ -4979,10 +5123,10 @@ fn assert_exact_memory_list_bound_movements(
 ) {
     model.set_terminal_size(100, 30);
     for (key_code, expected) in [
-        (KeyCode::PageDown, (7, 1)),
-        (KeyCode::PageDown, (14, 8)),
-        (KeyCode::PageUp, (7, 7)),
-        (KeyCode::End, (19, 13)),
+        (KeyCode::PageDown, (8, 1)),
+        (KeyCode::PageDown, (16, 9)),
+        (KeyCode::PageUp, (8, 8)),
+        (KeyCode::End, (19, 12)),
         (KeyCode::Home, (0, 0)),
     ] {
         assert_eq!(handle_event(model, key(key_code)), ControllerEffect::Redraw);

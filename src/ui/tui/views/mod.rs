@@ -25,6 +25,9 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
     }
     match model.active_view {
         View::Overview => overview::render(frame, area, model, theme),
+        View::Chat => render_future(frame, area, model, "Chat", theme),
+        View::Connections => render_future(frame, area, model, "Connections", theme),
+        View::Activity => render_activity(frame, area, model, theme),
         View::Setup => setup::render(frame, area, model, theme),
         View::Audit => audit::render(frame, area, model, theme),
         View::Help => help::render(frame, area, model, theme),
@@ -38,6 +41,11 @@ pub(super) fn workspace_content_height(model: &TuiModel, width: u16) -> u16 {
     }
     match model.active_view {
         View::Overview => overview::content_height(model, width),
+        View::Chat | View::Connections => 5,
+        View::Activity => wrapped_height(
+            activity_lines(model, &Theme::from_no_color(true)),
+            width.max(1),
+        ),
         View::Setup => setup::content_height(model, width),
         View::Audit => 0,
         View::Help => help::content_height(width),
@@ -47,6 +55,18 @@ pub(super) fn workspace_content_height(model: &TuiModel, width: u16) -> u16 {
 
 pub(super) fn agent_list_scroll_offset(model: &TuiModel) -> usize {
     agents::list_scroll_offset(model)
+}
+
+pub(super) fn agent_detail_scroll_geometry(model: &TuiModel) -> (usize, usize) {
+    agents::detail_scroll_geometry(model)
+}
+
+pub(super) fn agent_history_scroll_geometry(model: &TuiModel) -> (usize, usize) {
+    agents::history_scroll_geometry(model)
+}
+
+pub(super) fn agent_version_scroll_geometry(model: &TuiModel) -> (usize, usize) {
+    agents::version_scroll_geometry(model)
 }
 
 pub(super) fn wrapped_height(lines: Vec<Line<'static>>, width: u16) -> u16 {
@@ -78,6 +98,9 @@ pub(super) fn render_inspector(frame: &mut Frame<'_>, area: Rect, model: &TuiMod
             View::Overview => {
                 contextual_lines("Overview", "Runtime and installation health", theme)
             }
+            View::Chat => contextual_lines("Chat", "Coming in Phase 3", theme),
+            View::Connections => contextual_lines("Connections", "Coming in Phase 3", theme),
+            View::Activity => contextual_lines("Activity", "Readable recent events", theme),
             View::Setup => contextual_lines("Setup", "State is read-only in Phase 0B", theme),
             View::Help => contextual_lines("Help", "Approved keyboard and slash grammar", theme),
             View::Agents => agents::inspector_lines(model, theme),
@@ -95,6 +118,10 @@ pub(super) fn render_inspector(frame: &mut Frame<'_>, area: Rect, model: &TuiMod
             .scroll((scroll, 0)),
         area,
     );
+}
+
+pub(super) fn agent_editor_scroll_limit(model: &TuiModel) -> usize {
+    agents::editor_scroll_limit(model)
 }
 
 pub(super) fn panel<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
@@ -169,6 +196,57 @@ fn contextual_lines<'a>(heading: &'a str, detail: &'a str, theme: &Theme) -> Vec
 
 pub(super) fn workspace_focused(model: &TuiModel) -> bool {
     model.focus == Focus::Workspace
+}
+
+fn render_future(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, name: &str, theme: &Theme) {
+    let lines = vec![
+        Line::styled(format!("{name} is coming in Phase 3"), theme.accent),
+        Line::default(),
+        Line::raw("This destination is not interactive yet."),
+        Line::styled(
+            "No input, credentials, or sample data are shown.",
+            theme.muted,
+        ),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(panel(name, model.focus == Focus::Workspace, theme))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_activity(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    frame.render_widget(
+        Paragraph::new(activity_lines(model, theme))
+            .block(panel("Activity", model.focus == Focus::Workspace, theme))
+            .wrap(Wrap { trim: false })
+            .scroll((model.workspace_scroll, 0)),
+        area,
+    );
+}
+
+fn activity_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::styled("Recent local activity", theme.accent),
+        Line::styled(
+            "Readable summaries from the bounded audit history.",
+            theme.muted,
+        ),
+        Line::default(),
+    ];
+    if model.audit_entries.is_empty() {
+        lines.push(Line::raw("No recent activity."));
+    } else {
+        lines.extend(
+            model
+                .audit_entries
+                .iter()
+                .rev()
+                .map(|entry| Line::raw(format!("• {}", safe_text(&entry.summary)))),
+        );
+    }
+    lines
 }
 
 #[cfg(test)]

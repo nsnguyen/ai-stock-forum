@@ -398,7 +398,7 @@ fn schema_v1_upgrade_profile_lifecycle_restart_fallback_and_tui_are_accepted() {
 
     let mut tui = TuiModel::new(recovered_detail, recovered.previous_session_interrupted());
     assert_eq!(
-        handle_event(&mut tui, navigation_key('a')),
+        handle_event(&mut tui, navigation_key('3')),
         ControllerEffect::LoadAgentProfiles
     );
     assert_eq!(tui.active_view, View::Agents);
@@ -410,32 +410,32 @@ fn schema_v1_upgrade_profile_lifecycle_restart_fallback_and_tui_are_accepted() {
         );
         let rendered = render_text(&tui, width, 30);
         assert!(rendered.contains("Research North"), "{expected_mode}");
-        assert!(rendered.contains("Agent detail"), "{expected_mode}");
+        assert!(rendered.contains("Agent workspace"), "{expected_mode}");
         assert_eq!(
             rendered.contains("Agent list"),
-            width >= 80,
+            width >= 100,
             "{expected_mode}"
         );
-        assert_eq!(
-            rendered.contains("Readiness & history"),
-            width >= 120,
-            "{expected_mode}"
-        );
+        assert!(!rendered.contains("Readiness & history"), "{expected_mode}");
     }
-    for (character, expected) in [
-        ('1', View::Overview),
-        ('2', View::Setup),
-        ('3', View::Audit),
-        ('4', View::Help),
+    for (character, expected, expected_effect) in [
+        ('1', View::Overview, ControllerEffect::Redraw),
+        ('2', View::Chat, ControllerEffect::Redraw),
+        ('3', View::Agents, ControllerEffect::LoadAgentProfiles),
+        ('5', View::Connections, ControllerEffect::Redraw),
+        ('6', View::Activity, ControllerEffect::Redraw),
+        ('7', View::Setup, ControllerEffect::Redraw),
+        ('8', View::Audit, ControllerEffect::Redraw),
+        ('9', View::Help, ControllerEffect::Redraw),
     ] {
         assert_eq!(
             handle_event(&mut tui, navigation_key(character)),
-            ControllerEffect::Redraw
+            expected_effect
         );
         assert_eq!(tui.active_view, expected);
     }
     assert_eq!(
-        handle_event(&mut tui, navigation_key('a')),
+        handle_event(&mut tui, navigation_key('3')),
         ControllerEffect::LoadAgentProfiles
     );
 
