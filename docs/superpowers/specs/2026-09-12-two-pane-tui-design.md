@@ -1,8 +1,9 @@
 # Two-pane TUI: approved direction and interaction specification
 
-Status: visual direction and core keyboard choices approved in conversation;
-this document makes the full design concrete for review. Product implementation
-has not started.
+Status: the first implementation slice—the shared navigation/focus shell and
+complete Agents path—is implemented. Full Memory and Skills usability passes
+and Phase 3 remain future work. The manual `make dev` acceptance gate has not
+been performed.
 
 Source baseline: `5a24943c1de471363f81a1c50cad2d8fc740df80`, the merge of Hybrid
 Memory PR #12. This is a usability pass on the existing local application before
@@ -325,10 +326,12 @@ Primary seams in the current tree:
 - `src/ui/*_editor.rs`: keep draft validation and deliberate commit flows while
   exposing conventional fields and explicit input mode in the TUI.
 
-The first implementation slice is the shared navigation/focus shell plus the
-complete Agents path. It is followed by Memory, Skills, then the remaining
-status/history/help views. Each slice is usable and manually checked before
-the next. Chat and provider execution remain Phase 3 work.
+The first implementation slice, the shared navigation/focus shell plus the
+complete Agents path, is implemented. Full Memory and Skills usability passes,
+then the remaining status/history/help views, are future slices. The first
+slice has automated and rendered-preview evidence, but its manual `make dev`
+acceptance gate remains unperformed. Chat and provider execution remain Phase 3
+work.
 
 Update README, the relevant manual guides, and navigation/render assertions
 when implementation lands. Historical phase specifications stay historical.

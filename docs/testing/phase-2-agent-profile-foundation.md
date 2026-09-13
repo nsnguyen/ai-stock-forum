@@ -1,19 +1,36 @@
-# Phase 2 Agent Profile Foundation Testing Guide
+# Phase 2 Agent Profile Foundation specialized acceptance guide
 
-This guide is the release and local acceptance procedure for Agent Profiles
-Milestone 1. Run it only with isolated application state. It covers the release
-binary, Adaptive Cockpit, fallback command mode, immutable history, recovery,
-terminal restoration, and the single-instance guard. It does not test or claim
-skills, hybrid memory, provider execution, rooms, debates, or market data.
+This is the specialized historical persistence and recovery acceptance
+procedure for Agent Profiles Milestone 1. It covers the release binary,
+fallback command mode, immutable history, recovery, terminal restoration, and
+the single-instance guard. Run it only with deliberately isolated application
+state. It does not test or claim skills, hybrid memory, provider execution,
+rooms, debates, or market data.
+
+For a normal check of the current two-pane TUI, quit any other running instance
+and run `make dev` in the worktree. That normal path uses existing local app
+data: it needs no new macOS account or home-directory reassignment. Follow the
+[two-pane shell and Agents guide](two-pane-shell-agents.md) for the current
+navigation and usability checklist. Do not use normal state for the specialized
+corruption, migration, recovery, or destructive acceptance work retained below.
+
+The older isolated-state instructions in this document remain as a historical
+acceptance reference for the persistence invariants. The two-pane Agents
+controls are present and their automated gates pass, but the interactive
+`make dev` acceptance run has not been performed; do not treat this guide as a
+claim that the new interactive behavior has passed.
 
 ## What is accepted
 
 - A pinned Bull, Bear, Chief, Engineering, or Custom template can be copied into
   a local draft and explicitly activated as immutable version 1.
-- An unbound profile is valid and displays `Not Ready`.
+- An unbound profile is valid. The two-pane TUI labels it `Needs connection`;
+  historical and fallback output may use `Not Ready`.
 - Typed binding references can only be selected from an application catalog.
   Injected catalog tests distinguish `Unbound`, `Binding unavailable`, and
-  `Ready`; the production Milestone 1 catalog is empty.
+  `Ready`; the two-pane TUI renders those states as `Needs connection`,
+  `Connection unavailable`, and `Bindings configured`. The production
+  Milestone 1 catalog is empty.
 - Edit preview is local-only and passive. It writes no event, receipt, profile
   row, active pointer, persistent draft, or generic audit entry.
 - Activation is separate from preview and requires explicit confirmation.
@@ -24,7 +41,8 @@ skills, hybrid memory, provider execution, rooms, debates, or market data.
 - Generic audit and error output omits personality, instructions, provider
   material, and rejected hostile text.
 
-`Ready` does not mean a provider was contacted or a model can run. Milestone 1
+`Bindings configured` does not mean a provider was contacted or a model can
+run. Milestone 1
 has no provider adapter, secret input, model execution, automatic fallback, or
 agent process. Binding controls never accept free-form IDs, keys, or labels.
 
@@ -41,10 +59,12 @@ cargo build --release
 
 Do not proceed to live smoke if a gate fails.
 
-## Create isolated state
+## Historical isolated-state procedure
 
-Build before changing `HOME` or `XDG_DATA_HOME` so Cargo and rustup keep their
-normal configuration. On macOS or Linux:
+This procedure is not the normal usability path. It is retained for a dedicated
+disposable acceptance environment and must never target existing local app
+data. Build before changing `HOME` or `XDG_DATA_HOME` so Cargo and rustup keep
+their normal configuration. On macOS or Linux:
 
 ```sh
 profile_smoke_root="$(mktemp -d)"
@@ -58,7 +78,7 @@ The generated state is under the temporary home or XDG data directory, never
 the normal user state directory. Record the exact temporary root in local test
 evidence, but do not commit its database or lock file.
 
-## Adaptive Cockpit flow
+## Specialized isolated TUI persistence flow
 
 Record terminal type and starting geometry, then launch:
 
@@ -69,7 +89,8 @@ terminal_before="$(stty -g)"
 target/release/ai-stock-forum
 ```
 
-The current cockpit is keyboard-first. Its global destinations contain
+Use the current two-pane navigation while exercising the isolated persistence
+state. Its global destinations contain
 exactly these ordered labels:
 
 ```text
@@ -90,35 +111,51 @@ editors, typed shortcut characters remain editor text. Bare `q` is inert and
 `/quit` requests normal shutdown. `?` is a Help alias but is not a destination
 label.
 
-Perform this exact flow in the cockpit:
+Perform this flow only as a deliberate specialized manual acceptance run; it
+has not been performed for the current two-pane slice:
 
-1. Press bare `3` and confirm Agents opens. Use bare `1` through `9` in
-   turn, use bare `4` to open Skills, then return with bare `3`. Each shortcut
-   must work from every non-text browsing pane and confirmation, and Agents must
-   return to the same pane and selection. While text entry owns input, type
-   `wasd123456789` and verify the characters remain text rather than navigating.
-   Switching preserves tab state, drafts, and pending confirmations.
-2. Press `c` to copy the selected pinned template. Keep bindings empty, rename
-   the draft `Research North`, walk every guided step, and inspect the Review
-   screen. No durable profile exists before confirmation.
-3. Press `Enter` on Review to open the separate Confirm Create state, then press
-   `Enter` again. The new active profile must show version 1 and `Not Ready`.
-4. Select `Research North`, open detail with `Enter`, and press `e`.
+1. Press bare `3` and confirm Agents opens. Choose an agent with `W`/`S`, press
+   `Tab` to focus its workspace, use `A`/`D` among Profile, Memory, Skills, and
+   History, and press `Enter` to open the highlighted choice. No UUID lookup is
+   part of this path. Use bare `1` through `9` in turn, use bare `4` to open
+   Skills, then return with bare `3`. Each shortcut must work from every
+   non-text browsing pane and confirmation, and Agents must return to the same
+   pane and selection.
+2. Press `N` for the visible New action and copy the selected pinned template.
+   Keep bindings empty and rename the draft `Research North`. Profile fields
+   begin in NAV; select a field and press `Enter` deliberately to enter TYPE.
+   In Display name, type `wasd123456789/n` and a leading `:back`, then verify
+   these remain literal text. `Esc` must retain text and return to NAV; `Tab`
+   must retain text and move to the next field in NAV. Invalid raw input and its
+   error must remain available for correction. Profile normalization remains
+   single-line, and the fallback colon grammar is not a TUI prose parser.
+   Restore Display name to `Research North` before continuing. Inspect Review
+   and confirm that no durable profile exists yet.
+3. Move from Review to the separate Confirm Create state, then deliberately
+   press `Enter` on the labeled confirmation. `D` or a held/repeated `Enter`
+   must not cross the boundary and write. The new active profile must show
+   version 1 and `Needs connection` in the TUI.
+4. Select `Research North`, open Profile, and press `E` for the visible Edit
+   action.
 5. Change primary specialty, specialty tags, personality, and instructions.
-   Leave unavailable production bindings unbound. Use `Enter` to advance
-   through every field, then inspect the authoritative ordered Before/After
+   Leave unavailable production bindings unbound. Suspend and resume the draft
+   once by leaving Agents; only the labeled Discard action may abandon it. Move
+   through the fields, then inspect the authoritative ordered Before/After
    preview on Review.
 6. Press `Enter` on the authoritative Review to open Confirm Activate, then
    press `Esc`. Confirm the editor returns to the unchanged review and history
    still has only version 1.
-7. Open Confirm Activate again and press `Enter`. Confirm detail shows version
-   2 and remains honestly `Not Ready`.
-8. Press `h`. Confirm history is newest-first, then select version 1 and inspect
-   its complete accepted content, immutable metadata, and predecessor diff.
-   Inspection must not move the active pointer.
-9. Resize to at least `70x24`, `100x30`, and `140x40`. Confirm the Agents view
-   respectively uses one-pane narrow, two-pane medium, and two-pane wide
-   presentation without losing selection, editor/detail state, or history.
+7. Open Confirm Activate again and deliberately press `Enter` on its labeled
+   action. Confirm detail shows version 2 and remains honestly `Needs
+   connection` in the TUI.
+8. Press `H`. Confirm history is newest-first with readable version and date
+   labels, then select version 1 and inspect its accepted content and readable
+   field changes from its predecessor. Inspection must not move the active
+   pointer.
+9. Resize to at least `60x18`, `80x24`, `100x24`, `120x30`, and `160x40`.
+   Confirm widths from 60 through 99 show one logical pane, while widths from
+   100 show both list and workspace. Confirm the Agents view changes layout
+   without losing selection, editor/detail state, or history.
 10. Resize below `60x18`; press `Esc` and confirm the app remains open, then
     press bare `q` and confirm it is inert. Open command entry with `/`, type
     `quit`, and press `Enter` to request normal shutdown with `/quit`.

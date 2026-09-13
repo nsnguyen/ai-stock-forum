@@ -1624,7 +1624,7 @@ fn profile_foundation_guide_uses_current_navigation_and_shutdown_controls() {
             "Agent Profile Foundation testing guide is missing navigation destination: {destination}"
         );
     }
-    let adaptive = markdown_section(&guide, "## Adaptive Cockpit flow");
+    let adaptive = markdown_section(&guide, "## Specialized isolated TUI persistence flow");
     assert_eq!(
         fenced_text_lines(adaptive),
         EXPECTED_NAVIGATION_DESTINATIONS

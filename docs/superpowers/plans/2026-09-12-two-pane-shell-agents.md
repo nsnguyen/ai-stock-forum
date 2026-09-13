@@ -43,7 +43,7 @@
 - Produces `Focus::List` and `Focus::Actions` alongside Navigation/Workspace/Command. Inspector may remain as a legacy internal variant but is never a permanent third pane or invisible Tab stop.
 - Produces `InputMode::{Nav,Type}` and `TuiModel.input_mode` for the new profile interaction; legacy Memory/Skills input ownership remains authoritative until their slice. Shell footer derives actual mode, not a cosmetic label.
 
-- [ ] **Step 1: Add behavioral shell tests and run them red.** Reuse the real snapshot fixture structure in `tests/tui_navigation_contract.rs`. The new contract tests exercise real controller and TestBackend output, for example:
+- [x] **Step 1: Add behavioral shell tests and run them red.** Reuse the real snapshot fixture structure in `tests/tui_navigation_contract.rs`. The new contract tests exercise real controller and TestBackend output, for example:
 
 ```rust
 #[test]
@@ -67,7 +67,7 @@ Add literal expected route cases for all nine numbers, Shift uppercase WASD, ign
 
 Run: `cargo test --locked --test tui_two_pane_contract`. Confirm the old 3→Audit mapping or old geometry fails the new expectations before production edits.
 
-- [ ] **Step 2: Implement destination and focus routing.** Use the nine destinations as the single ordered source instead of independent six-element matches. Keep the existing pending-outcome navigation generation and per-tab draft swapping. For NAV directions, normalize unmodified lowercase or shifted uppercase WASD to directional intent before dispatching feature navigation; never normalize text/picker ownership incorrectly.
+- [x] **Step 2: Implement destination and focus routing.** Use the nine destinations as the single ordered source instead of independent six-element matches. Keep the existing pending-outcome navigation generation and per-tab draft swapping. For NAV directions, normalize unmodified lowercase or shifted uppercase WASD to directional intent before dispatching feature navigation; never normalize text/picker ownership incorrectly.
 
 ```rust
 // Conceptual route entries: use this order in the existing NavigationTab mapping.
@@ -83,7 +83,7 @@ const AGENT_REGIONS: &[Focus] = &[
 
 Only actual enabled regions enter the cycle; generic read-only pages need Navigation/Workspace, and command focus is explicitly requested with `/`, not a permanent stop. Agent region-specific actions and field traversal land in Task 2. Preserve legacy Memory/Skills interactions while replacing their global a/s shortcuts with 3/4. Do not let global normalization turn D into final confirmation Enter. Repeated key events cannot write. Keep Ctrl+C and `/quit` safe below the minimum size.
 
-- [ ] **Step 3: Implement shared geometry, truthful destination content, and footer.** Remove the vertical main menu and permanent inspector. Allocate top title/nav rows with whole-label wrapping, workspace, message, and contextual footer; the command field occupies space only while an actual input owns it. Use a single two-pane split for Agents/Skills and at most two panes for Memory, folding its optional context into the workspace. Compact mode reveals the logically focused region; do not reset selection on resize.
+- [x] **Step 3: Implement shared geometry, truthful destination content, and footer.** Remove the vertical main menu and permanent inspector. Allocate top title/nav rows with whole-label wrapping, workspace, message, and contextual footer; the command field occupies space only while an actual input owns it. Use a single two-pane split for Agents/Skills and at most two panes for Memory, folding its optional context into the workspace. Compact mode reveals the logically focused region; do not reset selection on resize.
 
 ```rust
 let list_width = ((u32::from(area.width) * 28) / 100) as u16;
@@ -95,7 +95,7 @@ let columns = Layout::horizontal([
 
 Use dark charcoal, near-white, muted secondary text, cyan active focus, NO_COLOR modifiers/markers. Selected-but-inactive rows must not masquerade as the focused region. Render Chat/Connections as Coming in Phase 3 without inputs or mock data. Activity can reuse bounded audit summaries read-only. Update shared Help and footer to teach numbers, Tab, WASD, Enter, Esc, and preserve truthful legacy field help until its respective slice.
 
-- [ ] **Step 4: Verify and commit.** Run focused new shell tests plus existing navigation, hardening, Memory, Skills, and Agents UI contracts. Migrate assertions that hard-code old destinations, geometry, or global hints while retaining behavioral assertions on state/identity/review handling. Run `cargo test --locked`, `cargo fmt --all -- --check`, and `git diff --check` before the task commit. Commit only the changed implementation and its tests.
+- [x] **Step 4: Verify and commit.** Run focused new shell tests plus existing navigation, hardening, Memory, Skills, and Agents UI contracts. Migrate assertions that hard-code old destinations, geometry, or global hints while retaining behavioral assertions on state/identity/review handling. Run `cargo test --locked`, `cargo fmt --all -- --check`, and `git diff --check` before the task commit. Commit only the changed implementation and its tests.
 
 ### Task 2: Complete the friendly Agents workspace and profile editor
 
@@ -110,7 +110,7 @@ Use dark charcoal, near-white, muted secondary text, cyan active focus, NO_COLOR
 - Adds `ProfileTuiField` in profile_editor.rs for Template, DisplayName, Role, Description, PrimarySpecialty, Tags, Personality, Instructions, Bindings, Review, Discard. TUI-only literal methods: `set_tui_field(&mut self, field: ProfileTuiField, text: &str) -> bool`, `move_tui_field(&mut self, forward: bool) -> ProfileTuiField`, `tui_field(&self) -> ProfileTuiField`, `tui_field_text(&self, field: ProfileTuiField) -> &str`. Store field-keyed raw text/errors separately from the validated draft and a dedicated active-field text buffer/cursor in Agents presentation state, not the global command field. Invalid edits still invalidate old previews. Keep `submit_line` fallback behavior unchanged; do not call `submit_keyboard_line` for TUI field prose.
 - Selection-driven profile loads bind `AgentProfileId` plus a selection generation and expected active version, not a mutable row index. Queue/coalesce passive profile loads in the runner using its existing pending-request pattern. A result may install only for the matching current target/generation, and must not change the user's selection or focus. Explicit command-mode outcomes keep their current command routing contract.
 
-- [ ] **Step 1: Add failing real-controller and editor tests.** Extend actual profile fixtures, not mock renderers. Tests must prove Tab from agent list exposes the workspace without a hidden Enter prerequisite; W/S changes selection but Tab does not; Profile/Memory/Skills/History choices all activate their existing exact target; wrong/late profile result cannot become the new selected agent's body; historical version is clearly read-only and Edit uses the active target.
+- [x] **Step 1: Add failing real-controller and editor tests.** Extend actual profile fixtures, not mock renderers. Tests must prove Tab from agent list exposes the workspace without a hidden Enter prerequisite; W/S changes selection but Tab does not; Profile/Memory/Skills/History choices all activate their existing exact target; wrong/late profile result cannot become the new selected agent's body; historical version is clearly read-only and Edit uses the active target.
 
 ```rust
 #[test]
@@ -134,7 +134,7 @@ Additional tests use literal `wasd123456789/n` and `:back` in profile fields, in
 
 Run: `cargo test --locked --test agent_profile_tui_controller_contract --test agent_profile_tui_render_contract --test agent_profile_editor_contract`; first run the new targeted test names to see intended red failures before implementation.
 
-- [ ] **Step 2: Implement readable selection and actions.** Render a stable colored monogram/name, short specialty, status, name/purpose workspace heading, and four obvious choices. Right identity comes immediately from selected list row. Show Loading <name> for absent/mismatched detail and discard stale detail. A/D moves horizontally with clamped ends; Esc backs out; W/S scrolls the workspace or its narrow vertical choice list. N starts existing template creation, E edits, H opens history, with visible actions. Tab doesn't open a note body or enter another object.
+- [x] **Step 2: Implement readable selection and actions.** Render a stable colored monogram/name, short specialty, status, name/purpose workspace heading, and four obvious choices. Right identity comes immediately from selected list row. Show Loading <name> for absent/mismatched detail and discard stale detail. A/D moves horizontally with clamped ends; Esc backs out; W/S scrolls the workspace or its narrow vertical choice list. N starts existing template creation, E edits, H opens history, with visible actions. Tab doesn't open a note body or enter another object.
 
 ```rust
 let selected = model.agents.profiles.profiles.get(model.agents.selected_profile);
@@ -146,7 +146,7 @@ let detail = model.agents.detail.as_ref().filter(|detail| {
 
 Use readable readiness mapping (Needs connection / Connection unavailable / Bindings configured, plus required engineering binding qualification). Keep IDs and digests internal; show Version N · Current or Historical with human dates and readable changed fields. Expose no raw immutable metadata block. Review and confirmation name operations and objects without requiring ID/token entry. Preserve exact internal review/authentication logic and history version selection. Skills and Memory targets use IDs internally and retain existing protected-workflow constraints. Full actions stay disabled with a readable loading hint until matching detail exists. Profile/history/version result installation cannot reselect the returned object. Starting Edit captures the selected identity and expected active version before dispatch.
 
-- [ ] **Step 3: Implement deliberate TYPE fields without changing fallback protocol.** Profile fields render in the workspace, retain exact editable buffers including invalid input, and validate beside the affected field. Enter enters TYPE; Esc retains draft and returns NAV; Tab leaves TYPE, moves to the next field/section without saving, and preserves old field input. Templates/reference/binding choices remain NAV. N/E opens the workflow; fields can start TYPE when appropriate, never pickers. Profile Enter accepts its single-line field: all durable profile text currently normalizes whitespace, so do not introduce a domain-level line-break change. Memory Note multiline editing remains part of the later Memory slice. Existing fallback colon commands remain exclusively in `submit_line`.
+- [x] **Step 3: Implement deliberate TYPE fields without changing fallback protocol.** Profile fields render in the workspace, retain exact editable buffers including invalid input, and validate beside the affected field. Enter enters TYPE; Esc retains draft and returns NAV; Tab leaves TYPE, moves to the next field/section without saving, and preserves old field input. Templates/reference/binding choices remain NAV. N/E opens the workflow; fields can start TYPE when appropriate, never pickers. Profile Enter accepts its single-line field: all durable profile text currently normalizes whitespace, so do not introduce a domain-level line-break change. Memory Note multiline editing remains part of the later Memory slice. Existing fallback colon commands remain exclusively in `submit_line`.
 
 ```rust
 match (model.input_mode, key.code) {
@@ -164,7 +164,7 @@ match (model.input_mode, key.code) {
 
 Keep draft suspension separate from explicit Discard. Changes invalidate preview generations. Never interpret a TUI field's leading `:` through the existing keyboard helper that currently forwards to control parsing. Keep readonly binding status honest: no Phase 3 credential entry. All currently supported profile draft fields remain reachable, including tags and role through deliberate controls.
 
-- [ ] **Step 4: Verify and commit.** Run the profile editor/TUI contracts and fallback contracts (fallback colon protocol must still work), navigation contracts, and full `cargo test --locked`. Run formatting and whitespace checks. Read the diff, preserving identity/race/review safeguards; commit the tested changes.
+- [x] **Step 4: Verify and commit.** Run the profile editor/TUI contracts and fallback contracts (fallback colon protocol must still work), navigation contracts, and full `cargo test --locked`. Run formatting and whitespace checks. Read the diff, preserving identity/race/review safeguards; commit the tested changes.
 
 ### Task 3: Visual verification, integration coverage, and test guide
 
@@ -178,7 +178,7 @@ Keep draft suspension separate from explicit Discard. Changes invalidate preview
 - Consumes public `render`, `handle_event`, `TuiModel`, actual profile fixture constructors; no application database is required for rendering examples.
 - Produces an honest first-slice guide: 3 Agents, W/S choose, Tab workspace, A/D Memory, Enter open, Esc return; N New and E Edit; NAV/TYPE; 1–9 destinations; later Memory/Skills visual work explicitly outstanding.
 
-- [ ] **Step 1: Inspect the actual rendered terminal output.** Use TestBackend fixtures for selected/unbound agent, empty Agents, history, profile editor, review, and Phase 3 placeholders at 60×18, 80×24, 100×24, 120×30, 160×40 and NO_COLOR. Make any newly discovered behavioral regression a failing test before fixing it. Inspect focus, wrapping, footer, cursor, and retained state when resizing. Do not represent illustration PNGs as implemented screenshots.
+- [x] **Step 1: Inspect the actual rendered terminal output.** Use TestBackend fixtures for selected/unbound agent, empty Agents, history, profile editor, review, and Phase 3 placeholders at 60×18, 80×24, 100×24, 120×30, 160×40 and NO_COLOR. Make any newly discovered behavioral regression a failing test before fixing it. Inspect focus, wrapping, footer, cursor, and retained state when resizing. Do not represent illustration PNGs as implemented screenshots.
 
 ```rust
 let mut terminal = Terminal::new(TestBackend::new(width, height))?;
@@ -188,6 +188,6 @@ for row in terminal.backend().buffer().content().chunks(usize::from(width)) {
 }
 ```
 
-- [ ] **Step 2: Document normal local testing.** Confirm CLI options from existing code/README, then document `make dev` in this worktree. If isolated application data is supported, show the existing explicit app-data override with a temporary directory, not a new macOS account. Do not launch a runtime that modifies the user's real app data during automated validation. Record automated coverage separately from unperformed interactive manual checks.
+- [x] **Step 2: Document normal local testing.** Confirm CLI options from existing code/README, then document `make dev` in this worktree. If isolated application data is supported, show the existing explicit app-data override with a temporary directory, not a new macOS account. Do not launch a runtime that modifies the user's real app data during automated validation. Record automated coverage separately from unperformed interactive manual checks.
 
-- [ ] **Step 3: Run integration gates and commit.** Run `cargo test --locked`, `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `git diff --check`. Update the plan checkboxes with actual progress. Commit the guide and any verified integration fixes. Do not push or merge without user direction. Keep the worktree for testing and review.
+- [x] **Step 3: Run integration gates and commit.** Run `cargo test --locked`, `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `git diff --check`. Update the plan checkboxes with actual progress. Commit the guide and any verified integration fixes. Do not push or merge without user direction. Keep the worktree for testing and review.

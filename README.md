@@ -17,6 +17,8 @@ and bounded deterministic retrieval without adding inference or chat.
 - [Delivery phases](phases.md)
 - [Phase 2 Agent Profile Foundation design](docs/superpowers/specs/2026-09-05-phase-2-agent-profile-foundation-design.md)
 - [Phase 2 Agent Profile testing guide](docs/testing/phase-2-agent-profile-foundation.md)
+- [Two-pane shell and Agents local testing](docs/testing/two-pane-shell-agents.md)
+- [Two-pane TUI design](docs/superpowers/specs/2026-09-12-two-pane-tui-design.md)
 - [Phase 2 Declarative Skills design](docs/superpowers/specs/2026-09-05-declarative-skills-design.md)
 - [Declarative Skills testing and workflow guide](docs/testing/declarative-skills.md)
 - [Phase 2 Hybrid Memory design](docs/superpowers/specs/2026-09-07-phase-2-hybrid-memory-design.md)
@@ -27,6 +29,27 @@ and bounded deterministic retrieval without adding inference or chat.
 The architecture and delivery phases are canonical for the current Rust
 implementation. Older documents under `docs/superpowers/` are retained as
 historical context and are explicitly marked as superseded.
+
+## Try the current TUI
+
+Quit any other running AI Stock Forum instance, then run this from the worktree:
+
+```sh
+make dev
+```
+
+This normal launch uses the existing local application data. It does not need a
+new macOS account or a different home directory. Keep destructive persistence
+and recovery acceptance away from normal state; the
+[two-pane shell and Agents guide](docs/testing/two-pane-shell-agents.md) covers
+the normal usability path, while the older
+[Agent Profile Foundation guide](docs/testing/phase-2-agent-profile-foundation.md)
+retains its specialized disposable-state procedure.
+
+The shared two-pane shell and complete Agents experience are the current first
+redesign slice. Automated gates and production-render previews pass; the
+interactive `make dev` acceptance run has not been performed. See the testing
+guide for the exact evidence record.
 
 ## Phase 0 scope
 
@@ -63,13 +86,14 @@ uses the TooSmall guidance screen.
 | --- | --- |
 | Bare `1`-`9` | Open Home, Chat, Agents, Skills, Connections, Activity, Setup, Audit, or Help from NAV. |
 | `?` | Open Help. |
-| `Tab`, `Shift+Tab` | Move focus forward or backward among visible regions. |
+| `Tab`, `Shift+Tab` | Move focus to the next or previous enabled section, revealing its pane at compact widths. |
 | `WASD` | Move through the focused NAV region; shifted uppercase WASD is equivalent. |
 | Arrow keys, `PageUp`, `PageDown`, `Home`, `End` | Quiet navigation equivalents or bounded page movement. |
 | `Esc` | Go back, cancel, or clear the current interaction. |
 | `/` | Focus the command editor with `/` prefilled. |
 | Command editor: text, `Enter`, arrows, `Home`, `End`, `Backspace`, `Delete`, `Up`, `Down`, `Tab`, `Shift+Tab`, `Esc` | Edit, submit, recall in-memory history, move focus, or cancel command entry. |
-| Agent profile editor: `Up`, `Down`, `Enter`, `Esc` | Choose a template, accept the current field, advance, or go back without requiring colon controls. |
+| Agent profile editor in NAV: `WASD`, `Tab`, `Shift+Tab`, `Enter`, `Esc` | Navigate fields and actions; `Enter` deliberately enters TYPE on a text field. |
+| Agent profile editor in TYPE: text, `Enter`, `Esc`, `Tab`, `Shift+Tab` | Enter literal single-line text; retain it when returning to NAV or moving to another field. |
 | `/quit` | Request the auditable normal shutdown from command entry, including the TooSmall screen. |
 | `Ctrl+C` | Request emergency interrupted shutdown from any focus. |
 
@@ -99,12 +123,11 @@ activation, and immutable history workflows; schema version 2 persistence;
 restart recovery; Adaptive Cockpit views; and command-mode parity.
 
 Profile bindings are typed references selected only from an application-supplied
-catalog, never free-form provider or model labels. Readiness is computed as
-`Unbound`, `Binding unavailable`, or `Ready` from the role's required bindings
-and the current catalog snapshot. The production Milestone 1 catalog is empty,
-so normal profiles remain unbound and display `Not Ready`; deterministic tests
-inject catalogs to cover unavailable and ready states. Readiness never contacts
-a provider, authorizes execution, or selects a fallback.
+catalog, never free-form provider or model labels. The Agents TUI presents the
+existing readiness states as `Needs connection`, `Connection unavailable`, and
+`Bindings configured`. These labels describe configured catalog references
+only: they never claim that a provider was contacted, a model can run, or a
+fallback was selected.
 
 Every accepted create installs immutable version 1. An accepted edit first uses
 a passive, local-only preview that writes no event, receipt, draft, profile row,
@@ -115,21 +138,23 @@ restart.
 
 ### Keyboard-first profile editor
 
-In the Adaptive Cockpit, press bare `3` to open Agents, then press `c` to
-create a profile. Bare `1`-`9` work from non-text browsing panes and
-confirmations; while command, profile, or skill text entry owns input, those
-characters remain text.
-Use `Up` and `Down` to choose a complete built-in template. Press `Enter` to
-accept it, then press `Enter` on each prefilled field to keep its current value
-and continue. Typing a replacement before `Enter` saves that replacement and
-continues. `Esc` returns to the previous field or cancels from the first step.
+Press `3` to open Agents and use `W`/`S` to choose an agent. Press `Tab` to move
+into the workspace, use `A`/`D` among Profile, Memory, Skills, and History, and
+press `Enter` to open the selected choice. Normal browsing never requires a UUID
+lookup. The visible Agents actions are `N` New, `E` Edit, and `H` History.
 
-On Create review, `Enter` opens a separate confirmation pane and a second
-`Enter` creates the profile. On Edit review, the first `Enter` requests the
-authoritative preview; after it appears, the next `Enter` opens activation
-confirmation and one more `Enter` activates the immutable revision. Specialty
-tag and optional binding controls remain available as advanced colon commands,
-and all existing editor colon controls remain backward-compatible aliases.
+Profile fields begin in NAV. Select a field and press `Enter` deliberately to
+enter TYPE. In TYPE, WASD, digits, slash, and a leading colon are literal input;
+they do not navigate or invoke editor commands. `Esc` retains the exact text and
+returns to NAV on that field. `Tab` retains it and moves to the next field in
+NAV. Invalid raw input and its error remain available for correction. Profile
+text is normalized to the existing single-line storage contract.
+
+Leaving Agents suspends the draft; only the labeled Discard action abandons it.
+Review and durable confirmation are separate steps. Final mutation requires a
+deliberate `Enter` on the labeled confirmation action: `D` and a held or
+repeated `Enter` cannot perform it. The fallback command-mode editor keeps its
+existing colon grammar; that protocol is not the TUI prose parser.
 
 Fallback line-command mode is unchanged: it retains explicit `:next`,
 `:review`, `:create`, and `:activate` controls plus its exact typed confirmation
