@@ -19,7 +19,7 @@ use ai_stock_forum::{
         tui::{
             ControllerEffect, TuiEvent, apply_outcome, handle_event,
             layout::view_geometry,
-            model::{AgentsPane, AgentsViewState, ProfileConfirmation, TuiModel, View},
+            model::{AgentsPane, AgentsViewState, Focus, ProfileConfirmation, TuiModel, View},
         },
     },
 };
@@ -112,6 +112,41 @@ fn profile_summary(id: u128) -> AgentProfileSummary {
         readiness: AgentReadiness::Unbound,
         content_digest: profile.content_digest().clone(),
     }
+}
+
+#[test]
+fn logical_list_focus_routes_agent_keys_to_the_visible_profile_list() {
+    let mut model = model();
+    model.select_view(View::Agents);
+    model.agents.profiles = AgentProfilesView {
+        profiles: vec![profile_summary(30_000), profile_summary(31_000)],
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
+    };
+    model.agents.detail = Some(AgentProfileView {
+        profile: profile_version(30_000),
+        readiness: AgentReadiness::Unbound,
+    });
+    model.agents.pane = AgentsPane::Detail;
+    model.agents.detail_scroll = 7;
+    model.set_focus(Focus::List);
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Char('s'))),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.agents.selected_profile, 1);
+    assert_eq!(model.agents.detail_scroll, 7);
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::LoadAgentProfile {
+            selected_profile: 1
+        }
+    );
+    assert_eq!(model.focus, Focus::Workspace);
+    assert_eq!(model.agents.pane, AgentsPane::Detail);
 }
 
 fn outcome(view: CommandView) -> CommandOutcome {

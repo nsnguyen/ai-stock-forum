@@ -171,6 +171,31 @@ fn hidden_profile_editor_does_not_claim_the_skills_command_bar() {
 }
 
 #[test]
+fn legacy_profile_editor_footer_matches_its_enter_escape_and_inert_tab_controls() {
+    let mut model = model(false, AgentsPane::Editor);
+    model.agents.editor = Some(
+        ProfileEditor::for_create(&builtin_profile_templates()[0]).expect("valid create editor"),
+    );
+    model.command.ingest("literal draft");
+
+    let text = render_text(&model, 100, 30);
+    for hint in ["WASD text", "Enter accept", "Esc back/cancel"] {
+        assert!(text.contains(hint), "missing profile editor hint {hint:?}");
+    }
+    assert!(!text.contains("Tab next field"));
+
+    let before = model.clone();
+    assert_eq!(
+        handle_event(
+            &mut model,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        ),
+        ControllerEffect::None
+    );
+    assert_eq!(model, before);
+}
+
+#[test]
 fn agents_layout_uses_one_or_two_panes_at_exact_width_breakpoints() {
     let list = model(true, AgentsPane::List);
     let narrow_list = render_text(&list, 79, 24);

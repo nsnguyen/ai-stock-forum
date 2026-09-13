@@ -42,9 +42,10 @@ pub(super) fn workspace_content_height(model: &TuiModel, width: u16) -> u16 {
     match model.active_view {
         View::Overview => overview::content_height(model, width),
         View::Chat | View::Connections => 5,
-        View::Activity => {
-            u16::try_from(model.audit_entries.len().saturating_add(3)).unwrap_or(u16::MAX)
-        }
+        View::Activity => wrapped_height(
+            activity_lines(model, &Theme::from_no_color(true)),
+            width.max(1),
+        ),
         View::Setup => setup::content_height(model, width),
         View::Audit => 0,
         View::Help => help::content_height(width),
@@ -200,6 +201,16 @@ fn render_future(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, name: &str
 }
 
 fn render_activity(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    frame.render_widget(
+        Paragraph::new(activity_lines(model, theme))
+            .block(panel("Activity", model.focus == Focus::Workspace, theme))
+            .wrap(Wrap { trim: false })
+            .scroll((model.workspace_scroll, 0)),
+        area,
+    );
+}
+
+fn activity_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::styled("Recent local activity", theme.accent),
         Line::styled(
@@ -219,13 +230,7 @@ fn render_activity(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &
                 .map(|entry| Line::raw(format!("• {}", safe_text(&entry.summary)))),
         );
     }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel("Activity", model.focus == Focus::Workspace, theme))
-            .wrap(Wrap { trim: false })
-            .scroll((model.workspace_scroll, 0)),
-        area,
-    );
+    lines
 }
 
 #[cfg(test)]

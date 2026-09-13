@@ -847,7 +847,11 @@ impl MemoryViewState {
     }
 
     pub(crate) fn local_layer_cache_is_authenticated(&self) -> bool {
-        match self.pane {
+        self.layer_cache_is_authenticated(self.pane)
+    }
+
+    pub(crate) fn layer_cache_is_authenticated(&self, pane: MemoryPane) -> bool {
+        match pane {
             MemoryPane::EntryList => self.authenticated_entries().is_some_and(|(_, counts)| {
                 counts.displayed == 0 || self.authenticated_selected_entry().is_some()
             }),

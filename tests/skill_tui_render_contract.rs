@@ -14,13 +14,15 @@ use ai_stock_forum::{
     ui::{
         skill_editor::SkillEditor,
         tui::{
-            AssignmentKind, SkillConfirmation, SkillOperationOrigin,
+            AssignmentKind, ControllerEffect, SkillConfirmation, SkillOperationOrigin, TuiEvent,
+            handle_event,
             model::{AgentsPane, Focus, Severity, SkillsPane, TuiModel, View},
             render,
             theme::Theme,
         },
     },
 };
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
 use uuid::Uuid;
 
@@ -677,6 +679,29 @@ fn editor_review_names_create_v1_and_the_next_object_version_without_fabricating
     assert!(text.contains("Exact version v2"));
     assert!(text.contains("version ID assigned on commit"));
     assert!(!text.contains(&SkillVersionId::from_uuid(Uuid::from_u128(1_502)).to_string()));
+}
+
+#[test]
+fn legacy_skill_editor_footer_does_not_advertise_unimplemented_tab_traversal() {
+    let mut model = skills_model(SkillsPane::Editor);
+    model.skills.editor = Some(SkillEditor::for_create(None));
+    model.command.ingest("literal draft");
+
+    let text = render_text(&model, 100, 30);
+    for hint in ["WASD text", "Enter accept", "Esc back/cancel"] {
+        assert!(text.contains(hint), "missing skill editor hint {hint:?}");
+    }
+    assert!(!text.contains("Tab next field"));
+
+    let before = model.clone();
+    assert_eq!(
+        handle_event(
+            &mut model,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        ),
+        ControllerEffect::None
+    );
+    assert_eq!(model, before);
 }
 
 #[test]

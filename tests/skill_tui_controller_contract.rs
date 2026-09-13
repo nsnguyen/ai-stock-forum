@@ -622,6 +622,40 @@ fn skill(seed: u128, name: &str) -> SkillVersion {
     .expect("skill")
 }
 
+#[test]
+fn logical_list_focus_routes_skills_keys_to_the_visible_library() {
+    let first = skill(90_000, "First visible skill");
+    let second = skill(90_100, "Second visible skill");
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.library_loaded = true;
+    model.skills.library = SkillsView {
+        skills: vec![summary(&first), summary(&second)],
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
+    };
+    model.skills.detail = Some(skill_view(&first));
+    model.skills.pane = SkillsPane::Detail;
+    model.skills.selected_action_index = 0;
+    model.set_focus(Focus::List);
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Char('s'))),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.skills.selected_skill, 1);
+    assert_eq!(model.skills.selected_action_index, 0);
+    assert_eq!(model.skills.pane, SkillsPane::Detail);
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::LoadSkill { selected_skill: 1 }
+    );
+    assert_eq!(model.focus, Focus::Workspace);
+    assert_eq!(model.skills.pane, SkillsPane::Detail);
+}
+
 fn summary(skill: &SkillVersion) -> SkillSummary {
     SkillSummary {
         skill_ref: skill.reference(),

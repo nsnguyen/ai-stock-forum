@@ -1054,7 +1054,12 @@ fn apply_skill_editor_effect(model: &mut TuiModel, effect: SkillEditorEffect) ->
 }
 
 fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEffect> {
-    let effect = match (model.skills.pane, key.code) {
+    let interaction_pane = if model.focus == Focus::List {
+        SkillsPane::List
+    } else {
+        model.skills.pane
+    };
+    let effect = match (interaction_pane, key.code) {
         (_, KeyCode::Char('/')) if no_modifiers(key.modifiers) => {
             model.command.clear();
             model.command.insert('/');
@@ -1071,12 +1076,14 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             ControllerEffect::Redraw
         }
         (SkillsPane::List, KeyCode::Enter) if no_modifiers(key.modifiers) => {
+            model.set_focus(Focus::Workspace);
             ControllerEffect::LoadSkill {
                 selected_skill: model.skills.selected_skill,
             }
         }
         (SkillsPane::List, KeyCode::Char('c')) if no_modifiers(key.modifiers) => {
             model.skills.pane = SkillsPane::CreateSource;
+            model.set_focus(Focus::Workspace);
             ControllerEffect::Redraw
         }
         (SkillsPane::CreateSource, KeyCode::Down) if no_modifiers(key.modifiers) => {
@@ -1257,7 +1264,12 @@ fn restore_skill_origin(model: &mut TuiModel, origin: SkillOperationOrigin) {
 }
 
 fn unwind_skills(model: &mut TuiModel) -> ControllerEffect {
-    match model.skills.pane {
+    let interaction_pane = if model.focus == Focus::List {
+        SkillsPane::List
+    } else {
+        model.skills.pane
+    };
+    match interaction_pane {
         SkillsPane::List => match model.skills.workspace_origin.take() {
             Some(SkillWorkspaceOrigin::Cockpit(view)) => model.select_view(view),
             Some(SkillWorkspaceOrigin::AgentSkills { profile_id }) => {
@@ -1840,8 +1852,8 @@ fn memory_pane_local_key(pane: MemoryPane, code: KeyCode) -> bool {
     }
 }
 
-fn memory_detail_scroll_owned(memory: &MemoryViewState) -> bool {
-    match memory.pane {
+fn memory_detail_scroll_owned(memory: &MemoryViewState, interaction_pane: MemoryPane) -> bool {
+    match interaction_pane {
         MemoryPane::EntryHistory => exact_history_version_is_installed(memory),
         MemoryPane::EntryDetail
         | MemoryPane::Editor
@@ -1852,6 +1864,31 @@ fn memory_detail_scroll_owned(memory: &MemoryViewState) -> bool {
         | MemoryPane::ProposalResolutionReview
         | MemoryPane::EpisodicDetail => true,
         MemoryPane::EntryList | MemoryPane::Proposals | MemoryPane::EpisodicSummaries => false,
+    }
+}
+
+fn memory_primary_pane(memory: &MemoryViewState) -> MemoryPane {
+    match memory.pane {
+        MemoryPane::EntryHistory => MemoryPane::EntryHistory,
+        MemoryPane::EntryList
+        | MemoryPane::EntryDetail
+        | MemoryPane::Editor
+        | MemoryPane::MutationReview => MemoryPane::EntryList,
+        MemoryPane::Confirmation => match memory.confirmed_command() {
+            Some(
+                ApplicationCommand::ApproveMemoryProposal { .. }
+                | ApplicationCommand::RejectMemoryProposal { .. },
+            ) => MemoryPane::Proposals,
+            _ => MemoryPane::EntryList,
+        },
+        MemoryPane::Result => match memory.result_origin {
+            MemoryResultOrigin::Mutation => MemoryPane::EntryList,
+            MemoryResultOrigin::Resolution => MemoryPane::Proposals,
+        },
+        MemoryPane::Proposals
+        | MemoryPane::ProposalDetail
+        | MemoryPane::ProposalResolutionReview => MemoryPane::Proposals,
+        MemoryPane::EpisodicSummaries | MemoryPane::EpisodicDetail => MemoryPane::EpisodicSummaries,
     }
 }
 
@@ -1895,28 +1932,36 @@ fn move_memory_detail_scroll(
 
 fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
     let (list_page, detail_page) = memory_page_sizes(model);
+    let interaction_pane = if model.focus == Focus::List {
+        memory_primary_pane(&model.agents.memory)
+    } else {
+        model.agents.memory.pane
+    };
     if no_modifiers(key.modifiers)
         && key.code != KeyCode::Esc
-        && (memory_pane_local_key(model.agents.memory.pane, key.code)
+        && (memory_pane_local_key(interaction_pane, key.code)
             || matches!(
-                model.agents.memory.pane,
+                interaction_pane,
                 MemoryPane::Editor
                     | MemoryPane::MutationReview
                     | MemoryPane::Confirmation
                     | MemoryPane::ProposalResolutionReview
             ))
-        && !model.agents.memory.local_layer_cache_is_authenticated()
+        && !model
+            .agents
+            .memory
+            .layer_cache_is_authenticated(interaction_pane)
     {
         return ControllerEffect::Redraw;
     }
     let memory = &mut model.agents.memory;
     if no_modifiers(key.modifiers)
-        && memory_detail_scroll_owned(memory)
+        && memory_detail_scroll_owned(memory, interaction_pane)
         && move_memory_detail_scroll(memory, key.code, detail_page)
     {
         return ControllerEffect::Redraw;
     }
-    match (memory.pane, key.code) {
+    match (interaction_pane, key.code) {
         (MemoryPane::EntryList, code)
             if no_modifiers(key.modifiers) && memory_list_movement(code).is_some() =>
         {
@@ -1950,6 +1995,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                 );
             };
             set_memory_pane(memory, MemoryPane::EntryDetail);
+            model.set_focus(Focus::Workspace);
             ControllerEffect::LoadMemoryEntry { selector, key }
         }
         (MemoryPane::EntryList, KeyCode::Char('c')) if no_modifiers(key.modifiers) => {
@@ -1960,6 +2006,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                 Ok(()) => {
                     memory.detail_scroll = 0;
                     model.command.clear();
+                    model.set_focus(Focus::Workspace);
                     ControllerEffect::Redraw
                 }
                 Err(error) => memory_failure(model, error),
@@ -2088,6 +2135,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                     crate::domain::DomainError::MemorySelectionUnavailable,
                 );
             };
+            model.set_focus(Focus::Workspace);
             ControllerEffect::LoadMemoryEntryVersion {
                 selector,
                 key,
@@ -2131,6 +2179,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                 );
             };
             set_memory_pane(memory, MemoryPane::ProposalDetail);
+            model.set_focus(Focus::Workspace);
             ControllerEffect::LoadMemoryProposal(proposal_id)
         }
         (MemoryPane::ProposalDetail, KeyCode::Right) if no_modifiers(key.modifiers) => {
@@ -2201,6 +2250,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                 );
             };
             set_memory_pane(memory, MemoryPane::EpisodicDetail);
+            model.set_focus(Focus::Workspace);
             ControllerEffect::LoadEpisodicSummary(summary_id)
         }
         (MemoryPane::MutationReview | MemoryPane::ProposalResolutionReview, KeyCode::Esc)
@@ -2303,14 +2353,22 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
 }
 
 fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEffect> {
-    if model.agents.pane == AgentsPane::Detail && model.agents.skill_panel_open {
+    if model.focus != Focus::List
+        && model.agents.pane == AgentsPane::Detail
+        && model.agents.skill_panel_open
+    {
         return handle_agent_skills_key(model, key);
     }
     if model.agents.pane == AgentsPane::Memory {
         let effect = handle_memory_key(model, key);
         return (effect != ControllerEffect::None).then_some(effect);
     }
-    let effect = match (model.agents.pane, key.code) {
+    let interaction_pane = if model.focus == Focus::List {
+        AgentsPane::List
+    } else {
+        model.agents.pane
+    };
+    let effect = match (interaction_pane, key.code) {
         (AgentsPane::List, KeyCode::Down) if no_modifiers(key.modifiers) => {
             let last = model.agents.profiles.profiles.len().saturating_sub(1);
             model
@@ -2328,6 +2386,7 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
         }
         (AgentsPane::List, KeyCode::Enter) if no_modifiers(key.modifiers) => {
             model.agents.pane = AgentsPane::Detail;
+            model.set_focus(Focus::Workspace);
             ControllerEffect::LoadAgentProfile {
                 selected_profile: model.agents.selected_profile,
             }
@@ -2336,10 +2395,12 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             if no_modifiers(key.modifiers) =>
         {
             let template_index = model.agents.selected_template;
+            model.set_focus(Focus::Workspace);
             ControllerEffect::StartProfileCreate { template_index }
         }
         (AgentsPane::List, KeyCode::Char('e')) if no_modifiers(key.modifiers) => {
             model.agents.pane = AgentsPane::Editor;
+            model.set_focus(Focus::Workspace);
             ControllerEffect::StartProfileEdit {
                 selected_profile: model.agents.selected_profile,
             }
@@ -2575,7 +2636,12 @@ fn move_agent_skill_action(model: &mut TuiModel, forward: bool) {
 }
 
 fn unwind_agents(model: &mut TuiModel) -> ControllerEffect {
-    match model.agents.pane {
+    let interaction_pane = if model.focus == Focus::List {
+        AgentsPane::List
+    } else {
+        model.agents.pane
+    };
+    match interaction_pane {
         AgentsPane::List => {
             model.select_view(View::Overview);
             ControllerEffect::Redraw

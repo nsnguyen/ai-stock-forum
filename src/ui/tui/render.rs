@@ -7,7 +7,7 @@ use ratatui::{
 
 use super::{
     layout::{MIN_HEIGHT, MIN_WIDTH, calculate_with_input},
-    model::{AgentsPane, Focus, InputMode, LayoutMode, NavigationTab, Severity, TuiModel, View},
+    model::{AgentsPane, Focus, LayoutMode, NavigationTab, Severity, TuiModel, View},
     theme::Theme,
     views,
 };
@@ -104,14 +104,12 @@ fn numbered_tabs(model: &TuiModel, width: usize, theme: &Theme) -> Vec<Line<'sta
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
-    let mode = if model.input_is_visible() {
-        InputMode::Type
+    let text = if model.focus == Focus::Command {
+        " TYPE  Tab leave input  WASD text  Enter run  Esc clear"
+    } else if model.input_is_visible() {
+        " TYPE  WASD text  Enter accept  Esc back/cancel"
     } else {
-        model.input_mode
-    };
-    let text = match mode {
-        InputMode::Nav => " NAV   Tab next section  WASD move  Enter open  Esc back",
-        InputMode::Type => " TYPE  Tab next field  WASD text  Enter accept  Esc keep & leave",
+        " NAV   Tab next section  WASD move  Enter open  Esc back"
     };
     frame.render_widget(
         Paragraph::new(Line::styled(text, theme.muted)).block(

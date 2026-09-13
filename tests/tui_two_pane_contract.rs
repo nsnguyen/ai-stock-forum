@@ -1,6 +1,7 @@
 use ai_stock_forum::{
     app::{AgentProfilesView, DatabaseReadiness, PresentationSnapshot, ProcessGuardOwnership},
-    domain::{InstallationId, SessionId},
+    audit::AuditEntry,
+    domain::{Actor, CorrelationId, InstallationId, SessionId},
     setup::SetupStatus,
     ui::tui::{
         ControllerEffect, TuiEvent, handle_event,
@@ -314,4 +315,63 @@ fn model_geometry_reserves_space_only_while_input_is_visible() {
     handle_event(&mut model, key(KeyCode::Esc));
     assert_eq!(model.input_mode, InputMode::Nav);
     assert_eq!(model.workspace_body_height, idle_height);
+}
+
+#[test]
+fn command_footer_matches_tab_enter_and_escape_controller_behavior() {
+    let mut model = model();
+    handle_event(&mut model, key(KeyCode::Char('/')));
+    model.command.insert('h');
+    let footer = render_text(&model, 100, 24);
+    for hint in ["Tab leave input", "WASD text", "Enter run", "Esc clear"] {
+        assert!(footer.contains(hint), "missing command hint {hint:?}");
+    }
+    assert!(!footer.contains("Tab next field"));
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Tab)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.focus, Focus::Workspace);
+    assert_eq!(model.command.text(), "/h");
+
+    model.set_focus(Focus::Command);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Esc)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.focus, Focus::Workspace);
+    assert_eq!(model.command.text(), "");
+}
+
+#[test]
+fn activity_end_reaches_the_final_wrapped_summary_at_minimum_size() {
+    let mut model = model();
+    model.replace_audit(
+        (1..=6)
+            .map(|sequence| AuditEntry {
+                sequence,
+                occurred_at_ms: 1_800_000_000_000 + i64::try_from(sequence).unwrap(),
+                actor: Actor::Human,
+                kind: "activity_test".to_owned(),
+                correlation_id: CorrelationId::from_uuid(Uuid::from_u128(sequence.into())),
+                summary: if sequence == 1 {
+                    format!(
+                        "{} FINAL-WRAPPED-ACTIVITY",
+                        "oldest long summary ".repeat(8)
+                    )
+                } else {
+                    format!("{} {sequence}", "newer long summary ".repeat(8))
+                },
+            })
+            .collect(),
+    );
+    model.set_terminal_size(60, 18);
+    handle_event(&mut model, key(KeyCode::Char('6')));
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::End)),
+        ControllerEffect::Redraw
+    );
+    assert!(model.workspace_scroll > 0);
+    assert!(render_text(&model, 60, 18).contains("FINAL-WRAPPED-ACTIVITY"));
 }

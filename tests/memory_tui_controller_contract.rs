@@ -1913,6 +1913,43 @@ fn memory_model(profile: &AgentProfileVersion) -> TuiModel {
     model
 }
 
+#[test]
+fn logical_list_focus_routes_memory_keys_to_the_visible_primary_list() {
+    let owner = profile(90_000);
+    let first = entry(&owner, 90_100, "First visible memory");
+    let second = entry(&owner, 90_200, "Second visible memory");
+    let selector = AgentProfileSelector::Id(owner.profile_id());
+    let mut model = memory_model(&owner);
+    model.agents.memory.entries = Some(populated_entries_view(
+        &owner,
+        &[first.clone(), second.clone()],
+    ));
+    model.agents.memory.entry_detail = Some(MemoryEntryView {
+        profile: owner.reference(),
+        entry: first,
+    });
+    model.agents.memory.pane = MemoryPane::EntryDetail;
+    model.agents.memory.detail_scroll = 7;
+    model.set_focus(Focus::List);
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Char('s'))),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.agents.memory.selected_entry, 1);
+    assert_eq!(model.agents.memory.detail_scroll, 0);
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::LoadMemoryEntry {
+            selector,
+            key: "Second visible memory".to_owned(),
+        }
+    );
+    assert_eq!(model.focus, Focus::Workspace);
+    assert_eq!(model.agents.memory.pane, MemoryPane::EntryDetail);
+}
+
 fn invalid_editor_model(
     owner: &AgentProfileVersion,
     selector: AgentProfileSelector,
