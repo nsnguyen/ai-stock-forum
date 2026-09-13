@@ -26,7 +26,9 @@ use ai_stock_forum::{
     ui::memory_editor::{MEMORY_PLAINTEXT_WARNING, MemoryEditor},
     ui::tui::{
         TuiEvent, handle_event,
-        layout::{memory_layout_mode, memory_workspace, view_geometry_for_state},
+        layout::{
+            calculate_with_input, memory_layout_mode, memory_workspace, view_geometry_for_state,
+        },
         model::{
             AgentDetailAction, AgentsPane, Focus, MemoryConfirmation, MemoryPane,
             MemoryProposalDetailAction, MemoryResultOrigin, TuiModel, View,
@@ -597,7 +599,7 @@ fn assert_fixed_safety_surface_at_every_supported_pane_count(
         .to_string();
     for width in [60, 100, 140] {
         let panel = render_memory_detail_text(model, width, 18);
-        let normalized = panel.lines().map(str::trim).collect::<Vec<_>>().join(" ");
+        let normalized = normalized_panel_text(&panel);
         for required in [
             profile_id.as_str(),
             operation,
@@ -923,17 +925,32 @@ fn render_text(model: &TuiModel, width: u16, height: u16) -> String {
     render_rows(model, width, height).join("\n")
 }
 
+fn normalized_panel_text(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            line.trim_matches(|character| matches!(character, '│' | '┌' | '┐' | '└' | '┘' | '─'))
+                .trim()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn render_memory_detail_text(model: &TuiModel, width: u16, height: u16) -> String {
-    let geometry = view_geometry_for_state(
+    let input_active = model.agents.memory.pane == MemoryPane::Editor
+        && model.agents.memory.editor.as_ref().is_some_and(|editor| {
+            matches!(
+                editor.step(),
+                ai_stock_forum::ui::memory_editor::MemoryEditorStep::Key
+                    | ai_stock_forum::ui::memory_editor::MemoryEditorStep::Value
+                    | ai_stock_forum::ui::memory_editor::MemoryEditorStep::PurposeTags
+            )
+        });
+    let cockpit = calculate_with_input(
         Rect::new(0, 0, width, height),
-        View::Agents,
         model.inspector_open,
-        true,
+        input_active,
     );
-    let nested = memory_workspace(
-        geometry.cockpit.workspace,
-        memory_layout_mode(geometry.cockpit.workspace),
-    );
+    let nested = memory_workspace(cockpit.workspace, memory_layout_mode(cockpit.workspace));
     let area = nested.detail.unwrap_or(nested.primary);
     render_rows(model, width, height)
         .into_iter()
@@ -981,9 +998,11 @@ fn direct_memory_layout_boundaries_use_the_actual_workspace_width() {
         (59, 1, false, false),
         (60, 1, false, false),
         (79, 1, false, false),
-        (80, 2, true, false),
+        (80, 1, false, false),
+        (99, 1, false, false),
+        (100, 2, true, false),
         (119, 2, true, false),
-        (120, 3, true, true),
+        (120, 2, true, false),
     ];
 
     for (width, pane_count, has_detail, has_context) in cases {
@@ -1013,9 +1032,9 @@ fn memory_cockpit_returns_the_generic_inspector_width_without_a_boundary_shrink(
         (59, 18, 59, false),
         (60, 17, 60, false),
         (60, 18, 60, false),
-        (119, 30, 99, true),
-        (120, 30, 100, true),
-        (140, 30, 120, true),
+        (119, 30, 119, false),
+        (120, 30, 120, false),
+        (140, 30, 140, false),
     ] {
         let geometry =
             view_geometry_for_state(Rect::new(0, 0, width, height), View::Agents, true, true);
@@ -1042,16 +1061,26 @@ fn rendered_memory_keeps_the_inspector_latent_and_minimum_frame_legible() {
     assert!(wide.inspector_open);
 
     let wide_text = render_text(&wide, 140, 30);
-    assert!(wide_text.contains(" Navigation "));
+    assert!(wide_text.contains("3 Agents"));
     assert!(!wide_text.contains(" Inspector "));
 
     let minimum = memory_model(60, 18);
     let rows = render_rows(&minimum, 60, 18);
     assert_eq!(rows[0].trim_end(), "AI STOCK FORUM  /  Agents  /  Narrow");
-    assert_eq!(
-        rows[2].trim_end(),
-        "1 Overview 2 Setup 3 Audit 4 Help a Agents s Skills"
-    );
+    let minimum_text = rows.join("\n");
+    for label in [
+        "1 Home",
+        "2 Chat",
+        "3 Agents",
+        "4 Skills",
+        "5 Connections",
+        "6 Activity",
+        "7 Setup",
+        "8 Audit",
+        "9 Help",
+    ] {
+        assert!(minimum_text.contains(label), "missing {label:?}");
+    }
     assert!(!rows.join("\n").contains("Terminal too small"));
 
     let too_short = render_text(&memory_model(60, 17), 60, 17);
@@ -1068,24 +1097,24 @@ fn memory_focus_omits_inspector_and_i_is_a_state_neutral_redraw() {
         handle_event(&mut model, key(KeyCode::Tab)),
         ai_stock_forum::ui::tui::ControllerEffect::Redraw
     );
-    assert_eq!(model.focus, Focus::Workspace);
+    assert_eq!(model.focus, Focus::List);
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Tab)),
         ai_stock_forum::ui::tui::ControllerEffect::Redraw
     );
-    assert_eq!(model.focus, Focus::Command);
+    assert_eq!(model.focus, Focus::Workspace);
     assert_eq!(
         handle_event(&mut model, key(KeyCode::BackTab)),
         ai_stock_forum::ui::tui::ControllerEffect::Redraw
     );
-    assert_eq!(model.focus, Focus::Workspace);
+    assert_eq!(model.focus, Focus::List);
 
     let saved_open = model.inspector_open;
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Char('i'))),
         ai_stock_forum::ui::tui::ControllerEffect::Redraw
     );
-    assert_eq!(model.focus, Focus::Workspace);
+    assert_eq!(model.focus, Focus::List);
     assert_eq!(model.inspector_open, saved_open);
 }
 
@@ -1097,7 +1126,7 @@ fn entering_and_leaving_memory_synchronizes_the_shared_cockpit_geometry() {
     model.agents.selected_detail_action = AgentDetailAction::Memory;
     model.inspector_open = true;
     model.set_terminal_size(140, 30);
-    assert_eq!(model.workspace_body_width, 86);
+    assert_eq!(model.workspace_body_width, 138);
 
     let effect = handle_event(&mut model, key(KeyCode::Enter));
     assert!(matches!(
@@ -1105,13 +1134,13 @@ fn entering_and_leaving_memory_synchronizes_the_shared_cockpit_geometry() {
         ai_stock_forum::ui::tui::ControllerEffect::LoadAgentMemory(_)
     ));
     assert_eq!(model.agents.pane, AgentsPane::Memory);
-    assert_eq!(model.workspace_body_width, 118);
+    assert_eq!(model.workspace_body_width, 138);
     assert!(model.inspector_open);
 
     let effect = handle_event(&mut model, key(KeyCode::Esc));
     assert_eq!(effect, ai_stock_forum::ui::tui::ControllerEffect::Redraw);
     assert_eq!(model.agents.pane, AgentsPane::Detail);
-    assert_eq!(model.workspace_body_width, 86);
+    assert_eq!(model.workspace_body_width, 138);
     assert!(model.inspector_open);
 
     assert_eq!(
@@ -1120,21 +1149,21 @@ fn entering_and_leaving_memory_synchronizes_the_shared_cockpit_geometry() {
     );
     assert!(model.inspector_open);
     assert_eq!(model.focus, Focus::Inspector);
-    assert_eq!(model.workspace_body_width, 86);
+    assert_eq!(model.workspace_body_width, 138);
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Char('i'))),
         ai_stock_forum::ui::tui::ControllerEffect::Redraw
     );
     assert!(!model.inspector_open);
     assert_eq!(model.focus, Focus::Workspace);
-    assert_eq!(model.workspace_body_width, 86);
+    assert_eq!(model.workspace_body_width, 138);
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Char('i'))),
         ai_stock_forum::ui::tui::ControllerEffect::Redraw
     );
     assert!(model.inspector_open);
     assert_eq!(model.focus, Focus::Inspector);
-    assert_eq!(model.workspace_body_width, 86);
+    assert_eq!(model.workspace_body_width, 138);
     assert!(render_text(&model, 140, 30).contains(" Inspector "));
 }
 
@@ -1145,18 +1174,21 @@ fn loaded_agent_detail_prepends_the_nested_memory_action_selector() {
     model.agents.pane = AgentsPane::Detail;
 
     let text = render_text(&model, 160, 40);
-    assert!(text.contains("Assigned Skills | Memory"));
-    assert!(text.contains("Left/Right: choose | Enter: open"));
+    for label in ["Profile", "Memory", "Skills", "History"] {
+        assert!(text.contains(label));
+    }
+    assert!(text.contains("A/D choose   Enter open"));
 
     model.agents.selected_detail_action = AgentDetailAction::Memory;
     let selected_text = render_text(&model, 160, 40);
-    assert_eq!(selected_text.matches("Assigned Skills | Memory").count(), 1);
-    assert_eq!(
+    assert!(
         selected_text
-            .matches("Left/Right: choose | Enter: open")
-            .count(),
-        1
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains("Profile Memory Skills History")
     );
+    assert_eq!(selected_text.matches("A/D choose   Enter open").count(), 1);
 }
 
 #[test]
@@ -1199,19 +1231,19 @@ fn memory_input_title_is_owned_only_by_active_text_entry_stages() {
 
     model.agents.memory.pane = MemoryPane::EntryList;
     let inactive_pane = render_text(&model, 100, 30);
-    assert!(inactive_pane.contains(" Command "));
+    assert!(!inactive_pane.contains(" Command "));
     assert!(!inactive_pane.contains(" Memory input "));
 
     model.agents.memory.pane = MemoryPane::Editor;
     model.active_view = View::Help;
     let hidden_tab = render_text(&model, 100, 30);
-    assert!(hidden_tab.contains(" Command "));
+    assert!(!hidden_tab.contains(" Command "));
     assert!(!hidden_tab.contains(" Memory input "));
 
     model.active_view = View::Agents;
     model.skills.active = true;
     let overlay = render_text(&model, 100, 30);
-    assert!(overlay.contains(" Command "));
+    assert!(!overlay.contains(" Command "));
     assert!(!overlay.contains(" Memory input "));
 }
 
@@ -1259,7 +1291,7 @@ fn invalid_memory_editors_neither_claim_the_command_bar_nor_render_their_draft()
         model.command.ingest("INVALID MEMORY EDITOR DRAFT");
 
         let text = render_text(&model, 100, 30);
-        assert!(text.contains(" Command "), "case={label}\n{text}");
+        assert!(!text.contains(" Command "), "case={label}\n{text}");
         assert!(!text.contains(" Memory input "), "case={label}\n{text}");
         assert!(
             !text.contains("INVALID MEMORY EDITOR DRAFT"),
@@ -1280,14 +1312,14 @@ fn hostile_memory_metadata_is_visibly_escaped_instead_of_silently_replaced() {
         .profile
         .as_mut()
         .expect("identity")
-        .display_name = "Owner\n\u{1b}\u{202e}\u{e9}".to_owned();
+        .display_name = "Owner\u{e9}\t\n\u{85}\u{1b}\u{202e}".to_owned();
     let entry = memory_entry(&model, 100, "safe key");
     install_entries(
         &mut model,
         vec![entry_summary(
             &entry,
-            "Key\n\u{1b}\u{202e}\u{e9}\t\u{85}".to_owned(),
-            vec!["Tag\t\u{85}".to_owned()],
+            "Key\n\u{85}\u{1b}\u{202e}\u{e9}\t".to_owned(),
+            vec!["Tag\u{85}\t".to_owned()],
         )],
     );
 
@@ -1760,7 +1792,7 @@ fn entry_list_preview_is_metadata_only_even_when_matching_detail_is_cached() {
 }
 
 #[test]
-fn matching_entry_detail_uses_one_two_and_three_column_composition() {
+fn matching_entry_detail_uses_one_and_two_column_composition() {
     let mut model = model_with_profile();
     model.active_view = View::Agents;
     model.agents.pane = AgentsPane::Memory;
@@ -1786,7 +1818,7 @@ fn matching_entry_detail_uses_one_two_and_three_column_composition() {
     assert!(medium.contains("Memory entries"));
     assert!(medium.contains("Entry detail"));
     assert!(medium.contains("value 600"));
-    assert!(!medium.contains("Entry context"));
+    assert!(medium.contains("Entry context"));
 
     let wide = render_text(&model, 140, 30);
     for expected in [
@@ -1825,6 +1857,40 @@ fn mismatched_entry_detail_fails_closed_without_cached_value_or_substitution() {
     assert!(text.contains("reload"));
     assert!(!text.contains("value 800"));
     assert!(!text.contains("stale key"));
+}
+
+#[test]
+fn final_memory_history_list_hint_matches_cached_version_escape_step() {
+    let mut model = model_with_profile();
+    model.active_view = View::Agents;
+    model.agents.pane = AgentsPane::Memory;
+    bind_memory(&mut model);
+    let entry = memory_entry(&model, 80_900, "retained history");
+    install_entries(
+        &mut model,
+        vec![entry_summary(
+            &entry,
+            entry.display_key().to_owned(),
+            Vec::new(),
+        )],
+    );
+    install_entry_detail(&mut model, entry.clone());
+    install_history(&mut model, &entry, std::slice::from_ref(&entry));
+    model.agents.memory.pane = MemoryPane::EntryHistory;
+    model.agents.memory.entry_version = Some(MemoryEntryVersionView {
+        profile: model.agents.detail.as_ref().unwrap().profile.reference(),
+        entry,
+    });
+    model.set_focus(Focus::List);
+    model.set_terminal_size(60, 18);
+    assert!(render_text(&model, 60, 18).contains("Esc: clear cached version"));
+    handle_event(
+        &mut model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    );
+    assert_eq!(model.agents.memory.pane, MemoryPane::EntryHistory);
+    assert!(model.agents.memory.entry_version.is_none());
+    assert!(render_text(&model, 60, 18).contains("Esc: entry detail"));
 }
 
 #[test]
@@ -2142,7 +2208,7 @@ fn malformed_edit_editor_origin_seed_and_namespace_states_render_content_free() 
     for (mut model, label) in cases {
         model.command.ingest("INVALID_EDIT_EDITOR_DRAFT_PROSE");
         let text = render_text(&model, 100, 30);
-        assert!(text.contains(" Command "), "case={label}\n{text}");
+        assert!(!text.contains(" Command "), "case={label}\n{text}");
         assert!(!text.contains(" Memory input "), "case={label}\n{text}");
         for forbidden in [
             "INVALID_EDIT_EDITOR_DRAFT_PROSE",
@@ -2380,7 +2446,7 @@ fn resolution_review_end_reaches_the_exact_wrapped_approval_tail_without_scrolli
     );
     assert_eq!(model.agents.memory.detail_scroll, usize::MAX);
     let panel = render_memory_detail_text(&model, 100, 30);
-    let normalized = panel.lines().map(str::trim).collect::<Vec<_>>().join(" ");
+    let normalized = normalized_panel_text(&panel);
     for fixed in [
         model
             .agents
@@ -3255,11 +3321,7 @@ fn deleted_recreation_prior_display_key_is_bounded_or_fails_closed_at_every_widt
             model.agents.memory.confirmation = None;
             let review_text = render_memory_detail_text(&model, width, 18);
             if valid {
-                let normalized = review_text
-                    .lines()
-                    .map(str::trim)
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                let normalized = normalized_panel_text(&review_text);
                 assert!(
                     !review_text.contains("Memory review unavailable."),
                     "width={width}, case={label}:\n{review_text}",
@@ -3311,11 +3373,7 @@ fn deleted_recreation_prior_display_key_is_bounded_or_fails_closed_at_every_widt
             model.agents.memory.pane = MemoryPane::Confirmation;
             let confirmation_text = render_memory_detail_text(&model, width, 18);
             if valid {
-                let normalized = confirmation_text
-                    .lines()
-                    .map(str::trim)
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                let normalized = normalized_panel_text(&confirmation_text);
                 assert!(
                     !confirmation_text.contains("Memory confirmation unavailable."),
                     "width={width}, case={label}:\n{confirmation_text}",
@@ -3773,7 +3831,7 @@ fn maximum_key_is_display_bounded_in_the_editor_context_column() {
         )
         .expect("edit editor");
 
-    let rows = render_rows(&model, 160, 30);
+    let rows = render_rows(&model, 100, 30);
     let context_key_row = rows
         .iter()
         .find(|row| row.contains("Key kkkkk"))
@@ -4072,15 +4130,18 @@ fn exact_eight_tags_and_128_sources_are_rendered_without_a_ninth_item() {
 }
 
 #[test]
-fn memory_preserves_exactly_the_six_global_navigation_labels_and_shortcuts() {
+fn memory_preserves_exactly_the_nine_global_navigation_labels_and_shortcuts() {
     let text = render_text(&memory_model(140, 30), 140, 30);
     for label in [
-        "1 Overview",
-        "2 Setup",
-        "3 Audit",
-        "4 Help",
-        "a Agents",
-        "s Skills",
+        "1 Home",
+        "2 Chat",
+        "3 Agents",
+        "4 Skills",
+        "5 Connections",
+        "6 Activity",
+        "7 Setup",
+        "8 Audit",
+        "9 Help",
     ] {
         assert_eq!(text.matches(label).count(), 1, "label={label}");
     }
@@ -4089,11 +4150,14 @@ fn memory_preserves_exactly_the_six_global_navigation_labels_and_shortcuts() {
 
     let cases = [
         ('1', View::Overview, false),
-        ('2', View::Setup, false),
-        ('3', View::Audit, false),
-        ('4', View::Help, false),
-        ('a', View::Agents, false),
-        ('s', View::Agents, true),
+        ('2', View::Chat, false),
+        ('3', View::Agents, false),
+        ('4', View::Agents, true),
+        ('5', View::Connections, false),
+        ('6', View::Activity, false),
+        ('7', View::Setup, false),
+        ('8', View::Audit, false),
+        ('9', View::Help, false),
     ];
     for (shortcut, expected_view, skills_active) in cases {
         let mut model = memory_model(140, 30);
@@ -4104,7 +4168,8 @@ fn memory_preserves_exactly_the_six_global_navigation_labels_and_shortcuts() {
 
     for code in [
         KeyCode::Char('m'),
-        KeyCode::Char('7'),
+        KeyCode::Char('a'),
+        KeyCode::Char('s'),
         KeyCode::Char('q'),
         KeyCode::F(7),
     ] {
@@ -4144,7 +4209,7 @@ fn memory_owned_command_text_is_visibly_escaped_and_uses_the_escaped_cursor_widt
     for raw in ['\u{202e}', '\u{e9}'] {
         assert!(!flat.contains(raw), "raw command scalar leaked: {raw:?}");
     }
-    assert_eq!(render_cursor(&model, 100, 30), Position::new(21, 28));
+    assert_eq!(render_cursor(&model, 100, 30), Position::new(21, 26));
 
     model.command.clear();
     model.command.ingest("Multiline Key");
@@ -4218,7 +4283,7 @@ fn memory_cursor_in_the_middle_uses_the_visible_escaped_prefix_width() {
     }
     assert_eq!(
         render_cursor(&model, 100, 30),
-        Position::new(14, 28),
+        Position::new(14, 26),
         "cursor column must be prompt width 3 plus escaped prefix width 11",
     );
 }
@@ -4749,6 +4814,7 @@ fn wide_editor_review_confirmation_and_result_contexts_follow_the_pane_matrix() 
     let approval_id = proposal.approval_id().to_string();
     install_proposals(&mut resolution, std::slice::from_ref(&proposal));
     install_resolution_review(&mut resolution, proposal, MemoryResolutionAction::Approve);
+    resolution.agents.memory.detail_scroll = usize::MAX;
     let resolution_text = render_text(&resolution, 300, 30);
     assert!(resolution_text.contains("Resolution target"));
     assert!(resolution_text.contains(&approval_id));
@@ -4822,7 +4888,7 @@ fn assert_exact_memory_panel_titles(
     narrow: &str,
     primary: &str,
     detail: &str,
-    context: &str,
+    _merged_context: &str,
 ) {
     const TITLES: &[&str] = &[
         "Memory entries",
@@ -4859,7 +4925,7 @@ fn assert_exact_memory_panel_titles(
     for (width, expected) in [
         (60, vec![narrow]),
         (100, vec![primary, detail]),
-        (140, vec![primary, detail, context]),
+        (140, vec![primary, detail]),
     ] {
         let rendered = render_text(model, width, 30);
         for title in TITLES {

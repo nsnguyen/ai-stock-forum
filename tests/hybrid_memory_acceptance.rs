@@ -628,12 +628,15 @@ fn fallback_and_tui_commit_equivalent_typed_memory_mutations() {
     assert_eq!(
         fallback.navigation_labels,
         [
-            "1 Overview",
-            "2 Setup",
-            "3 Audit",
-            "4 Help",
-            "a Agents",
-            "s Skills",
+            "1 Home",
+            "2 Chat",
+            "3 Agents",
+            "4 Skills",
+            "5 Connections",
+            "6 Activity",
+            "7 Setup",
+            "8 Audit",
+            "9 Help",
         ]
     );
     assert_eq!(fallback.navigation_labels, tui.navigation_labels);

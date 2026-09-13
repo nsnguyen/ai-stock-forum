@@ -262,12 +262,12 @@ after 300
 drain_output
 
 tui_slash {/agent show "Bull Researcher Revised"}
-must_exact {Agent detail} "TUI slash show name workspace"
+must_exact {Agent workspace} "TUI slash show name workspace"
 after 300
 drain_output
 
 tui_slash {/agent history "Bull Researcher Revised" 1}
-must_exact {Historical version} "TUI slash exact name workspace"
+must_exact {Historical · Read-only} "TUI slash exact name workspace"
 must_exact {Description} "TUI slash exact name detail"
 after 300
 drain_output
@@ -278,19 +278,24 @@ after 300
 drain_output
 
 tui_slash {/agent history "Bull Researcher Revised"}
-must_exact {Returned} "TUI slash history name detail"
+must_exact {Profile history} "TUI slash history name detail"
 after 300
 drain_output
 
 tui_slash "/agent history $profile_id 2"
-must_exact {Historical version} "TUI slash exact ID workspace"
+must_exact {Version 2 · Current} "TUI slash exact ID workspace"
 must_exact {Description} "TUI slash exact ID detail"
 after 300
 drain_output
 
 tui_slash "/agent history $profile_id"
-must_exact {ACTIVE} "TUI slash history ID typed list"
+must_exact {Version 2 · Current} "TUI slash history ID typed list"
 puts {PTY_TUI_SLASH_READ_OK list show=name,id history=name,id exact=name,id}
+
+after 200
+drain_output
+tui_slash {/agent show "Bull Researcher Revised"}
+must_exact {Agent workspace} "TUI detail before resize"
 
 foreach geometry {{24 70 {Bull Researcher Revised}} {30 100 Description} {40 140 Description}} {
     lassign $geometry rows cols marker
@@ -299,27 +304,23 @@ foreach geometry {{24 70 {Bull Researcher Revised}} {30 100 Description} {40 140
     resize_tty $tui_tty $tui_app_pid $rows $cols
     after 300
     drain_output
-    send -- "1"
-    after 300
-    drain_output
-    send -- "a"
     must_exact $marker "resize ${cols}x${rows}"
 }
 
 after 200
 drain_output
-send -- "c"
+send -- "n"
 must_exact {Profile editor} "keyboard create opens editor"
 after 200
 drain_output
 send -- "\033\[B"
-must_exact {downside} "Down selects complete Bear template"
-for {set i 0} {$i < 7} {incr i} {
+must_exact {Bear Researcher} "Down selects complete Bear template"
+for {set i 0} {$i < 9} {incr i} {
     after 150
     drain_output
-    send -- "\r"
+    send -- "\t"
 }
-must_exact {REVIEW CHANGES} "Enter-only create reaches review"
+must_exact {Review changes} "Tab navigation reaches create review"
 after 200
 drain_output
 send -- "\r"
@@ -327,9 +328,9 @@ must_exact {Confirm Create} "review Enter opens create confirmation"
 after 200
 drain_output
 send -- "\r"
-must_exact {Agent detail} "confirmation Enter creates profile"
+must_exact {Agent workspace} "confirmation Enter creates profile"
 must_exact {Bear Researcher} "keyboard-created Bear profile"
-puts {PTY_TUI_KEYBOARD_CREATE_OK template=keyboard fields=enter review=enter confirmation=enter}
+puts {PTY_TUI_KEYBOARD_CREATE_OK template=keyboard fields=tab review=enter confirmation=enter}
 
 after 200
 drain_output

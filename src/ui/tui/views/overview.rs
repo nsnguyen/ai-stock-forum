@@ -16,7 +16,7 @@ use crate::ui::tui::{
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     frame.render_widget(
         Paragraph::new(content(model, theme))
-            .block(panel("Overview", workspace_focused(model), theme))
+            .block(panel("Home", workspace_focused(model), theme))
             .wrap(Wrap { trim: false })
             .scroll((model.workspace_scroll, 0)),
         area,
@@ -41,13 +41,12 @@ fn content(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
     let recent = model
         .audit_entries
         .last()
-        .map(|entry| format!("#{} {}", entry.sequence, safe_text(&entry.summary)))
+        .map(|entry| safe_text(&entry.summary))
         .unwrap_or_else(|| "No recent activity".to_owned());
 
     vec![
-        Line::styled("SYSTEM IDENTITY", theme.accent),
-        label_value("Installation", model.installation_id.to_string(), theme),
-        label_value("Session", model.session_id.to_string(), theme),
+        Line::styled("LOCAL APP", theme.accent),
+        Line::raw("Your private agent workspace is available on this device."),
         Line::default(),
         Line::styled("HEALTH", theme.accent),
         Line::from(vec![
@@ -58,8 +57,7 @@ fn content(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
             ratatui::text::Span::styled(format!("{:<14}", "Command"), theme.muted),
             ratatui::text::Span::styled(command, command_style),
         ]),
-        label_value("Database", "Ready".to_owned(), theme),
-        label_value("Process guard", "Held".to_owned(), theme),
+        label_value("Local data", "Ready".to_owned(), theme),
         label_value("Setup", setup, theme),
         label_value("Recent", recent, theme),
     ]
@@ -68,7 +66,7 @@ fn content(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
 fn setup_state(status: &SetupStatus) -> String {
     match status {
         SetupStatus::NotStarted => "Not started".to_owned(),
-        SetupStatus::DraftSaved { draft_id } => format!("Draft saved: {draft_id}"),
-        SetupStatus::Applied { configuration_id } => format!("Applied: {configuration_id}"),
+        SetupStatus::DraftSaved { .. } => "Draft saved".to_owned(),
+        SetupStatus::Applied { .. } => "Applied".to_owned(),
     }
 }

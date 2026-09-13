@@ -4,7 +4,7 @@ use super::model::{LayoutMode, View};
 
 pub const MIN_WIDTH: u16 = 60;
 pub const MIN_HEIGHT: u16 = 18;
-pub const MEDIUM_WIDTH: u16 = 80;
+pub const MEDIUM_WIDTH: u16 = 100;
 pub const WIDE_WIDTH: u16 = 120;
 pub const MEDIUM_HEIGHT: u16 = 24;
 pub const WIDE_HEIGHT: u16 = 30;
@@ -19,6 +19,7 @@ pub struct CockpitLayout {
     pub inspector: Option<Rect>,
     pub message: Rect,
     pub command: Rect,
+    pub footer: Rect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,18 +98,6 @@ pub fn skill_geometry(area: Rect, inspector_open: bool) -> ViewGeometry {
 pub fn layout_mode(area: Rect) -> LayoutMode {
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         LayoutMode::TooSmall
-    } else if area.width >= WIDE_WIDTH && area.height >= WIDE_HEIGHT {
-        LayoutMode::Wide
-    } else if area.width >= MEDIUM_WIDTH && area.height >= MEDIUM_HEIGHT {
-        LayoutMode::Medium
-    } else {
-        LayoutMode::Narrow
-    }
-}
-
-pub fn agent_layout_mode(area: Rect) -> LayoutMode {
-    if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
-        LayoutMode::TooSmall
     } else if area.width >= WIDE_WIDTH {
         LayoutMode::Wide
     } else if area.width >= MEDIUM_WIDTH {
@@ -116,6 +105,10 @@ pub fn agent_layout_mode(area: Rect) -> LayoutMode {
     } else {
         LayoutMode::Narrow
     }
+}
+
+pub fn agent_layout_mode(area: Rect) -> LayoutMode {
+    layout_mode(area)
 }
 
 pub fn memory_layout_mode(area: Rect) -> LayoutMode {
@@ -135,9 +128,10 @@ pub fn agent_workspace(area: Rect, mode: LayoutMode) -> AgentWorkspaceLayout {
             active: area,
         },
         LayoutMode::Medium | LayoutMode::Wide => {
-            let columns =
-                Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)])
-                    .split(area);
+            let list_width = ((u32::from(area.width) * 28) / 100) as u16;
+            let list_width = list_width.clamp(24, 36);
+            let columns = Layout::horizontal([Constraint::Length(list_width), Constraint::Min(0)])
+                .split(area);
             AgentWorkspaceLayout {
                 list: Some(columns[0]),
                 active: columns[1],
@@ -153,27 +147,15 @@ pub fn memory_workspace(area: Rect, mode: LayoutMode) -> MemoryWorkspaceLayout {
             detail: None,
             context: None,
         },
-        LayoutMode::Medium => {
-            let columns =
-                Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)])
-                    .split(area);
+        LayoutMode::Medium | LayoutMode::Wide => {
+            let list_width = ((u32::from(area.width) * 28) / 100) as u16;
+            let list_width = list_width.clamp(24, 36);
+            let columns = Layout::horizontal([Constraint::Length(list_width), Constraint::Min(0)])
+                .split(area);
             MemoryWorkspaceLayout {
                 primary: columns[0],
                 detail: Some(columns[1]),
                 context: None,
-            }
-        }
-        LayoutMode::Wide => {
-            let columns = Layout::horizontal([
-                Constraint::Percentage(30),
-                Constraint::Percentage(44),
-                Constraint::Percentage(26),
-            ])
-            .split(area);
-            MemoryWorkspaceLayout {
-                primary: columns[0],
-                detail: Some(columns[1]),
-                context: Some(columns[2]),
             }
         }
     }
@@ -194,9 +176,10 @@ pub fn skill_workspace(area: Rect, mode: LayoutMode) -> SkillWorkspaceLayout {
             active: area,
         },
         LayoutMode::Medium | LayoutMode::Wide => {
-            let columns =
-                Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)])
-                    .split(area);
+            let list_width = ((u32::from(area.width) * 28) / 100) as u16;
+            let list_width = list_width.clamp(24, 36);
+            let columns = Layout::horizontal([Constraint::Length(list_width), Constraint::Min(0)])
+                .split(area);
             SkillWorkspaceLayout {
                 list: Some(columns[0]),
                 active: columns[1],
@@ -207,30 +190,34 @@ pub fn skill_workspace(area: Rect, mode: LayoutMode) -> SkillWorkspaceLayout {
 
 pub fn calculate(area: Rect, inspector_open: bool) -> CockpitLayout {
     let mode = layout_mode(area);
-    calculate_for_mode(area, inspector_open, mode, 3, true)
+    calculate_for_mode(area, inspector_open, mode, false)
+}
+
+pub fn calculate_with_input(area: Rect, inspector_open: bool, input_active: bool) -> CockpitLayout {
+    let mode = layout_mode(area);
+    calculate_for_mode(area, inspector_open, mode, input_active)
 }
 
 pub fn calculate_agents(area: Rect, inspector_open: bool) -> CockpitLayout {
     let mode = agent_layout_mode(area);
-    calculate_for_mode(area, inspector_open, mode, 4, true)
+    calculate_for_mode(area, inspector_open, mode, false)
 }
 
 pub fn calculate_agents_memory(area: Rect) -> CockpitLayout {
     let mode = agent_layout_mode(area);
-    calculate_for_mode(area, false, mode, 4, false)
+    calculate_for_mode(area, false, mode, false)
 }
 
 pub fn calculate_skills(area: Rect, inspector_open: bool) -> CockpitLayout {
     let mode = skill_layout_mode(area);
-    calculate_for_mode(area, inspector_open, mode, 4, true)
+    calculate_for_mode(area, inspector_open, mode, false)
 }
 
 fn calculate_for_mode(
     area: Rect,
     inspector_open: bool,
     mode: LayoutMode,
-    header_height: u16,
-    inspector_available: bool,
+    input_active: bool,
 ) -> CockpitLayout {
     if mode == LayoutMode::TooSmall {
         return CockpitLayout {
@@ -242,53 +229,27 @@ fn calculate_for_mode(
             inspector: None,
             message: area,
             command: area,
+            footer: area,
         };
     }
 
+    let command_height = if input_active { 3 } else { 0 };
     let bands = Layout::vertical([
-        Constraint::Length(header_height),
+        Constraint::Length(3),
         Constraint::Min(0),
         Constraint::Length(1),
-        Constraint::Length(3),
+        Constraint::Length(command_height),
+        Constraint::Length(2),
     ])
     .split(area);
     let header = bands[0];
     let content = bands[1];
     let message = bands[2];
     let command = bands[3];
-
-    let (navigation, workspace, inspector) = match mode {
-        LayoutMode::Wide if inspector_available => {
-            let columns = Layout::horizontal([
-                Constraint::Length(20),
-                Constraint::Min(0),
-                Constraint::Length(32),
-            ])
-            .split(content);
-            (Some(columns[0]), columns[1], Some(columns[2]))
-        }
-        LayoutMode::Wide => {
-            let columns =
-                Layout::horizontal([Constraint::Length(20), Constraint::Min(0)]).split(content);
-            (Some(columns[0]), columns[1], None)
-        }
-        LayoutMode::Medium => {
-            let columns =
-                Layout::horizontal([Constraint::Length(20), Constraint::Min(0)]).split(content);
-            let workspace = columns[1];
-            (
-                Some(columns[0]),
-                workspace,
-                (inspector_available && inspector_open).then(|| centered_overlay(workspace)),
-            )
-        }
-        LayoutMode::Narrow => (
-            None,
-            content,
-            (inspector_available && inspector_open).then(|| centered_overlay(content)),
-        ),
-        LayoutMode::TooSmall => unreachable!("too-small mode returns before splitting"),
-    };
+    let footer = bands[4];
+    let navigation = None;
+    let workspace = content;
+    let inspector = inspector_open.then(|| centered_overlay(content));
 
     CockpitLayout {
         mode,
@@ -299,6 +260,7 @@ fn calculate_for_mode(
         inspector,
         message,
         command,
+        footer,
     }
 }
 
@@ -358,8 +320,8 @@ mod tests {
         let cases = [
             (Rect::new(0, 0, 120, 30), LayoutMode::Wide),
             (Rect::new(0, 0, 119, 30), LayoutMode::Medium),
-            (Rect::new(0, 0, 80, 24), LayoutMode::Medium),
-            (Rect::new(0, 0, 79, 24), LayoutMode::Narrow),
+            (Rect::new(0, 0, 100, 24), LayoutMode::Medium),
+            (Rect::new(0, 0, 99, 24), LayoutMode::Narrow),
             (Rect::new(0, 0, 60, 18), LayoutMode::Narrow),
             (Rect::new(0, 0, 59, 18), LayoutMode::TooSmall),
             (Rect::new(0, 0, 120, 17), LayoutMode::TooSmall),
@@ -370,29 +332,27 @@ mod tests {
     }
 
     #[test]
-    fn wide_has_three_columns_and_medium_uses_an_overlay_inspector() {
-        let wide = calculate(Rect::new(0, 0, 140, 40), true);
-        assert!(wide.navigation.is_some());
-        assert!(wide.inspector.is_some());
-        assert!(wide.inspector.unwrap().x > wide.workspace.x);
-
-        let medium = calculate(Rect::new(0, 0, 100, 30), true);
-        assert!(medium.navigation.is_some());
-        assert!(medium.inspector.is_some());
-        assert!(medium.inspector.unwrap().width < medium.viewport.width);
+    fn shell_has_no_navigation_column_or_permanent_inspector() {
+        for area in [Rect::new(0, 0, 100, 24), Rect::new(0, 0, 140, 40)] {
+            let shell = calculate(area, false);
+            assert_eq!(shell.navigation, None);
+            assert_eq!(shell.inspector, None);
+            assert_eq!(shell.workspace.x, area.x);
+            assert_eq!(shell.workspace.width, area.width);
+        }
     }
 
     #[test]
-    fn wide_uses_fixed_navigation_and_inspector_widths_at_all_sizes() {
+    fn workspace_uses_the_full_width_at_all_supported_sizes() {
         let exact = calculate(Rect::new(0, 0, 120, 30), false);
-        assert_eq!(exact.navigation, Some(Rect::new(0, 3, 20, 23)));
-        assert_eq!(exact.workspace, Rect::new(20, 3, 68, 23));
-        assert_eq!(exact.inspector, Some(Rect::new(88, 3, 32, 23)));
+        assert_eq!(exact.navigation, None);
+        assert_eq!(exact.workspace, Rect::new(0, 3, 120, 24));
+        assert_eq!(exact.inspector, None);
 
         let larger = calculate(Rect::new(5, 7, 160, 40), false);
-        assert_eq!(larger.navigation, Some(Rect::new(5, 10, 20, 33)));
-        assert_eq!(larger.workspace, Rect::new(25, 10, 108, 33));
-        assert_eq!(larger.inspector, Some(Rect::new(133, 10, 32, 33)));
+        assert_eq!(larger.navigation, None);
+        assert_eq!(larger.workspace, Rect::new(5, 10, 160, 34));
+        assert_eq!(larger.inspector, None);
     }
 
     #[test]
@@ -413,10 +373,11 @@ mod tests {
         let layout = calculate(Rect::new(4, 7, 120, 30), false);
 
         assert_eq!(layout.header, Rect::new(4, 7, 120, 3));
-        assert_eq!(layout.message, Rect::new(4, 33, 120, 1));
-        assert_eq!(layout.command, Rect::new(4, 34, 120, 3));
+        assert_eq!(layout.message, Rect::new(4, 34, 120, 1));
+        assert_eq!(layout.command, Rect::new(4, 35, 120, 0));
+        assert_eq!(layout.footer, Rect::new(4, 35, 120, 2));
         assert_eq!(layout.workspace.y, 10);
-        assert_eq!(layout.workspace.height, 23);
+        assert_eq!(layout.workspace.height, 24);
     }
 
     #[test]
@@ -424,7 +385,7 @@ mod tests {
         let medium = calculate(Rect::new(10, 20, 100, 30), true);
         let inspector = medium.inspector.expect("open inspector overlay");
 
-        assert_eq!(inspector.width, 56);
+        assert_eq!(inspector.width, 70);
         assert_eq!(inspector.height, 16);
         assert!(inspector.x >= medium.workspace.x);
         assert!(inspector.y >= medium.workspace.y);

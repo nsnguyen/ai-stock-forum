@@ -1,12 +1,12 @@
 use super::{
     TuiEvent,
     model::{
-        AgentDetailAction, AgentOutcomeIntent, AgentSkillAction, AgentsPane, AssignmentKind, Focus,
-        LayoutMode, MEMORY_RETAINED_ROW_CAP, MemoryConfirmation, MemoryEditorOrigin,
-        MemoryEntryDetailAction, MemoryPane, MemoryProposalDetailAction, MemoryResultOrigin,
-        MemoryViewState, NavigationTab, ProfileConfirmation, RuntimeStatus, Severity,
-        SkillConfirmation, SkillDetailAction, SkillOperationOrigin, SkillWorkspaceOrigin,
-        SkillsPane, TuiModel, View,
+        AgentDetailAction, AgentOutcomeIntent, AgentProfileRead, AgentProfileTarget,
+        AgentSkillAction, AgentsPane, AssignmentKind, Focus, InputMode, LayoutMode,
+        MEMORY_RETAINED_ROW_CAP, MemoryConfirmation, MemoryEditorOrigin, MemoryEntryDetailAction,
+        MemoryPane, MemoryProposalDetailAction, MemoryResultOrigin, MemoryViewState, NavigationTab,
+        ProfileConfirmation, RuntimeStatus, Severity, SkillConfirmation, SkillDetailAction,
+        SkillOperationOrigin, SkillWorkspaceOrigin, SkillsPane, TuiModel, View,
     },
     views,
 };
@@ -22,7 +22,7 @@ use crate::{
     ui::command::{AgentWorkflowCommand, ParsedLine, SkillWorkflowCommand, parse_line},
     ui::memory_editor::{MemoryEditorEffect, MemoryEditorStep, MemoryPreviewRequest},
     ui::profile_editor::{
-        PreviewEditRequest, ProfileEditorEffect, ProfileEditorMode, ProfileEditorStep,
+        PreviewEditRequest, ProfileEditorEffect, ProfileEditorMode, ProfileTuiField,
     },
     ui::skill_editor::{SkillEditorEffect, SkillPreviewRequest},
 };
@@ -32,9 +32,9 @@ const COMMAND_IN_FLIGHT_MESSAGE: &str = "A command is already running.";
 const COMMAND_REJECTED_MESSAGE: &str = "Command rejected. Check the command and try again.";
 const MEMORY_OUTCOME_MESSAGE: &str = "Memory command completed.";
 const PROTECTED_AGENTS_MESSAGE: &str =
-    "Press a outside text input to finish the protected Agents workflow.";
+    "Press 3 outside text input to finish the protected Agents workflow.";
 const PROTECTED_SKILLS_MESSAGE: &str =
-    "Press s outside text input to finish the protected Skills workflow.";
+    "Press 4 outside text input to finish the protected Skills workflow.";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControllerEffect {
     None,
@@ -43,6 +43,13 @@ pub enum ControllerEffect {
     SubmitPreservingNavigation(ApplicationCommand),
     RequestShutdown(ShutdownReason),
     LoadAgentProfiles,
+    LoadSelectedAgentProfile {
+        target: AgentProfileTarget,
+        read: AgentProfileRead,
+    },
+    StartSelectedProfileEdit {
+        target: AgentProfileTarget,
+    },
     LoadAgentProfile {
         selected_profile: usize,
     },
@@ -138,7 +145,10 @@ impl ControllerEffect {
     pub(super) fn is_navigation_refresh(&self) -> bool {
         matches!(
             self,
-            Self::LoadAgentProfiles | Self::LoadAgentSkillLibrary | Self::LoadSkills
+            Self::LoadAgentProfiles
+                | Self::LoadAgentSkillLibrary
+                | Self::LoadSkills
+                | Self::LoadSelectedAgentProfile { .. }
         )
     }
 
@@ -302,6 +312,7 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
                     };
                 }
                 AgentOutcomeIntent::AgentsWorkspace if present_outcome => {
+                    model.agents.select_profile_id(profile.profile.profile_id());
                     model.agents.replace_detail(profile);
                     model.agents.pane = if preserve_agents_pane {
                         agents_pane_before
@@ -322,6 +333,7 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
         }
         CommandView::AgentProfileHistory(history) => {
             if present_outcome {
+                model.agents.select_profile_id(history.profile_id);
                 model.agents.replace_history(history);
                 model.agents.pane = if preserve_agents_pane {
                     agents_pane_before
@@ -335,6 +347,7 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
         }
         CommandView::AgentProfileVersion(version) => {
             if present_outcome {
+                model.agents.select_profile_id(version.profile.profile_id());
                 model.agents.replace_version_detail(version);
                 model.agents.pane = if preserve_agents_pane {
                     agents_pane_before
@@ -480,6 +493,10 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         return ControllerEffect::RequestShutdown(ShutdownReason::Interrupted);
     }
 
+    if key.kind == KeyEventKind::Repeat && key.code == KeyCode::Enter {
+        return ControllerEffect::None;
+    }
+
     if memory_text_entry_active(model) {
         return handle_memory_editor_key(model, key);
     }
@@ -514,7 +531,7 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         return handle_command_key(model, key);
     }
 
-    if is_plain_char(key, '/') {
+    if is_plain_char(key, '/') && !active_skill_editor(model) {
         model.command.clear();
         model.command.insert('/');
         model.set_focus(Focus::Command);
@@ -541,6 +558,23 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
 
     if active_skill_editor(model) {
         return handle_skill_editor_key(model, key);
+    }
+
+    let key = normalize_nav_direction(key);
+    let key = if !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane != AgentsPane::Memory
+    {
+        normalize_agents_shortcut(key)
+    } else {
+        key
+    };
+
+    if key.code == KeyCode::Tab && no_modifiers(key.modifiers) {
+        return cycle_focus(model, true);
+    }
+    if key.code == KeyCode::BackTab && backtab_modifiers(key.modifiers) {
+        return cycle_focus(model, false);
     }
 
     if model.focus == Focus::Navigation {
@@ -592,7 +626,7 @@ fn handle_global_navigation_shortcut(
     key: KeyEvent,
 ) -> Option<ControllerEffect> {
     let confirmation_active = active_confirmation(model) || active_skill_confirmation(model);
-    let text_entry_active = active_profile_editor(model)
+    let text_entry_active = (active_profile_editor(model) && model.input_mode == InputMode::Type)
         || active_skill_editor(model)
         || memory_text_entry_active(model)
         || model.focus == Focus::Command;
@@ -600,16 +634,45 @@ fn handle_global_navigation_shortcut(
         return None;
     }
 
-    let effect = match key.code {
-        KeyCode::Char('1') => switch_to_tab(model, NavigationTab::Overview),
-        KeyCode::Char('2') => switch_to_tab(model, NavigationTab::Setup),
-        KeyCode::Char('3') => switch_to_tab(model, NavigationTab::Audit),
-        KeyCode::Char('4') => switch_to_tab(model, NavigationTab::Help),
-        KeyCode::Char('a') => switch_to_tab(model, NavigationTab::Agents),
-        KeyCode::Char('s') => switch_to_skills(model),
-        _ => return None,
+    let KeyCode::Char(number) = key.code else {
+        return None;
     };
-    Some(effect)
+    NavigationTab::for_number(number).map(|tab| switch_to_destination(model, tab))
+}
+
+fn switch_to_destination(model: &mut TuiModel, tab: NavigationTab) -> ControllerEffect {
+    if tab == NavigationTab::Skills {
+        switch_to_skills(model)
+    } else {
+        switch_to_tab(model, tab)
+    }
+}
+
+fn normalize_nav_direction(mut key: KeyEvent) -> KeyEvent {
+    let shifted = key.modifiers == KeyModifiers::SHIFT;
+    let unmodified = key.modifiers == KeyModifiers::NONE;
+    if !shifted && !unmodified {
+        return key;
+    }
+    key.code = match key.code {
+        KeyCode::Char('w' | 'W') => KeyCode::Up,
+        KeyCode::Char('a' | 'A') => KeyCode::Left,
+        KeyCode::Char('s' | 'S') => KeyCode::Down,
+        KeyCode::Char('d' | 'D') => KeyCode::Right,
+        _ => return key,
+    };
+    key.modifiers = KeyModifiers::NONE;
+    key
+}
+
+fn normalize_agents_shortcut(mut key: KeyEvent) -> KeyEvent {
+    if (key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT)
+        && let KeyCode::Char(letter @ ('n' | 'N' | 'e' | 'E' | 'h' | 'H')) = key.code
+    {
+        key.code = KeyCode::Char(letter.to_ascii_lowercase());
+        key.modifiers = KeyModifiers::NONE;
+    }
+    key
 }
 
 fn switch_to_tab(model: &mut TuiModel, tab: NavigationTab) -> ControllerEffect {
@@ -808,6 +871,14 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
 }
 
 fn handle_paste(model: &mut TuiModel, text: &str) -> ControllerEffect {
+    if active_profile_editor(model) {
+        if model.input_mode != InputMode::Type {
+            return ControllerEffect::None;
+        }
+        model.agents.field_input.ingest(text);
+        retain_profile_field(model);
+        return ControllerEffect::Redraw;
+    }
     if model.focus != Focus::Command
         && !model.skills.active
         && model.active_view == View::Agents
@@ -1022,7 +1093,12 @@ fn apply_skill_editor_effect(model: &mut TuiModel, effect: SkillEditorEffect) ->
 }
 
 fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEffect> {
-    let effect = match (model.skills.pane, key.code) {
+    let interaction_pane = if model.focus == Focus::List {
+        SkillsPane::List
+    } else {
+        model.skills.pane
+    };
+    let effect = match (interaction_pane, key.code) {
         (_, KeyCode::Char('/')) if no_modifiers(key.modifiers) => {
             model.command.clear();
             model.command.insert('/');
@@ -1039,12 +1115,14 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             ControllerEffect::Redraw
         }
         (SkillsPane::List, KeyCode::Enter) if no_modifiers(key.modifiers) => {
+            model.set_focus(Focus::Workspace);
             ControllerEffect::LoadSkill {
                 selected_skill: model.skills.selected_skill,
             }
         }
         (SkillsPane::List, KeyCode::Char('c')) if no_modifiers(key.modifiers) => {
             model.skills.pane = SkillsPane::CreateSource;
+            model.set_focus(Focus::Workspace);
             ControllerEffect::Redraw
         }
         (SkillsPane::CreateSource, KeyCode::Down) if no_modifiers(key.modifiers) => {
@@ -1225,7 +1303,12 @@ fn restore_skill_origin(model: &mut TuiModel, origin: SkillOperationOrigin) {
 }
 
 fn unwind_skills(model: &mut TuiModel) -> ControllerEffect {
-    match model.skills.pane {
+    let interaction_pane = if model.focus == Focus::List {
+        SkillsPane::List
+    } else {
+        model.skills.pane
+    };
+    match interaction_pane {
         SkillsPane::List => match model.skills.workspace_origin.take() {
             Some(SkillWorkspaceOrigin::Cockpit(view)) => model.select_view(view),
             Some(SkillWorkspaceOrigin::AgentSkills { profile_id }) => {
@@ -1278,6 +1361,24 @@ fn active_profile_editor(model: &TuiModel) -> bool {
         && model.active_view == View::Agents
         && model.agents.pane == AgentsPane::Editor
         && model.agents.editor.is_some()
+        && matches!(model.focus, Focus::Workspace | Focus::Actions)
+}
+
+fn move_profile_field_focus(model: &mut TuiModel, forward: bool) -> ControllerEffect {
+    let field = model.agents.editor.as_ref().unwrap().tui_field();
+    if (forward && field == ProfileTuiField::Discard)
+        || (!forward && field == ProfileTuiField::Template)
+    {
+        return cycle_focus(model, forward);
+    }
+    model
+        .agents
+        .editor
+        .as_mut()
+        .unwrap()
+        .move_tui_field(forward);
+    model.agents.synchronize_field_input();
+    ControllerEffect::Redraw
 }
 
 fn handle_confirmation_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
@@ -1305,53 +1406,159 @@ fn handle_confirmation_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEff
     }
 }
 
+fn retain_profile_field(model: &mut TuiModel) {
+    if let Some(editor) = model.agents.editor.as_mut() {
+        editor.set_tui_field(editor.tui_field(), model.agents.field_input.text());
+    }
+}
+
+fn profile_text_field(field: ProfileTuiField) -> bool {
+    matches!(
+        field,
+        ProfileTuiField::DisplayName
+            | ProfileTuiField::Description
+            | ProfileTuiField::PrimarySpecialty
+            | ProfileTuiField::Tags
+            | ProfileTuiField::Personality
+            | ProfileTuiField::Instructions
+    )
+}
+
 fn handle_profile_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
+    if model.input_mode == InputMode::Type {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab => {
+                retain_profile_field(model);
+                model.set_input_mode(InputMode::Nav);
+                if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+                    return move_profile_field_focus(model, key.code == KeyCode::Tab);
+                }
+            }
+            KeyCode::Char(character) if text_modifiers(key.modifiers) => {
+                model.agents.field_input.insert(character);
+                retain_profile_field(model);
+            }
+            KeyCode::Backspace => {
+                model.agents.field_input.backspace();
+                retain_profile_field(model);
+            }
+            KeyCode::Delete => {
+                model.agents.field_input.delete();
+                retain_profile_field(model);
+            }
+            KeyCode::Left => {
+                model.agents.field_input.move_left();
+            }
+            KeyCode::Right => {
+                model.agents.field_input.move_right();
+            }
+            KeyCode::Home => {
+                model.agents.field_input.move_home();
+            }
+            KeyCode::End => {
+                model.agents.field_input.move_end();
+            }
+            _ => {}
+        }
+        return ControllerEffect::Redraw;
+    }
+    let key = normalize_nav_direction(key);
+    let field = model.agents.editor.as_ref().unwrap().tui_field();
+    if field == ProfileTuiField::Review
+        && matches!(
+            key.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+        )
+    {
+        let limit = views::agent_editor_scroll_limit(model);
+        let page = usize::from(model.workspace_body_height.saturating_sub(5).max(1));
+        let offset = model.agents.detail_scroll.min(limit);
+        model.agents.detail_scroll = match key.code {
+            KeyCode::Up => offset.saturating_sub(1),
+            KeyCode::Down => offset.saturating_add(1).min(limit),
+            KeyCode::PageUp => offset.saturating_sub(page),
+            KeyCode::PageDown => offset.saturating_add(page).min(limit),
+            KeyCode::Home => 0,
+            KeyCode::End => limit,
+            _ => offset,
+        };
+        return ControllerEffect::Redraw;
+    }
     match key.code {
-        KeyCode::Esc if no_modifiers(key.modifiers) => {
-            let at_first_step = model
-                .agents
-                .editor
-                .as_ref()
-                .is_none_or(|editor| editor.step() == ProfileEditorStep::Template);
-            if at_first_step {
-                model.command.clear();
-                model.agents.editor = None;
-                model.agents.pane = AgentsPane::Detail;
-                ControllerEffect::CancelProfileReview
+        KeyCode::Esc => {
+            model.agents.pane = AgentsPane::Detail;
+            model.set_focus(Focus::Workspace);
+            ControllerEffect::Redraw
+        }
+        KeyCode::Tab | KeyCode::BackTab => {
+            model.agents.detail_scroll = 0;
+            move_profile_field_focus(model, key.code == KeyCode::Tab)
+        }
+        KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {
+            let forward = matches!(key.code, KeyCode::Down | KeyCode::Right);
+            if field == ProfileTuiField::Template {
+                return cycle_profile_template(model, forward);
+            }
+            if field == ProfileTuiField::Role {
+                use crate::agents::AgentRole;
+                let roles = [
+                    AgentRole::Bull,
+                    AgentRole::Bear,
+                    AgentRole::Chief,
+                    AgentRole::Engineering,
+                    AgentRole::Custom,
+                ];
+                let editor = model.agents.editor.as_mut().unwrap();
+                let index = roles
+                    .iter()
+                    .position(|role| *role == editor.draft().role)
+                    .unwrap_or(0);
+                editor.select_tui_role(
+                    roles[if forward {
+                        (index + 1).min(roles.len() - 1)
+                    } else {
+                        index.saturating_sub(1)
+                    }],
+                );
             } else {
-                let effect = model
+                model
                     .agents
                     .editor
                     .as_mut()
-                    .map(|editor| editor.submit_line(":back"))
-                    .unwrap_or(ProfileEditorEffect::None);
-                apply_profile_editor_effect(model, effect)
+                    .unwrap()
+                    .move_tui_field(forward);
             }
-        }
-        KeyCode::Up if no_modifiers(key.modifiers) => cycle_profile_template(model, false),
-        KeyCode::Down if no_modifiers(key.modifiers) => cycle_profile_template(model, true),
-        KeyCode::Enter => submit_profile_editor_enter(model, key),
-        KeyCode::Char(character) if text_modifiers(key.modifiers) => {
-            model.command.insert(character);
+            model.agents.synchronize_field_input();
             ControllerEffect::Redraw
         }
-        KeyCode::Backspace if no_modifiers(key.modifiers) => {
-            edit(model, |model| model.command.backspace())
-        }
-        KeyCode::Delete if no_modifiers(key.modifiers) => {
-            edit(model, |model| model.command.delete())
-        }
-        KeyCode::Left if no_modifiers(key.modifiers) => {
-            edit(model, |model| model.command.move_left())
-        }
-        KeyCode::Right if no_modifiers(key.modifiers) => {
-            edit(model, |model| model.command.move_right())
-        }
-        KeyCode::Home if no_modifiers(key.modifiers) => {
-            edit(model, |model| model.command.move_home())
-        }
-        KeyCode::End if no_modifiers(key.modifiers) => {
-            edit(model, |model| model.command.move_end())
+        KeyCode::Enter if key.kind == KeyEventKind::Press => {
+            if profile_text_field(field) {
+                model.agents.synchronize_field_input();
+                model.set_input_mode(InputMode::Type);
+                return ControllerEffect::Redraw;
+            }
+            if matches!(field, ProfileTuiField::Review | ProfileTuiField::Discard) {
+                let editor = model.agents.editor.as_mut().unwrap();
+                let control = if field == ProfileTuiField::Discard {
+                    ":cancel"
+                } else {
+                    match editor.mode() {
+                        ProfileEditorMode::Create { .. } => ":create",
+                        ProfileEditorMode::Edit { .. } if editor.review().is_some() => ":activate",
+                        ProfileEditorMode::Edit { .. } => ":review",
+                    }
+                };
+                let effect = editor.submit_line(control);
+                return apply_profile_editor_effect(model, effect);
+            }
+            model.agents.editor.as_mut().unwrap().move_tui_field(true);
+            model.agents.synchronize_field_input();
+            ControllerEffect::Redraw
         }
         _ => ControllerEffect::None,
     }
@@ -1361,60 +1568,28 @@ fn cycle_profile_template(model: &mut TuiModel, forward: bool) -> ControllerEffe
     let Some(editor) = model.agents.editor.as_mut() else {
         return ControllerEffect::None;
     };
-    if editor.step() != ProfileEditorStep::Template {
-        return ControllerEffect::None;
-    }
-    if !matches!(editor.mode(), ProfileEditorMode::Create { .. }) {
-        return ControllerEffect::None;
+    if editor.tui_field() != ProfileTuiField::Template
+        || !matches!(editor.mode(), ProfileEditorMode::Create { .. })
+    {
+        return ControllerEffect::Redraw;
     }
     let templates = builtin_profile_templates();
-    if templates.is_empty() {
-        return ControllerEffect::None;
-    }
     let current = templates
         .iter()
-        .position(|template| template.role == editor.draft().role)
+        .position(|template| {
+            template.id.as_str() == editor.tui_field_text(ProfileTuiField::Template)
+        })
         .unwrap_or(0);
     let selected = if forward {
-        (current + 1) % templates.len()
+        (current + 1).min(templates.len() - 1)
     } else {
-        (current + templates.len() - 1) % templates.len()
+        current.saturating_sub(1)
     };
     if editor.select_template(&templates[selected]) {
         model.agents.selected_template = selected;
     }
+    model.agents.synchronize_field_input();
     ControllerEffect::Redraw
-}
-
-fn submit_profile_editor_enter(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
-    let on_review = model
-        .agents
-        .editor
-        .as_ref()
-        .is_some_and(|editor| editor.step() == ProfileEditorStep::Review);
-    if on_review && key.kind != KeyEventKind::Press {
-        return ControllerEffect::None;
-    }
-
-    let input = model.command.take_text();
-    let effect = model
-        .agents
-        .editor
-        .as_mut()
-        .map(|editor| {
-            if editor.step() == ProfileEditorStep::Review && input.is_empty() {
-                let control = match editor.mode() {
-                    ProfileEditorMode::Create { .. } => ":create",
-                    ProfileEditorMode::Edit { .. } if editor.review().is_some() => ":activate",
-                    ProfileEditorMode::Edit { .. } => ":review",
-                };
-                editor.submit_line(control)
-            } else {
-                editor.submit_keyboard_line(&input)
-            }
-        })
-        .unwrap_or(ProfileEditorEffect::None);
-    apply_profile_editor_effect(model, effect)
 }
 
 fn apply_profile_editor_effect(
@@ -1808,8 +1983,15 @@ fn memory_pane_local_key(pane: MemoryPane, code: KeyCode) -> bool {
     }
 }
 
-fn memory_detail_scroll_owned(memory: &MemoryViewState) -> bool {
-    match memory.pane {
+fn memory_detail_scroll_owned(
+    memory: &MemoryViewState,
+    interaction_pane: MemoryPane,
+    focus: Focus,
+) -> bool {
+    if focus != Focus::Workspace {
+        return false;
+    }
+    match interaction_pane {
         MemoryPane::EntryHistory => exact_history_version_is_installed(memory),
         MemoryPane::EntryDetail
         | MemoryPane::Editor
@@ -1820,6 +2002,31 @@ fn memory_detail_scroll_owned(memory: &MemoryViewState) -> bool {
         | MemoryPane::ProposalResolutionReview
         | MemoryPane::EpisodicDetail => true,
         MemoryPane::EntryList | MemoryPane::Proposals | MemoryPane::EpisodicSummaries => false,
+    }
+}
+
+fn memory_primary_pane(memory: &MemoryViewState) -> MemoryPane {
+    match memory.pane {
+        MemoryPane::EntryHistory => MemoryPane::EntryHistory,
+        MemoryPane::EntryList
+        | MemoryPane::EntryDetail
+        | MemoryPane::Editor
+        | MemoryPane::MutationReview => MemoryPane::EntryList,
+        MemoryPane::Confirmation => match memory.confirmed_command() {
+            Some(
+                ApplicationCommand::ApproveMemoryProposal { .. }
+                | ApplicationCommand::RejectMemoryProposal { .. },
+            ) => MemoryPane::Proposals,
+            _ => MemoryPane::EntryList,
+        },
+        MemoryPane::Result => match memory.result_origin {
+            MemoryResultOrigin::Mutation => MemoryPane::EntryList,
+            MemoryResultOrigin::Resolution => MemoryPane::Proposals,
+        },
+        MemoryPane::Proposals
+        | MemoryPane::ProposalDetail
+        | MemoryPane::ProposalResolutionReview => MemoryPane::Proposals,
+        MemoryPane::EpisodicSummaries | MemoryPane::EpisodicDetail => MemoryPane::EpisodicSummaries,
     }
 }
 
@@ -1863,28 +2070,36 @@ fn move_memory_detail_scroll(
 
 fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
     let (list_page, detail_page) = memory_page_sizes(model);
+    let interaction_pane = if model.focus == Focus::List {
+        memory_primary_pane(&model.agents.memory)
+    } else {
+        model.agents.memory.pane
+    };
     if no_modifiers(key.modifiers)
         && key.code != KeyCode::Esc
-        && (memory_pane_local_key(model.agents.memory.pane, key.code)
+        && (memory_pane_local_key(interaction_pane, key.code)
             || matches!(
-                model.agents.memory.pane,
+                interaction_pane,
                 MemoryPane::Editor
                     | MemoryPane::MutationReview
                     | MemoryPane::Confirmation
                     | MemoryPane::ProposalResolutionReview
             ))
-        && !model.agents.memory.local_layer_cache_is_authenticated()
+        && !model
+            .agents
+            .memory
+            .layer_cache_is_authenticated(interaction_pane)
     {
         return ControllerEffect::Redraw;
     }
     let memory = &mut model.agents.memory;
     if no_modifiers(key.modifiers)
-        && memory_detail_scroll_owned(memory)
+        && memory_detail_scroll_owned(memory, interaction_pane, model.focus)
         && move_memory_detail_scroll(memory, key.code, detail_page)
     {
         return ControllerEffect::Redraw;
     }
-    match (memory.pane, key.code) {
+    match (interaction_pane, key.code) {
         (MemoryPane::EntryList, code)
             if no_modifiers(key.modifiers) && memory_list_movement(code).is_some() =>
         {
@@ -1918,6 +2133,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                 );
             };
             set_memory_pane(memory, MemoryPane::EntryDetail);
+            model.set_focus(Focus::Workspace);
             ControllerEffect::LoadMemoryEntry { selector, key }
         }
         (MemoryPane::EntryList, KeyCode::Char('c')) if no_modifiers(key.modifiers) => {
@@ -1928,6 +2144,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                 Ok(()) => {
                     memory.detail_scroll = 0;
                     model.command.clear();
+                    model.set_focus(Focus::Workspace);
                     ControllerEffect::Redraw
                 }
                 Err(error) => memory_failure(model, error),
@@ -2012,7 +2229,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         }
         (MemoryPane::EntryHistory, code)
             if no_modifiers(key.modifiers)
-                && !exact_history_version_is_installed(memory)
+                && (model.focus == Focus::List || !exact_history_version_is_installed(memory))
                 && memory_list_movement(code).is_some() =>
         {
             let movement = memory_list_movement(code).expect("guard checked movement");
@@ -2056,6 +2273,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                     crate::domain::DomainError::MemorySelectionUnavailable,
                 );
             };
+            model.set_focus(Focus::Workspace);
             ControllerEffect::LoadMemoryEntryVersion {
                 selector,
                 key,
@@ -2099,6 +2317,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                 );
             };
             set_memory_pane(memory, MemoryPane::ProposalDetail);
+            model.set_focus(Focus::Workspace);
             ControllerEffect::LoadMemoryProposal(proposal_id)
         }
         (MemoryPane::ProposalDetail, KeyCode::Right) if no_modifiers(key.modifiers) => {
@@ -2169,6 +2388,7 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
                 );
             };
             set_memory_pane(memory, MemoryPane::EpisodicDetail);
+            model.set_focus(Focus::Workspace);
             ControllerEffect::LoadEpisodicSummary(summary_id)
         }
         (MemoryPane::MutationReview | MemoryPane::ProposalResolutionReview, KeyCode::Esc)
@@ -2270,56 +2490,197 @@ fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
     }
 }
 
+fn selected_profile_read(model: &TuiModel, read: AgentProfileRead) -> ControllerEffect {
+    model
+        .agents
+        .profile_target()
+        .map_or(ControllerEffect::Redraw, |target| {
+            ControllerEffect::LoadSelectedAgentProfile { target, read }
+        })
+}
+
+fn start_selected_profile_edit(model: &mut TuiModel) -> ControllerEffect {
+    if model.agents.editor.is_some() {
+        model.agents.pane = AgentsPane::Editor;
+        model.set_focus(Focus::Workspace);
+        return ControllerEffect::Redraw;
+    }
+    if model.agents.matching_detail().is_none() {
+        model.set_message(
+            Severity::Info,
+            "Loading selected agent; Edit will be available shortly.",
+        );
+        return selected_profile_read(model, AgentProfileRead::Detail);
+    }
+    let effect = model
+        .agents
+        .profile_target()
+        .map_or(ControllerEffect::Redraw, |target| {
+            ControllerEffect::StartSelectedProfileEdit { target }
+        });
+    model.set_focus(Focus::Workspace);
+    effect
+}
+
+pub(super) fn agents_actions(model: &TuiModel) -> [Option<&'static str>; 3] {
+    if model.skills.active
+        || model.active_view != View::Agents
+        || matches!(
+            model.focus,
+            Focus::Navigation | Focus::Command | Focus::Inspector
+        )
+        || matches!(
+            model.agents.pane,
+            AgentsPane::Memory | AgentsPane::Confirmation
+        )
+    {
+        return [None; 3];
+    }
+    let pane = if model.focus == Focus::List {
+        AgentsPane::List
+    } else {
+        model.agents.pane
+    };
+    if pane == AgentsPane::Detail && model.agents.skill_panel_open {
+        return [None; 3];
+    }
+    let has_draft = model.agents.editor.is_some();
+    let loaded = model.agents.matching_detail().is_some();
+    [
+        matches!(pane, AgentsPane::List | AgentsPane::Detail).then_some(if has_draft {
+            "N Resume draft"
+        } else {
+            "N new agent"
+        }),
+        (matches!(
+            pane,
+            AgentsPane::List | AgentsPane::Detail | AgentsPane::History
+        ) && (loaded || has_draft))
+            .then_some(if has_draft {
+                "E Resume draft"
+            } else {
+                "E edit"
+            }),
+        (matches!(pane, AgentsPane::List | AgentsPane::Detail) && loaded).then_some("H history"),
+    ]
+}
+
 fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEffect> {
-    if model.agents.pane == AgentsPane::Detail && model.agents.skill_panel_open {
+    if model.focus != Focus::List
+        && model.agents.pane == AgentsPane::Detail
+        && model.agents.skill_panel_open
+    {
         return handle_agent_skills_key(model, key);
     }
     if model.agents.pane == AgentsPane::Memory {
         let effect = handle_memory_key(model, key);
         return (effect != ControllerEffect::None).then_some(effect);
     }
-    let effect = match (model.agents.pane, key.code) {
+    let interaction_pane = if model.focus == Focus::List {
+        AgentsPane::List
+    } else {
+        model.agents.pane
+    };
+    if no_modifiers(key.modifiers)
+        && matches!(
+            key.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+        )
+    {
+        if interaction_pane == AgentsPane::Detail {
+            let (limit, page) = views::agent_detail_scroll_geometry(model);
+            model.agents.detail_scroll =
+                moved_document_offset(model.agents.detail_scroll, limit, page, key.code);
+            return Some(ControllerEffect::Redraw);
+        }
+        if interaction_pane == AgentsPane::History {
+            if model.agents.version_detail.is_some() {
+                let (limit, page) = views::agent_version_scroll_geometry(model);
+                model.agents.version_scroll =
+                    moved_document_offset(model.agents.version_scroll, limit, page, key.code);
+            } else {
+                let previous = model.agents.selected_history_version;
+                let last = model
+                    .agents
+                    .history
+                    .as_ref()
+                    .map(|history| history.versions.len().saturating_sub(1))
+                    .unwrap_or(0);
+                let (_, page) = views::agent_history_scroll_geometry(model);
+                model.agents.selected_history_version =
+                    moved_document_offset(previous, last, page, key.code);
+                model.agents.history_scroll = views::agent_history_scroll_geometry(model).0;
+                if previous != model.agents.selected_history_version {
+                    model.agents.selection_generation =
+                        model.agents.selection_generation.wrapping_add(1);
+                }
+            }
+            return Some(ControllerEffect::Redraw);
+        }
+    }
+    let effect = match (interaction_pane, key.code) {
         (AgentsPane::List, KeyCode::Down) if no_modifiers(key.modifiers) => {
             let last = model.agents.profiles.profiles.len().saturating_sub(1);
             model
                 .agents
                 .select_profile_index(model.agents.selected_profile.saturating_add(1).min(last));
             model.agents.list_scroll = views::agent_list_scroll_offset(model);
-            ControllerEffect::Redraw
+            selected_profile_read(model, AgentProfileRead::Detail)
         }
         (AgentsPane::List, KeyCode::Up) if no_modifiers(key.modifiers) => {
             model
                 .agents
                 .select_profile_index(model.agents.selected_profile.saturating_sub(1));
             model.agents.list_scroll = views::agent_list_scroll_offset(model);
-            ControllerEffect::Redraw
+            selected_profile_read(model, AgentProfileRead::Detail)
         }
         (AgentsPane::List, KeyCode::Enter) if no_modifiers(key.modifiers) => {
             model.agents.pane = AgentsPane::Detail;
-            ControllerEffect::LoadAgentProfile {
-                selected_profile: model.agents.selected_profile,
-            }
+            model.set_focus(Focus::Workspace);
+            selected_profile_read(model, AgentProfileRead::Detail)
         }
-        (AgentsPane::List | AgentsPane::Detail, KeyCode::Char('c'))
+        (AgentsPane::List | AgentsPane::Detail, KeyCode::Char('c' | 'n'))
             if no_modifiers(key.modifiers) =>
         {
+            if model.agents.editor.is_some() {
+                model.agents.pane = AgentsPane::Editor;
+                model.set_focus(Focus::Workspace);
+                return Some(ControllerEffect::Redraw);
+            }
             let template_index = model.agents.selected_template;
+            model.set_focus(Focus::Workspace);
             ControllerEffect::StartProfileCreate { template_index }
         }
-        (AgentsPane::List, KeyCode::Char('e')) if no_modifiers(key.modifiers) => {
-            model.agents.pane = AgentsPane::Editor;
-            ControllerEffect::StartProfileEdit {
-                selected_profile: model.agents.selected_profile,
-            }
+        (AgentsPane::List | AgentsPane::Detail | AgentsPane::History, KeyCode::Char('e'))
+            if no_modifiers(key.modifiers) =>
+        {
+            start_selected_profile_edit(model)
         }
-        (AgentsPane::Detail, KeyCode::Char('h')) if no_modifiers(key.modifiers) => {
-            model.agents.pane = AgentsPane::History;
-            ControllerEffect::LoadAgentProfileHistory {
-                selected_profile: model.agents.selected_profile,
+        (AgentsPane::List | AgentsPane::Detail, KeyCode::Char('h'))
+            if no_modifiers(key.modifiers) =>
+        {
+            if model.agents.matching_detail().is_none() {
+                return Some(selected_profile_read(model, AgentProfileRead::Detail));
             }
+            model.agents.pane = AgentsPane::History;
+            model.set_focus(Focus::Workspace);
+            selected_profile_read(model, AgentProfileRead::History)
         }
         (AgentsPane::Detail, KeyCode::Enter) if no_modifiers(key.modifiers) => {
+            if model.agents.matching_detail().is_none() {
+                return Some(selected_profile_read(model, AgentProfileRead::Detail));
+            }
             match model.agents.selected_detail_action {
+                AgentDetailAction::Profile => ControllerEffect::Redraw,
+                AgentDetailAction::History => {
+                    model.agents.pane = AgentsPane::History;
+                    selected_profile_read(model, AgentProfileRead::History)
+                }
                 AgentDetailAction::AssignedSkills => {
                     model.agents.skill_panel_open = true;
                     model.agents.selected_assigned_skill = 0;
@@ -2328,7 +2689,7 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
                 }
                 AgentDetailAction::Memory => {
                     let Some((profile_id, identity, namespace_id)) =
-                        model.agents.detail.as_ref().map(|detail| {
+                        model.agents.matching_detail().map(|detail| {
                             (
                                 detail.profile.profile_id(),
                                 crate::app::MemoryProfileIdentityView {
@@ -2352,46 +2713,11 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             }
         }
         (AgentsPane::Detail, KeyCode::Right) if no_modifiers(key.modifiers) => {
-            model.agents.selected_detail_action = AgentDetailAction::Memory;
+            model.agents.selected_detail_action = model.agents.selected_detail_action.moved(true);
             ControllerEffect::Redraw
         }
         (AgentsPane::Detail, KeyCode::Left) if no_modifiers(key.modifiers) => {
-            model.agents.selected_detail_action = AgentDetailAction::AssignedSkills;
-            ControllerEffect::Redraw
-        }
-        (AgentsPane::Detail, KeyCode::Down) if no_modifiers(key.modifiers) => {
-            model.agents.detail_scroll = model.agents.detail_scroll.saturating_add(1);
-            ControllerEffect::Redraw
-        }
-        (AgentsPane::Detail, KeyCode::Up) if no_modifiers(key.modifiers) => {
-            model.agents.detail_scroll = model.agents.detail_scroll.saturating_sub(1);
-            ControllerEffect::Redraw
-        }
-        (AgentsPane::Detail, KeyCode::Char('e')) if no_modifiers(key.modifiers) => {
-            model.agents.pane = AgentsPane::Editor;
-            ControllerEffect::StartProfileEdit {
-                selected_profile: model.agents.selected_profile,
-            }
-        }
-        (AgentsPane::History, KeyCode::Down) if no_modifiers(key.modifiers) => {
-            let last = model
-                .agents
-                .history
-                .as_ref()
-                .map(|history| history.versions.len().saturating_sub(1))
-                .unwrap_or(0);
-            model.agents.selected_history_version = model
-                .agents
-                .selected_history_version
-                .saturating_add(1)
-                .min(last);
-            model.agents.history_scroll = model.agents.selected_history_version;
-            ControllerEffect::Redraw
-        }
-        (AgentsPane::History, KeyCode::Up) if no_modifiers(key.modifiers) => {
-            model.agents.selected_history_version =
-                model.agents.selected_history_version.saturating_sub(1);
-            model.agents.history_scroll = model.agents.selected_history_version;
+            model.agents.selected_detail_action = model.agents.selected_detail_action.moved(false);
             ControllerEffect::Redraw
         }
         (AgentsPane::History, KeyCode::Enter) if no_modifiers(key.modifiers) => {
@@ -2401,18 +2727,28 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
                     .get(model.agents.selected_history_version)
                     .map(|entry| (history.profile_id, entry.version))
             });
-            let Some((profile_id, version)) = selection else {
+            let Some((_profile_id, version)) = selection else {
                 return Some(ControllerEffect::Redraw);
             };
-            ControllerEffect::LoadAgentProfileVersion {
-                profile_id,
-                version,
-            }
+            selected_profile_read(model, AgentProfileRead::Version(version))
         }
         (_, KeyCode::Esc) if no_modifiers(key.modifiers) => return Some(unwind_agents(model)),
         _ => return None,
     };
     Some(effect)
+}
+
+fn moved_document_offset(offset: usize, limit: usize, page: usize, key: KeyCode) -> usize {
+    let offset = offset.min(limit);
+    match key {
+        KeyCode::Up => offset.saturating_sub(1),
+        KeyCode::Down => offset.saturating_add(1).min(limit),
+        KeyCode::PageUp => offset.saturating_sub(page),
+        KeyCode::PageDown => offset.saturating_add(page).min(limit),
+        KeyCode::Home => 0,
+        KeyCode::End => limit,
+        _ => offset,
+    }
 }
 
 fn handle_agent_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEffect> {
@@ -2543,7 +2879,12 @@ fn move_agent_skill_action(model: &mut TuiModel, forward: bool) {
 }
 
 fn unwind_agents(model: &mut TuiModel) -> ControllerEffect {
-    match model.agents.pane {
+    let interaction_pane = if model.focus == Focus::List {
+        AgentsPane::List
+    } else {
+        model.agents.pane
+    };
+    match interaction_pane {
         AgentsPane::List => {
             model.select_view(View::Overview);
             ControllerEffect::Redraw
@@ -2554,7 +2895,9 @@ fn unwind_agents(model: &mut TuiModel) -> ControllerEffect {
             ControllerEffect::Redraw
         }
         AgentsPane::History => {
-            model.agents.pane = AgentsPane::Detail;
+            if model.agents.version_detail.take().is_none() {
+                model.agents.pane = AgentsPane::Detail;
+            }
             ControllerEffect::Redraw
         }
         AgentsPane::Editor => {
@@ -2624,11 +2967,24 @@ fn dismiss(model: &mut TuiModel) -> ControllerEffect {
 }
 
 fn cycle_focus(model: &mut TuiModel, forward: bool) -> ControllerEffect {
+    // Older/default Agents state represents list ownership with Workspace + List.
+    // Cycle from the visible logical region without resetting retained workspaces.
+    if !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane == AgentsPane::List
+        && model.focus == Focus::Workspace
+        && model.layout_mode != LayoutMode::TooSmall
+    {
+        model.set_focus(Focus::List);
+    }
     let order = visible_focus_order(model);
-    let current = order
-        .iter()
-        .position(|focus| *focus == model.focus)
-        .unwrap_or(0);
+    let Some(current) = order.iter().position(|focus| *focus == model.focus) else {
+        if model.focus == Focus::Inspector {
+            model.inspector_open = false;
+        }
+        model.set_focus(Focus::Workspace);
+        return ControllerEffect::Redraw;
+    };
     let next = if forward {
         current.saturating_add(1) % order.len()
     } else if current == 0 {
@@ -2637,44 +2993,28 @@ fn cycle_focus(model: &mut TuiModel, forward: bool) -> ControllerEffect {
         current - 1
     };
     model.set_focus(order[next]);
+    if !model.skills.active
+        && model.active_view == View::Agents
+        && model.focus == Focus::Workspace
+        && model.agents.pane == AgentsPane::List
+    {
+        model.agents.pane = AgentsPane::Detail;
+        return selected_profile_read(model, AgentProfileRead::Detail);
+    }
     ControllerEffect::Redraw
 }
 
 fn visible_focus_order(model: &TuiModel) -> &'static [Focus] {
-    const WIDE: &[Focus] = &[
-        Focus::Navigation,
-        Focus::Workspace,
-        Focus::Inspector,
-        Focus::Command,
-    ];
-    const MEDIUM: &[Focus] = &[Focus::Navigation, Focus::Workspace, Focus::Command];
-    const MEDIUM_INSPECTOR: &[Focus] = &[
-        Focus::Navigation,
-        Focus::Workspace,
-        Focus::Inspector,
-        Focus::Command,
-    ];
-    const NARROW: &[Focus] = &[Focus::Workspace, Focus::Command];
-    const NARROW_INSPECTOR: &[Focus] = &[Focus::Workspace, Focus::Inspector, Focus::Command];
+    const DOCUMENT: &[Focus] = &[Focus::Navigation, Focus::Workspace];
+    const TWO_PANE: &[Focus] = &[Focus::Navigation, Focus::List, Focus::Workspace];
 
-    if !model.skills.active
-        && model.active_view == View::Agents
-        && model.agents.pane == AgentsPane::Memory
-    {
-        return match model.layout_mode {
-            LayoutMode::Wide | LayoutMode::Medium => MEDIUM,
-            LayoutMode::Narrow => NARROW,
-            LayoutMode::TooSmall => &[Focus::Workspace],
-        };
+    if model.layout_mode == LayoutMode::TooSmall {
+        return &[Focus::Workspace];
     }
-
-    match (model.layout_mode, model.inspector_open) {
-        (LayoutMode::Wide, _) => WIDE,
-        (LayoutMode::Medium, true) => MEDIUM_INSPECTOR,
-        (LayoutMode::Medium, false) => MEDIUM,
-        (LayoutMode::Narrow, true) => NARROW_INSPECTOR,
-        (LayoutMode::Narrow, false) => NARROW,
-        (LayoutMode::TooSmall, _) => &[Focus::Workspace],
+    if model.skills.active || model.active_view == View::Agents {
+        TWO_PANE
+    } else {
+        DOCUMENT
     }
 }
 
@@ -2742,7 +3082,7 @@ fn move_navigation_selection(model: &mut TuiModel, forward: bool) -> ControllerE
     } else {
         switch_to_tab(model, target)
     };
-    if matches!(model.layout_mode, LayoutMode::Wide | LayoutMode::Medium) {
+    if model.layout_mode != LayoutMode::TooSmall {
         model.set_focus(Focus::Navigation);
     }
     effect
@@ -2750,16 +3090,12 @@ fn move_navigation_selection(model: &mut TuiModel, forward: bool) -> ControllerE
 
 fn select_navigation_bound(model: &mut TuiModel, end: bool) -> ControllerEffect {
     let target = if end {
-        NavigationTab::Skills
+        NavigationTab::Help
     } else {
         NavigationTab::Overview
     };
-    let effect = if target == NavigationTab::Skills {
-        switch_to_skills(model)
-    } else {
-        switch_to_tab(model, target)
-    };
-    if matches!(model.layout_mode, LayoutMode::Wide | LayoutMode::Medium) {
+    let effect = switch_to_destination(model, target);
+    if model.layout_mode != LayoutMode::TooSmall {
         model.set_focus(Focus::Navigation);
     }
     effect
@@ -2954,11 +3290,12 @@ mod tests {
     }
 
     #[test]
-    fn global_keys_switch_views_focus_inspector_and_leave_bare_q_inert() {
+    fn global_keys_switch_numbered_views_allow_explicit_details_and_leave_bare_q_inert() {
         let mut model = model();
-        assert_redraw_and_view(&mut model, key('2'), View::Setup);
-        assert_redraw_and_view(&mut model, key('3'), View::Audit);
-        assert_redraw_and_view(&mut model, key('4'), View::Help);
+        assert_redraw_and_view(&mut model, key('2'), View::Chat);
+        assert_redraw_and_view(&mut model, key('7'), View::Setup);
+        assert_redraw_and_view(&mut model, key('8'), View::Audit);
+        assert_redraw_and_view(&mut model, key('9'), View::Help);
         assert_eq!(handle_event(&mut model, key('i')), ControllerEffect::Redraw);
         assert!(model.inspector_open);
         assert_eq!(model.focus, Focus::Inspector);
@@ -3212,7 +3549,7 @@ mod tests {
             handle_event(&mut model, key_code(KeyCode::Tab, KeyModifiers::NONE)),
             ControllerEffect::Redraw
         );
-        assert_eq!(model.focus, Focus::Inspector);
+        assert_eq!(model.focus, Focus::Navigation);
         assert_eq!(
             handle_event(&mut model, key_code(KeyCode::BackTab, KeyModifiers::SHIFT)),
             ControllerEffect::Redraw
@@ -3388,7 +3725,7 @@ mod tests {
         let mut model = model();
         model.replace_audit((1..=100).map(audit_entry).collect());
         model.set_command_in_flight(true);
-        assert_eq!(handle_event(&mut model, key('3')), ControllerEffect::Redraw);
+        assert_eq!(handle_event(&mut model, key('8')), ControllerEffect::Redraw);
         model.audit_selection = Some(75);
 
         apply_outcome(

@@ -3,7 +3,7 @@ use std::time::Duration;
 use crossbeam_channel::Receiver;
 use crossterm::event::{self, Event, KeyEventKind};
 
-use super::error::TuiError;
+use super::{error::TuiError, model::NavigationTab};
 use crate::ui::interrupt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,7 +31,11 @@ impl SkillKey {
             KeyCode::Right => Some(Self::Right),
             KeyCode::Enter => Some(Self::Enter),
             KeyCode::Esc => Some(Self::Escape),
-            KeyCode::Char('s') => Some(Self::Open),
+            KeyCode::Char(character)
+                if NavigationTab::for_number(character) == Some(NavigationTab::Skills) =>
+            {
+                Some(Self::Open)
+            }
             KeyCode::Char('c') => Some(Self::Create),
             _ => None,
         }
@@ -107,9 +111,9 @@ mod tests {
     use super::{CrosstermEventSource, EventSource, SkillKey, TuiEvent, translate};
 
     #[test]
-    fn skill_open_uses_only_the_bare_s_shortcut() {
+    fn skill_open_uses_the_authoritative_bare_four_destination() {
         assert_eq!(
-            SkillKey::from_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
+            SkillKey::from_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE)),
             Some(SkillKey::Open)
         );
         assert_eq!(
@@ -117,7 +121,7 @@ mod tests {
             None
         );
         assert_eq!(
-            SkillKey::from_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE)),
+            SkillKey::from_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
             None
         );
     }

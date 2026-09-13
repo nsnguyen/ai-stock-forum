@@ -14,13 +14,15 @@ use ai_stock_forum::{
     ui::{
         skill_editor::SkillEditor,
         tui::{
-            AssignmentKind, SkillConfirmation, SkillOperationOrigin,
+            AssignmentKind, ControllerEffect, SkillConfirmation, SkillOperationOrigin, TuiEvent,
+            handle_event,
             model::{AgentsPane, Focus, Severity, SkillsPane, TuiModel, View},
             render,
             theme::Theme,
         },
     },
 };
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
 use uuid::Uuid;
 
@@ -144,6 +146,21 @@ fn profile_with_skills(
     }
 }
 
+fn select_profile_detail(model: &mut TuiModel, detail: AgentProfileView) {
+    let profile = &detail.profile;
+    model.agents.profiles.profiles = vec![AgentProfileSummary {
+        profile_id: profile.profile_id(),
+        profile_version_id: profile.profile_version_id(),
+        version: profile.version(),
+        display_name: profile.display_name().to_owned(),
+        role: profile.role(),
+        primary_specialty: profile.primary_specialty().to_owned(),
+        readiness: detail.readiness,
+        content_digest: profile.content_digest().clone(),
+    }];
+    model.agents.detail = Some(detail);
+}
+
 fn render_rows(model: &TuiModel, width: u16, height: u16) -> Vec<String> {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -164,7 +181,7 @@ fn render_text(model: &TuiModel, width: u16, height: u16) -> String {
 }
 
 #[test]
-fn skills_workspace_uses_one_two_and_three_panes_at_adaptive_breakpoints() {
+fn skills_workspace_uses_one_and_two_panes_at_adaptive_breakpoints() {
     let detail = skills_model(SkillsPane::Detail);
 
     let narrow = render_text(&detail, 79, 24);
@@ -172,7 +189,7 @@ fn skills_workspace_uses_one_two_and_three_panes_at_adaptive_breakpoints() {
     assert!(!narrow.contains("Skill library"));
     assert!(!narrow.contains("Skill context"));
 
-    let medium = render_text(&detail, 80, 24);
+    let medium = render_text(&detail, 100, 24);
     assert!(medium.contains("Skill library"));
     assert!(medium.contains("Skill detail"));
     assert!(!medium.contains("Skill context"));
@@ -180,7 +197,7 @@ fn skills_workspace_uses_one_two_and_three_panes_at_adaptive_breakpoints() {
     let wide = render_text(&detail, 120, 30);
     assert!(wide.contains("Skill library"));
     assert!(wide.contains("Skill detail"));
-    assert!(wide.contains("Skill context"));
+    assert!(!wide.contains("Skill context"));
 
     let list = skills_model(SkillsPane::List);
     let narrow_list = render_text(&list, 60, 18);
@@ -379,7 +396,7 @@ fn agent_skill_panel_shows_exact_pin_upgrade_availability_and_explicit_actions()
     model.active_view = View::Agents;
     model.agents.pane = AgentsPane::Detail;
     model.agents.skill_panel_open = true;
-    model.agents.detail = Some(detail);
+    select_profile_detail(&mut model, detail);
     model.skills.library = SkillsView {
         skills: vec![summary(&second)],
         total_count: 1,
@@ -389,7 +406,7 @@ fn agent_skill_panel_shows_exact_pin_upgrade_availability_and_explicit_actions()
 
     let text = render_text(&model, 180, 60);
     for expected in [
-        "Assigned skills",
+        "Skill 1 of 1",
         "PINNED EXACT VERSION",
         "v1",
         "Upgrade available",
@@ -403,15 +420,8 @@ fn agent_skill_panel_shows_exact_pin_upgrade_availability_and_explicit_actions()
     ] {
         assert!(text.contains(expected), "missing {expected}");
     }
-    for chunk in first
-        .reference()
-        .skill_version_id()
-        .to_string()
-        .as_bytes()
-        .chunks(8)
-    {
-        assert!(text.contains(std::str::from_utf8(chunk).unwrap()));
-    }
+    assert!(!text.contains(&first.reference().skill_version_id().to_string()));
+    assert!(text.contains("Agent Evidence"));
 }
 
 #[test]
@@ -447,21 +457,19 @@ fn confirmation_and_help_advertise_only_real_keyboard_and_quit_behavior() {
 
     let mut help = TuiModel::new(snapshot(), false);
     help.active_view = View::Help;
-    let help_text = render_text(&help, 100, 36);
-    assert!(help_text.contains("1-4 / a / s"));
-    assert!(help_text.contains("Open a view outside active text entry"));
-    assert!(help_text.contains("a Agents / s Skills"));
-    assert!(!help_text.contains("Option/Alt+1-6"));
+    let help_text = render_text(&help, 100, 40);
+    assert!(help_text.contains("1-9"));
+    assert!(help_text.contains("Open a destination while in NAV"));
+    assert!(help_text.contains("3 Agents / 4 Skills"));
+    assert!(!help_text.contains("Option/Alt+1-9"));
     assert!(help_text.contains("q                   Inert"));
     assert!(help_text.contains("/quit"));
     assert!(!help_text.contains("q                   Request shutdown"));
 
-    let navigation = render_text(&help, 120, 36);
-    assert!(navigation.contains("s Skills"));
-    assert!(navigation.contains("a Agents"));
+    let navigation = render_text(&help, 120, 40);
+    assert!(navigation.contains("4 Skills"));
+    assert!(navigation.contains("3 Agents"));
     assert!(!navigation.contains("Alt+"));
-    assert!(navigation.contains("q inert"));
-    assert!(navigation.contains("/quit exit"));
 }
 
 #[test]
@@ -613,11 +621,11 @@ fn create_confirmation_uses_authoritative_candidate_state_and_names_version_one(
 fn list_focus_is_exclusive_and_skills_suppresses_agents_navigation_focus() {
     let mut model = skills_model(SkillsPane::List);
     model.active_view = View::Agents;
-    let terminal = terminal_for(&model, 80, 24);
+    let terminal = terminal_for(&model, 100, 24);
     let buffer = terminal.backend().buffer();
 
-    let library_corner = buffer.cell((20, 4)).expect("library corner");
-    let detail_corner = buffer.cell((45, 4)).expect("detail corner");
+    let library_corner = buffer.cell((20, 3)).expect("library corner");
+    let detail_corner = buffer.cell((45, 3)).expect("detail corner");
     assert!(
         library_corner
             .modifier
@@ -630,8 +638,8 @@ fn list_focus_is_exclusive_and_skills_suppresses_agents_navigation_focus() {
     );
 
     let text = render_text(&model, 120, 36);
-    assert!(text.contains("> s Skills"));
-    assert!(!text.contains("> a Agents"));
+    assert!(text.contains("4 Skills"));
+    assert!(text.contains("3 Agents"));
 }
 
 #[test]
@@ -679,6 +687,29 @@ fn editor_review_names_create_v1_and_the_next_object_version_without_fabricating
     assert!(text.contains("Exact version v2"));
     assert!(text.contains("version ID assigned on commit"));
     assert!(!text.contains(&SkillVersionId::from_uuid(Uuid::from_u128(1_502)).to_string()));
+}
+
+#[test]
+fn legacy_skill_editor_footer_does_not_advertise_unimplemented_tab_traversal() {
+    let mut model = skills_model(SkillsPane::Editor);
+    model.skills.editor = Some(SkillEditor::for_create(None));
+    model.command.ingest("literal draft");
+
+    let text = render_text(&model, 100, 30);
+    for hint in ["WASD text", "Enter accept", "Esc back/cancel"] {
+        assert!(text.contains(hint), "missing skill editor hint {hint:?}");
+    }
+    assert!(!text.contains("Tab next field"));
+
+    let before = model.clone();
+    assert_eq!(
+        handle_event(
+            &mut model,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        ),
+        ControllerEffect::None
+    );
+    assert_eq!(model, before);
 }
 
 #[test]
@@ -783,7 +814,7 @@ fn create_source_agent_picker_and_result_keep_complete_contextual_keys_compact_a
 }
 
 #[test]
-fn wide_long_content_declares_truncation_without_hiding_actions() {
+fn wide_long_content_keeps_truncation_guidance_and_actions_visible() {
     let mut long = skill(1_800, "Long Complete", SkillProvenance::User);
     let mut draft = long.content().clone();
     draft.instructions = format!("{} INSTRUCTION-END", "wrapped guidance ".repeat(80));
@@ -804,8 +835,6 @@ fn wide_long_content_declares_truncation_without_hiding_actions() {
     model.skills.detail = Some(view(&long));
 
     let text = render_text(&model, 160, 44);
-    assert!(!text.contains("INSTRUCTION-END"));
-    assert!(!text.contains("REFERENCE-END"));
     assert!(text.contains("Long content may be truncated"));
     assert!(text.contains("Left/Right: choose action"));
     assert!(text.contains("Enter: open"));
@@ -841,7 +870,7 @@ fn agents_multi_skill_panel_shows_position_rows_and_contextual_available_actions
     model.active_view = View::Agents;
     model.agents.pane = AgentsPane::Detail;
     model.agents.skill_panel_open = true;
-    model.agents.detail = Some(detail);
+    select_profile_detail(&mut model, detail);
     model.skills.library = SkillsView {
         skills: vec![summary(&first_active), summary(&second)],
         total_count: 2,

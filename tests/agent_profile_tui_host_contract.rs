@@ -100,6 +100,42 @@ fn advance_edit_to_preview(editor: &mut ProfileEditor, display_name: &str) -> Pr
     request
 }
 
+#[test]
+fn explicit_create_leaves_command_type_and_opens_a_nav_template_picker() {
+    use ai_stock_forum::ui::tui::{
+        handle_event,
+        model::{Focus, InputMode},
+    };
+    let (_temp, _paths, service) = service();
+    let runtime = ApplicationRuntime::spawn(service, 2).unwrap();
+    let client = runtime.client();
+    let mut model = TuiModel::new(empty_snapshot(), false);
+    model.select_view(View::Agents);
+    model.set_focus(Focus::Command);
+    execute_agent_effect(
+        &client,
+        &mut model,
+        ControllerEffect::StartProfileCreateByTemplate {
+            template_id: builtin_profile_templates()[0].id.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(model.input_mode, InputMode::Nav);
+    assert_eq!(model.focus, Focus::Workspace);
+    handle_event(
+        &mut model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
+    );
+    assert_eq!(
+        model.agents.editor.as_ref().unwrap().draft().role,
+        builtin_profile_templates()[1].role
+    );
+    assert!(model.command.text().is_empty());
+    runtime
+        .finish_and_join(ShutdownReason::Interrupted)
+        .unwrap();
+}
+
 #[derive(Clone)]
 struct TemplateReadRecorder {
     calls: Arc<Mutex<usize>>,
@@ -692,7 +728,7 @@ fn shutdown_cancels_service_review_before_terminal_restoration() {
     };
     let mut events = OneInterrupt {
         events: VecDeque::from([
-            TuiEvent::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            TuiEvent::Key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)),
             TuiEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
             TuiEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
         ]),
@@ -781,7 +817,7 @@ fn host_initializes_and_round_trips_view_geometry_without_resize() {
         };
         let mut events = OneInterrupt {
             events: VecDeque::from([
-                TuiEvent::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+                TuiEvent::Key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)),
                 TuiEvent::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
                 TuiEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             ]),

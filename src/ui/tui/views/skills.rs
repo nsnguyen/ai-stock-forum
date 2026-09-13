@@ -12,7 +12,7 @@ use crate::{
         skill_editor::{SkillEditor, SkillEditorField, SkillEditorMode, SkillEditorStep},
         tui::{
             layout::{skill_layout_mode, skill_workspace},
-            model::{AssignmentKind, Severity, SkillDetailAction, SkillsPane, TuiModel},
+            model::{AssignmentKind, Focus, Severity, SkillDetailAction, SkillsPane, TuiModel},
             theme::Theme,
         },
     },
@@ -23,6 +23,10 @@ use super::{label_value, panel, safe_text, workspace_focused};
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     let mode = skill_layout_mode(frame.area());
     let layout = skill_workspace(area, mode);
+    if layout.list.is_none() && model.focus == Focus::List {
+        render_library(frame, area, model, theme);
+        return;
+    }
     if let Some(list) = layout.list {
         render_library(frame, list, model, theme);
     }
@@ -105,7 +109,8 @@ fn render_fixed_panel(
 }
 
 fn render_library(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
-    let focused = workspace_focused(model) && model.skills.pane == SkillsPane::List;
+    let focused = model.focus == Focus::List
+        || (workspace_focused(model) && model.skills.pane == SkillsPane::List);
     let mut lines = vec![Line::styled(
         "Up/Down: select | Enter: open | c Create | Esc: back",
         theme.focus,
@@ -145,7 +150,13 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
                     if selected { ">" } else { " " },
                     safe_text(&skill.display_name)
                 ),
-                if selected { theme.focus } else { theme.accent },
+                if selected && focused {
+                    theme.focus
+                } else if selected {
+                    theme.accent
+                } else {
+                    theme.muted
+                },
             ));
             lines.push(Line::from(vec![
                 Span::styled("  Active version ", theme.muted),

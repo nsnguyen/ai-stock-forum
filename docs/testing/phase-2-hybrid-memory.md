@@ -90,7 +90,7 @@ fresh target once. Never seed after a live application launch.
 ## Direct memory and immutable history
 
 1. Launch `target/release/ai-stock-forum` with the disposable environment.
-   Press bare `a`, select the printed synthetic agent, open Detail, select
+   Press bare `3`, select the printed synthetic agent, open Detail, select
    Memory with Left/Right, and press Enter.
 2. Create key `thesis` with value `synthetic value v1` and a synthetic purpose
    tag. Confirm the plaintext warning appears in the editor, review, and
@@ -220,10 +220,8 @@ mutations and proposal resolutions; proposal creation is test-harness-only.
 Exercise these exact outer terminal sizes:
 
 - `60x18`: one-pane Memory layout;
-- `100x24`: the navigation rail consumes 20 columns, leaving an 80-column
-  Memory workspace and two panes; and
-- `140x30`: the navigation rail consumes 20 columns, leaving a 120-column
-  Memory workspace and three panes.
+- `100x24`: a 28-column list and 72-column active workspace; and
+- `140x30`: a clamped 36-column list and 104-column active workspace.
 
 At every size, verify stable agent identity, selected action, required plaintext
 warning, Enter, and Esc remain visible in the active panel. Verify the global
@@ -231,18 +229,21 @@ destination rail contains exactly these ordered labels and no duplicate or
 seventh destination:
 
 ```text
-1 Overview
-2 Setup
-3 Audit
-4 Help
-a Agents
-s Skills
+1 Home
+2 Chat
+3 Agents
+4 Skills
+5 Connections
+6 Activity
+7 Setup
+8 Audit
+9 Help
 ```
 
-Memory remains nested under Agents; bare `m` and bare `7` are not destinations.
-Modified shortcuts are inert. From every non-text Memory state, each of the six
-bare global keys navigates to its destination and bare `a` returns to the exact
-retained Memory state. While a Memory editor owns text, type `1234as`; typed
+Memory remains nested under Agents; bare `m` is not a destination.
+Modified shortcuts are inert. From every non-text Memory state, each of the nine
+bare global keys navigates to its destination and bare `3` returns to the exact
+retained Memory state. While a Memory editor owns text, type `wasd123456789`; typed
 shortcut characters remain editor text and do not navigate. Bare `q` is inert;
 `/quit` requests normal shutdown. `?` remains a Help alias, not a destination
 label.

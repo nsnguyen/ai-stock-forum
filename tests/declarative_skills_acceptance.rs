@@ -179,7 +179,7 @@ fn keyboard_workflow_creates_versions_pins_upgrades_unassigns_and_restores_exact
     let mut model = TuiModel::new(snapshot(Some(empty_agent.clone())), false);
 
     assert_eq!(
-        handle_event(&mut model, navigation_key(KeyCode::Char('s'))),
+        handle_event(&mut model, navigation_key(KeyCode::Char('4'))),
         ControllerEffect::LoadSkills
     );
     apply_outcome(&mut model, outcome(CommandView::Skills(library(&[&first]))));

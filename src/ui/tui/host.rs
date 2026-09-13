@@ -5,10 +5,11 @@ use super::{
     controller::{ControllerEffect, apply_outcome, handle_event},
     event::{CrosstermEventSource, EventSource, TuiEvent},
     model::{
-        AgentOutcomeIntent, MemoryOutcomeIntent, MemoryPane, MemoryResultOrigin, MemoryViewState,
-        NavigationTab, RuntimeStatus, SkillOperationOrigin, SkillWorkspaceOrigin, TuiModel,
-        absent_set_diff_matches, canonical_memory_edit_diff, delete_diff_matches,
-        deleted_set_diff_matches, expected_state_matches_namespace_key, seeded_present_set_diff,
+        AgentOutcomeIntent, AgentProfileRead, AgentProfileTarget, MemoryOutcomeIntent, MemoryPane,
+        MemoryResultOrigin, MemoryViewState, NavigationTab, RuntimeStatus, SkillOperationOrigin,
+        SkillWorkspaceOrigin, TuiModel, absent_set_diff_matches, canonical_memory_edit_diff,
+        delete_diff_matches, deleted_set_diff_matches, expected_state_matches_namespace_key,
+        seeded_present_set_diff,
     },
     terminal::{CrosstermScreen, Screen},
     theme::Theme,
@@ -501,6 +502,21 @@ pub fn execute_agent_effect(
     effect: ControllerEffect,
 ) -> Result<(), RuntimeError> {
     match effect {
+        ControllerEffect::LoadSelectedAgentProfile { target, read } => {
+            if model.agents.profile_target().as_ref() == Some(&target) {
+                let outcome = client.submit(profile_read_command(&target, read))?;
+                if profile_read_matches(read, &outcome.view) {
+                    model.agents.install_profile_result(&target, outcome.view);
+                }
+            }
+        }
+        ControllerEffect::StartSelectedProfileEdit { target } => {
+            if model.agents.profile_target().as_ref() == Some(&target)
+                && model.agents.matching_detail().is_some()
+            {
+                start_profile_editor_from_detail(model)?;
+            }
+        }
         ControllerEffect::LoadAgentProfiles => {
             refresh_agent_navigation_data(client, model)?;
         }
@@ -536,6 +552,7 @@ pub fn execute_agent_effect(
                 .agents
                 .start_profile_create(template_index, &templates)
             {
+                model.set_focus(super::model::Focus::Workspace);
                 model.command.clear();
                 model.clear_message();
             } else {
@@ -561,6 +578,7 @@ pub fn execute_agent_effect(
             if template_index
                 .is_some_and(|index| model.agents.start_profile_create(index, &templates))
             {
+                model.set_focus(super::model::Focus::Workspace);
                 model.command.clear();
                 model.clear_message();
             } else {
@@ -1448,6 +1466,8 @@ fn start_profile_editor_from_detail(model: &mut TuiModel) -> Result<(), RuntimeE
             draft,
         ));
         model.agents.pane = super::model::AgentsPane::Editor;
+        model.agents.synchronize_field_input();
+        model.set_focus(super::model::Focus::Workspace);
         model.command.clear();
         model.clear_message();
     }
@@ -1538,12 +1558,42 @@ struct PendingMemoryRequest {
     generation: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingProfileRequest {
+    target: AgentProfileTarget,
+    read: AgentProfileRead,
+}
+
+fn profile_read_command(target: &AgentProfileTarget, read: AgentProfileRead) -> ApplicationCommand {
+    let selector = target.profile_id.into();
+    match read {
+        AgentProfileRead::Detail => ApplicationCommand::ShowAgentProfile { selector },
+        AgentProfileRead::History => ApplicationCommand::ShowAgentProfileHistory { selector },
+        AgentProfileRead::Version(version) => {
+            ApplicationCommand::ShowAgentProfileVersion { selector, version }
+        }
+    }
+}
+
+fn profile_read_matches(read: AgentProfileRead, view: &CommandView) -> bool {
+    match (read, view) {
+        (AgentProfileRead::Detail, CommandView::AgentProfile(_))
+        | (AgentProfileRead::History, CommandView::AgentProfileHistory(_)) => true,
+        (AgentProfileRead::Version(expected), CommandView::AgentProfileVersion(version)) => {
+            version.profile.version() == expected
+        }
+        _ => false,
+    }
+}
+
 struct TuiRunner {
     runtime: Option<ApplicationRuntime>,
     client: RuntimeClient,
     model: TuiModel,
     pending: Option<PendingOutcome>,
     pending_memory: Option<PendingMemoryRequest>,
+    pending_profile: Option<PendingProfileRequest>,
+    deferred_profile_refresh: Option<PendingProfileRequest>,
     queued_shutdown: Option<ShutdownReason>,
     deferred_navigation_refresh: Option<ControllerEffect>,
     deferred_memory_refreshes: VecDeque<ControllerEffect>,
@@ -1562,6 +1612,8 @@ impl TuiRunner {
             model: TuiModel::new(snapshot, previous_session_interrupted),
             pending: None,
             pending_memory: None,
+            pending_profile: None,
+            deferred_profile_refresh: None,
             queued_shutdown: None,
             deferred_navigation_refresh: None,
             deferred_memory_refreshes: VecDeque::new(),
@@ -1615,6 +1667,17 @@ impl TuiRunner {
                 }
             }
 
+            if self.pending.is_none()
+                && self.queued_shutdown.is_none()
+                && let Some(request) = self.deferred_profile_refresh.take()
+            {
+                self.apply_effect(ControllerEffect::LoadSelectedAgentProfile {
+                    target: request.target,
+                    read: request.read,
+                })?;
+                dirty = true;
+            }
+
             dirty |= self.update_layout(screen)?;
 
             if let Some(event) = events.next_event(EVENT_POLL_INTERVAL)? {
@@ -1640,6 +1703,18 @@ impl TuiRunner {
             Ok(None) => return Ok(None),
             Err(error) => {
                 self.pending.take();
+                if let Some(request) = self.pending_profile.take() {
+                    self.model.set_command_in_flight(false);
+                    if self.model.agents.profile_target().as_ref() == Some(&request.target) {
+                        self.model.set_message(
+                            super::model::Severity::Warning,
+                            "Agent details are unavailable. Select the agent again to retry.",
+                        );
+                    }
+                    if matches!(error, RuntimeError::Application(_)) {
+                        return Ok(Some(ControllerEffect::Redraw));
+                    }
+                }
                 if let Some(request) = self.pending_memory.take() {
                     if matches!(error, RuntimeError::Application(_)) {
                         self.recover_memory_pending_error(&request, &error)?;
@@ -1655,6 +1730,15 @@ impl TuiRunner {
             }
         };
         self.pending.take();
+        if let Some(request) = self.pending_profile.take() {
+            self.model.set_command_in_flight(false);
+            if profile_read_matches(request.read, &outcome.view) {
+                self.model
+                    .agents
+                    .install_profile_result(&request.target, outcome.view);
+            }
+            return Ok(Some(ControllerEffect::Redraw));
+        }
         let memory_request = self.pending_memory.take();
         if let Some(request) = memory_request {
             let applied = apply_memory_outcome(
@@ -1691,6 +1775,21 @@ impl TuiRunner {
     }
 
     fn apply_effect(&mut self, effect: ControllerEffect) -> Result<LoopControl, TuiError> {
+        if let ControllerEffect::LoadSelectedAgentProfile { target, read } = &effect {
+            if self.model.agents.profile_target().as_ref() != Some(target) {
+                return Ok(LoopControl::Continue { redraw: true });
+            }
+            let request = PendingProfileRequest {
+                target: target.clone(),
+                read: *read,
+            };
+            if self.pending.is_some() {
+                if self.pending_profile.as_ref() != Some(&request) {
+                    self.deferred_profile_refresh = Some(request);
+                }
+                return Ok(LoopControl::Continue { redraw: true });
+            }
+        }
         if self.pending.is_some() {
             if effect.is_navigation_refresh() {
                 self.defer_navigation_refresh(effect);
@@ -1704,6 +1803,14 @@ impl TuiRunner {
         }
 
         match effect {
+            ControllerEffect::LoadSelectedAgentProfile { target, read } => {
+                if self.model.runtime_status == RuntimeStatus::Stopping {
+                    return Ok(LoopControl::Continue { redraw: false });
+                }
+                self.submit_preserving_navigation(profile_read_command(&target, read))?;
+                self.pending_profile = Some(PendingProfileRequest { target, read });
+                Ok(LoopControl::Continue { redraw: true })
+            }
             ControllerEffect::None => Ok(LoopControl::Continue { redraw: false }),
             ControllerEffect::Redraw => Ok(LoopControl::Continue { redraw: true }),
             ControllerEffect::Submit(ApplicationCommand::RequestShutdown) => {
@@ -1731,6 +1838,7 @@ impl TuiRunner {
                 Ok(LoopControl::Finish(reason))
             }
             effect @ (ControllerEffect::LoadAgentProfiles
+            | ControllerEffect::StartSelectedProfileEdit { .. }
             | ControllerEffect::LoadAgentProfile { .. }
             | ControllerEffect::LoadAgentProfileHistory { .. }
             | ControllerEffect::LoadAgentProfileVersion { .. }
@@ -1743,6 +1851,14 @@ impl TuiRunner {
             | ControllerEffect::ExecuteProfile(_)
             | ControllerEffect::CancelProfileReview) => {
                 execute_agent_effect(&self.client, &mut self.model, effect)?;
+                if self.model.agents.matching_detail().is_none()
+                    && let Some(target) = self.model.agents.profile_target()
+                {
+                    self.deferred_profile_refresh = Some(PendingProfileRequest {
+                        target,
+                        read: AgentProfileRead::Detail,
+                    });
+                }
                 Ok(LoopControl::Continue { redraw: true })
             }
             effect @ (ControllerEffect::LoadSkills
@@ -6673,7 +6789,7 @@ mod tests {
         );
         assert_eq!(
             model.agents.selected_detail_action,
-            AgentDetailAction::AssignedSkills,
+            AgentDetailAction::Profile,
         );
         assert!(model.agents.memory.profile.is_none());
         assert_eq!(model.agents.pane, AgentsPane::Detail);
@@ -6727,7 +6843,7 @@ mod tests {
             EventStep::Idle,
             EventStep::Idle,
             EventStep::Event(TuiEvent::Resize(70, 20)),
-            navigation_key('2'),
+            navigation_key('7'),
             EventStep::Idle,
         ];
         steps.extend(command_steps("/quit"));
@@ -6797,7 +6913,7 @@ mod tests {
 
         let effect = handle_event(
             &mut runner.model,
-            TuiEvent::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
+            TuiEvent::Key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE)),
         );
         assert_eq!(effect, ControllerEffect::LoadSkills);
         assert!(runner.model.skills.active);
@@ -6893,7 +7009,7 @@ mod tests {
         assert_eq!(
             handle_event(
                 &mut runner.model,
-                TuiEvent::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE,)),
+                TuiEvent::Key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE,)),
             ),
             ControllerEffect::Redraw
         );
@@ -6970,6 +7086,101 @@ mod tests {
     }
 
     #[test]
+    fn runner_profile_reads_coalesce_and_never_install_a_late_identity() {
+        use super::super::model::{AgentProfileRead, Focus};
+        let first = refresh_profile(91_000, 0);
+        let second = refresh_profile(92_000, 1);
+        let (runtime, calls, _) = memory_action_runtime([
+            Ok(CommandView::AgentProfile(AgentProfileView {
+                profile: first.clone(),
+                readiness: AgentReadiness::Unbound,
+            })),
+            Ok(CommandView::AgentProfile(AgentProfileView {
+                profile: second.clone(),
+                readiness: AgentReadiness::Unbound,
+            })),
+        ]);
+        let mut runner = TuiRunner::new(runtime, snapshot(), false);
+        runner.model.select_view(View::Agents);
+        runner.model.agents.profiles.profiles = vec![
+            refresh_profile_summary(&first),
+            refresh_profile_summary(&second),
+        ];
+        runner.model.set_focus(Focus::List);
+        let target = runner.model.agents.profile_target().unwrap();
+        runner
+            .apply_effect(ControllerEffect::LoadSelectedAgentProfile {
+                target,
+                read: AgentProfileRead::Detail,
+            })
+            .unwrap();
+        for code in [KeyCode::Down, KeyCode::Up, KeyCode::Down, KeyCode::Down] {
+            let effect = handle_event(
+                &mut runner.model,
+                TuiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+            );
+            runner.apply_effect(effect).unwrap();
+        }
+        assert_eq!(runner.model.agents.selected_profile, 1);
+        poll_memory_completion(&mut runner).unwrap();
+        assert!(runner.model.agents.detail.is_none());
+        assert_eq!(runner.model.focus, Focus::List);
+        let queued = runner
+            .deferred_profile_refresh
+            .take()
+            .expect("latest passive selection");
+        assert_eq!(queued.target.profile_id, second.profile_id());
+        runner
+            .apply_effect(ControllerEffect::LoadSelectedAgentProfile {
+                target: queued.target,
+                read: queued.read,
+            })
+            .unwrap();
+        poll_memory_completion(&mut runner).unwrap();
+        assert_eq!(
+            runner.model.agents.matching_detail().unwrap().profile,
+            second
+        );
+        assert_eq!(runner.model.focus, Focus::List);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                ApplicationCommand::ShowAgentProfile {
+                    selector: first.profile_id().into()
+                },
+                ApplicationCommand::ShowAgentProfile {
+                    selector: second.profile_id().into()
+                },
+            ]
+        );
+        runner.finish(ShutdownReason::Interrupted).unwrap();
+    }
+
+    #[test]
+    fn stable_edit_target_cannot_follow_a_mutated_row_index() {
+        let first = refresh_profile(93_000, 0);
+        let second = refresh_profile(94_000, 1);
+        let (runtime, calls, _) = memory_action_runtime([]);
+        let mut runner = TuiRunner::new(runtime, snapshot(), false);
+        runner.model.agents.profiles.profiles = vec![
+            refresh_profile_summary(&first),
+            refresh_profile_summary(&second),
+        ];
+        let target = runner.model.agents.profile_target().unwrap();
+        runner.model.agents.select_profile_index(1);
+        runner.model.agents.detail = Some(AgentProfileView {
+            profile: second,
+            readiness: AgentReadiness::Unbound,
+        });
+        runner
+            .apply_effect(ControllerEffect::StartSelectedProfileEdit { target })
+            .unwrap();
+        assert!(runner.model.agents.editor.is_none());
+        assert!(calls.lock().unwrap().is_empty());
+        runner.finish(ShutdownReason::Interrupted).unwrap();
+    }
+
+    #[test]
     fn restored_skills_result_cannot_submit_behind_an_async_command() {
         let (runtime, observer, release) = runtime(true, false, false);
         let mut runner = TuiRunner::new(runtime, snapshot(), false);
@@ -6990,7 +7201,7 @@ mod tests {
         assert_eq!(
             handle_event(
                 &mut runner.model,
-                TuiEvent::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE,)),
+                TuiEvent::Key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE,)),
             ),
             ControllerEffect::Redraw
         );

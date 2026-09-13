@@ -47,14 +47,14 @@ fn model() -> TuiModel {
 }
 
 #[test]
-fn bare_s_switch_from_agent_panel_restores_the_agents_tab() {
+fn bare_four_switch_from_agent_panel_restores_the_agents_tab() {
     let mut model = model();
     model.active_view = View::Agents;
     model.agents.skill_panel_open = true;
     model.agents.detail = Some(profile_with_skills(10, Vec::new()));
 
     assert_eq!(
-        handle_event(&mut model, navigation_key('s')),
+        handle_event(&mut model, navigation_key('4')),
         ControllerEffect::LoadSkills
     );
     assert_eq!(
@@ -138,11 +138,11 @@ fn hidden_skill_editor_blocks_agent_skill_actions_without_losing_its_draft() {
     assert_eq!(model.skills, protected_skills);
     assert_eq!(
         model.message.as_ref().map(|message| message.text.as_str()),
-        Some("Press s outside text input to finish the protected Skills workflow.")
+        Some("Press 4 outside text input to finish the protected Skills workflow.")
     );
 
     assert_eq!(
-        handle_event(&mut model, navigation_key('s')),
+        handle_event(&mut model, navigation_key('4')),
         ControllerEffect::Redraw
     );
     assert_eq!(model.skills.pane, SkillsPane::Editor);
@@ -164,7 +164,7 @@ fn hidden_skill_confirmation_blocks_agent_mutations_without_replacing_its_review
     model.skills.review_registered = true;
 
     assert_eq!(
-        handle_event(&mut model, navigation_key('a')),
+        handle_event(&mut model, navigation_key('3')),
         ControllerEffect::Redraw
     );
     model.agents.pane = AgentsPane::Detail;
@@ -182,7 +182,7 @@ fn hidden_skill_confirmation_blocks_agent_mutations_without_replacing_its_review
     assert_eq!(model.skills, protected_skills);
     assert_eq!(
         model.message.as_ref().map(|message| message.text.as_str()),
-        Some("Press s outside text input to finish the protected Skills workflow.")
+        Some("Press 4 outside text input to finish the protected Skills workflow.")
     );
 }
 
@@ -250,7 +250,7 @@ fn delayed_read_results_hydrate_without_displacing_protected_workflows() {
         ControllerEffect::Redraw
     );
     assert_eq!(
-        handle_event(&mut skill_model, navigation_key('s')),
+        handle_event(&mut skill_model, navigation_key('4')),
         ControllerEffect::Redraw
     );
     assert_eq!(
@@ -293,7 +293,7 @@ fn delayed_read_results_hydrate_without_displacing_protected_workflows() {
         ControllerEffect::Redraw
     );
     assert_eq!(
-        handle_event(&mut agent_model, navigation_key('a')),
+        handle_event(&mut agent_model, navigation_key('3')),
         ControllerEffect::Redraw
     );
     let listed_agent = agent(70, "Hydrated agent");
@@ -344,21 +344,27 @@ fn delayed_agent_detail_does_not_replace_a_newer_selection_or_context_after_retu
         ControllerEffect::Redraw
     );
     assert_eq!(
-        handle_event(&mut model, navigation_key('4')),
+        handle_event(&mut model, navigation_key('9')),
         ControllerEffect::Redraw
     );
     assert_eq!(
-        handle_event(&mut model, navigation_key('a')),
+        handle_event(&mut model, navigation_key('3')),
         ControllerEffect::Redraw
     );
     model.set_focus(Focus::Workspace);
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Up)),
-        ControllerEffect::Redraw
+        ControllerEffect::LoadSelectedAgentProfile {
+            target: model.agents.profile_target().unwrap(),
+            read: ai_stock_forum::ui::tui::model::AgentProfileRead::Detail
+        }
     );
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Down)),
-        ControllerEffect::Redraw
+        ControllerEffect::LoadSelectedAgentProfile {
+            target: model.agents.profile_target().unwrap(),
+            read: ai_stock_forum::ui::tui::model::AgentProfileRead::Detail
+        }
     );
     model.agents.detail_scroll = 4;
     let expected_agents = model.agents.clone();
@@ -402,11 +408,11 @@ fn delayed_skill_detail_does_not_replace_a_newer_selection_or_context_after_retu
         ControllerEffect::Redraw
     );
     assert_eq!(
-        handle_event(&mut model, navigation_key('4')),
+        handle_event(&mut model, navigation_key('9')),
         ControllerEffect::Redraw
     );
     assert_eq!(
-        handle_event(&mut model, navigation_key('s')),
+        handle_event(&mut model, navigation_key('4')),
         ControllerEffect::Redraw
     );
     model.set_focus(Focus::Workspace);
@@ -434,7 +440,7 @@ fn skill_read_outcome_replaces_a_stale_cockpit_escape_origin() {
     model.skills.library_loaded = true;
 
     assert_eq!(
-        handle_event(&mut model, navigation_key('s')),
+        handle_event(&mut model, navigation_key('4')),
         ControllerEffect::Redraw
     );
     assert_eq!(
@@ -442,7 +448,7 @@ fn skill_read_outcome_replaces_a_stale_cockpit_escape_origin() {
         Some(SkillWorkspaceOrigin::Cockpit(View::Overview))
     );
     assert_eq!(
-        handle_event(&mut model, navigation_key('2')),
+        handle_event(&mut model, navigation_key('7')),
         ControllerEffect::Redraw
     );
     assert_eq!(
@@ -494,11 +500,11 @@ fn cancelled_agent_skill_origin_cannot_capture_a_later_cockpit_open() {
     assert_eq!(model.skills.workspace_origin, None);
 
     assert_eq!(
-        handle_event(&mut model, navigation_key('2')),
+        handle_event(&mut model, navigation_key('7')),
         ControllerEffect::Redraw
     );
     assert_eq!(
-        handle_event(&mut model, navigation_key('s')),
+        handle_event(&mut model, navigation_key('4')),
         ControllerEffect::Redraw
     );
     assert_eq!(
@@ -620,6 +626,40 @@ fn skill(seed: u128, name: &str) -> SkillVersion {
         .expect("draft"),
     )
     .expect("skill")
+}
+
+#[test]
+fn logical_list_focus_routes_skills_keys_to_the_visible_library() {
+    let first = skill(90_000, "First visible skill");
+    let second = skill(90_100, "Second visible skill");
+    let mut model = model();
+    model.skills.active = true;
+    model.skills.library_loaded = true;
+    model.skills.library = SkillsView {
+        skills: vec![summary(&first), summary(&second)],
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
+    };
+    model.skills.detail = Some(skill_view(&first));
+    model.skills.pane = SkillsPane::Detail;
+    model.skills.selected_action_index = 0;
+    model.set_focus(Focus::List);
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Char('s'))),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.skills.selected_skill, 1);
+    assert_eq!(model.skills.selected_action_index, 0);
+    assert_eq!(model.skills.pane, SkillsPane::Detail);
+
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::LoadSkill { selected_skill: 1 }
+    );
+    assert_eq!(model.focus, Focus::Workspace);
+    assert_eq!(model.skills.pane, SkillsPane::Detail);
 }
 
 fn summary(skill: &SkillVersion) -> SkillSummary {
@@ -967,7 +1007,7 @@ fn opened_historical_version_assigns_its_exact_ref_and_classifies_historical_rea
 }
 
 #[test]
-fn bare_s_opens_skills_without_mutating_library_and_bare_q_is_inert() {
+fn bare_four_opens_skills_without_mutating_library_and_bare_q_is_inert() {
     let first = skill(10, "First");
     let mut model = model();
     model.skills.replace_skills(SkillsView {
@@ -979,7 +1019,7 @@ fn bare_s_opens_skills_without_mutating_library_and_bare_q_is_inert() {
     let before = model.skills.library.clone();
 
     assert_eq!(
-        handle_event(&mut model, navigation_key('s')),
+        handle_event(&mut model, navigation_key('4')),
         ControllerEffect::Redraw
     );
     assert!(model.skills.active);
@@ -1364,6 +1404,11 @@ fn agent_detail_unassigns_the_selected_exact_current_reference_through_preview()
     let mut model = model();
     model.active_view = View::Agents;
     model.agents.pane = AgentsPane::Detail;
+    let mut row = agent(400, profile.display_name());
+    row.content_digest = profile.content_digest().clone();
+    model.agents.profiles.profiles = vec![row];
+    model.agents.selected_detail_action =
+        ai_stock_forum::ui::tui::model::AgentDetailAction::AssignedSkills;
     model.agents.detail = Some(AgentProfileView {
         readiness: profile.readiness(),
         profile,
