@@ -1860,6 +1860,40 @@ fn mismatched_entry_detail_fails_closed_without_cached_value_or_substitution() {
 }
 
 #[test]
+fn final_memory_history_list_hint_matches_cached_version_escape_step() {
+    let mut model = model_with_profile();
+    model.active_view = View::Agents;
+    model.agents.pane = AgentsPane::Memory;
+    bind_memory(&mut model);
+    let entry = memory_entry(&model, 80_900, "retained history");
+    install_entries(
+        &mut model,
+        vec![entry_summary(
+            &entry,
+            entry.display_key().to_owned(),
+            Vec::new(),
+        )],
+    );
+    install_entry_detail(&mut model, entry.clone());
+    install_history(&mut model, &entry, std::slice::from_ref(&entry));
+    model.agents.memory.pane = MemoryPane::EntryHistory;
+    model.agents.memory.entry_version = Some(MemoryEntryVersionView {
+        profile: model.agents.detail.as_ref().unwrap().profile.reference(),
+        entry,
+    });
+    model.set_focus(Focus::List);
+    model.set_terminal_size(60, 18);
+    assert!(render_text(&model, 60, 18).contains("Esc: clear cached version"));
+    handle_event(
+        &mut model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    );
+    assert_eq!(model.agents.memory.pane, MemoryPane::EntryHistory);
+    assert!(model.agents.memory.entry_version.is_none());
+    assert!(render_text(&model, 60, 18).contains("Esc: entry detail"));
+}
+
+#[test]
 fn entry_history_without_version_detail_renders_the_history_layer() {
     let mut model = model_with_profile();
     model.active_view = View::Agents;

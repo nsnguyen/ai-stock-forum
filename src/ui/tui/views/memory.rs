@@ -545,8 +545,16 @@ fn history_list_content(model: &TuiModel, area: Rect, theme: &Theme) -> PanelCon
             ));
         }
         lines.push(Line::styled(
+            bounded_ascii_line("Up/Down: select | Enter: load exact version", width),
+            theme.muted,
+        ));
+        lines.push(Line::styled(
             bounded_ascii_line(
-                "Up/Down: select | Enter: load exact version | Esc: entry detail",
+                if model.agents.memory.entry_version.is_some() {
+                    "Esc: clear cached version; then entry detail"
+                } else {
+                    "Esc: entry detail"
+                },
                 width,
             ),
             theme.muted,
@@ -2357,7 +2365,7 @@ mod tests {
         model.agents.memory.pane = MemoryPane::EntryHistory;
         model.agents.memory.entry_version = None;
         model.workspace_scroll = u16::MAX;
-        assert_eq!(content_height(&model, 60), 4);
+        assert_eq!(content_height(&model, 60), 5);
 
         let stale = MemoryEntryVersion::create_present(
             profile.memory_namespace_id(),

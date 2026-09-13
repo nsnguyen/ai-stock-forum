@@ -57,6 +57,18 @@ pub(super) fn agent_list_scroll_offset(model: &TuiModel) -> usize {
     agents::list_scroll_offset(model)
 }
 
+pub(super) fn agent_detail_scroll_geometry(model: &TuiModel) -> (usize, usize) {
+    agents::detail_scroll_geometry(model)
+}
+
+pub(super) fn agent_history_scroll_geometry(model: &TuiModel) -> (usize, usize) {
+    agents::history_scroll_geometry(model)
+}
+
+pub(super) fn agent_version_scroll_geometry(model: &TuiModel) -> (usize, usize) {
+    agents::version_scroll_geometry(model)
+}
+
 pub(super) fn wrapped_height(lines: Vec<Line<'static>>, width: u16) -> u16 {
     let count = Paragraph::new(lines)
         .wrap(Wrap { trim: false })

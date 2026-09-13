@@ -199,58 +199,121 @@ fn profile_summary_lines(
     ]
 }
 
-fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
-    let mut lines = Vec::new();
-    if let Some(row) = model.agents.selected_summary() {
-        lines.push(Line::from(vec![
+fn detail_header(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
+    let Some(row) = model.agents.selected_summary() else {
+        return Vec::new();
+    };
+    let mut lines = vec![
+        Line::from(vec![
             Span::styled(
                 monogram(&row.display_name),
                 theme.agent_monogram(row.profile_id),
             ),
             Span::styled(format!("  {}", safe_text(&row.display_name)), theme.accent),
-        ]));
-        lines.push(Line::styled(safe_text(&row.primary_specialty), theme.muted));
-        lines.push(Line::default());
-        lines.extend(agent_detail_action_lines(model, theme));
-        if let Some(detail) = model.agents.matching_detail() {
-            if model.agents.skill_panel_open {
-                lines.extend(assigned_skill_lines(model, theme));
-            } else {
-                lines.extend(detail_lines(detail, theme));
-            }
-        } else {
-            lines.push(Line::styled(
-                format!("Loading {}", safe_text(&row.display_name)),
-                theme.muted,
-            ));
-            lines.push(Line::raw(
-                "Actions become available when this profile is loaded.",
-            ));
-        }
-        lines.push(Line::default());
+        ]),
+        Line::styled(safe_text(&row.primary_specialty), theme.muted),
+    ];
+    if model.agents.skill_panel_open {
         lines.push(Line::styled(
-            "N new agent   E edit   H history",
-            theme.focus,
+            "Assigned skills · Esc returns to Profile",
+            theme.muted,
         ));
     } else {
-        lines.push(Line::styled("Your agents", theme.accent));
-        lines.push(Line::raw(
-            "No agent profiles yet. Press N to create your first agent.",
-        ));
+        lines.extend(agent_detail_action_lines(model, theme).into_iter().take(2));
     }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel(
-                "Agent workspace",
-                agent_workspace_focused(model),
-                theme,
-            ))
-            .wrap(Wrap { trim: false })
-            .scroll((scroll(model.agents.detail_scroll, area.height), 0)),
-        area,
-    );
+    lines
 }
 
+fn detail_body(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
+    let Some(row) = model.agents.selected_summary() else {
+        return vec![Line::raw(
+            "No agent profiles yet. Press N to create your first agent.",
+        )];
+    };
+    if let Some(detail) = model.agents.matching_detail() {
+        if model.agents.skill_panel_open {
+            assigned_skill_lines(model, theme)
+        } else {
+            detail_lines(detail, theme)
+        }
+    } else {
+        vec![
+            Line::styled(
+                format!("Loading {}", safe_text(&row.display_name)),
+                theme.muted,
+            ),
+            Line::raw("Actions become available when this profile is loaded."),
+        ]
+    }
+}
+
+fn active_area(model: &TuiModel) -> Rect {
+    let terminal = Rect::new(0, 0, model.terminal_width, model.terminal_height);
+    let cockpit = crate::ui::tui::layout::calculate_with_input(
+        terminal,
+        model.inspector_is_visible(),
+        model.input_is_visible(),
+    );
+    agent_workspace(cockpit.workspace, agent_layout_mode(terminal)).active
+}
+
+fn document_geometry(area: Rect, header_height: usize) -> (Rect, Rect) {
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let height = u16::try_from(header_height)
+        .unwrap_or(u16::MAX)
+        .min(inner.height.saturating_sub(1));
+    (
+        Rect { height, ..inner },
+        Rect {
+            y: inner.y + height,
+            height: inner.height - height,
+            ..inner
+        },
+    )
+}
+
+fn body_limit(lines: Vec<Line<'static>>, body: Rect) -> usize {
+    Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .line_count(body.width.max(1))
+        .saturating_sub(usize::from(body.height))
+}
+
+pub(super) fn detail_scroll_geometry(model: &TuiModel) -> (usize, usize) {
+    let theme = Theme::from_no_color(true);
+    let (_, body) = document_geometry(active_area(model), detail_header(model, &theme).len());
+    (
+        body_limit(detail_body(model, &theme), body),
+        usize::from(body.height.max(1)),
+    )
+}
+
+fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    let header = detail_header(model, theme);
+    let (heading, body) = document_geometry(area, header.len());
+    frame.render_widget(
+        panel("Agent workspace", agent_workspace_focused(model), theme),
+        area,
+    );
+    // Keep selected identity and actions visible; only the document body scrolls.
+    frame.render_widget(Paragraph::new(header), heading);
+    let lines = detail_body(model, theme);
+    let offset = model
+        .agents
+        .detail_scroll
+        .min(body_limit(lines.clone(), body));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0)),
+        body,
+    );
+}
 fn agent_workspace_focused(model: &TuiModel) -> bool {
     workspace_focused(model) && model.agents.pane != AgentsPane::List
 }
@@ -319,7 +382,7 @@ fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
         };
         action_spans.push(Span::styled(
             format!("[{label}]"),
-            if action == selected_action {
+            if action == selected_action && agent_workspace_focused(model) {
                 theme.focus
             } else {
                 theme.muted
@@ -487,31 +550,62 @@ fn profile_version_lines(
     lines
 }
 
-fn render_history(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
-    frame.render_widget(
-        Paragraph::new(history_lines(model, theme))
-            .block(panel(
-                "Profile history",
-                workspace_focused(model) && model.agents.pane == AgentsPane::History,
-                theme,
-            ))
-            .wrap(Wrap { trim: false })
-            .scroll((scroll(model.agents.history_scroll, area.height), 0)),
-        area,
-    );
+fn history_cards(model: &TuiModel, theme: &Theme) -> Vec<Vec<Line<'static>>> {
+    let Some(row) = model.agents.selected_summary() else {
+        return Vec::new();
+    };
+    let Some(history) = model.agents.history.as_ref().filter(|history| {
+        history.profile_id == row.profile_id && history.active_version_id == row.profile_version_id
+    }) else {
+        return Vec::new();
+    };
+    history
+        .versions
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            vec![
+                Line::styled(
+                    format!(
+                        "{} Version {} · {}",
+                        if index == model.agents.selected_history_version {
+                            "›"
+                        } else {
+                            " "
+                        },
+                        entry.version.get(),
+                        if entry.profile_version_id == history.active_version_id {
+                            "Current"
+                        } else {
+                            "Historical · Read-only"
+                        }
+                    ),
+                    if index == model.agents.selected_history_version
+                        && agent_workspace_focused(model)
+                    {
+                        theme.focus
+                    } else {
+                        theme.muted
+                    },
+                ),
+                Line::styled(
+                    format!(
+                        "  {} · {}",
+                        readable_date(entry.created_at_ms),
+                        readiness_name(entry.readiness)
+                    ),
+                    theme.muted,
+                ),
+                Line::default(),
+            ]
+        })
+        .collect()
 }
 
-fn history_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
+fn history_document(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
     let Some(row) = model.agents.selected_summary() else {
         return vec![Line::raw("Select an agent to view history.")];
     };
-    let mut lines = vec![
-        Line::styled(
-            format!("{} · History", safe_text(&row.display_name)),
-            theme.accent,
-        ),
-        Line::default(),
-    ];
     if let Some(detail) = model
         .agents
         .version_detail
@@ -519,69 +613,124 @@ fn history_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
         .filter(|detail| detail.profile.profile_id() == row.profile_id)
     {
         let current = detail.profile.profile_version_id() == row.profile_version_id;
-        lines.extend(profile_version_lines(
+        let mut lines = profile_version_lines(
             &detail.profile,
             detail.readiness,
             if current { "Current" } else { "Historical" },
             theme,
-        ));
+        );
         lines.push(Line::default());
         lines.push(Line::styled("Changes from previous version", theme.accent));
         append_diffs(&mut lines, &detail.predecessor_diff, theme);
-        lines.push(Line::styled(
-            "Esc returns to history · E edits current profile",
-            theme.focus,
-        ));
-        return lines;
-    }
-    let Some(history) = model.agents.history.as_ref().filter(|history| {
-        history.profile_id == row.profile_id && history.active_version_id == row.profile_version_id
-    }) else {
-        lines.push(Line::raw(format!(
+        lines
+    } else {
+        vec![Line::raw(format!(
             "Loading history for {}",
             safe_text(&row.display_name)
-        )));
-        return lines;
-    };
-    for (index, entry) in history.versions.iter().enumerate() {
-        lines.push(Line::styled(
-            format!(
-                "{} Version {} · {}",
-                if index == model.agents.selected_history_version {
-                    "›"
-                } else {
-                    " "
-                },
-                entry.version.get(),
-                if entry.profile_version_id == history.active_version_id {
-                    "Current"
-                } else {
-                    "Historical · Read-only"
-                }
-            ),
-            if index == model.agents.selected_history_version {
-                theme.focus
-            } else {
-                theme.muted
-            },
-        ));
-        lines.push(Line::styled(
-            format!(
-                "  {} · {}",
-                readable_date(entry.created_at_ms),
-                readiness_name(entry.readiness)
-            ),
-            theme.muted,
-        ));
-        lines.push(Line::default());
+        ))]
     }
-    lines.push(Line::styled(
-        "W/S choose version   Enter inspect   E edit current   Esc back",
-        theme.focus,
-    ));
-    lines
 }
 
+fn history_rows_for_area(model: &TuiModel, area: Rect) -> (usize, usize) {
+    let (_, body) = document_geometry(area, 2);
+    let cards = history_cards(model, &Theme::from_no_color(true));
+    if cards.is_empty() {
+        return (0, 1);
+    }
+    let heights: Vec<_> = cards
+        .iter()
+        .map(|card| {
+            Paragraph::new(card.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(body.width.max(1))
+        })
+        .collect();
+    let selected = model.agents.selected_history_version.min(cards.len() - 1);
+    let mut first = model.agents.history_scroll.min(selected);
+    let mut height: usize = heights[first..=selected].iter().sum();
+    while first < selected && height > usize::from(body.height) {
+        height = height.saturating_sub(heights[first]);
+        first += 1;
+    }
+    let mut visible = 0;
+    let mut used = 0;
+    for height in &heights[first..] {
+        if used + height > usize::from(body.height) && visible > 0 {
+            break;
+        }
+        used += height;
+        visible += 1;
+    }
+    (first, visible.max(1))
+}
+
+pub(super) fn history_scroll_geometry(model: &TuiModel) -> (usize, usize) {
+    history_rows_for_area(model, active_area(model))
+}
+
+pub(super) fn version_scroll_geometry(model: &TuiModel) -> (usize, usize) {
+    let (_, body) = document_geometry(active_area(model), 2);
+    (
+        body_limit(history_document(model, &Theme::from_no_color(true)), body),
+        usize::from(body.height.max(1)),
+    )
+}
+
+fn render_history(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    let (heading, body) = document_geometry(area, 2);
+    let name = model
+        .agents
+        .selected_summary()
+        .map(|row| safe_text(&row.display_name))
+        .unwrap_or_else(|| "Agent".into());
+    let inspecting = model.agents.version_detail.is_some();
+    frame.render_widget(
+        panel("Profile history", agent_workspace_focused(model), theme),
+        area,
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(format!("{name} · History"), theme.accent),
+            Line::styled(
+                if inspecting {
+                    if model.agents.editor.is_some() {
+                        "W/S scroll · Esc history · E Resume draft"
+                    } else {
+                        "W/S scroll · Esc history · E edit current"
+                    }
+                } else {
+                    "W/S choose · Enter inspect · Esc profile"
+                },
+                theme.muted,
+            ),
+        ]),
+        heading,
+    );
+    let cards = history_cards(model, theme);
+    let lines = if inspecting || cards.is_empty() {
+        history_document(model, theme)
+    } else {
+        cards
+            .into_iter()
+            .skip(history_rows_for_area(model, area).0)
+            .flatten()
+            .collect()
+    };
+    let offset = if inspecting {
+        model
+            .agents
+            .version_scroll
+            .min(body_limit(lines.clone(), body))
+    } else {
+        0
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0)),
+        body,
+    );
+}
 fn render_editor(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     use crate::ui::tui::model::InputMode;
     let active = model
@@ -589,7 +738,8 @@ fn render_editor(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
         .editor
         .as_ref()
         .map(|editor| editor.tui_field());
-    let is_typing = model.input_mode == InputMode::Type;
+    let focused = agent_workspace_focused(model);
+    let is_typing = focused && model.input_mode == InputMode::Type;
     let active_error = model.agents.editor.as_ref().and_then(|editor| {
         editor.tui_field_error(editor.tui_field()).map(|_| {
             format!(
@@ -610,16 +760,21 @@ fn render_editor(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
         let cursor = input.cursor_byte().min(input.text().len());
         let prefix = &input.text()[..cursor];
         let tail = &input.text()[cursor..];
-        let width = usize::from(area.width.saturating_sub(5));
-        let visible_prefix: String = prefix
+        let capacity = usize::from(area.width.saturating_sub(3));
+        let safe_prefix = safe_text(prefix);
+        let mut width = 0;
+        let visible_prefix: String = safe_prefix
             .chars()
             .rev()
-            .take(width)
+            .take_while(|character| {
+                width += Span::raw(character.to_string()).width();
+                width <= capacity
+            })
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
             .collect();
-        let text = format!("{}│{}", safe_text(&visible_prefix), safe_text(tail));
+        let text = format!("{}│{}", visible_prefix, safe_text(tail));
         let label = active.map(field_label).unwrap_or_default();
         let mut input_lines = vec![
             Line::raw(text),
@@ -632,7 +787,7 @@ fn render_editor(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
             input_lines.push(Line::styled(error.clone(), theme.warning));
         }
         frame.render_widget(
-            Paragraph::new(input_lines).block(panel(&format!("TYPE · {label}"), true, theme)),
+            Paragraph::new(input_lines).block(panel(&format!("TYPE · {label}"), focused, theme)),
             Rect {
                 height: active_height,
                 ..area
@@ -645,7 +800,7 @@ fn render_editor(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
             guidance.push(Line::styled(error, theme.warning));
         }
         frame.render_widget(
-            Paragraph::new(guidance).block(panel("Selected field", true, theme)),
+            Paragraph::new(guidance).block(panel("Selected field", focused, theme)),
             Rect {
                 height: active_height,
                 ..area
@@ -661,7 +816,7 @@ fn render_editor(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
         .agents
         .editor
         .as_ref()
-        .map(|editor| editor_lines(editor, theme))
+        .map(|editor| editor_lines(editor, theme, focused))
         .unwrap_or_else(|| vec![Line::raw("Editor is unavailable. Press Esc to return.")]);
     let marker = lines
         .iter()
@@ -690,7 +845,7 @@ fn render_editor(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
     );
 }
 
-fn editor_lines(editor: &ProfileEditor, theme: &Theme) -> Vec<Line<'static>> {
+fn editor_lines(editor: &ProfileEditor, theme: &Theme, focused: bool) -> Vec<Line<'static>> {
     use crate::ui::profile_editor::ProfileTuiField;
     let field = editor.tui_field();
     let mode = if matches!(editor.mode(), ProfileEditorMode::Create { .. }) {
@@ -704,7 +859,11 @@ fn editor_lines(editor: &ProfileEditor, theme: &Theme) -> Vec<Line<'static>> {
             theme.accent,
         ),
         Line::styled(
-            "Tab next field   Shift+Tab previous   Enter edit/select   Esc keep draft",
+            if focused {
+                "Tab next field   Shift+Tab previous   Enter edit/select   Esc keep draft"
+            } else {
+                "Draft retained · Tab to the workspace to resume"
+            },
             theme.muted,
         ),
         Line::default(),
@@ -719,8 +878,12 @@ fn editor_lines(editor: &ProfileEditor, theme: &Theme) -> Vec<Line<'static>> {
             lines.push(Line::raw("Enter requests an authoritative review."));
         }
         lines.push(Line::styled(
-            "Enter continues to a separate confirmation · Esc keeps draft",
-            theme.focus,
+            if focused {
+                "Enter continues to a separate confirmation · Esc keeps draft"
+            } else {
+                "Draft retained · Return focus to review or confirm"
+            },
+            if focused { theme.focus } else { theme.muted },
         ));
         if let Some(message) = editor.local_message() {
             lines.push(Line::styled(editor_message(message.code()), theme.warning));
@@ -755,8 +918,10 @@ fn editor_lines(editor: &ProfileEditor, theme: &Theme) -> Vec<Line<'static>> {
         };
         lines.push(Line::styled(
             format!("{} {label}", if field == item { "›" } else { " " }),
-            if field == item {
+            if field == item && focused {
                 theme.focus
+            } else if field == item {
+                theme.accent
             } else {
                 theme.muted
             },
@@ -1187,14 +1352,12 @@ fn field_label(field: crate::ui::profile_editor::ProfileTuiField) -> &'static st
 }
 
 pub(super) fn editor_scroll_limit(model: &TuiModel) -> usize {
-    let terminal = Rect::new(0, 0, model.terminal_width, model.terminal_height);
-    let cockpit = crate::ui::tui::layout::calculate_with_input(terminal, false, false);
-    let active = agent_workspace(cockpit.workspace, agent_layout_mode(terminal)).active;
+    let active = active_area(model);
     let lines = model
         .agents
         .editor
         .as_ref()
-        .map(|editor| editor_lines(editor, &Theme::from_no_color(true)))
+        .map(|editor| editor_lines(editor, &Theme::from_no_color(true), true))
         .unwrap_or_default();
     Paragraph::new(lines)
         .wrap(Wrap { trim: false })

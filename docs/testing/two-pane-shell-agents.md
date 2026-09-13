@@ -12,11 +12,10 @@ passes. Chat and Connections remain honest Phase 3 placeholders.
 
 ## Normal testing path
 
-Quit any other running AI Stock Forum instance. From this redesign worktree,
+Quit any other running AI Stock Forum instance. From the repository root,
 run:
 
 ```sh
-cd /Users/nguyen-mini/.codex/worktrees/ai-stock-forum-two-pane-design
 make dev
 ```
 
@@ -109,11 +108,18 @@ commands.
 
 - `Esc` retains the exact field text and returns to NAV on that field.
 - `Tab` retains the exact field text, leaves TYPE, and moves to the next field
-  in NAV; `Shift+Tab` moves to the previous field.
+  in NAV; `Shift+Tab` moves to the previous field. After Discard, Tab reaches
+  navigation; before Template, Shift+Tab reaches the agent list. Returning to
+  the workspace retains the selected field and its raw input.
 - Invalid raw input and its inline error remain available for correction after
   leaving the field or switching destinations.
 - Leaving Agents suspends the draft. Only the explicit labeled Discard action
   abandons it.
+
+The footer names only actions available to its current owner. A retained draft
+shows Resume instead of New/Edit. History offers Edit for the current profile;
+assigned Skills and main navigation show their own controls. Shifted N/E/H work
+like their lowercase NAV forms, while TYPE preserves them as text.
 
 Profile input remains single-line and follows the existing profile
 normalization rules. The unchanged fallback command-mode editor still has its
@@ -170,8 +176,8 @@ this documentation preparation.
 
 | Evidence | Result |
 | --- | --- |
-| Current Agents controls | Implemented and independently reviewed on integration base `0408d9d` |
-| `cargo test --locked` | 1,273 passed; 0 failed; 1 ignored across 99 result summaries |
+| Current Agents controls | Final-fix wave implemented; 330 covering checks passed; final scoped re-review pending |
+| `cargo test --locked` | 1,282 passed; 0 failed; 1 ignored across 99 result summaries |
 | Formatting, lint, and whitespace | `cargo fmt --all -- --check`, all-target Clippy with warnings denied, and `git diff --check` passed |
 | Production-render matrix | All 10 scenes at 5 sizes in color and NO_COLOR emitted the exact requested height; 100 renders passed |
 | Durable representative renders | Three actual-render PNGs generated and independently inspected |

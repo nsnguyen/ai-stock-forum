@@ -142,6 +142,452 @@ fn render_text(model: &TuiModel, width: u16, height: u16) -> String {
         .collect()
 }
 
+fn final_key(model: &mut TuiModel, code: KeyCode) -> ControllerEffect {
+    handle_event(
+        model,
+        TuiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+    )
+}
+
+fn final_backtab(model: &mut TuiModel) {
+    handle_event(
+        model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
+    );
+}
+
+fn final_footer(model: &TuiModel, width: u16, height: u16) -> String {
+    let terminal = rendered(model, width, height);
+    let buffer = terminal.backend().buffer();
+    (height - 2..height)
+        .flat_map(|y| (0..width).map(move |x| buffer[(x, y)].symbol()))
+        .collect()
+}
+
+#[test]
+fn final_profile_scroll_is_bounded_and_new_selection_keeps_pinned_loading_context() {
+    use ai_stock_forum::ui::tui::model::Focus;
+    for (width, height) in [(60, 18), (120, 30)] {
+        let mut model = model(true, AgentsPane::Detail);
+        let first = profile();
+        let mut draft = first.to_draft();
+        draft.instructions = format!("{} PROFILE-END", "long evidence ".repeat(220));
+        let long = AgentProfileVersion::create(
+            first.profile_id(),
+            first.profile_version_id(),
+            first.memory_namespace_id(),
+            first.created_at_ms(),
+            draft,
+            None,
+        )
+        .unwrap();
+        model.agents.profiles.profiles[0].content_digest = long.content_digest().clone();
+        model.agents.detail.as_mut().unwrap().profile = long;
+        let mut next = model.agents.profiles.profiles[0].clone();
+        next.profile_id = AgentProfileId::from_uuid(Uuid::from_u128(99));
+        next.display_name = "Next Agent".into();
+        model.agents.profiles.profiles.push(next);
+        handle_event(&mut model, TuiEvent::Resize(width, height));
+        final_key(&mut model, KeyCode::End);
+        assert!(
+            model.agents.detail_scroll > 0,
+            "End must move the actual profile offset"
+        );
+        assert!(render_text(&model, width, height).contains("PROFILE-END"));
+        let end = model.agents.detail_scroll;
+        for _ in 0..50 {
+            final_key(&mut model, KeyCode::Char('s'));
+        }
+        assert_eq!(model.agents.detail_scroll, end);
+        final_key(&mut model, KeyCode::Char('9'));
+        final_key(&mut model, KeyCode::Char('3'));
+        assert_eq!(model.agents.detail_scroll, end);
+        let text = render_text(&model, width, height);
+        for label in [
+            "Long Horizon Analyst",
+            "Profile",
+            "Memory",
+            "Skills",
+            "History",
+        ] {
+            assert!(text.contains(label), "missing {label}");
+        }
+        final_key(&mut model, KeyCode::Home);
+        assert_eq!(model.agents.detail_scroll, 0);
+        final_key(&mut model, KeyCode::PageDown);
+        assert!(model.agents.detail_scroll > 0);
+        let retained = model.agents.detail_scroll;
+        final_backtab(&mut model);
+        final_key(&mut model, KeyCode::Tab);
+        assert_eq!(
+            model.agents.detail_scroll, retained,
+            "same-agent compact list round-trip keeps its body position"
+        );
+        final_backtab(&mut model);
+        assert_eq!(model.focus, Focus::List);
+        final_key(&mut model, KeyCode::Char('s'));
+        final_key(&mut model, KeyCode::Tab);
+        assert_eq!(model.agents.detail_scroll, 0);
+        let text = render_text(&model, width, height);
+        assert!(text.contains("Loading Next Agent"));
+        for label in ["Profile", "Memory", "Skills", "History"] {
+            assert!(text.contains(label));
+        }
+    }
+}
+
+#[test]
+fn final_history_keeps_twelve_wrapped_cards_visible_through_resize_and_opens_at_top() {
+    let mut model = model(true, AgentsPane::Detail);
+    handle_event(&mut model, TuiEvent::Resize(60, 18));
+    final_key(&mut model, KeyCode::Char('h'));
+    let first = profile();
+    let mut versions = vec![first.clone()];
+    for index in 2..=12 {
+        let previous = versions.last().unwrap();
+        let mut draft = previous.to_draft();
+        draft.description = format!("History description {index}");
+        versions.push(
+            AgentProfileVersion::next_version(
+                previous,
+                AgentProfileVersionId::from_uuid(Uuid::from_u128(100 + index)),
+                previous.created_at_ms() + 1,
+                draft,
+            )
+            .unwrap(),
+        );
+    }
+    let history = model.agents.history.as_mut().unwrap();
+    history.versions = versions
+        .iter()
+        .map(|profile| AgentProfileHistoryEntry {
+            profile_version_id: profile.profile_version_id(),
+            version: profile.version(),
+            supersedes: profile.supersedes(),
+            created_at_ms: profile.created_at_ms(),
+            readiness: AgentReadiness::Unbound,
+            content_digest: profile.content_digest().clone(),
+        })
+        .collect();
+    for index in 0..12 {
+        if index > 0 {
+            final_key(&mut model, KeyCode::Char('s'));
+        }
+        let text = render_text(&model, 60, 18);
+        assert!(
+            text.contains(&format!("› Version {}", index + 1)),
+            "selected version {} hidden",
+            index + 1
+        );
+    }
+    for (width, height) in [(120, 30), (60, 18)] {
+        handle_event(&mut model, TuiEvent::Resize(width, height));
+        assert!(render_text(&model, width, height).contains("› Version 12"));
+    }
+    let effect = final_key(&mut model, KeyCode::Enter);
+    assert!(
+        matches!(effect, ControllerEffect::LoadSelectedAgentProfile { read: ai_stock_forum::ui::tui::model::AgentProfileRead::Version(version), .. } if version.get() == 12)
+    );
+    let target = model.agents.profile_target().unwrap();
+    assert!(model.agents.install_profile_result(
+        &target,
+        ai_stock_forum::app::CommandView::AgentProfileVersion(AgentProfileVersionView {
+            profile: versions.last().unwrap().clone(),
+            readiness: AgentReadiness::Unbound,
+            predecessor_diff: vec![]
+        })
+    ));
+    assert!(render_text(&model, 60, 18).contains("Version 12"));
+    final_key(&mut model, KeyCode::Esc);
+    assert!(render_text(&model, 60, 18).contains("› Version 12"));
+}
+
+#[test]
+fn final_editor_boundary_tabs_leave_and_return_to_retained_invalid_fields() {
+    use ai_stock_forum::ui::{
+        profile_editor::ProfileTuiField,
+        tui::model::{Focus, InputMode},
+    };
+    for (width, height) in [(60, 18), (120, 30)] {
+        let mut model = model(true, AgentsPane::Editor);
+        model.agents.editor =
+            Some(ProfileEditor::for_create(&builtin_profile_templates()[0]).unwrap());
+        model.set_terminal_size(width, height);
+        final_backtab(&mut model);
+        assert_eq!(model.focus, Focus::List);
+        assert!(!final_footer(&model, width, height).contains("next field"));
+        final_key(&mut model, KeyCode::Char('w'));
+        assert_eq!(
+            model.agents.editor.as_ref().unwrap().tui_field(),
+            ProfileTuiField::Template
+        );
+        handle_event(&mut model, TuiEvent::Paste("not editor input".into()));
+        assert_eq!(
+            model.agents.editor.as_ref().unwrap().tui_field(),
+            ProfileTuiField::Template
+        );
+        final_key(&mut model, KeyCode::Tab);
+        assert_eq!(model.focus, Focus::Workspace);
+        assert_eq!(
+            model.agents.editor.as_ref().unwrap().tui_field(),
+            ProfileTuiField::Template
+        );
+        final_key(&mut model, KeyCode::Tab);
+        final_key(&mut model, KeyCode::Enter);
+        model.agents.field_input.clear();
+        let raw = "invalid".repeat(50);
+        handle_event(&mut model, TuiEvent::Paste(raw.clone()));
+        final_key(&mut model, KeyCode::Tab);
+        for _ in 0..20 {
+            if model.focus != Focus::Workspace {
+                break;
+            }
+            final_key(&mut model, KeyCode::Tab);
+        }
+        assert_eq!(model.focus, Focus::Navigation);
+        assert_eq!(model.input_mode, InputMode::Nav);
+        let editor = model.agents.editor.as_ref().unwrap();
+        assert_eq!(editor.tui_field(), ProfileTuiField::Discard);
+        assert_eq!(editor.tui_field_text(ProfileTuiField::DisplayName), raw);
+        assert!(
+            editor
+                .tui_field_error(ProfileTuiField::DisplayName)
+                .is_some()
+        );
+        final_backtab(&mut model);
+        assert_eq!(model.focus, Focus::Workspace);
+        assert_eq!(
+            model.agents.editor.as_ref().unwrap().tui_field(),
+            ProfileTuiField::Discard
+        );
+        final_key(&mut model, KeyCode::Esc);
+        assert!(final_footer(&model, width, height).contains("Resume"));
+    }
+}
+
+#[test]
+fn final_footer_advertises_only_available_actions_for_the_logical_owner() {
+    use ai_stock_forum::ui::tui::model::Focus;
+    for (pane, focus, loaded, skills, draft, expected) in [
+        (
+            AgentsPane::List,
+            Focus::List,
+            true,
+            false,
+            false,
+            vec!["N new", "E edit", "H history"],
+        ),
+        (
+            AgentsPane::Detail,
+            Focus::Workspace,
+            true,
+            false,
+            false,
+            vec!["N new", "E edit", "H history"],
+        ),
+        (
+            AgentsPane::History,
+            Focus::Workspace,
+            true,
+            false,
+            false,
+            vec!["E edit"],
+        ),
+        (
+            AgentsPane::Detail,
+            Focus::Navigation,
+            true,
+            false,
+            false,
+            vec![],
+        ),
+        (
+            AgentsPane::Detail,
+            Focus::Workspace,
+            true,
+            true,
+            false,
+            vec![],
+        ),
+        (
+            AgentsPane::Detail,
+            Focus::Workspace,
+            false,
+            false,
+            false,
+            vec!["N new"],
+        ),
+        (
+            AgentsPane::Detail,
+            Focus::Workspace,
+            true,
+            false,
+            true,
+            vec!["N Resume", "E Resume", "H history"],
+        ),
+        (
+            AgentsPane::Detail,
+            Focus::Workspace,
+            false,
+            false,
+            true,
+            vec!["N Resume", "E Resume"],
+        ),
+        (
+            AgentsPane::Detail,
+            Focus::List,
+            true,
+            true,
+            false,
+            vec!["N new", "E edit", "H history"],
+        ),
+        (
+            AgentsPane::Editor,
+            Focus::Navigation,
+            true,
+            false,
+            true,
+            vec![],
+        ),
+    ] {
+        let mut model = model(true, pane);
+        model.set_focus(focus);
+        model.agents.skill_panel_open = skills;
+        if !loaded {
+            model.agents.detail = None;
+        }
+        if draft {
+            model.agents.editor =
+                Some(ProfileEditor::for_create(&builtin_profile_templates()[0]).unwrap());
+        }
+        let footer = final_footer(&model, 60, 18);
+        for (ch, needle) in [('n', "N "), ('e', "E "), ('h', "H ")] {
+            let advertised = expected.iter().any(|label| label.starts_with(needle));
+            assert_eq!(
+                footer.contains(needle),
+                advertised,
+                "{pane:?} {focus:?}: {footer}"
+            );
+            if advertised {
+                let mut copy = model.clone();
+                let effect = final_key(&mut copy, KeyCode::Char(ch));
+                assert!(effect != ControllerEffect::None);
+                if ch == 'n' && !draft {
+                    assert!(matches!(
+                        effect,
+                        ControllerEffect::StartProfileCreate { .. }
+                    ));
+                }
+                if ch == 'e' && !draft {
+                    assert!(matches!(
+                        effect,
+                        ControllerEffect::StartSelectedProfileEdit { .. }
+                    ));
+                }
+                if draft && ch != 'h' {
+                    assert_eq!(copy.agents.pane, AgentsPane::Editor);
+                }
+            }
+        }
+        for label in expected {
+            assert!(footer.contains(label), "missing {label}: {footer}");
+        }
+    }
+}
+
+#[test]
+fn final_shifted_actions_are_nav_shortcuts_but_modifiers_and_type_stay_literal() {
+    for letter in ['N', 'E', 'H'] {
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+            let mut model = model(true, AgentsPane::Detail);
+            let effect = handle_event(
+                &mut model,
+                TuiEvent::Key(KeyEvent::new(KeyCode::Char(letter), modifiers)),
+            );
+            assert!(
+                matches!(
+                    effect,
+                    ControllerEffect::StartProfileCreate { .. }
+                        | ControllerEffect::StartSelectedProfileEdit { .. }
+                        | ControllerEffect::LoadSelectedAgentProfile { .. }
+                ),
+                "{letter} {modifiers:?}: {effect:?}"
+            );
+        }
+        for modifiers in [
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL,
+            KeyModifiers::SUPER,
+        ] {
+            let mut model = model(true, AgentsPane::Detail);
+            let before = model.clone();
+            handle_event(
+                &mut model,
+                TuiEvent::Key(KeyEvent::new(KeyCode::Char(letter), modifiers)),
+            );
+            assert_eq!(model, before);
+        }
+    }
+    let mut model = model(true, AgentsPane::Editor);
+    model.agents.editor = Some(ProfileEditor::for_create(&builtin_profile_templates()[0]).unwrap());
+    final_key(&mut model, KeyCode::Tab);
+    final_key(&mut model, KeyCode::Enter);
+    model.agents.field_input.clear();
+    for letter in ['N', 'E', 'H'] {
+        handle_event(
+            &mut model,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::SHIFT)),
+        );
+    }
+    assert_eq!(model.agents.field_input.text(), "NEH");
+}
+
+#[test]
+fn final_type_cursor_stays_visible_after_safe_wide_and_combining_text() {
+    for raw in ["界".repeat(60), "e\u{301}界".repeat(40)] {
+        let mut model = model(false, AgentsPane::Editor);
+        model.agents.editor =
+            Some(ProfileEditor::for_create(&builtin_profile_templates()[0]).unwrap());
+        model.set_terminal_size(60, 18);
+        final_key(&mut model, KeyCode::Tab);
+        final_key(&mut model, KeyCode::Enter);
+        model.agents.field_input.clear();
+        handle_event(&mut model, TuiEvent::Paste(raw.clone()));
+        let terminal = rendered(&model, 60, 18);
+        let buffer = terminal.backend().buffer();
+        // Exclude the panel borders; the only inner vertical marker is the TYPE cursor.
+        assert!(
+            (1..59).any(|x| (0..18).any(|y| buffer[(x, y)].symbol() == "│")),
+            "cursor clipped for {raw}"
+        );
+        assert_eq!(model.agents.field_input.text(), raw);
+    }
+}
+
+#[test]
+fn final_help_explains_current_profile_controls() {
+    let mut model = model(false, AgentsPane::List);
+    model.select_view(View::Help);
+    let text = render_text(&model, 180, 70);
+    for label in [
+        "Profile / Memory / Skills / History",
+        "Esc keeps",
+        "Resume",
+        "literal",
+        "Memory and Skills",
+    ] {
+        assert!(text.contains(label), "missing {label}");
+    }
+    assert!(!text.contains("Profile, Memory, and Skills keep"));
+}
+
+#[test]
+fn final_guide_uses_a_portable_repository_root_launch() {
+    let guide = include_str!("../docs/testing/two-pane-shell-agents.md");
+    assert!(guide.contains("repository root"));
+    assert!(!guide.contains("/Users/nguyen-mini"));
+}
+
 #[test]
 fn fresh_agents_list_owns_the_only_focused_panel_and_actions_wait_for_tab() {
     let theme = Theme::from_no_color(false);

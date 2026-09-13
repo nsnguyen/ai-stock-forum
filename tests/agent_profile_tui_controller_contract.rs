@@ -442,7 +442,10 @@ fn logical_list_focus_routes_agent_keys_to_the_visible_profile_list() {
         }
     );
     assert_eq!(model.agents.selected_profile, 1);
-    assert_eq!(model.agents.detail_scroll, 7);
+    assert_eq!(
+        model.agents.detail_scroll, 0,
+        "a new object starts at its own body origin"
+    );
 
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Enter)),
@@ -1000,6 +1003,7 @@ fn bare_q_never_requests_shutdown_across_agent_input_owners_or_too_small() {
 #[test]
 fn agents_edit_detail_and_history_navigation_keep_independent_scroll_state() {
     let mut model = model();
+    model.set_terminal_size(60, 18);
     handle_event(&mut model, navigation_key('3'));
     model.agents.replace_profiles(AgentProfilesView {
         profiles: vec![profile_summary(40), profile_summary(41)],

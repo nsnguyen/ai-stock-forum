@@ -1781,6 +1781,7 @@ pub struct AgentsViewState {
     pub list_scroll: usize,
     pub detail_scroll: usize,
     pub history_scroll: usize,
+    pub version_scroll: usize,
     pub selected_history_version: usize,
     pub skill_panel_open: bool,
     pub selected_assigned_skill: usize,
@@ -1806,6 +1807,7 @@ impl Default for AgentsViewState {
             list_scroll: 0,
             detail_scroll: 0,
             history_scroll: 0,
+            version_scroll: 0,
             selected_history_version: 0,
             skill_panel_open: false,
             selected_assigned_skill: 0,
@@ -1932,6 +1934,9 @@ impl AgentsViewState {
         self.list_scroll = self.list_scroll.min(self.selected_profile);
         if previous_id != next_id {
             self.selection_generation = self.selection_generation.wrapping_add(1);
+            self.detail_scroll = 0;
+            self.history_scroll = 0;
+            self.version_scroll = 0;
             self.selected_detail_action = AgentDetailAction::Profile;
             if self.pane == AgentsPane::History {
                 self.pane = AgentsPane::Detail;
@@ -2008,7 +2013,13 @@ impl AgentsViewState {
         let next_summary = self.selected_summary();
         let next_id = next_summary.map(|summary| summary.profile_id);
         if selected_id != next_id {
+            self.detail_scroll = 0;
+            self.history_scroll = 0;
+            self.version_scroll = 0;
             self.selected_detail_action = AgentDetailAction::Profile;
+            if self.pane == AgentsPane::History {
+                self.pane = AgentsPane::Detail;
+            }
             self.memory.invalidate_profile_context();
         } else if bound_profile.as_ref().is_some_and(|profile| {
             next_summary.is_some_and(|summary| {
@@ -2120,6 +2131,7 @@ impl AgentsViewState {
             self.history_scroll = 0;
         }
         self.version_detail = Some(version);
+        self.version_scroll = 0;
         true
     }
 

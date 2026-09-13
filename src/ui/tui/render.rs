@@ -109,28 +109,51 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
         && model.active_view == View::Agents
         && model.agents.pane != AgentsPane::Memory
     {
-        let lines = if model.agents.pane == AgentsPane::Editor {
+        let lines = if model.focus == Focus::Navigation {
+            vec![
+                " NAV  Tab section  WASD destination  Enter open  Esc back".to_owned(),
+                " 1–9 destination · / command".to_owned(),
+            ]
+        } else if model.agents.pane == AgentsPane::Editor && model.focus != Focus::List {
             if model.input_mode == super::model::InputMode::Type {
-                [
-                    " TYPE  WASD text  Enter accept  Esc keep & leave",
-                    " Tab next field · Single-line text",
+                vec![
+                    " TYPE  WASD text  Enter accept  Esc keep & leave".to_owned(),
+                    " Tab next field · Single-line text".to_owned(),
                 ]
             } else {
-                [
-                    " NAV  Tab next field  Enter edit/select  Esc keep draft",
-                    " WASD move · Review: W/S, PgUp/PgDn, Home/End scroll",
+                vec![
+                    " NAV  Tab next field/section  Enter select  Esc keep draft".to_owned(),
+                    " Review: W/S, PgUp/PgDn, Home/End scroll".to_owned(),
                 ]
             }
         } else if model.agents.pane == AgentsPane::Confirmation {
-            [
-                " NAV  Enter confirm  Esc return to review",
-                " Changes apply only after confirmation",
+            vec![
+                " NAV  Enter confirm  Esc return to review".to_owned(),
+                " Changes apply only after confirmation".to_owned(),
+            ]
+        } else if model.agents.skill_panel_open && model.focus != Focus::List {
+            vec![
+                if model.agents.selected_assigned_skill_ref().is_some() {
+                    " NAV  W/S skill  A/D action  Enter open  Esc profile".to_owned()
+                } else {
+                    " NAV  No assigned skills  Esc profile".to_owned()
+                },
+                " R reload skills · Tab section".to_owned(),
             ]
         } else {
-            [
-                " NAV  Tab section  WASD move  Enter open  Esc back",
-                " N new agent   E edit   H history",
-            ]
+            let actions = super::controller::agents_actions(model)
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("   ");
+            let hint = if model.agents.pane == AgentsPane::History && model.focus != Focus::List {
+                " NAV  W/S browse  Enter inspect  Esc back  Tab section"
+            } else if model.focus == Focus::List || model.agents.pane == AgentsPane::List {
+                " NAV  W/S agent  Tab workspace  Enter open  Esc back"
+            } else {
+                " NAV Tab section A/D choice W/S scroll Enter open Esc back"
+            };
+            vec![hint.to_owned(), format!(" {actions}")]
         };
         frame.render_widget(
             Paragraph::new(
@@ -553,7 +576,7 @@ mod tests {
             );
             let end = model.workspace_scroll;
             assert!(
-                render_text(model.clone(), width, height, true).contains("/quit"),
+                render_text(model.clone(), width, height, true).contains("contextual hints"),
                 "size={width}x{height}, scroll={end}"
             );
 
@@ -564,7 +587,7 @@ mod tests {
                 );
             }
             assert_eq!(model.workspace_scroll, end, "size={width}x{height}");
-            assert!(render_text(model, width, height, true).contains("/quit"));
+            assert!(render_text(model, width, height, true).contains("contextual hints"));
         }
     }
 

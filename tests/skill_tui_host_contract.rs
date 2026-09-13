@@ -1764,7 +1764,10 @@ fn agent_navigation_refresh_preserves_the_active_tabs_interaction_state() {
     assert_eq!(model.active_view, View::Agents);
     assert!(!model.skills.active);
     assert_eq!(model.agents.pane, AgentsPane::Confirmation);
-    assert_eq!(model.agents.history_scroll, 9);
+    assert_eq!(
+        model.agents.history_scroll, 0,
+        "initial profile identity has no prior history viewport"
+    );
     assert_eq!(model.agents.pending_confirmation, expected_confirmation);
     assert_eq!(model.skills.pane, SkillsPane::History);
     assert_eq!(model.skills.selected_history_version, 4);

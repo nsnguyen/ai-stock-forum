@@ -561,6 +561,14 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
     }
 
     let key = normalize_nav_direction(key);
+    let key = if !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane != AgentsPane::Memory
+    {
+        normalize_agents_shortcut(key)
+    } else {
+        key
+    };
 
     if key.code == KeyCode::Tab && no_modifiers(key.modifiers) {
         return cycle_focus(model, true);
@@ -654,6 +662,16 @@ fn normalize_nav_direction(mut key: KeyEvent) -> KeyEvent {
         _ => return key,
     };
     key.modifiers = KeyModifiers::NONE;
+    key
+}
+
+fn normalize_agents_shortcut(mut key: KeyEvent) -> KeyEvent {
+    if (key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT)
+        && let KeyCode::Char(letter @ ('n' | 'N' | 'e' | 'E' | 'h' | 'H')) = key.code
+    {
+        key.code = KeyCode::Char(letter.to_ascii_lowercase());
+        key.modifiers = KeyModifiers::NONE;
+    }
     key
 }
 
@@ -1343,6 +1361,24 @@ fn active_profile_editor(model: &TuiModel) -> bool {
         && model.active_view == View::Agents
         && model.agents.pane == AgentsPane::Editor
         && model.agents.editor.is_some()
+        && matches!(model.focus, Focus::Workspace | Focus::Actions)
+}
+
+fn move_profile_field_focus(model: &mut TuiModel, forward: bool) -> ControllerEffect {
+    let field = model.agents.editor.as_ref().unwrap().tui_field();
+    if (forward && field == ProfileTuiField::Discard)
+        || (!forward && field == ProfileTuiField::Template)
+    {
+        return cycle_focus(model, forward);
+    }
+    model
+        .agents
+        .editor
+        .as_mut()
+        .unwrap()
+        .move_tui_field(forward);
+    model.agents.synchronize_field_input();
+    ControllerEffect::Redraw
 }
 
 fn handle_confirmation_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
@@ -1395,13 +1431,7 @@ fn handle_profile_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerE
                 retain_profile_field(model);
                 model.set_input_mode(InputMode::Nav);
                 if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
-                    model
-                        .agents
-                        .editor
-                        .as_mut()
-                        .unwrap()
-                        .move_tui_field(key.code == KeyCode::Tab);
-                    model.agents.synchronize_field_input();
+                    return move_profile_field_focus(model, key.code == KeyCode::Tab);
                 }
             }
             KeyCode::Char(character) if text_modifiers(key.modifiers) => {
@@ -1467,14 +1497,7 @@ fn handle_profile_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerE
         }
         KeyCode::Tab | KeyCode::BackTab => {
             model.agents.detail_scroll = 0;
-            model
-                .agents
-                .editor
-                .as_mut()
-                .unwrap()
-                .move_tui_field(key.code == KeyCode::Tab);
-            model.agents.synchronize_field_input();
-            ControllerEffect::Redraw
+            move_profile_field_focus(model, key.code == KeyCode::Tab)
         }
         KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {
             let forward = matches!(key.code, KeyCode::Down | KeyCode::Right);
@@ -2499,6 +2522,49 @@ fn start_selected_profile_edit(model: &mut TuiModel) -> ControllerEffect {
     effect
 }
 
+pub(super) fn agents_actions(model: &TuiModel) -> [Option<&'static str>; 3] {
+    if model.skills.active
+        || model.active_view != View::Agents
+        || matches!(
+            model.focus,
+            Focus::Navigation | Focus::Command | Focus::Inspector
+        )
+        || matches!(
+            model.agents.pane,
+            AgentsPane::Memory | AgentsPane::Confirmation
+        )
+    {
+        return [None; 3];
+    }
+    let pane = if model.focus == Focus::List {
+        AgentsPane::List
+    } else {
+        model.agents.pane
+    };
+    if pane == AgentsPane::Detail && model.agents.skill_panel_open {
+        return [None; 3];
+    }
+    let has_draft = model.agents.editor.is_some();
+    let loaded = model.agents.matching_detail().is_some();
+    [
+        matches!(pane, AgentsPane::List | AgentsPane::Detail).then_some(if has_draft {
+            "N Resume draft"
+        } else {
+            "N new agent"
+        }),
+        (matches!(
+            pane,
+            AgentsPane::List | AgentsPane::Detail | AgentsPane::History
+        ) && (loaded || has_draft))
+            .then_some(if has_draft {
+                "E Resume draft"
+            } else {
+                "E edit"
+            }),
+        (matches!(pane, AgentsPane::List | AgentsPane::Detail) && loaded).then_some("H history"),
+    ]
+}
+
 fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEffect> {
     if model.focus != Focus::List
         && model.agents.pane == AgentsPane::Detail
@@ -2515,6 +2581,48 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
     } else {
         model.agents.pane
     };
+    if no_modifiers(key.modifiers)
+        && matches!(
+            key.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+        )
+    {
+        if interaction_pane == AgentsPane::Detail {
+            let (limit, page) = views::agent_detail_scroll_geometry(model);
+            model.agents.detail_scroll =
+                moved_document_offset(model.agents.detail_scroll, limit, page, key.code);
+            return Some(ControllerEffect::Redraw);
+        }
+        if interaction_pane == AgentsPane::History {
+            if model.agents.version_detail.is_some() {
+                let (limit, page) = views::agent_version_scroll_geometry(model);
+                model.agents.version_scroll =
+                    moved_document_offset(model.agents.version_scroll, limit, page, key.code);
+            } else {
+                let previous = model.agents.selected_history_version;
+                let last = model
+                    .agents
+                    .history
+                    .as_ref()
+                    .map(|history| history.versions.len().saturating_sub(1))
+                    .unwrap_or(0);
+                let (_, page) = views::agent_history_scroll_geometry(model);
+                model.agents.selected_history_version =
+                    moved_document_offset(previous, last, page, key.code);
+                model.agents.history_scroll = views::agent_history_scroll_geometry(model).0;
+                if previous != model.agents.selected_history_version {
+                    model.agents.selection_generation =
+                        model.agents.selection_generation.wrapping_add(1);
+                }
+            }
+            return Some(ControllerEffect::Redraw);
+        }
+    }
     let effect = match (interaction_pane, key.code) {
         (AgentsPane::List, KeyCode::Down) if no_modifiers(key.modifiers) => {
             let last = model.agents.profiles.profiles.len().saturating_sub(1);
@@ -2612,53 +2720,6 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             model.agents.selected_detail_action = model.agents.selected_detail_action.moved(false);
             ControllerEffect::Redraw
         }
-        (AgentsPane::Detail, KeyCode::Down) if no_modifiers(key.modifiers) => {
-            model.agents.detail_scroll = model.agents.detail_scroll.saturating_add(1);
-            ControllerEffect::Redraw
-        }
-        (AgentsPane::Detail, KeyCode::Up) if no_modifiers(key.modifiers) => {
-            model.agents.detail_scroll = model.agents.detail_scroll.saturating_sub(1);
-            ControllerEffect::Redraw
-        }
-        (AgentsPane::History, KeyCode::Down) if no_modifiers(key.modifiers) => {
-            if model.agents.version_detail.is_some() {
-                model.agents.history_scroll = model.agents.history_scroll.saturating_add(1);
-                return Some(ControllerEffect::Redraw);
-            }
-            let previous = model.agents.selected_history_version;
-            let last = model
-                .agents
-                .history
-                .as_ref()
-                .map(|history| history.versions.len().saturating_sub(1))
-                .unwrap_or(0);
-            model.agents.selected_history_version = model
-                .agents
-                .selected_history_version
-                .saturating_add(1)
-                .min(last);
-            model.agents.history_scroll = model.agents.selected_history_version;
-            if previous != model.agents.selected_history_version {
-                model.agents.selection_generation =
-                    model.agents.selection_generation.wrapping_add(1);
-            }
-            ControllerEffect::Redraw
-        }
-        (AgentsPane::History, KeyCode::Up) if no_modifiers(key.modifiers) => {
-            if model.agents.version_detail.is_some() {
-                model.agents.history_scroll = model.agents.history_scroll.saturating_sub(1);
-                return Some(ControllerEffect::Redraw);
-            }
-            let previous = model.agents.selected_history_version;
-            model.agents.selected_history_version =
-                model.agents.selected_history_version.saturating_sub(1);
-            model.agents.history_scroll = model.agents.selected_history_version;
-            if previous != model.agents.selected_history_version {
-                model.agents.selection_generation =
-                    model.agents.selection_generation.wrapping_add(1);
-            }
-            ControllerEffect::Redraw
-        }
         (AgentsPane::History, KeyCode::Enter) if no_modifiers(key.modifiers) => {
             let selection = model.agents.history.as_ref().and_then(|history| {
                 history
@@ -2675,6 +2736,19 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
         _ => return None,
     };
     Some(effect)
+}
+
+fn moved_document_offset(offset: usize, limit: usize, page: usize, key: KeyCode) -> usize {
+    let offset = offset.min(limit);
+    match key {
+        KeyCode::Up => offset.saturating_sub(1),
+        KeyCode::Down => offset.saturating_add(1).min(limit),
+        KeyCode::PageUp => offset.saturating_sub(page),
+        KeyCode::PageDown => offset.saturating_add(page).min(limit),
+        KeyCode::Home => 0,
+        KeyCode::End => limit,
+        _ => offset,
+    }
 }
 
 fn handle_agent_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEffect> {
