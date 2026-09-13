@@ -1933,6 +1933,9 @@ impl AgentsViewState {
         if previous_id != next_id {
             self.selection_generation = self.selection_generation.wrapping_add(1);
             self.selected_detail_action = AgentDetailAction::Profile;
+            if self.pane == AgentsPane::History {
+                self.pane = AgentsPane::Detail;
+            }
             if self.matching_detail().is_none() {
                 self.detail = None;
             }

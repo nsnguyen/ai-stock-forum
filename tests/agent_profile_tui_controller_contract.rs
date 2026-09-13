@@ -185,6 +185,97 @@ fn passive_profile_rejects_same_ids_with_wrong_content_and_generation_reentry() 
 }
 
 #[test]
+fn history_list_selection_returns_a_new_agent_to_profile_but_retains_same_agent_history() {
+    use ai_stock_forum::ui::tui::model::{AgentDetailAction, AgentProfileRead};
+    for (width, height) in [(60, 18), (120, 30)] {
+        let mut model = model();
+        model.agents.profiles.profiles = vec![profile_summary(500), profile_summary(600)];
+        handle_event(&mut model, TuiEvent::Resize(width, height));
+        handle_event(&mut model, key(KeyCode::Char('3')));
+        handle_event(&mut model, key(KeyCode::Tab));
+        let first = model.agents.profile_target().unwrap();
+        assert!(model.agents.install_profile_result(
+            &first,
+            CommandView::AgentProfile(AgentProfileView {
+                profile: profile_version(500),
+                readiness: AgentReadiness::Unbound,
+            })
+        ));
+        assert_eq!(
+            handle_event(&mut model, key(KeyCode::Char('h'))),
+            ControllerEffect::LoadSelectedAgentProfile {
+                target: first.clone(),
+                read: AgentProfileRead::History
+            }
+        );
+        let profile = profile_version(500);
+        assert!(model.agents.install_profile_result(
+            &first,
+            CommandView::AgentProfileHistory(AgentProfileHistoryView {
+                profile_id: profile.profile_id(),
+                active_version_id: profile.profile_version_id(),
+                versions: vec![AgentProfileHistoryEntry {
+                    profile_version_id: profile.profile_version_id(),
+                    version: profile.version(),
+                    supersedes: None,
+                    created_at_ms: profile.created_at_ms(),
+                    readiness: AgentReadiness::Unbound,
+                    content_digest: profile.content_digest().clone(),
+                }],
+                total_count: 1,
+                returned_count: 1,
+                truncated: false,
+            })
+        ));
+        let history = model.agents.history.clone();
+        handle_event(
+            &mut model,
+            key_event(KeyCode::BackTab, KeyModifiers::SHIFT, KeyEventKind::Press),
+        );
+        handle_event(&mut model, key(KeyCode::Char('w')));
+        handle_event(&mut model, key(KeyCode::Tab));
+        assert_eq!(model.agents.pane, AgentsPane::History);
+        assert_eq!(model.agents.history, history);
+        handle_event(
+            &mut model,
+            key_event(KeyCode::BackTab, KeyModifiers::SHIFT, KeyEventKind::Press),
+        );
+        assert_eq!(model.focus, Focus::List);
+        let load = handle_event(&mut model, key(KeyCode::Char('s')));
+        let second = model.agents.profile_target().unwrap();
+        assert_eq!(
+            load,
+            ControllerEffect::LoadSelectedAgentProfile {
+                target: second.clone(),
+                read: AgentProfileRead::Detail
+            }
+        );
+        handle_event(&mut model, key(KeyCode::Tab));
+        assert_eq!(model.focus, Focus::Workspace);
+        assert_eq!(model.agents.pane, AgentsPane::Detail);
+        assert_eq!(
+            model.agents.selected_detail_action,
+            AgentDetailAction::Profile
+        );
+        assert!(model.agents.history.is_none());
+        assert!(model.agents.install_profile_result(
+            &second,
+            CommandView::AgentProfile(AgentProfileView {
+                profile: profile_version(600),
+                readiness: AgentReadiness::Unbound,
+            })
+        ));
+        assert_eq!(
+            handle_event(&mut model, key(KeyCode::Char('h'))),
+            ControllerEffect::LoadSelectedAgentProfile {
+                target: second,
+                read: AgentProfileRead::History
+            }
+        );
+    }
+}
+
+#[test]
 fn history_escape_closes_only_the_loaded_version_and_edit_keeps_active_target() {
     let mut model = model();
     model.select_view(View::Agents);
