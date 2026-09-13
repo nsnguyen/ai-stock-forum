@@ -165,9 +165,50 @@ fn final_footer(model: &TuiModel, width: u16, height: u16) -> String {
 }
 
 #[test]
+fn wide_empty_agents_has_one_welcome_and_a_quiet_empty_list() {
+    let model = model(false, AgentsPane::List);
+    let text = render_rows(&model, 120, 30).join("\n");
+    assert!(text.contains("Your crew is empty."));
+    assert!(text.contains("N  New agent"));
+    assert_eq!(text.matches("No agent profiles yet").count(), 1);
+}
+
+#[test]
+fn full_long_agent_name_remains_reachable_in_the_scrollable_profile() {
+    for (width, height) in [(60, 18), (100, 24)] {
+        let mut model = model(true, AgentsPane::Detail);
+        let first = profile();
+        let mut draft = first.to_draft();
+        draft.display_name = format!("{} NAME-END", "A".repeat(DISPLAY_NAME_MAX_BYTES - 9));
+        let long = AgentProfileVersion::create(
+            first.profile_id(),
+            first.profile_version_id(),
+            first.memory_namespace_id(),
+            first.created_at_ms(),
+            draft,
+            None,
+        )
+        .unwrap();
+        model.agents.profiles.profiles[0].display_name = long.display_name().to_owned();
+        model.agents.profiles.profiles[0].content_digest = long.content_digest().clone();
+        model.agents.detail.as_mut().unwrap().profile = long;
+        handle_event(&mut model, TuiEvent::Resize(width, height));
+        let mut visible = String::new();
+        for _ in 0..30 {
+            visible.push_str(&render_text(&model, width, height));
+            final_key(&mut model, KeyCode::Char('s'));
+        }
+        assert!(
+            visible.contains("NAME-END"),
+            "full name hidden at {width}x{height}"
+        );
+    }
+}
+
+#[test]
 fn final_profile_scroll_is_bounded_and_new_selection_keeps_pinned_loading_context() {
     use ai_stock_forum::ui::tui::model::Focus;
-    for (width, height) in [(60, 18), (120, 30)] {
+    for (width, height) in [(60, 18), (80, 24), (100, 24), (120, 30), (160, 40)] {
         let mut model = model(true, AgentsPane::Detail);
         let first = profile();
         let mut draft = first.to_draft();
@@ -614,9 +655,9 @@ fn fresh_agents_list_owns_the_only_focused_panel_and_actions_wait_for_tab() {
                 })
             })
         };
-        assert_eq!(style_for("Agent list").unwrap().fg, theme.focus.fg);
+        assert_eq!(style_for("Agent list").unwrap().fg, theme.accent.fg);
         if width == 120 {
-            assert_ne!(style_for("Agent workspace").unwrap().fg, theme.focus.fg);
+            assert_ne!(style_for("Agent workspace").unwrap().fg, theme.accent.fg);
             assert_ne!(style_for("Profile ").unwrap().fg, theme.focus.fg);
         }
     }
@@ -727,7 +768,18 @@ fn identity_monogram_color_survives_reordering_and_no_color_has_no_palette() {
             for x in 1..35 {
                 if format!("{}{}", buffer[(x, y)].symbol(), buffer[(x + 1, y)].symbol()) == initials
                 {
-                    return buffer[(x, y)].fg;
+                    assert_ne!(buffer[(x, y)].bg, ratatui::style::Color::Reset);
+                    assert_eq!(
+                        buffer[(x, y - 1)].bg,
+                        buffer[(x, y)].bg,
+                        "identity badge must have a filled row above the initials"
+                    );
+                    assert_eq!(
+                        buffer[(x, y + 1)].bg,
+                        buffer[(x, y)].bg,
+                        "identity badge must have a filled row below the initials"
+                    );
+                    return buffer[(x, y)].bg;
                 }
             }
         }
@@ -752,6 +804,87 @@ fn identity_monogram_color_survives_reordering_and_no_color_has_no_palette() {
             .all(|cell| cell.fg == ratatui::style::Color::Reset
                 && cell.bg == ratatui::style::Color::Reset)
     );
+    let buffer = terminal.backend().buffer();
+    let list = (3..26)
+        .map(|y| (0..33).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        list.contains("╭>"),
+        "NO_COLOR list selection needs a visible marker"
+    );
+}
+
+#[test]
+fn wide_agent_choices_have_icon_cards_and_follow_actual_action_selection() {
+    use ai_stock_forum::ui::tui::model::{AgentDetailAction, Focus};
+    let mut model = model(true, AgentsPane::Detail);
+    model.focus = Focus::Workspace;
+    handle_event(&mut model, TuiEvent::Resize(120, 30));
+    let rows = render_rows(&model, 120, 30);
+    let title_y = rows
+        .iter()
+        .position(|row| {
+            row.contains("Profile") && row.contains("Memory") && row.contains("History")
+        })
+        .unwrap();
+    assert!(
+        rows[..title_y]
+            .iter()
+            .any(|row| row.matches('╭').count() >= 4),
+        "each Agent choice must have its own visible card boundary"
+    );
+    assert!(
+        rows[..title_y]
+            .iter()
+            .any(|row| row.contains("(_)") || row.contains("(o)")),
+        "Profile choice needs its terminal-grid identity icon"
+    );
+    assert!(
+        render_text(&model, 120, 30).contains("Saved notes"),
+        "Memory describes its purpose without inventing a note count"
+    );
+    final_key(&mut model, KeyCode::Char('d'));
+    assert_eq!(
+        model.agents.selected_detail_action,
+        AgentDetailAction::Memory
+    );
+    assert!(matches!(
+        final_key(&mut model, KeyCode::Enter),
+        ControllerEffect::LoadAgentMemory(_)
+    ));
+}
+
+#[test]
+fn selected_agent_card_surface_moves_with_the_real_list_selection() {
+    use ai_stock_forum::ui::tui::model::Focus;
+    let mut model = model(true, AgentsPane::List);
+    model.focus = Focus::List;
+    model.agents.profiles.profiles[0].display_name = "Alpha One".into();
+    let mut second = model.agents.profiles.profiles[0].clone();
+    second.profile_id = AgentProfileId::from_uuid(Uuid::from_u128(91));
+    second.display_name = "Beta Two".into();
+    model.agents.profiles.profiles.push(second);
+    handle_event(&mut model, TuiEvent::Resize(120, 30));
+    let card_color = |model: &TuiModel, name: &str| {
+        let terminal = rendered(model, 120, 30);
+        let buffer = terminal.backend().buffer();
+        (4..25)
+            .find_map(|y| {
+                let row = (0..32).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+                row.contains(name).then(|| buffer[(28, y)].bg)
+            })
+            .expect("card name visible")
+    };
+    let selected = card_color(&model, "Alpha One");
+    let unselected = card_color(&model, "Beta Two");
+    assert_ne!(
+        selected, unselected,
+        "selected agent needs a filled card surface"
+    );
+    final_key(&mut model, KeyCode::Char('s'));
+    assert_eq!(card_color(&model, "Beta Two"), selected);
+    assert_eq!(card_color(&model, "Alpha One"), unselected);
 }
 
 #[test]
@@ -885,13 +1018,15 @@ fn agents_layout_uses_one_or_two_panes_at_exact_width_breakpoints() {
 }
 
 #[test]
-fn legacy_views_keep_height_aware_modes_at_low_supported_heights() {
+fn legacy_views_keep_the_friendly_shell_at_low_supported_heights() {
     for view in [View::Overview, View::Setup, View::Audit, View::Help] {
-        for (width, mode) in [(80, "Narrow"), (120, "Wide")] {
+        for width in [80, 120] {
             let mut legacy = model(false, AgentsPane::List);
             legacy.active_view = view;
             let text = render_text(&legacy, width, 18);
-            assert!(text.contains(mode), "view={view:?} width={width}");
+            assert!(text.contains("LOCAL"), "view={view:?} width={width}");
+            assert!(!text.contains(" / Narrow"));
+            assert!(!text.contains(" / Wide"));
             assert!(
                 !text.contains(" Navigation "),
                 "view={view:?} width={width}"
@@ -905,7 +1040,7 @@ fn narrow_header_rows_are_complete_at_sixty_and_seventy_columns() {
     let model = model(true, AgentsPane::List);
     for width in [60, 70] {
         let rows = render_rows(&model, width, 18);
-        assert_eq!(rows[0].trim_end(), "AI STOCK FORUM  /  Agents  /  Narrow");
+        assert_eq!(rows[0].trim_end(), "AI STOCK FORUM  /  Agents  ·  LOCAL");
         let navigation = format!("{} {}", rows[1], rows[2]);
         for label in [
             "1 Home",
@@ -967,6 +1102,25 @@ fn agents_empty_and_populated_states_render_readable_identity_and_readiness() {
         "builtin.bull",
     ] {
         assert!(!populated.contains(hidden));
+    }
+}
+
+#[test]
+fn empty_agents_keep_the_friendly_portrait_and_create_hint_at_minimum_size() {
+    for (width, height) in [(60, 18), (100, 24), (120, 30)] {
+        let mut model = model(false, AgentsPane::List);
+        handle_event(&mut model, TuiEvent::Resize(width, height));
+        let text = render_text(&model, width, height);
+        assert!(
+            text.contains("o   o"),
+            "empty Agents needs its friendly portrait at {width}x{height}"
+        );
+        assert!(text.contains("No agent profiles yet"));
+        assert!(text.contains("Press N"));
+        assert!(matches!(
+            final_key(&mut model, KeyCode::Char('n')),
+            ControllerEffect::StartProfileCreate { .. }
+        ));
     }
 }
 
