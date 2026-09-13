@@ -1,0 +1,546 @@
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::{
+    agents::{AgentProfileVersion, AgentProfileVersionRef},
+    domain::{
+        Actor, ApprovalId, Digest, DomainError, EventId, MemoryNamespaceId, MemoryProposalId,
+        ObjectRef, ObjectVersion, canonical_json_bytes, sha256,
+    },
+    memory::normalization::{PLAINTEXT_VALIDATION_VERSION_V1, PlaintextField, validate_plaintext},
+};
+
+use super::entry::{
+    DISPLAY_KEY_MAX_BYTES, canonicalize_memory_multiline, canonicalize_memory_single_line,
+};
+use super::{ExpectedMemoryEntryState, MemoryEntryDraft, MemoryEntryState, NormalizedMemoryKey};
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct MemoryProposalRef {
+    proposal_id: MemoryProposalId,
+    version: ObjectVersion,
+    content_digest: Digest,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryProposalRefWire {
+    proposal_id: MemoryProposalId,
+    version: ObjectVersion,
+    content_digest: Digest,
+}
+
+impl MemoryProposalRef {
+    pub fn new(
+        proposal_id: MemoryProposalId,
+        version: ObjectVersion,
+        content_digest: Digest,
+    ) -> Result<Self, DomainError> {
+        if version.get() != 1 {
+            return Err(DomainError::InvalidMemoryProposal);
+        }
+        Ok(Self {
+            proposal_id,
+            version,
+            content_digest,
+        })
+    }
+
+    pub fn proposal_id(&self) -> MemoryProposalId {
+        self.proposal_id
+    }
+    pub fn version(&self) -> ObjectVersion {
+        self.version
+    }
+    pub fn content_digest(&self) -> &Digest {
+        &self.content_digest
+    }
+}
+
+impl<'de> Deserialize<'de> for MemoryProposalRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = MemoryProposalRefWire::deserialize(deserializer)?;
+        Self::new(wire.proposal_id, wire.version, wire.content_digest)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum MemoryProposalOperation {
+    Set { candidate: MemoryEntryDraft },
+    Delete,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct MemoryProposal {
+    proposal_id: MemoryProposalId,
+    version: ObjectVersion,
+    proposer: AgentProfileVersionRef,
+    namespace_id: MemoryNamespaceId,
+    operation: MemoryProposalOperation,
+    display_key: String,
+    normalized_key: NormalizedMemoryKey,
+    expected: ExpectedMemoryEntryState,
+    rationale: String,
+    plaintext_validation_version: u16,
+    created_at_ms: i64,
+    creation_event_id: EventId,
+    approval_id: ApprovalId,
+    content_digest: Digest,
+    record_digest: Digest,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryProposalWire {
+    proposal_id: MemoryProposalId,
+    version: ObjectVersion,
+    proposer: AgentProfileVersionRef,
+    namespace_id: MemoryNamespaceId,
+    operation: MemoryProposalOperation,
+    display_key: String,
+    normalized_key: NormalizedMemoryKey,
+    expected: ExpectedMemoryEntryState,
+    rationale: String,
+    plaintext_validation_version: u16,
+    created_at_ms: i64,
+    creation_event_id: EventId,
+    approval_id: ApprovalId,
+    content_digest: Digest,
+    record_digest: Digest,
+}
+
+impl MemoryProposal {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        proposal_id: MemoryProposalId,
+        proposer: &AgentProfileVersion,
+        actor: &Actor,
+        operation: MemoryProposalOperation,
+        display_key: String,
+        expected: ExpectedMemoryEntryState,
+        rationale: String,
+        created_at_ms: i64,
+        creation_event_id: EventId,
+        approval_id: ApprovalId,
+    ) -> Result<Self, DomainError> {
+        if *actor != Actor::Agent(proposer.profile_id()) {
+            return Err(DomainError::MemoryProposalActorMismatch);
+        }
+        let display_key =
+            canonicalize_memory_single_line("display_key", &display_key, 1, DISPLAY_KEY_MAX_BYTES)?;
+        let normalized_key = NormalizedMemoryKey::new(&display_key)?;
+        let rationale = canonical_rationale(&rationale)?;
+        let mut proposal = Self {
+            proposal_id,
+            version: ObjectVersion::new(1)?,
+            proposer: proposer.reference(),
+            namespace_id: proposer.memory_namespace_id(),
+            operation,
+            display_key,
+            normalized_key,
+            expected,
+            rationale,
+            plaintext_validation_version: PLAINTEXT_VALIDATION_VERSION_V1,
+            created_at_ms,
+            creation_event_id,
+            approval_id,
+            content_digest: sha256(&[]),
+            record_digest: sha256(&[]),
+        };
+        proposal.validate_structure()?;
+        proposal.content_digest = proposal.compute_content_digest()?;
+        proposal.record_digest = proposal.compute_record_digest()?;
+        Ok(proposal)
+    }
+
+    pub fn reference(&self) -> MemoryProposalRef {
+        MemoryProposalRef {
+            proposal_id: self.proposal_id,
+            version: self.version,
+            content_digest: self.content_digest.clone(),
+        }
+    }
+
+    pub fn object_ref(&self) -> Result<ObjectRef, DomainError> {
+        ObjectRef::new(
+            "memory_proposal",
+            self.proposal_id.to_string(),
+            self.version,
+            self.content_digest.clone(),
+        )
+    }
+    pub fn proposer(&self) -> &AgentProfileVersionRef {
+        &self.proposer
+    }
+    pub fn namespace_id(&self) -> MemoryNamespaceId {
+        self.namespace_id
+    }
+    pub fn operation(&self) -> &MemoryProposalOperation {
+        &self.operation
+    }
+    pub fn display_key(&self) -> &str {
+        &self.display_key
+    }
+    pub fn normalized_key(&self) -> &NormalizedMemoryKey {
+        &self.normalized_key
+    }
+    pub fn expected(&self) -> &ExpectedMemoryEntryState {
+        &self.expected
+    }
+    pub fn rationale(&self) -> &str {
+        &self.rationale
+    }
+    pub fn plaintext_validation_version(&self) -> u16 {
+        self.plaintext_validation_version
+    }
+    pub fn created_at_ms(&self) -> i64 {
+        self.created_at_ms
+    }
+    pub fn creation_event_id(&self) -> EventId {
+        self.creation_event_id
+    }
+    pub fn approval_id(&self) -> ApprovalId {
+        self.approval_id
+    }
+    pub fn content_digest(&self) -> &Digest {
+        &self.content_digest
+    }
+    pub fn record_digest(&self) -> &Digest {
+        &self.record_digest
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_parts(
+        proposal_id: MemoryProposalId,
+        version: ObjectVersion,
+        proposer: AgentProfileVersionRef,
+        namespace_id: MemoryNamespaceId,
+        operation: MemoryProposalOperation,
+        display_key: String,
+        normalized_key: NormalizedMemoryKey,
+        expected: ExpectedMemoryEntryState,
+        rationale: String,
+        plaintext_validation_version: u16,
+        created_at_ms: i64,
+        creation_event_id: EventId,
+        approval_id: ApprovalId,
+        content_digest: Digest,
+        record_digest: Digest,
+    ) -> Result<Self, DomainError> {
+        let proposal = Self {
+            proposal_id,
+            version,
+            proposer,
+            namespace_id,
+            operation,
+            display_key,
+            normalized_key,
+            expected,
+            rationale,
+            plaintext_validation_version,
+            created_at_ms,
+            creation_event_id,
+            approval_id,
+            content_digest,
+            record_digest,
+        };
+        proposal.validate_structure()?;
+        if proposal.compute_content_digest()? != proposal.content_digest
+            || proposal.compute_record_digest()? != proposal.record_digest
+        {
+            return Err(DomainError::InvalidMemoryProposal);
+        }
+        Ok(proposal)
+    }
+
+    fn validate_structure(&self) -> Result<(), DomainError> {
+        if self.version.get() != 1
+            || self.plaintext_validation_version != PLAINTEXT_VALIDATION_VERSION_V1
+        {
+            return Err(DomainError::InvalidMemoryProposal);
+        }
+        if canonicalize_memory_single_line(
+            "display_key",
+            &self.display_key,
+            1,
+            DISPLAY_KEY_MAX_BYTES,
+        )? != self.display_key
+            || NormalizedMemoryKey::new(&self.display_key)? != self.normalized_key
+            || canonical_rationale(&self.rationale)? != self.rationale
+        {
+            return Err(DomainError::InvalidMemoryProposal);
+        }
+        match (&self.operation, &self.expected) {
+            (MemoryProposalOperation::Set { candidate }, _) => {
+                if candidate.display_key() != self.display_key
+                    || candidate.normalized_key() != self.normalized_key
+                    || matches!(&self.expected, ExpectedMemoryEntryState::Present(reference) if set_content_digest(candidate)? == *reference.content_digest())
+                {
+                    return Err(DomainError::InvalidMemoryProposal);
+                }
+            }
+            (MemoryProposalOperation::Delete, ExpectedMemoryEntryState::Present(reference))
+                if reference.namespace_id() == self.namespace_id
+                    && reference.state() == MemoryEntryState::Present
+                    && reference.normalized_key() == &self.normalized_key => {}
+            _ => return Err(DomainError::InvalidMemoryProposal),
+        }
+        if !expected_state_is_well_formed(&self.expected)
+            || expected_ref(&self.expected).is_some_and(|reference| {
+                reference.namespace_id() != self.namespace_id
+                    || reference.normalized_key() != &self.normalized_key
+            })
+        {
+            return Err(DomainError::InvalidMemoryProposal);
+        }
+        Ok(())
+    }
+
+    fn compute_content_digest(&self) -> Result<Digest, DomainError> {
+        Ok(sha256(&canonical_json_bytes(
+            &MemoryProposalContentDigestMaterial {
+                proposer: &self.proposer,
+                namespace_id: self.namespace_id,
+                operation: &self.operation,
+                display_key: &self.display_key,
+                normalized_key: &self.normalized_key,
+                expected: &self.expected,
+                rationale: &self.rationale,
+                plaintext_validation_version: self.plaintext_validation_version,
+            },
+        )?))
+    }
+
+    fn compute_record_digest(&self) -> Result<Digest, DomainError> {
+        Ok(sha256(&canonical_json_bytes(
+            &MemoryProposalRecordDigestMaterial {
+                proposal_id: self.proposal_id,
+                version: self.version,
+                proposer: &self.proposer,
+                namespace_id: self.namespace_id,
+                operation: &self.operation,
+                display_key: &self.display_key,
+                normalized_key: &self.normalized_key,
+                expected: &self.expected,
+                rationale: &self.rationale,
+                plaintext_validation_version: self.plaintext_validation_version,
+                created_at_ms: self.created_at_ms,
+                creation_event_id: self.creation_event_id,
+                approval_id: self.approval_id,
+                content_digest: &self.content_digest,
+            },
+        )?))
+    }
+}
+
+impl<'de> Deserialize<'de> for MemoryProposal {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = MemoryProposalWire::deserialize(deserializer)?;
+        Self::from_parts(
+            wire.proposal_id,
+            wire.version,
+            wire.proposer,
+            wire.namespace_id,
+            wire.operation,
+            wire.display_key,
+            wire.normalized_key,
+            wire.expected,
+            wire.rationale,
+            wire.plaintext_validation_version,
+            wire.created_at_ms,
+            wire.creation_event_id,
+            wire.approval_id,
+            wire.content_digest,
+            wire.record_digest,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+fn expected_ref(expected: &ExpectedMemoryEntryState) -> Option<&super::MemoryEntryRef> {
+    match expected {
+        ExpectedMemoryEntryState::Absent => None,
+        ExpectedMemoryEntryState::Present(reference)
+        | ExpectedMemoryEntryState::Deleted(reference) => Some(reference),
+    }
+}
+
+fn expected_state_is_well_formed(expected: &ExpectedMemoryEntryState) -> bool {
+    match expected {
+        ExpectedMemoryEntryState::Absent => true,
+        ExpectedMemoryEntryState::Present(reference) => {
+            reference.state() == MemoryEntryState::Present
+        }
+        ExpectedMemoryEntryState::Deleted(reference) => {
+            reference.state() == MemoryEntryState::Deleted
+        }
+    }
+}
+
+fn canonical_rationale(value: &str) -> Result<String, DomainError> {
+    let value = canonicalize_memory_multiline("proposal_rationale", value, 1, 512)?;
+    if value != value.trim() {
+        return Err(DomainError::InvalidMemoryProposal);
+    }
+    validate_plaintext(
+        PLAINTEXT_VALIDATION_VERSION_V1,
+        PlaintextField::ProposalRationale,
+        &value,
+    )?;
+    Ok(value)
+}
+
+fn set_content_digest(candidate: &MemoryEntryDraft) -> Result<Digest, DomainError> {
+    let normalized_key = candidate.normalized_key();
+    Ok(sha256(&canonical_json_bytes(
+        &MemoryEntryContentDigestMaterial {
+            display_key: candidate.display_key(),
+            normalized_key: &normalized_key,
+            state: MemoryEntryState::Present,
+            value: candidate.value(),
+            purpose_tags: candidate.purpose_tags(),
+            plaintext_validation_version: PLAINTEXT_VALIDATION_VERSION_V1,
+        },
+    )?))
+}
+
+#[derive(Serialize)]
+struct MemoryEntryContentDigestMaterial<'a> {
+    display_key: &'a str,
+    normalized_key: &'a NormalizedMemoryKey,
+    state: MemoryEntryState,
+    value: &'a str,
+    purpose_tags: &'a [String],
+    plaintext_validation_version: u16,
+}
+
+#[derive(Serialize)]
+struct MemoryProposalContentDigestMaterial<'a> {
+    proposer: &'a AgentProfileVersionRef,
+    namespace_id: MemoryNamespaceId,
+    operation: &'a MemoryProposalOperation,
+    display_key: &'a str,
+    normalized_key: &'a NormalizedMemoryKey,
+    expected: &'a ExpectedMemoryEntryState,
+    rationale: &'a str,
+    plaintext_validation_version: u16,
+}
+#[derive(Serialize)]
+struct MemoryProposalRecordDigestMaterial<'a> {
+    proposal_id: MemoryProposalId,
+    version: ObjectVersion,
+    proposer: &'a AgentProfileVersionRef,
+    namespace_id: MemoryNamespaceId,
+    operation: &'a MemoryProposalOperation,
+    display_key: &'a str,
+    normalized_key: &'a NormalizedMemoryKey,
+    expected: &'a ExpectedMemoryEntryState,
+    rationale: &'a str,
+    plaintext_validation_version: u16,
+    created_at_ms: i64,
+    creation_event_id: EventId,
+    approval_id: ApprovalId,
+    content_digest: &'a Digest,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        agents::{AgentBindings, AgentProfileDraft, AgentRole},
+        domain::{AgentProfileId, AgentProfileVersionId, MemoryEntryId, MemoryEntryVersionId},
+        memory::MemoryEntryVersion,
+    };
+    use uuid::Uuid;
+
+    fn uuid(value: u128) -> Uuid {
+        Uuid::from_u128(value)
+    }
+
+    fn profile() -> AgentProfileVersion {
+        AgentProfileVersion::create(
+            AgentProfileId::from_uuid(uuid(1)),
+            AgentProfileVersionId::from_uuid(uuid(2)),
+            MemoryNamespaceId::from_uuid(uuid(3)),
+            1,
+            AgentProfileDraft::new(
+                "Research Analyst".to_owned(),
+                "Profile.".to_owned(),
+                AgentRole::Custom,
+                "research".to_owned(),
+                vec![],
+                "Careful.".to_owned(),
+                "Review.".to_owned(),
+                AgentBindings::default(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap(),
+            None,
+        )
+        .unwrap()
+    }
+
+    fn present(profile: &AgentProfileVersion) -> MemoryEntryVersion {
+        MemoryEntryVersion::create_present(
+            profile.memory_namespace_id(),
+            MemoryEntryId::from_uuid(uuid(4)),
+            MemoryEntryVersionId::from_uuid(uuid(5)),
+            MemoryEntryDraft::new(
+                "Portfolio Thesis".to_owned(),
+                "Own durable companies.".to_owned(),
+                vec![],
+            )
+            .unwrap(),
+            Actor::Human,
+            1,
+            None,
+            EventId::from_uuid(uuid(6)),
+        )
+        .unwrap()
+    }
+
+    fn delete_proposal(display_key: &str) -> MemoryProposal {
+        let profile = profile();
+        let entry = present(&profile);
+        MemoryProposal::new(
+            MemoryProposalId::from_uuid(uuid(7)),
+            &profile,
+            &Actor::Agent(profile.profile_id()),
+            MemoryProposalOperation::Delete,
+            display_key.to_owned(),
+            ExpectedMemoryEntryState::Present(entry.reference()),
+            "Remove stale thesis.".to_owned(),
+            2,
+            EventId::from_uuid(uuid(8)),
+            ApprovalId::from_uuid(uuid(9)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn delete_creation_canonicalizes_foldable_display_key_whitespace() {
+        assert_eq!(
+            delete_proposal("Portfolio  Thesis").display_key(),
+            "Portfolio Thesis"
+        );
+    }
+
+    #[test]
+    fn delete_deserialization_rejects_digest_consistent_noncanonical_display_key() {
+        let mut proposal = delete_proposal("Portfolio Thesis");
+        proposal.display_key = "Portfolio  Thesis".to_owned();
+        proposal.content_digest = proposal.compute_content_digest().unwrap();
+        proposal.record_digest = proposal.compute_record_digest().unwrap();
+        assert!(
+            serde_json::from_value::<MemoryProposal>(serde_json::to_value(proposal).unwrap())
+                .is_err()
+        );
+    }
+}

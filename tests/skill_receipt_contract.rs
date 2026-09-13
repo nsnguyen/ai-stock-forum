@@ -21,8 +21,8 @@ mod fix_round_one_replay_matrix {
     use ai_stock_forum::{
         agents::{AgentBindings, AgentProfileDraft, AgentRole},
         app::{
-            AgentProfileSelector, ApplicationCommand, CommandEnvelope, CommandOutcome,
-            CommandView, SkillSelector,
+            AgentProfileSelector, ApplicationCommand, CommandEnvelope, CommandOutcome, CommandView,
+            SkillSelector,
         },
         domain::{Actor, CommandId, CorrelationId, SkillId},
         skills::{SkillDraft, SkillResource},
@@ -256,7 +256,10 @@ mod fix_round_one_replay_matrix {
         let CommandView::Skill(active) = active.view else {
             panic!("active skill")
         };
-        assert_eq!(active.skill_ref.skill_version_id(), versioned_view.skill_version_id);
+        assert_eq!(
+            active.skill_ref.skill_version_id(),
+            versioned_view.skill_version_id
+        );
 
         let profile = app
             .execute(envelope(
@@ -401,11 +404,7 @@ fn create_receipt_skill(
     let CommandView::SkillCreated(created) = created.view else {
         panic!("skill created")
     };
-    (
-        created.skill_id,
-        created.skill_version_id,
-        created.version,
-    )
+    (created.skill_id, created.skill_version_id, created.version)
 }
 
 fn activate_renamed_receipt_skill(
@@ -448,8 +447,7 @@ fn show_skill_receipt_replays_original_outcome_after_later_activation_and_rename
     );
     let original = app.execute(command.clone()).unwrap();
 
-    let version_two_id =
-        activate_renamed_receipt_skill(&mut app, 34_002, skill_id, version_one_id);
+    let version_two_id = activate_renamed_receipt_skill(&mut app, 34_002, skill_id, version_one_id);
 
     assert_eq!(app.execute(command).unwrap(), original);
 

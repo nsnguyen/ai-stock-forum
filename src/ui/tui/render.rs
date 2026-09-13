@@ -6,8 +6,8 @@ use ratatui::{
 };
 
 use super::{
-    layout::{MIN_HEIGHT, MIN_WIDTH, calculate_skills, view_geometry},
-    model::{Focus, LayoutMode, Severity, TuiModel, View},
+    layout::{MIN_HEIGHT, MIN_WIDTH, calculate_skills},
+    model::{AgentsPane, Focus, LayoutMode, Severity, TuiModel, View},
     theme::Theme,
     views,
 };
@@ -16,7 +16,13 @@ pub fn render(frame: &mut Frame<'_>, model: &TuiModel, theme: &Theme) {
     let cockpit = if model.skills.active {
         calculate_skills(frame.area(), model.inspector_open)
     } else {
-        view_geometry(frame.area(), model.active_view, model.inspector_open).cockpit
+        super::layout::view_geometry_for_state(
+            frame.area(),
+            model.active_view,
+            model.inspector_open,
+            model.active_view == View::Agents && model.agents.pane == AgentsPane::Memory,
+        )
+        .cockpit
     };
     frame.render_widget(Clear, cockpit.viewport);
     if cockpit.mode == LayoutMode::TooSmall {
@@ -65,7 +71,12 @@ fn render_header(
             .library
             .skills
             .iter()
-            .filter(|skill| matches!(skill.provenance, crate::skills::SkillProvenance::BuiltIn { .. }))
+            .filter(|skill| {
+                matches!(
+                    skill.provenance,
+                    crate::skills::SkillProvenance::BuiltIn { .. }
+                )
+            })
             .count();
         let custom = model.skills.library.skills.len().saturating_sub(built_in);
         lines.push(Line::from(vec![
@@ -112,11 +123,31 @@ fn render_header(
 
 fn numbered_tabs(model: &TuiModel, theme: &Theme) -> Line<'static> {
     let tabs = [
-        ("1", "Overview", !model.skills.active && model.active_view == View::Overview),
-        ("2", "Setup", !model.skills.active && model.active_view == View::Setup),
-        ("3", "Audit", !model.skills.active && model.active_view == View::Audit),
-        ("4", "Help", !model.skills.active && model.active_view == View::Help),
-        ("a", "Agents", !model.skills.active && model.active_view == View::Agents),
+        (
+            "1",
+            "Overview",
+            !model.skills.active && model.active_view == View::Overview,
+        ),
+        (
+            "2",
+            "Setup",
+            !model.skills.active && model.active_view == View::Setup,
+        ),
+        (
+            "3",
+            "Audit",
+            !model.skills.active && model.active_view == View::Audit,
+        ),
+        (
+            "4",
+            "Help",
+            !model.skills.active && model.active_view == View::Help,
+        ),
+        (
+            "a",
+            "Agents",
+            !model.skills.active && model.active_view == View::Agents,
+        ),
         ("s", "Skills", model.skills.active),
     ];
     let mut spans = Vec::new();
@@ -139,11 +170,31 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
         theme.muted
     };
     let tabs = [
-        ("1", "Overview", !model.skills.active && model.active_view == View::Overview),
-        ("2", "Setup", !model.skills.active && model.active_view == View::Setup),
-        ("3", "Audit", !model.skills.active && model.active_view == View::Audit),
-        ("4", "Help", !model.skills.active && model.active_view == View::Help),
-        ("a", "Agents", !model.skills.active && model.active_view == View::Agents),
+        (
+            "1",
+            "Overview",
+            !model.skills.active && model.active_view == View::Overview,
+        ),
+        (
+            "2",
+            "Setup",
+            !model.skills.active && model.active_view == View::Setup,
+        ),
+        (
+            "3",
+            "Audit",
+            !model.skills.active && model.active_view == View::Audit,
+        ),
+        (
+            "4",
+            "Help",
+            !model.skills.active && model.active_view == View::Help,
+        ),
+        (
+            "a",
+            "Agents",
+            !model.skills.active && model.active_view == View::Agents,
+        ),
         ("s", "Skills", model.skills.active),
     ];
     let mut lines = vec![Line::styled("VIEWS", theme.accent), Line::default()];
@@ -193,26 +244,30 @@ fn render_message(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
 }
 
 fn render_command(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
-    let focused = model.focus == Focus::Command;
-    let title = if model.skills.active
-        && model.skills.pane == crate::ui::tui::model::SkillsPane::Editor
-    {
-        " Skill input "
-    } else if !model.skills.active
-        && model.active_view == View::Agents
-        && model.agents.pane == crate::ui::tui::model::AgentsPane::Editor
-    {
-        " Profile input "
-    } else if model.command_in_flight {
-        " Command - working "
-    } else {
-        " Command "
-    };
+    let memory_owned = memory_text_input_owns_command(model);
+    let invalid_memory_editor = memory_editor_is_visible(model)
+        && !model.agents.memory.local_layer_cache_is_authenticated();
+    let focused = model.focus == Focus::Command || memory_owned;
+    let title =
+        if model.skills.active && model.skills.pane == crate::ui::tui::model::SkillsPane::Editor {
+            " Skill input "
+        } else if !model.skills.active
+            && model.active_view == View::Agents
+            && model.agents.pane == crate::ui::tui::model::AgentsPane::Editor
+        {
+            " Profile input "
+        } else if memory_owned {
+            " Memory input "
+        } else if model.command_in_flight {
+            " Command - working "
+        } else {
+            " Command "
+        };
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
         .border_style(if focused { theme.focus } else { theme.muted });
-    let line = if focused {
+    let (line, cursor_prefix_width) = if focused {
         let cursor = model.command.cursor_byte().min(model.command.text().len());
         let prefix = model
             .command
@@ -220,37 +275,100 @@ fn render_command(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
             .get(..cursor)
             .unwrap_or(model.command.text());
         let suffix = model.command.text().get(cursor..).unwrap_or_default();
-        Line::from(vec![
-            Span::styled("> ", theme.accent),
-            Span::raw(prefix.to_owned()),
-            Span::styled("|", theme.focus),
-            Span::raw(suffix.to_owned()),
-        ])
-    } else if model.command.text().is_empty() {
-        Line::styled("Type /help for commands", theme.muted)
+        let (prefix, suffix) = if memory_owned {
+            escaped_memory_command_parts(model, prefix, suffix)
+        } else {
+            (prefix.to_owned(), suffix.to_owned())
+        };
+        let prefix_width = Line::from(prefix.clone()).width();
+        (
+            Line::from(vec![
+                Span::styled("> ", theme.accent),
+                Span::raw(prefix),
+                Span::styled("|", theme.focus),
+                Span::raw(suffix),
+            ]),
+            prefix_width,
+        )
+    } else if invalid_memory_editor || model.command.text().is_empty() {
+        (Line::styled("Type /help for commands", theme.muted), 0)
     } else {
-        Line::from(model.command.text().to_owned())
+        (Line::from(model.command.text().to_owned()), 0)
     };
     frame.render_widget(Paragraph::new(line).block(block), area);
 
     if focused && area.width > 2 && area.height > 2 {
-        let prefix_width = Line::from(model.command.prefix()).width();
         let desired = area
             .x
             .saturating_add(1)
             .saturating_add(2)
-            .saturating_add(u16::try_from(prefix_width).unwrap_or(u16::MAX));
+            .saturating_add(u16::try_from(cursor_prefix_width).unwrap_or(u16::MAX));
         let cursor_x = desired.min(area.right().saturating_sub(2));
         frame.set_cursor_position((cursor_x, area.y.saturating_add(1)));
     }
 }
 
+fn escaped_memory_command_parts(model: &TuiModel, prefix: &str, suffix: &str) -> (String, String) {
+    let cap = match model
+        .agents
+        .memory
+        .editor
+        .as_ref()
+        .map(|editor| editor.step())
+    {
+        Some(crate::ui::memory_editor::MemoryEditorStep::Key) => 384,
+        Some(crate::ui::memory_editor::MemoryEditorStep::Value) => 16_384,
+        // Eight escaped 128-byte tags plus seven comma-space separators.
+        Some(crate::ui::memory_editor::MemoryEditorStep::PurposeTags) => 1_038,
+        Some(crate::ui::memory_editor::MemoryEditorStep::Review) | None => 0,
+    };
+    let prefix_required = prefix
+        .chars()
+        .map(|character| {
+            character
+                .escape_default()
+                .map(char::len_utf8)
+                .sum::<usize>()
+        })
+        .fold(0_usize, usize::saturating_add);
+    let escaped_prefix = views::memory_escape_bounded(prefix, cap);
+    if prefix_required > cap {
+        return (escaped_prefix, String::new());
+    }
+    let escaped_suffix = views::memory_escape_bounded(suffix, cap.saturating_sub(prefix_required));
+    (escaped_prefix, escaped_suffix)
+}
+
+fn memory_text_input_owns_command(model: &TuiModel) -> bool {
+    memory_editor_is_visible(model)
+        && model.agents.memory.local_layer_cache_is_authenticated()
+        && model.agents.memory.editor.as_ref().is_some_and(|editor| {
+            matches!(
+                editor.step(),
+                crate::ui::memory_editor::MemoryEditorStep::Key
+                    | crate::ui::memory_editor::MemoryEditorStep::Value
+                    | crate::ui::memory_editor::MemoryEditorStep::PurposeTags
+            )
+        })
+}
+
+fn memory_editor_is_visible(model: &TuiModel) -> bool {
+    !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane == AgentsPane::Memory
+        && model.agents.memory.pane == crate::ui::tui::model::MemoryPane::Editor
+        && model.agents.memory.editor.is_some()
+}
+
 fn render_too_small(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     let command = if model.focus == Focus::Command {
-        Line::from(vec![
-            Span::styled("> ", theme.accent),
-            Span::raw(model.command.text().to_owned()),
-        ])
+        let text = if memory_text_input_owns_command(model) {
+            let (prefix, suffix) = escaped_memory_command_parts(model, model.command.text(), "");
+            format!("{prefix}{suffix}")
+        } else {
+            model.command.text().to_owned()
+        };
+        Line::from(vec![Span::styled("> ", theme.accent), Span::raw(text)])
     } else {
         Line::styled("Press / to enter a command", theme.muted)
     };

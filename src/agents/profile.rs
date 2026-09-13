@@ -26,6 +26,71 @@ pub const INSTRUCTIONS_MAX_BYTES: usize = 4_096;
 pub const MAX_SKILL_REFS: usize = 16;
 const DEFAULT_POLICY_REF: &str = "profile-default/v1";
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentProfileVersionRef {
+    profile_id: AgentProfileId,
+    profile_version_id: AgentProfileVersionId,
+    version: ObjectVersion,
+    content_digest: Digest,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentProfileVersionRefWire {
+    profile_id: AgentProfileId,
+    profile_version_id: AgentProfileVersionId,
+    version: ObjectVersion,
+    content_digest: Digest,
+}
+
+impl AgentProfileVersionRef {
+    pub fn new(
+        profile_id: AgentProfileId,
+        profile_version_id: AgentProfileVersionId,
+        version: ObjectVersion,
+        content_digest: Digest,
+    ) -> Result<Self, DomainError> {
+        Ok(Self {
+            profile_id,
+            profile_version_id,
+            version,
+            content_digest,
+        })
+    }
+
+    pub fn profile_id(&self) -> AgentProfileId {
+        self.profile_id
+    }
+
+    pub fn profile_version_id(&self) -> AgentProfileVersionId {
+        self.profile_version_id
+    }
+
+    pub fn version(&self) -> ObjectVersion {
+        self.version
+    }
+
+    pub fn content_digest(&self) -> &Digest {
+        &self.content_digest
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentProfileVersionRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = AgentProfileVersionRefWire::deserialize(deserializer)?;
+        Self::new(
+            wire.profile_id,
+            wire.profile_version_id,
+            wire.version,
+            wire.content_digest,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRole {
@@ -289,7 +354,11 @@ impl AgentProfileDraft {
         if expected == replacement || expected.skill_id() != replacement.skill_id() {
             return Err(DomainError::AgentProfileUnchanged);
         }
-        let Some(index) = self.skill_refs.iter().position(|current| current == &expected) else {
+        let Some(index) = self
+            .skill_refs
+            .iter()
+            .position(|current| current == &expected)
+        else {
             return Err(DomainError::AgentProfileUnchanged);
         };
         let mut candidate = self.clone();
@@ -298,7 +367,11 @@ impl AgentProfileDraft {
     }
 
     pub fn unassign_skill(&self, expected: SkillVersionRef) -> Result<Self, DomainError> {
-        let Some(index) = self.skill_refs.iter().position(|current| current == &expected) else {
+        let Some(index) = self
+            .skill_refs
+            .iter()
+            .position(|current| current == &expected)
+        else {
             return Err(DomainError::AgentProfileUnchanged);
         };
         let mut candidate = self.clone();
@@ -463,6 +536,16 @@ impl AgentProfileVersion {
         &self.content_digest
     }
 
+    pub fn reference(&self) -> AgentProfileVersionRef {
+        AgentProfileVersionRef::new(
+            self.profile_id,
+            self.profile_version_id,
+            self.version,
+            self.content_digest.clone(),
+        )
+        .expect("existing agent profile version has a valid reference")
+    }
+
     pub fn recompute_content_digest(&self) -> Result<Digest, DomainError> {
         self.compute_digest()
     }
@@ -515,7 +598,10 @@ impl AgentProfileVersion {
         &self.skill_refs
     }
 
-    pub fn assign_skill(&self, skill_ref: SkillVersionRef) -> Result<AgentProfileDraft, DomainError> {
+    pub fn assign_skill(
+        &self,
+        skill_ref: SkillVersionRef,
+    ) -> Result<AgentProfileDraft, DomainError> {
         self.to_draft().assign_skill(skill_ref)
     }
 

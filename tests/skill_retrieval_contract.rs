@@ -93,7 +93,7 @@ fn retrieval_stops_before_the_first_incomplete_budget_section_and_counts_omissio
         let result = retrieve_assigned_skills(&assignments, &available, budget)
             .expect("assigned versions are available");
 
-        assert_eq!(result.skills(), &[alpha.clone()]);
+        assert_eq!(result.skills(), std::slice::from_ref(&alpha));
         assert_eq!(result.accepted_bytes(), accepted_bytes);
         assert_eq!(result.resource_count(), 1);
         assert_eq!(result.omitted_skill_count(), 2);
@@ -108,7 +108,7 @@ fn retrieval_returns_command_like_text_as_inert_content() {
 
     let result = retrieve_assigned_skills(
         &[assigned.reference()],
-        &[assigned.clone()],
+        std::slice::from_ref(&assigned),
         unlimited_budget(),
     )
     .expect("assigned version is available");

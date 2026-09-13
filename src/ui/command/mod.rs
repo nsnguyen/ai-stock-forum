@@ -6,8 +6,8 @@ mod runner;
 mod windows;
 
 pub use parser::{
-    AgentWorkflowCommand, FallbackParsedLine, ParsedLine, SkillWorkflowCommand,
-    parse_fallback_line, parse_line,
+    AgentWorkflowCommand, FallbackParsedLine, MemoryWorkflowCommand, ParsedLine,
+    SkillWorkflowCommand, parse_fallback_line, parse_line,
 };
 pub use reader::{BoundedLineReader, RawLine};
 pub use renderer::TextRenderer;

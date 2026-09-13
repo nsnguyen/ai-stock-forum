@@ -47,7 +47,10 @@ fn keyboard_lines_advance_all_five_stages_and_escape_preserves_the_draft() {
 
     assert_eq!(editor.back(), SkillEditorEffect::None);
     assert_eq!(editor.step(), SkillEditorStep::References);
-    assert_eq!(editor.draft().instructions, "Separate observations from conclusions.");
+    assert_eq!(
+        editor.draft().instructions,
+        "Separate observations from conclusions."
+    );
     assert_eq!(editor.submit_keyboard_line(""), SkillEditorEffect::None);
     assert_eq!(editor.step(), SkillEditorStep::Review);
 }

@@ -69,6 +69,10 @@ fn render_lines(
     );
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the panel renderer accepts its explicit layout and content components"
+)]
 fn render_fixed_panel(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -82,7 +86,9 @@ fn render_fixed_panel(
     let block = panel(title, focused, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let header_height = u16::try_from(header.len()).unwrap_or(u16::MAX).min(inner.height);
+    let header_height = u16::try_from(header.len())
+        .unwrap_or(u16::MAX)
+        .min(inner.height);
     let footer = Paragraph::new(footer).wrap(Wrap { trim: false });
     let footer_height = u16::try_from(footer.line_count(inner.width.max(1)))
         .unwrap_or(u16::MAX)
@@ -144,7 +150,10 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
             lines.push(Line::from(vec![
                 Span::styled("  Active version ", theme.muted),
                 Span::raw(format!("v{}", skill.skill_ref.version().get())),
-                Span::styled(format!(" | {}", provenance_short(&skill.provenance)), theme.muted),
+                Span::styled(
+                    format!(" | {}", provenance_short(&skill.provenance)),
+                    theme.muted,
+                ),
             ]));
             if model
                 .skills
@@ -166,10 +175,13 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
 }
 
 fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
-    let mut lines = vec![action_selector(model, theme), Line::styled(
-        "Left/Right: choose action | Enter: open | Esc: library",
-        theme.focus,
-    )];
+    let mut lines = vec![
+        action_selector(model, theme),
+        Line::styled(
+            "Left/Right: choose action | Enter: open | Esc: library",
+            theme.focus,
+        ),
+    ];
     if model.skills.version_detail.is_some() {
         lines.push(Line::styled(
             "Historical detail is read-only; assignment and history remain available.",
@@ -211,7 +223,10 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
         Some(active) if active.version() > detail.skill_ref.version() => {
             ("HISTORICAL", theme.warning)
         }
-        Some(_) => ("UNKNOWN - loaded active identity is inconsistent", theme.warning),
+        Some(_) => (
+            "UNKNOWN - loaded active identity is inconsistent",
+            theme.warning,
+        ),
         None => ("UNKNOWN - active version not loaded", theme.warning),
     };
     lines.extend([
@@ -229,7 +244,13 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
         label_value(
             "Active version",
             active_ref
-                .map(|active| format!("v{} / {}", active.version().get(), active.skill_version_id()))
+                .map(|active| {
+                    format!(
+                        "v{} / {}",
+                        active.version().get(),
+                        active.skill_version_id()
+                    )
+                })
                 .unwrap_or_else(|| "Not loaded".to_owned()),
             theme,
         ),
@@ -263,11 +284,17 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
         Line::default(),
         Line::styled("INERT INSTRUCTIONS", theme.accent),
         Line::styled("Text guidance only; it grants no capability.", theme.muted),
-        Line::styled("Long content may be truncated by the visible pane.", theme.muted),
+        Line::styled(
+            "Long content may be truncated by the visible pane.",
+            theme.muted,
+        ),
         Line::raw(safe_text(&detail.content.instructions)),
         Line::default(),
         Line::styled("INERT REFERENCE NOTES", theme.accent),
-        Line::styled("Reference text only; names and bodies are not executable.", theme.muted),
+        Line::styled(
+            "Reference text only; names and bodies are not executable.",
+            theme.muted,
+        ),
     ]);
     if detail.content.resources.is_empty() {
         lines.push(Line::raw("None"));
@@ -292,7 +319,13 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
 fn action_selector(model: &TuiModel, theme: &Theme) -> Line<'static> {
     let selected = model.skills.selected_action();
     let mut spans = vec![Span::styled("Actions  ", theme.accent)];
-    for (index, action) in model.skills.available_detail_actions().iter().copied().enumerate() {
+    for (index, action) in model
+        .skills
+        .available_detail_actions()
+        .iter()
+        .copied()
+        .enumerate()
+    {
         let label = match action {
             SkillDetailAction::Assign => "Assign",
             SkillDetailAction::CreateVersion => "Create Version",
@@ -303,7 +336,11 @@ fn action_selector(model: &TuiModel, theme: &Theme) -> Line<'static> {
         }
         spans.push(Span::styled(
             format!("[{label}]"),
-            if action == selected { theme.focus } else { theme.muted },
+            if action == selected {
+                theme.focus
+            } else {
+                theme.muted
+            },
         ));
     }
     Line::from(spans)
@@ -318,9 +355,17 @@ fn render_create_source(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, the
         Line::styled(
             format!(
                 "{} Blank skill",
-                if model.skills.selected_create_source == 0 { ">" } else { " " }
+                if model.skills.selected_create_source == 0 {
+                    ">"
+                } else {
+                    " "
+                }
             ),
-            if model.skills.selected_create_source == 0 { theme.focus } else { theme.accent },
+            if model.skills.selected_create_source == 0 {
+                theme.focus
+            } else {
+                theme.accent
+            },
         ),
         Line::styled("  Start with empty saved guidance.", theme.muted),
     ];
@@ -343,7 +388,14 @@ fn render_create_source(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, the
             theme.muted,
         ));
     }
-    render_lines(frame, area, "Create skill", lines, workspace_focused(model), theme);
+    render_lines(
+        frame,
+        area,
+        "Create skill",
+        lines,
+        workspace_focused(model),
+        theme,
+    );
 }
 
 fn render_history(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
@@ -357,7 +409,14 @@ fn render_history(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
             Line::styled("Loading skill history...", theme.accent),
             Line::raw("Esc returns to the current detail."),
         ]);
-        render_lines(frame, area, "Skill history", lines, workspace_focused(model), theme);
+        render_lines(
+            frame,
+            area,
+            "Skill history",
+            lines,
+            workspace_focused(model),
+            theme,
+        );
         return;
     };
     lines.extend([
@@ -366,7 +425,10 @@ fn render_history(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
         label_value("Returned", history.returned_count.to_string(), theme),
     ]);
     if history.truncated {
-        lines.push(Line::styled("History results are truncated.", theme.warning));
+        lines.push(Line::styled(
+            "History results are truncated.",
+            theme.warning,
+        ));
     }
     for (index, entry) in history.versions.iter().enumerate() {
         let selected = index == model.skills.selected_history_version;
@@ -397,7 +459,14 @@ fn render_history(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
             theme,
         ));
     }
-    render_lines(frame, area, "Skill history", lines, workspace_focused(model), theme);
+    render_lines(
+        frame,
+        area,
+        "Skill history",
+        lines,
+        workspace_focused(model),
+        theme,
+    );
 }
 
 fn render_editor(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
@@ -423,12 +492,23 @@ fn render_editor(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
             theme,
         ),
         label_value("Focused pane", "Editor".to_owned(), theme),
-        label_value("Current stage", editor_step_name(editor.step()).to_owned(), theme),
-        label_value("Current field", editor_field_name(editor.field()).to_owned(), theme),
+        label_value(
+            "Current stage",
+            editor_step_name(editor.step()).to_owned(),
+            theme,
+        ),
+        label_value(
+            "Current field",
+            editor_field_name(editor.field()).to_owned(),
+            theme,
+        ),
         Line::styled(editor_guidance(editor), theme.focus),
     ];
     if editor.step() == SkillEditorStep::References {
-        lines.extend([Line::default(), Line::styled("ACCEPTED INERT NOTES", theme.accent)]);
+        lines.extend([
+            Line::default(),
+            Line::styled("ACCEPTED INERT NOTES", theme.accent),
+        ]);
         if editor.references().is_empty() {
             lines.push(Line::styled("None yet", theme.muted));
         } else {
@@ -506,7 +586,14 @@ fn render_editor(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
         ));
     }
     append_error_guidance(&mut lines, model, theme);
-    render_lines(frame, area, "Skill editor", lines, workspace_focused(model), theme);
+    render_lines(
+        frame,
+        area,
+        "Skill editor",
+        lines,
+        workspace_focused(model),
+        theme,
+    );
 }
 
 fn render_agent_picker(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
@@ -533,12 +620,23 @@ fn render_agent_picker(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, them
                 if selected { theme.focus } else { theme.accent },
             ));
             lines.push(Line::styled(
-                format!("  Profile v{} | {}", profile.version.get(), profile.profile_id),
+                format!(
+                    "  Profile v{} | {}",
+                    profile.version.get(),
+                    profile.profile_id
+                ),
                 theme.muted,
             ));
         }
     }
-    render_lines(frame, area, "Agent picker", lines, workspace_focused(model), theme);
+    render_lines(
+        frame,
+        area,
+        "Agent picker",
+        lines,
+        workspace_focused(model),
+        theme,
+    );
 }
 
 fn render_assignment_review(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
@@ -561,7 +659,11 @@ fn render_assignment_review(frame: &mut Frame<'_>, area: Rect, model: &TuiModel,
         ));
         body.push(label_value(
             "Agent version",
-            format!("v{} / {}", agent.profile.version().get(), agent.profile.profile_version_id()),
+            format!(
+                "v{} / {}",
+                agent.profile.version().get(),
+                agent.profile.profile_version_id()
+            ),
             theme,
         ));
     } else {
@@ -648,7 +750,10 @@ fn render_confirmation(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, them
             "Commits the displayed immutable version or exact agent pin only.".to_owned(),
             theme,
         ),
-        Line::styled("No automatic upgrades or executable capabilities.", theme.muted),
+        Line::styled(
+            "No automatic upgrades or executable capabilities.",
+            theme.muted,
+        ),
     ]);
     append_error_guidance(&mut body, model, theme);
     render_fixed_panel(
@@ -674,7 +779,14 @@ fn render_result(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
         Line::styled("Enter or Esc: return to skill detail", theme.focus),
     ];
     append_error_guidance(&mut lines, model, theme);
-    render_lines(frame, area, "Skill result", lines, workspace_focused(model), theme);
+    render_lines(
+        frame,
+        area,
+        "Skill result",
+        lines,
+        workspace_focused(model),
+        theme,
+    );
 }
 
 pub(super) fn inspector_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
@@ -688,7 +800,10 @@ pub(super) fn inspector_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'stat
         lines.push(Line::styled("EXACT SELECTION", theme.accent));
         append_exact_ref(&mut lines, "Selected", skill_ref, theme);
     } else {
-        lines.push(Line::styled("No exact skill version selected.", theme.muted));
+        lines.push(Line::styled(
+            "No exact skill version selected.",
+            theme.muted,
+        ));
     }
     if let Some(detail) = model
         .skills
@@ -718,7 +833,10 @@ fn append_assignment_context(
     target: &SkillVersionRef,
     theme: &Theme,
 ) {
-    lines.extend([Line::default(), Line::styled("AGENT ASSIGNMENT CONTEXT", theme.accent)]);
+    lines.extend([
+        Line::default(),
+        Line::styled("AGENT ASSIGNMENT CONTEXT", theme.accent),
+    ]);
     let agent = model
         .skills
         .selected_agent_detail
@@ -736,13 +854,23 @@ fn append_assignment_context(
         .skill_refs()
         .iter()
         .find(|assigned| assigned.skill_id() == target.skill_id());
-    lines.push(label_value("Agent", safe_text(agent.profile.display_name()), theme));
+    lines.push(label_value(
+        "Agent",
+        safe_text(agent.profile.display_name()),
+        theme,
+    ));
     match assigned {
-        Some(assigned) if assigned == target => {
-            lines.push(label_value("Assigned", "This exact version".to_owned(), theme))
-        }
+        Some(assigned) if assigned == target => lines.push(label_value(
+            "Assigned",
+            "This exact version".to_owned(),
+            theme,
+        )),
         Some(assigned) => {
-            lines.push(label_value("Assigned", "Another exact version".to_owned(), theme));
+            lines.push(label_value(
+                "Assigned",
+                "Another exact version".to_owned(),
+                theme,
+            ));
             append_exact_ref(lines, "Pinned", assigned, theme);
         }
         None => lines.push(label_value("Assigned", "Not assigned".to_owned(), theme)),
@@ -758,13 +886,21 @@ fn append_exact_ref(
     lines.extend([
         label_value(label, format!("v{}", reference.version().get()), theme),
         label_value("Skill ID", reference.skill_id().to_string(), theme),
-        label_value("Version ID", reference.skill_version_id().to_string(), theme),
+        label_value(
+            "Version ID",
+            reference.skill_version_id().to_string(),
+            theme,
+        ),
         label_value("Digest", reference.content_digest().to_string(), theme),
     ]);
 }
 
 fn append_error_guidance(lines: &mut Vec<Line<'static>>, model: &TuiModel, theme: &Theme) {
-    if model.message.as_ref().is_some_and(|message| message.severity == Severity::Error) {
+    if model
+        .message
+        .as_ref()
+        .is_some_and(|message| message.severity == Severity::Error)
+    {
         lines.extend([
             Line::default(),
             Line::styled("RECOVERY", theme.error),
@@ -917,7 +1053,11 @@ fn candidate_confirmation_lines(
             theme,
         ),
         label_value("Version", version, theme),
-        label_value("Provenance", "Pending authoritative commit".to_owned(), theme),
+        label_value(
+            "Provenance",
+            "Pending authoritative commit".to_owned(),
+            theme,
+        ),
     ];
     if let Some(expected) = expected_active_version_id {
         body.push(label_value("Reviewed base", expected.to_string(), theme));
@@ -1144,9 +1284,10 @@ fn next_action(model: &TuiModel) -> &'static str {
         SkillsPane::Editor => "Type focused value; Enter continue; Esc back",
         SkillsPane::AgentPicker => "Up/Down agent; Enter review; Esc detail",
         SkillsPane::AssignmentReview
-            if model.skills.assignment == Some(AssignmentKind::AlreadyAssigned) => {
-                "Esc choose another version"
-            }
+            if model.skills.assignment == Some(AssignmentKind::AlreadyAssigned) =>
+        {
+            "Esc choose another version"
+        }
         SkillsPane::AssignmentReview => "Enter validate; Esc agent picker",
         SkillsPane::Confirmation => "Enter confirm; Esc return to review",
         SkillsPane::Result => "Enter or Esc return to detail",

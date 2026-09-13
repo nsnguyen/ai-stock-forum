@@ -86,7 +86,10 @@ impl SkillReviewRegistry {
         candidate: &SkillDraft,
     ) -> Result<SkillEditPreview, DomainError> {
         let candidate_digest = candidate_digest(candidate)?;
-        let _operation = self.operation.lock().unwrap_or_else(|error| error.into_inner());
+        let _operation = self
+            .operation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let Some(ReviewState::Available(PendingSkillReview::Edit {
             token,
@@ -121,7 +124,10 @@ impl SkillReviewRegistry {
     pub(crate) fn operation(&self) -> SkillReviewOperation<'_> {
         SkillReviewOperation {
             registry: self,
-            _ownership: self.operation.lock().unwrap_or_else(|error| error.into_inner()),
+            _ownership: self
+                .operation
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
         }
     }
 
@@ -146,7 +152,11 @@ impl SkillReviewOperation<'_> {
             expected_active_version_id,
             &candidate_digest,
         )?;
-        *self.registry.state.lock().unwrap_or_else(|error| error.into_inner()) =
+        *self
+            .registry
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
             Some(ReviewState::Available(PendingSkillReview::Edit {
                 token: review_token,
                 actor,
@@ -178,7 +188,11 @@ impl SkillReviewOperation<'_> {
             expected_active_profile_version_id,
             &operation,
         )?;
-        *self.registry.state.lock().unwrap_or_else(|error| error.into_inner()) =
+        *self
+            .registry
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
             Some(ReviewState::Available(PendingSkillReview::Assignment {
                 token: review_token,
                 actor,
@@ -196,6 +210,10 @@ impl SkillReviewOperation<'_> {
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the review reservation validates the complete edit identity at its boundary"
+    )]
     pub(crate) fn reserve_edit(
         &self,
         command_id: CommandId,
@@ -206,8 +224,8 @@ impl SkillReviewOperation<'_> {
         candidate: &SkillDraft,
         supplied_review_digest: &ContentDigest,
     ) -> Result<(), crate::app::AppError> {
-        let candidate_digest = candidate_digest(candidate)
-            .map_err(|_| crate::app::AppError::SkillReviewMismatch)?;
+        let candidate_digest =
+            candidate_digest(candidate).map_err(|_| crate::app::AppError::SkillReviewMismatch)?;
         self.reserve(command_id, review_token, |review| {
             matches!(
                 review,
@@ -228,6 +246,10 @@ impl SkillReviewOperation<'_> {
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the review reservation validates the complete assignment identity at its boundary"
+    )]
     pub(crate) fn reserve_assignment(
         &self,
         command_id: CommandId,
@@ -264,7 +286,11 @@ impl SkillReviewOperation<'_> {
         supplied_token: SkillReviewToken,
         matches_review: impl FnOnce(&PendingSkillReview) -> bool,
     ) -> Result<(), crate::app::AppError> {
-        let mut state = self.registry.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self
+            .registry
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let Some(current) = state.take() else {
             return Err(crate::app::AppError::SkillReviewUnavailable);
         };
@@ -289,7 +315,11 @@ impl SkillReviewOperation<'_> {
     }
 
     pub(crate) fn release(&self, command_id: CommandId) {
-        let mut state = self.registry.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self
+            .registry
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if matches!(state.as_ref(), Some(ReviewState::Reserved { command_id: owner, .. }) if *owner == command_id)
         {
             let Some(ReviewState::Reserved { review, .. }) = state.take() else {
@@ -300,7 +330,11 @@ impl SkillReviewOperation<'_> {
     }
 
     pub(crate) fn consume_reserved(&self, command_id: CommandId) {
-        let mut state = self.registry.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self
+            .registry
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if matches!(state.as_ref(), Some(ReviewState::Reserved { command_id: owner, .. }) if *owner == command_id)
         {
             state.take();
@@ -348,12 +382,14 @@ fn assignment_review_digest(
     expected_active_profile_version_id: AgentProfileVersionId,
     operation: &AgentSkillAssignmentOperation,
 ) -> Result<ContentDigest, DomainError> {
-    Ok(sha256(&canonical_json_bytes(&AssignmentReviewDigestMaterial {
-        actor,
-        profile_id,
-        expected_active_profile_version_id,
-        operation,
-    })?))
+    Ok(sha256(&canonical_json_bytes(
+        &AssignmentReviewDigestMaterial {
+            actor,
+            profile_id,
+            expected_active_profile_version_id,
+            operation,
+        },
+    )?))
 }
 
 #[derive(Serialize)]

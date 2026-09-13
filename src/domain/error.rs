@@ -26,6 +26,8 @@ pub enum DomainError {
     InvalidProfileTemplateProvenance,
     #[error("agent profile candidate has no semantic changes")]
     AgentProfileUnchanged,
+    #[error("agent profile version reference is invalid")]
+    InvalidAgentProfileVersionReference,
     #[error("invalid skill field")]
     InvalidSkillField { field: &'static str },
     #[error("skill text contains unsafe characters")]
@@ -48,6 +50,52 @@ pub enum DomainError {
     InvalidSkillVersion,
     #[error("skill review token is invalid")]
     InvalidSkillReviewToken,
+    #[error("invalid memory field")]
+    InvalidMemoryField { field: &'static str },
+    #[error("memory text contains unsafe characters")]
+    UnsafeMemoryText { field: &'static str },
+    #[error("memory editor seed is invalid")]
+    InvalidMemoryEditorSeed,
+    #[error("memory editor transition is invalid")]
+    InvalidMemoryEditorTransition,
+    #[error("plaintext validation version is unknown")]
+    UnknownPlaintextValidationVersion,
+    #[error("memory entry is structurally invalid")]
+    InvalidMemoryEntry,
+    #[error("memory review is unavailable")]
+    MemoryReviewUnavailable,
+    #[error("memory expected state does not match the authoritative entry")]
+    MemoryExpectedStateMismatch,
+    #[error("memory proposal is structurally invalid")]
+    InvalidMemoryProposal,
+    #[error("memory proposal actor does not match its proposer profile")]
+    MemoryProposalActorMismatch,
+    #[error("memory proposal resolution is invalid")]
+    InvalidMemoryProposalResolution,
+    #[error("memory proposal review is unavailable")]
+    MemoryProposalReviewUnavailable,
+    #[error("memory proposal capacity has been reached")]
+    MemoryProposalCapacityReached,
+    #[error("memory projection is structurally invalid")]
+    InvalidMemoryProjection,
+    #[error("episodic source ordering is invalid")]
+    EpisodicSourcesNotOrdered,
+    #[error("episodic sources must be unique")]
+    EpisodicSourcesNotUnique,
+    #[error("episodic summary is structurally invalid")]
+    InvalidEpisodicSummary,
+    #[error("memory retrieval scope is structurally invalid")]
+    InvalidMemoryRetrievalScope,
+    #[error("memory retrieval budget is invalid")]
+    InvalidMemoryRetrievalBudget,
+    #[error("memory snapshot is structurally invalid")]
+    InvalidMemorySnapshot,
+    #[error("memory retrieval accounting overflowed")]
+    MemoryRetrievalOverflow,
+    #[error("memory view generation overflowed")]
+    MemoryGenerationOverflow,
+    #[error("memory selection is unavailable")]
+    MemorySelectionUnavailable,
 }
 
 impl DomainError {
@@ -65,6 +113,7 @@ impl DomainError {
             Self::UnknownProfileTemplate => "unknown_profile_template",
             Self::InvalidProfileTemplateProvenance => "invalid_profile_template_provenance",
             Self::AgentProfileUnchanged => "agent_profile_unchanged",
+            Self::InvalidAgentProfileVersionReference => "invalid_agent_profile_version_reference",
             Self::InvalidSkillField { .. } => "invalid_skill_field",
             Self::UnsafeSkillText { .. } => "unsafe_skill_text",
             Self::TooManySkillTags => "too_many_skill_tags",
@@ -76,6 +125,29 @@ impl DomainError {
             Self::SkillUnchanged => "skill_unchanged",
             Self::InvalidSkillVersion => "invalid_skill_version",
             Self::InvalidSkillReviewToken => "invalid_skill_review_token",
+            Self::InvalidMemoryField { .. } => "invalid_memory_field",
+            Self::UnsafeMemoryText { .. } => "unsafe_memory_text",
+            Self::InvalidMemoryEditorSeed => "invalid_memory_editor_seed",
+            Self::InvalidMemoryEditorTransition => "invalid_memory_editor_transition",
+            Self::UnknownPlaintextValidationVersion => "unknown_plaintext_validation_version",
+            Self::InvalidMemoryEntry => "invalid_memory_entry",
+            Self::MemoryReviewUnavailable => "memory_review_unavailable",
+            Self::MemoryExpectedStateMismatch => "memory_expected_state_mismatch",
+            Self::InvalidMemoryProposal => "invalid_memory_proposal",
+            Self::MemoryProposalActorMismatch => "memory_proposal_actor_mismatch",
+            Self::InvalidMemoryProposalResolution => "invalid_memory_proposal_resolution",
+            Self::MemoryProposalReviewUnavailable => "memory_proposal_review_unavailable",
+            Self::MemoryProposalCapacityReached => "memory_proposal_capacity_reached",
+            Self::InvalidMemoryProjection => "invalid_memory_projection",
+            Self::EpisodicSourcesNotOrdered => "episodic_sources_not_ordered",
+            Self::EpisodicSourcesNotUnique => "episodic_sources_not_unique",
+            Self::InvalidEpisodicSummary => "invalid_episodic_summary",
+            Self::InvalidMemoryRetrievalScope => "invalid_memory_retrieval_scope",
+            Self::InvalidMemoryRetrievalBudget => "invalid_memory_retrieval_budget",
+            Self::InvalidMemorySnapshot => "invalid_memory_snapshot",
+            Self::MemoryRetrievalOverflow => "memory_retrieval_overflow",
+            Self::MemoryGenerationOverflow => "memory_generation_overflow",
+            Self::MemorySelectionUnavailable => "memory_selection_unavailable",
         }
     }
 }

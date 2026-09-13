@@ -53,9 +53,15 @@ uuid_id!(ProfileReviewToken);
 uuid_id!(SkillId);
 uuid_id!(SkillVersionId);
 uuid_id!(SkillReviewToken);
+uuid_id!(MemoryEntryId);
+uuid_id!(MemoryEntryVersionId);
+uuid_id!(MemoryProposalId);
+uuid_id!(MemoryReviewToken);
+uuid_id!(EpisodicSummaryId);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Actor {
     Human,
     System,
+    Agent(AgentProfileId),
 }

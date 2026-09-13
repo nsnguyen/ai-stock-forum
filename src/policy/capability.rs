@@ -18,6 +18,11 @@ pub enum Capability {
     AgentSkillAssign,
     #[serde(rename = "skill_unassign")]
     AgentSkillUnassign,
+    MemoryRead,
+    MemoryPreview,
+    MemoryMutate,
+    MemoryPropose,
+    MemoryResolve,
     Shutdown,
     DiscussionRun,
     McpUse,

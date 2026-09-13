@@ -1,11 +1,12 @@
 use ai_stock_forum::app::{ApplicationCommand, InputRejectionCategory};
-use ai_stock_forum::ui::command::{ParsedLine, parse_line};
+use ai_stock_forum::ui::command::{MemoryWorkflowCommand, ParsedLine, parse_line};
 
 fn command(bytes: &[u8]) -> ApplicationCommand {
     match parse_line(bytes) {
         ParsedLine::Command(command) => command,
         ParsedLine::AgentWorkflow(_) => panic!("expected direct command"),
         ParsedLine::SkillWorkflow(_) => panic!("expected direct command"),
+        ParsedLine::MemoryWorkflow(_) => panic!("expected direct command"),
         ParsedLine::Ignored => panic!("expected command"),
     }
 }
@@ -154,4 +155,12 @@ fn classifies_invalid_forms_of_recognized_commands_as_malformed() {
         };
         assert_eq!(rejection.category, InputRejectionCategory::Malformed);
     }
+}
+
+#[test]
+fn memory_workflows_are_never_classified_as_direct_or_legacy_workflows() {
+    assert!(matches!(
+        parse_line(b"/memory set analyst thesis"),
+        ParsedLine::MemoryWorkflow(MemoryWorkflowCommand::Set { .. })
+    ));
 }

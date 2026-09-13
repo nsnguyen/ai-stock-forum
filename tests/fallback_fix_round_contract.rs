@@ -504,6 +504,7 @@ fn audit_renderer_includes_every_typed_summary_and_required_metadata_safely() {
         assert!(text.contains(match entry.actor {
             Actor::Human => "human",
             Actor::System => "system",
+            Actor::Agent(_) => "agent",
         }));
         assert!(text.contains(&entry.kind));
         assert!(text.contains(&entry.correlation_id.to_string()));

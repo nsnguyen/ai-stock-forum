@@ -3,9 +3,7 @@
 use crate::{
     app::ApplicationCommand,
     domain::{DomainError, SkillId, SkillVersionId},
-    skills::{
-        DISPLAY_NAME_MAX_BYTES, SkillDraft, SkillEditPreview, SkillResource,
-    },
+    skills::{DISPLAY_NAME_MAX_BYTES, SkillDraft, SkillEditPreview, SkillResource},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +65,10 @@ impl SkillPreviewRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "editor effects preserve their direct command and preview payload interfaces"
+)]
 pub enum SkillEditorEffect {
     None,
     Preview(SkillPreviewRequest),
@@ -278,16 +280,15 @@ impl SkillEditor {
             SkillEditorField::UseWhen => &self.raw.use_when,
             SkillEditorField::Tags => &self.raw.tags,
             SkillEditorField::Instructions => &self.raw.instructions,
-            SkillEditorField::ReferenceName => {
-                self.pending_reference_name.as_deref().unwrap_or("")
-            }
+            SkillEditorField::ReferenceName => self.pending_reference_name.as_deref().unwrap_or(""),
             SkillEditorField::ReferenceBody => &self.pending_reference_body,
             SkillEditorField::Review => "",
         }
     }
 
     pub fn draft(&self) -> SkillDraft {
-        self.try_draft().expect("editor exposes a draft after validation")
+        self.try_draft()
+            .expect("editor exposes a draft after validation")
     }
 
     pub fn try_draft(&self) -> Result<SkillDraft, DomainError> {
@@ -334,8 +335,10 @@ impl SkillEditor {
         match self.field {
             SkillEditorField::DisplayName => {
                 self.raw.display_name = input.to_owned();
-                if input.is_empty() || input.len() > DISPLAY_NAME_MAX_BYTES || self.probe().is_err() {
-                    return self.invalid(SkillEditorField::DisplayName, "skill_display_name_invalid");
+                if input.is_empty() || input.len() > DISPLAY_NAME_MAX_BYTES || self.probe().is_err()
+                {
+                    return self
+                        .invalid(SkillEditorField::DisplayName, "skill_display_name_invalid");
                 }
                 self.field = SkillEditorField::Purpose;
             }
@@ -365,14 +368,16 @@ impl SkillEditor {
             SkillEditorField::Instructions => {
                 self.raw.instructions = input.to_owned();
                 if self.probe().is_err() {
-                    return self.invalid(SkillEditorField::Instructions, "skill_instructions_invalid");
+                    return self
+                        .invalid(SkillEditorField::Instructions, "skill_instructions_invalid");
                 }
                 self.step = SkillEditorStep::References;
                 self.field = SkillEditorField::ReferenceName;
             }
             SkillEditorField::ReferenceName if input.is_empty() => {
                 if self.go_to_review().is_err() {
-                    return self.invalid(SkillEditorField::ReferenceName, "skill_references_invalid");
+                    return self
+                        .invalid(SkillEditorField::ReferenceName, "skill_references_invalid");
                 }
             }
             SkillEditorField::ReferenceName => {
@@ -392,8 +397,8 @@ impl SkillEditor {
                     body: self.pending_reference_body.clone(),
                 };
                 let editing_reference = self.editing_reference.take();
-                let previous = editing_reference
-                    .and_then(|index| self.raw.resources.get(index).cloned());
+                let previous =
+                    editing_reference.and_then(|index| self.raw.resources.get(index).cloned());
                 if let Some(index) = editing_reference {
                     if let Some(slot) = self.raw.resources.get_mut(index) {
                         *slot = resource;
@@ -411,7 +416,8 @@ impl SkillEditor {
                     }
                     self.editing_reference = editing_reference;
                     self.pending_reference_name = Some(name);
-                    return self.invalid(SkillEditorField::ReferenceBody, "skill_reference_invalid");
+                    return self
+                        .invalid(SkillEditorField::ReferenceBody, "skill_reference_invalid");
                 }
                 self.pending_reference_body.clear();
                 self.selected_reference = None;
@@ -424,7 +430,8 @@ impl SkillEditor {
 
     pub fn back(&mut self) -> SkillEditorEffect {
         self.local_error = None;
-        let had_review = self.review.take().is_some() || self.pending_preview_generation.take().is_some();
+        let had_review =
+            self.review.take().is_some() || self.pending_preview_generation.take().is_some();
         match self.field {
             SkillEditorField::DisplayName => return SkillEditorEffect::Cancelled,
             SkillEditorField::Purpose => self.field = SkillEditorField::DisplayName,
@@ -455,7 +462,9 @@ impl SkillEditor {
     }
 
     pub fn apply_preview(&mut self, generation: u64, preview: SkillEditPreview) -> bool {
-        if self.pending_preview_generation != Some(generation) || !self.preview_matches_mode(&preview) {
+        if self.pending_preview_generation != Some(generation)
+            || !self.preview_matches_mode(&preview)
+        {
             return false;
         }
         self.pending_preview_generation = None;

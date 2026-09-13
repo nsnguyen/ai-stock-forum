@@ -1,6 +1,6 @@
 use crate::domain::{Sha256Digest, sha256};
 
-pub const LATEST_SCHEMA_VERSION: u32 = 3;
+pub const LATEST_SCHEMA_VERSION: u32 = 5;
 
 pub(crate) const APPLICATION_ID: i64 = 0x4149_4653;
 pub(crate) const MIGRATION_BOUNDARY_PREFIX: &str = "-- migration-boundary:";
@@ -38,7 +38,7 @@ impl Migration {
     }
 }
 
-pub(crate) fn ordered() -> [Migration; 3] {
+pub(crate) fn ordered() -> [Migration; 5] {
     [
         Migration {
             version: 1,
@@ -59,6 +59,20 @@ pub(crate) fn ordered() -> [Migration; 3] {
             sql: include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/migrations/0003_declarative_skills.sql"
+            )),
+        },
+        Migration {
+            version: 4,
+            sql: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/0004_hybrid_memory.sql"
+            )),
+        },
+        Migration {
+            version: 5,
+            sql: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/0005_episodic_source_recovery.sql"
             )),
         },
     ]

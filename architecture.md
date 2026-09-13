@@ -619,7 +619,7 @@ that mode and through the TUI command palette.
 | `/marketplace list|show|approve|revoke` | Manage the internal MCP catalog |
 | `/mcp grant|revoke|status` | Manage per-agent MCP eligibility |
 | `/skill add|list|show|assign|unassign` | Manage versioned skills |
-| `/memory get|set|list|proposals|approve|delete` | Manage durable agent memory |
+| `/memory list`, `get`, `history`, `set`, `delete`, `proposals`, `proposal`, `approve`, `reject`, `episodes`, `episode` | Inspect durable agent memory and run reviewed Human mutations or proposal resolutions |
 | `/job start|list|show|cancel|diff` | Manage engineering jobs |
 | `/approve show|accept|reject` | Resolve exact pending actions |
 | `/audit show|tail|export` | Inspect normalized events and decisions |
@@ -914,22 +914,89 @@ Personality controls voice, perspective, and reasoning emphasis. It does not
 change authority. “Aggressive trader,” “Bull,” or “security expert” never means
 the agent receives additional tools or a higher risk limit.
 
-### Memory
+### Hybrid Memory durability and recovery
 
-Version 1 uses a hybrid model:
+Hybrid Memory belongs to a stable agent memory namespace. Activating a new
+version of one profile preserves that namespace. Creating a different or
+copied profile allocates a fresh empty namespace even when the operator
+deliberately reproduces allowed non-memory fields. Every producer and read
+resolves its exact profile-version reference to the authoritative namespace.
+Deterministic retrieval encodes `memory-scope-v1` with that exact profile
+reference, its derived namespace, and either `General` or canonical `Tagged`
+purpose scope. Logical-key and proposal identities belong to typed commands and
+records, not to retrieval scope.
 
-- **Explicit KV memory:** durable facts and preferences in an agent-private
-  namespace. The user can edit them directly. Agents can only propose changes;
-  the user approves or rejects each durable mutation.
-- **Bounded episodic summaries:** labeled summaries of completed rooms, linked
-  to source event IDs. They are retrieval aids, not policy or ground truth.
-- **Append-only audit events:** the full operational history, not automatically
-  inserted into prompts.
+The immutable application event stream is the authoritative complete memory
+record. Accepted entry versions, proposals and rationales, proposal
+resolutions, episodic summaries and source links, approvals, and command
+request/outcome receipts are authenticated immutable mirrors used for exact
+inspection and idempotent replay. Current-entry and proposal-status tables and
+the in-memory projection are rebuildable pointers. Generic audit is deliberately
+prose-free metadata, not another copy of memory content.
 
-Retrieval is scoped by agent, room, purpose, and size budget. Private memory is
-not shared merely because two profiles use the same provider connection or
-model. Cross-agent sharing happens through the room transcript or an explicit
-user action and is audited.
+The application does not encrypt Hybrid Memory at rest. Application-managed
+durable records are local plaintext: current entry and history rows, proposals
+and rationales, summaries and source links, mutation events, request/outcome
+receipts, SQLite WAL/journal sidecars, and deliberate detail output. Copied
+backups can retain plaintext wherever stored. Owner-only permissions are access
+control, not encryption. Credentials are prohibited. The bounded credential
+deny-list is best-effort defense in depth and cannot prove arbitrary text
+contains no secret. Overwrite appends a version; delete adds a tombstone and is
+not secure erasure. Immutable versions, events, and receipts accumulate
+monotonically, and repeated edits consume additional local capacity. SQLite may
+reuse pages, so neither physical file size nor allocated page count is promised
+to grow monotonically.
+
+Overwrite and delete retain prior plaintext in immutable history.
+
+All memory mutations use one SQLite `BEGIN IMMEDIATE` transaction. The actor
+and capability matrix is exact: a Human may directly set/delete and may
+Approve or Reject; an Agent may only create a proposal for its own exact
+profile identity; System cannot mutate or resolve memory. A direct Human review
+binds the exact profile, namespace, expected entry state, candidate or action,
+plaintext acknowledgement, command, and digest. A proposal-resolution review
+also binds the immutable proposal, pending approval, current entry state, and
+Approve versus Reject action. Review tokens are process-local, one-use, and
+stay reserved through event, mirror, projection, generic audit, receipt, and
+commit.
+
+Proposal creation appends one proposal event and one non-expiring pending
+approval without modifying an entry. Approval revalidates the proposal,
+approval, namespace, and expected current entry, applies the exact candidate,
+and expires newly stale same-key siblings in proposal-ID order within the same
+event. Rejection resolves only the selected proposal and approval. A direct
+Human mutation similarly expires proposals made stale by the new current
+state. A capacity/full-disk, contention, query, integrity, stale-state, or
+receipt error cannot leave a partial event, entry, proposal, approval, pointer,
+projection, audit record, or receipt.
+
+Command replay authenticates the canonical request fingerprint, exactly one
+receipt event reference, and primary-object metadata. It reconstructs the
+original outcome from the verified event and immutable mirrors; it never
+repeats current retrieval selection and never requires a process-local review
+token. Snapshot retrieval streams deterministically ordered eligible records
+through fixed byte/item limits. Exact purpose-tag matches precede bounded
+untagged fallbacks, each record appears once, and episodic summaries retain and
+display their bounded exact source references. Deliberate episodic detail uses
+the exact label `Summary — verify sources`; summaries remain qualified retrieval
+aids rather than policy or unqualified fact.
+
+Startup verifies event sequence and digests, receipts, immutable mirrors,
+source references, stable namespace ownership, current pointers, and proposal/
+approval coherence. A missing rebuildable pointer is reconstructed. A missing
+permitted immutable mirror may be backfilled from its verified event. An
+existing immutable row must be byte-equivalent to that event; altered,
+conflicting, or unexplained immutable data causes safe startup refusal rather
+than repair-by-overwrite. WAL/journal sidecars remain sensitive local plaintext
+during recovery and operation.
+
+#### Production and deferred boundary
+
+Production surfaces expose deliberate reads and reviewed Human actions only.
+Phase 2 has no production proposal creator, summary writer, snapshot route,
+automatic extraction, semantic/vector search, embeddings, autonomous proposal
+generation, inference/chat, remote sync, encryption at rest, credential vault,
+retention pruning, or secure erasure.
 
 ### Room context and resume
 
@@ -1205,8 +1272,11 @@ state. Ordered migrations manage schema changes. Important records include:
 - typed approvals, rejections, cancellations, and promotion outcomes.
 
 Operational events are append-only and have stable IDs, actor, timestamp,
-correlation ID, object version/digest, and redacted payload. Mutable views such
-as “current agent version” are projections over versioned records.
+correlation ID, object version/digest, and a payload appropriate to the event's
+contract. Most generic operational payloads are redacted; accepted memory
+mutation events intentionally retain approved plaintext as part of the
+authoritative memory record. Mutable views such as “current agent version” are
+projections over versioned records.
 
 Setup events include draft creation and resume, path and category choices,
 template versions, validation and connection-test outcomes, opaque secret
@@ -1294,10 +1364,12 @@ events stop recovery with an inspectable error; the platform never guesses or
 silently drops transcript history.
 
 Secret values live in the operating-system credential store or the owning
-runtime's supported login store. SQLite stores only opaque references and safe
-labels. Logs redact known secret values, authorization headers, environment
-values, and raw credential files. Database and exported audit files use
-owner-only filesystem permissions by default.
+runtime's supported login store. For provider/runtime credentials, SQLite
+stores only opaque references and safe labels. That guarantee does not make
+arbitrary Hybrid Memory secret-safe: the bounded scanner cannot prove that
+memory text contains no credential. Logs redact known secret values,
+authorization headers, environment values, and raw credential files. Database
+and exported audit files use owner-only filesystem permissions by default.
 
 The secret broker supports purpose-bound idempotency receipts and deletion by
 opaque receipt/reference. An interrupted entry stays quarantined until the
@@ -1470,6 +1542,7 @@ When documents disagree, use this order:
 4. a phase-specific implementation plan approved after these documents; then
 5. older specifications and plans as historical context only.
 
-The next step after review is to write a detailed implementation plan for Phase
-0. Existing Python, React, FastAPI, and Hermes-first plans must not be executed
-against this architecture without being rewritten and approved.
+The next dependency boundary is Phase 3 provider execution, inference, and
+chat. It remains pending and requires its own approved design and implementation
+plan. Existing Python, React, FastAPI, and Hermes-first plans must not be
+executed against this architecture without being rewritten and approved.

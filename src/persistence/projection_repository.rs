@@ -1,4 +1,7 @@
-use std::{collections::{BTreeMap, BTreeSet}, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    str::FromStr,
+};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -14,10 +17,10 @@ use crate::{
 };
 
 use super::{
-    EventRepository, ImmediateTransaction, PersistenceError, RecoveryError,
+    EventRepository, ImmediateTransaction, MemoryRepository, PersistenceError, RecoveryError,
     agent_profile_repository::{active_profiles_match, reconcile_expected_versions},
     load_all_skill_versions, load_all_versions, reconcile_skill_versions,
-    replace_active_profiles, replace_active_skills,
+    reconcile_verified_memory, replace_active_profiles, replace_active_skills,
 };
 
 pub struct ProjectionRepository;
@@ -117,6 +120,7 @@ impl ProjectionRepository {
         let profile_events = profile_recovery_events(events);
         reconcile_expected_versions(&transaction, &profile_events)?;
         load_all_versions(&transaction).map_err(recovery_from_persistence)?;
+        reconcile_verified_memory(&transaction, events, &state.memory)?;
         clear_rebuildable_projection_rows(&transaction)?;
         store_transaction(&transaction, &state).map_err(recovery_from_persistence)?;
         transaction
@@ -132,23 +136,23 @@ impl ProjectionRepository {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| StartupError::Persistence(PersistenceError::QueryFailed))?;
-        let state = prepare_rebuild(&transaction, events)
-            .map_err(StartupError::EventStreamRecovery)?;
+        let state =
+            prepare_rebuild(&transaction, events).map_err(StartupError::EventStreamRecovery)?;
         reconcile_skill_projection(&transaction, &state.skills)
             .map_err(StartupError::Persistence)?;
         let profile_events = profile_recovery_events(events);
         reconcile_expected_versions(&transaction, &profile_events)
             .map_err(StartupError::EventStreamRecovery)?;
         load_all_versions(&transaction).map_err(startup_from_profile_persistence)?;
+        reconcile_verified_memory(&transaction, events, &state.memory)
+            .map_err(StartupError::EventStreamRecovery)?;
         replace_active_profiles(&transaction, &state.agent_profiles)
             .map_err(startup_from_profile_persistence)?;
-        transaction
-            .commit()
-            .map_err(|_| {
-                StartupError::EventStreamRecovery(
-                    RecoveryError::ActiveAgentProfileRebuildFailed,
-                )
-            })
+        MemoryRepository::replace_current_projection(&transaction, &state.memory)
+            .map_err(StartupError::Persistence)?;
+        transaction.commit().map_err(|_| {
+            StartupError::EventStreamRecovery(RecoveryError::ActiveAgentProfileRebuildFailed)
+        })
     }
 
     /// Clears rebuildable projection rows after proving that `events` is the current,
@@ -164,6 +168,7 @@ impl ProjectionRepository {
         let profile_events = profile_recovery_events(events);
         reconcile_expected_versions(transaction.transaction(), &profile_events)?;
         load_all_versions(transaction.transaction()).map_err(recovery_from_persistence)?;
+        reconcile_verified_memory(transaction.transaction(), events, &state.memory)?;
         clear_rebuildable_projection_rows(transaction.transaction())?;
         Ok(state)
     }
@@ -188,6 +193,12 @@ fn clear_rebuildable_projection_rows(transaction: &Transaction<'_>) -> Result<()
     transaction
         .execute("DELETE FROM active_agent_profiles", [])
         .map_err(|_| RecoveryError::ActiveAgentProfileRebuildFailed)?;
+    transaction
+        .execute("DELETE FROM current_memory_entries", [])
+        .map_err(|_| RecoveryError::QueryFailed)?;
+    transaction
+        .execute("DELETE FROM current_memory_proposal_status", [])
+        .map_err(|_| RecoveryError::QueryFailed)?;
     transaction
         .execute("DELETE FROM projection_metadata", [])
         .map_err(|_| RecoveryError::QueryFailed)?;
@@ -315,6 +326,7 @@ fn read_projection_rows(
         sessions,
         agent_profiles: expected.agent_profiles.clone(),
         skills: expected.skills.clone(),
+        memory: expected.memory.clone(),
         last_sequence: u64::try_from(sequence).map_err(|_| RecoveryError::InvalidEventRecord)?,
         last_event_digest: digest
             .map(|value| Sha256Digest::parse(&value))
@@ -385,10 +397,9 @@ where
         })
         .transpose()?
         .unwrap_or_default();
-    let persisted_state =
-        reduce_events(&persisted_prefix).map_err(persistence_from_recovery)?;
-    if let Some(persisted) = read_projection_rows(transaction, &persisted_state)
-        .map_err(persistence_from_recovery)?
+    let persisted_state = reduce_events(&persisted_prefix).map_err(persistence_from_recovery)?;
+    if let Some(persisted) =
+        read_projection_rows(transaction, &persisted_state).map_err(persistence_from_recovery)?
     {
         if reduce_events(&persisted_prefix).map_err(persistence_from_recovery)? != persisted {
             return Err(PersistenceError::ProjectionStateConflict);
@@ -478,6 +489,7 @@ where
     }
     reconcile_skill_projection(transaction, &state.skills)?;
     replace_active_profiles(transaction, &state.agent_profiles)?;
+    MemoryRepository::replace_current_projection(transaction, &state.memory)?;
     after_active_profiles(transaction)?;
     let digest = state
         .digest()

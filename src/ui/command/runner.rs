@@ -15,13 +15,23 @@ use crate::{
     agents::{AgentProfileDraft, ProfileTemplateId, builtin_profile_templates},
     app::{
         AgentProfileSelector, AgentSkillAssignmentOperation, AgentSkillAssignmentPreview, AppError,
-        ApplicationCommand, CommandView, InputRejection, InputRejectionCategory,
-        ShutdownDisposition, ShutdownReason, SkillSelector,
+        ApplicationCommand, CommandView, InputRejection, InputRejectionCategory, MemoryEditPreview,
+        MemoryProposalResolutionReview, ShutdownDisposition, ShutdownReason, SkillSelector,
+    },
+    domain::Digest,
+    memory::{
+        ExpectedMemoryEntryState, MemoryEditReview, MemoryEntryDraft, MemoryEntryState,
+        MemoryEntryVersion, MemoryField, MemoryFieldDiff, MemoryFieldValue, MemoryMutationKind,
+        MemoryNoChange, NormalizedMemoryKey,
     },
     panic_boundary::catch_sensitive_unwind,
+    persistence::PersistenceError,
     runtime::{ApplicationRuntime, RuntimeClient, RuntimeError},
     skills::SkillDraft,
-    ui::profile_editor::{ProfileEditor, ProfileEditorEffect, ProfileEditorMode},
+    ui::{
+        memory_editor::{MemoryEditor, MemoryEditorEffect},
+        profile_editor::{ProfileEditor, ProfileEditorEffect, ProfileEditorMode},
+    },
 };
 
 #[cfg(windows)]
@@ -30,8 +40,9 @@ use super::windows::{
     classify_read_error, may_begin_read,
 };
 use super::{
-    AgentWorkflowCommand, BoundedLineReader, FallbackParsedLine, RawLine, SkillWorkflowCommand,
-    TextRenderer, parse_fallback_line, reader::LineAccumulator,
+    AgentWorkflowCommand, BoundedLineReader, FallbackParsedLine, MemoryWorkflowCommand, RawLine,
+    SkillWorkflowCommand, TextRenderer, parse_fallback_line, reader::LineAccumulator,
+    renderer::canonical_memory_edit_diff,
 };
 
 #[derive(Debug, Error)]
@@ -653,6 +664,8 @@ pub struct FallbackRunner {
     show_prompt: bool,
     profile_workflow: Mutex<Option<ProfileWorkflow>>,
     skill_workflow: Mutex<Option<SkillWorkflow>>,
+    memory_workflow: Mutex<Option<MemoryWorkflow>>,
+    memory_review_registered: Mutex<bool>,
 }
 
 #[expect(
@@ -702,6 +715,10 @@ impl SkillDraftInput {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the fallback workflow intentionally owns one complete local skill candidate"
+)]
 enum SkillWorkflow {
     EditingCreation(SkillDraftInput),
     Confirming {
@@ -711,6 +728,62 @@ enum SkillWorkflow {
     },
 }
 
+enum MemoryWorkflow {
+    Editing {
+        editor: MemoryEditor,
+        seed: Option<MemoryEntryVersion>,
+    },
+    SetReview {
+        editor: MemoryEditor,
+        seed: Option<MemoryEntryVersion>,
+        review: MemoryEditReview,
+    },
+    SetConfirmation {
+        editor: MemoryEditor,
+        command: ApplicationCommand,
+        expected_confirmation: String,
+    },
+    DeleteReview {
+        review: MemoryEditReview,
+    },
+    DeleteConfirmation {
+        review: MemoryEditReview,
+        command: ApplicationCommand,
+        expected_confirmation: String,
+    },
+    ProposalResolutionReview {
+        review: MemoryProposalResolutionReview,
+    },
+    ProposalResolutionConfirmation {
+        review: MemoryProposalResolutionReview,
+        command: ApplicationCommand,
+        expected_confirmation: String,
+    },
+}
+
+impl MemoryWorkflow {
+    fn confirmation_parts(&self) -> Option<(ApplicationCommand, &str)> {
+        match self {
+            Self::SetConfirmation {
+                command,
+                expected_confirmation,
+                ..
+            }
+            | Self::DeleteConfirmation {
+                command,
+                expected_confirmation,
+                ..
+            }
+            | Self::ProposalResolutionConfirmation {
+                command,
+                expected_confirmation,
+                ..
+            } => Some((command.clone(), expected_confirmation)),
+            _ => None,
+        }
+    }
+}
+
 impl FallbackRunner {
     pub fn new(client: RuntimeClient, show_prompt: bool) -> Self {
         Self {
@@ -718,6 +791,8 @@ impl FallbackRunner {
             show_prompt,
             profile_workflow: Mutex::new(None),
             skill_workflow: Mutex::new(None),
+            memory_workflow: Mutex::new(None),
+            memory_review_registered: Mutex::new(false),
         }
     }
 
@@ -727,7 +802,7 @@ impl FallbackRunner {
         mut writer: W,
     ) -> Result<ShutdownReason, UiError> {
         let mut reader = BoundedLineReader::new(reader);
-        let result = (|| {
+        let result = catch_sensitive_unwind(AssertUnwindSafe(|| {
             loop {
                 self.prompt(&mut writer)?;
                 let line = reader.next_line().map_err(|_| UiError::Read)?;
@@ -739,11 +814,19 @@ impl FallbackRunner {
                     return Ok(reason);
                 }
             }
-        })();
-        if result.is_err() {
-            let _ = self.cancel_workflows();
+        }));
+        match result {
+            Ok(result) => {
+                if result.is_err() {
+                    let _ = self.cancel_workflows();
+                }
+                result
+            }
+            Err(payload) => {
+                let _ = self.cancel_workflows();
+                resume_unwind(payload)
+            }
         }
-        result
     }
 
     fn prompt<W: Write>(&self, writer: &mut W) -> Result<(), UiError> {
@@ -767,6 +850,34 @@ impl FallbackRunner {
                 input_digest: line.input_digest().clone(),
             };
             return self.execute_command(ApplicationCommand::RejectInput(rejection), writer);
+        }
+
+        if self
+            .memory_workflow
+            .lock()
+            .map_err(|_| UiError::Panicked)?
+            .is_some()
+        {
+            let line = match std::str::from_utf8(line.bytes()) {
+                Ok(line) => line,
+                Err(_) => {
+                    self.execute_command(
+                        ApplicationCommand::RejectInput(InputRejection::from_input(
+                            InputRejectionCategory::InvalidEncoding,
+                            None,
+                            line.bytes(),
+                        )),
+                        writer,
+                    )?;
+                    return Ok(None);
+                }
+            };
+            if line.trim() == "/quit" {
+                self.cancel_memory_workflow()?;
+                return self.execute_command(ApplicationCommand::RequestShutdown, writer);
+            }
+            self.process_memory_line(line, writer)?;
+            return Ok(None);
         }
 
         if self
@@ -832,6 +943,641 @@ impl FallbackRunner {
                 self.start_skill_workflow(command, writer)?;
                 Ok(None)
             }
+            FallbackParsedLine::MemoryWorkflow(command) => {
+                self.start_memory_workflow(command, writer)?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn start_memory_workflow<W: Write>(
+        &self,
+        command: MemoryWorkflowCommand,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        match command {
+            MemoryWorkflowCommand::Set { agent, key } => self.start_memory_set(agent, key, writer),
+            MemoryWorkflowCommand::Delete { agent, key } => {
+                self.start_memory_delete(agent, key, writer)
+            }
+            MemoryWorkflowCommand::Approve { proposal_id } => self.start_memory_resolution(
+                proposal_id,
+                crate::memory::MemoryResolutionAction::Approve,
+                writer,
+            ),
+            MemoryWorkflowCommand::Reject { proposal_id } => self.start_memory_resolution(
+                proposal_id,
+                crate::memory::MemoryResolutionAction::Reject,
+                writer,
+            ),
+        }
+    }
+
+    fn start_memory_set<W: Write>(
+        &self,
+        agent: AgentProfileSelector,
+        key: String,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        let normalized_key = match NormalizedMemoryKey::new(&key) {
+            Ok(normalized_key) => normalized_key,
+            Err(error) => {
+                TextRenderer::render_memory_editor_error(error.code(), writer)
+                    .map_err(|_| UiError::Write)?;
+                return Ok(());
+            }
+        };
+        let (editor, seed) = match self.client.submit(ApplicationCommand::ShowMemoryEntry {
+            selector: agent.clone(),
+            display_key: key.clone(),
+        }) {
+            Ok(outcome) => {
+                let CommandView::MemoryEntry(view) = outcome.view else {
+                    return Err(UiError::Panicked);
+                };
+                if view.entry.reference().normalized_key() != &normalized_key
+                    || !profile_matches_selector(&view.profile, &agent)
+                {
+                    TextRenderer::render_memory_editor_error(
+                        crate::domain::DomainError::InvalidMemoryEditorSeed.code(),
+                        writer,
+                    )
+                    .map_err(|_| UiError::Write)?;
+                    return Ok(());
+                }
+                let seed = view.entry;
+                match MemoryEditor::for_set(agent, seed.clone()) {
+                    Ok(editor) => (editor, Some(seed)),
+                    Err(error) => {
+                        TextRenderer::render_memory_editor_error(error.code(), writer)
+                            .map_err(|_| UiError::Write)?;
+                        return Ok(());
+                    }
+                }
+            }
+            Err(RuntimeError::Application(AppError::MemoryEntryNotFound)) => {
+                let mut editor = MemoryEditor::for_create(agent);
+                editor
+                    .submit_line(key)
+                    .map_err(|error| UiError::Runtime(RuntimeError::Application(error.into())))?;
+                (editor, None)
+            }
+            Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+                TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write)?;
+                return Ok(());
+            }
+            Err(error) => return Err(UiError::Runtime(error)),
+        };
+        TextRenderer::render_memory_editor(&editor, writer).map_err(|_| UiError::Write)?;
+        *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? =
+            Some(MemoryWorkflow::Editing { editor, seed });
+        Ok(())
+    }
+
+    fn start_memory_delete<W: Write>(
+        &self,
+        agent: AgentProfileSelector,
+        key: String,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        let normalized_key = match NormalizedMemoryKey::new(&key) {
+            Ok(normalized_key) => normalized_key,
+            Err(error) => {
+                TextRenderer::render_memory_editor_error(error.code(), writer)
+                    .map_err(|_| UiError::Write)?;
+                return Ok(());
+            }
+        };
+        match self.client.preview_memory_delete(agent.clone(), key) {
+            Ok(MemoryEditPreview::NoChange(MemoryNoChange::AlreadyAbsent)) => {
+                TextRenderer::render_memory_no_change(MemoryNoChange::AlreadyAbsent, writer)
+                    .map_err(|_| UiError::Write)
+            }
+            Ok(MemoryEditPreview::NoChange(MemoryNoChange::IdenticalContent)) => {
+                Err(UiError::Panicked)
+            }
+            Ok(MemoryEditPreview::Review(review)) => {
+                if !memory_delete_review_matches_request(&review, &agent, &normalized_key) {
+                    return self.reject_newly_registered_memory_review();
+                }
+                self.register_memory_review()?;
+                let workflow = MemoryWorkflow::DeleteReview { review };
+                self.install_memory_workflow(workflow, writer)
+            }
+            Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+                TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write)
+            }
+            Err(error) => Err(UiError::Runtime(error)),
+        }
+    }
+
+    fn start_memory_resolution<W: Write>(
+        &self,
+        proposal_id: crate::domain::MemoryProposalId,
+        requested_action: crate::memory::MemoryResolutionAction,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        let proposal_view = match self
+            .client
+            .submit(ApplicationCommand::ShowMemoryProposal { proposal_id })
+        {
+            Ok(outcome) => {
+                let CommandView::MemoryProposal(view) = outcome.view else {
+                    return Err(UiError::Panicked);
+                };
+                if view.proposal.reference().proposal_id() != proposal_id
+                    || view.status != crate::memory::MemoryProposalStatus::Pending
+                    || view.resolution.is_some()
+                {
+                    return Err(UiError::Panicked);
+                }
+                view
+            }
+            Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+                TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write)?;
+                return Ok(());
+            }
+            Err(error) => return Err(UiError::Runtime(error)),
+        };
+        let proposal = proposal_view.proposal.reference();
+        let preview = match requested_action {
+            crate::memory::MemoryResolutionAction::Approve => {
+                self.client.preview_memory_proposal_approval(proposal)
+            }
+            crate::memory::MemoryResolutionAction::Reject => {
+                self.client.preview_memory_proposal_rejection(proposal)
+            }
+        };
+        match preview {
+            Ok(review)
+                if memory_resolution_review_matches_request(
+                    &review,
+                    requested_action,
+                    &proposal_view,
+                ) =>
+            {
+                self.register_memory_review()?;
+                self.install_memory_workflow(
+                    MemoryWorkflow::ProposalResolutionReview { review },
+                    writer,
+                )
+            }
+            Ok(_) => self.reject_newly_registered_memory_review(),
+            Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+                TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write)
+            }
+            Err(error) => Err(UiError::Runtime(error)),
+        }
+    }
+
+    fn install_memory_workflow<W: Write>(
+        &self,
+        workflow: MemoryWorkflow,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? = Some(workflow);
+        self.render_memory_workflow(writer)
+    }
+
+    fn render_memory_workflow<W: Write>(&self, writer: &mut W) -> Result<(), UiError> {
+        let workflow = self
+            .memory_workflow
+            .lock()
+            .map_err(|_| UiError::Panicked)?
+            .take()
+            .ok_or(UiError::Panicked)?;
+        let rendered = match &workflow {
+            MemoryWorkflow::Editing { editor, .. } => {
+                TextRenderer::render_memory_editor(editor, writer)
+            }
+            MemoryWorkflow::SetReview { review, .. }
+            | MemoryWorkflow::DeleteReview { review, .. } => {
+                TextRenderer::render_memory_edit_review(review, writer)
+            }
+            MemoryWorkflow::SetConfirmation {
+                editor,
+                expected_confirmation,
+                ..
+            } => {
+                let _ = editor.step();
+                TextRenderer::render_memory_confirmation(expected_confirmation, writer)
+            }
+            MemoryWorkflow::DeleteConfirmation {
+                review,
+                expected_confirmation,
+                ..
+            } => {
+                let _ = review.review_digest.to_string();
+                TextRenderer::render_memory_confirmation(expected_confirmation, writer)
+            }
+            MemoryWorkflow::ProposalResolutionConfirmation {
+                review,
+                expected_confirmation,
+                ..
+            } => {
+                let _ = review.review_digest.to_string();
+                TextRenderer::render_memory_confirmation(expected_confirmation, writer)
+            }
+            MemoryWorkflow::ProposalResolutionReview { review, .. } => {
+                TextRenderer::render_memory_resolution_review(review, writer)
+            }
+        };
+        *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? = Some(workflow);
+        rendered.map_err(|_| UiError::Write)
+    }
+
+    fn process_memory_line<W: Write>(&self, line: &str, writer: &mut W) -> Result<(), UiError> {
+        let state = self
+            .memory_workflow
+            .lock()
+            .map_err(|_| UiError::Panicked)?
+            .take()
+            .ok_or(UiError::Panicked)?;
+        match state {
+            MemoryWorkflow::Editing { mut editor, seed } => {
+                if line.trim() == "/quit" {
+                    TextRenderer::render_memory_cancelled(writer).map_err(|_| UiError::Write)?;
+                    return self
+                        .execute_command(ApplicationCommand::RequestShutdown, writer)
+                        .map(|_| ());
+                }
+                let effect = if line == ":cancel" {
+                    MemoryEditorEffect::Cancelled
+                } else if line == ":back" {
+                    editor.back()
+                } else {
+                    match editor.submit_keyboard_line(line) {
+                        Ok(effect) => effect,
+                        Err(error) => {
+                            TextRenderer::render_memory_editor_error(error.code(), writer)
+                                .map_err(|_| UiError::Write)?;
+                            *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? =
+                                Some(MemoryWorkflow::Editing { editor, seed });
+                            return Ok(());
+                        }
+                    }
+                };
+                match effect {
+                    MemoryEditorEffect::Cancelled => {
+                        TextRenderer::render_memory_cancelled(writer).map_err(|_| UiError::Write)
+                    }
+                    MemoryEditorEffect::Preview(request) => {
+                        let requested_selector = request.selector;
+                        let requested_candidate = request.candidate;
+                        let preview = match self.client.preview_memory_set(
+                            requested_selector.clone(),
+                            requested_candidate.clone(),
+                        ) {
+                            Ok(preview) => preview,
+                            Err(
+                                error @ (RuntimeError::Application(_) | RuntimeError::Backpressure),
+                            ) => {
+                                editor.report_error(runtime_error_code(&error));
+                                *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? =
+                                    Some(MemoryWorkflow::Editing { editor, seed });
+                                TextRenderer::render_runtime_error(&error, writer)
+                                    .map_err(|_| UiError::Write)?;
+                                return self.render_memory_workflow(writer);
+                            }
+                            Err(error) => return Err(UiError::Runtime(error)),
+                        };
+                        match preview {
+                            MemoryEditPreview::NoChange(MemoryNoChange::IdenticalContent) => {
+                                if !memory_identical_content_matches_request(
+                                    seed.as_ref(),
+                                    &requested_candidate,
+                                ) {
+                                    return Err(UiError::Panicked);
+                                }
+                                editor.clear_review();
+                                *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? =
+                                    Some(MemoryWorkflow::Editing { editor, seed });
+                                TextRenderer::render_memory_no_change(
+                                    MemoryNoChange::IdenticalContent,
+                                    writer,
+                                )
+                                .map_err(|_| UiError::Write)?;
+                                self.render_memory_workflow(writer)
+                            }
+                            MemoryEditPreview::NoChange(MemoryNoChange::AlreadyAbsent) => {
+                                Err(UiError::Panicked)
+                            }
+                            MemoryEditPreview::Review(review) => {
+                                if !memory_set_review_matches_request(
+                                    &review,
+                                    &requested_selector,
+                                    &requested_candidate,
+                                    seed.as_ref(),
+                                ) {
+                                    return self.reject_newly_registered_memory_review();
+                                }
+                                if !editor.apply_preview(
+                                    request.generation,
+                                    MemoryEditPreview::Review(review.clone()),
+                                ) {
+                                    return Err(UiError::Panicked);
+                                }
+                                self.install_memory_workflow(
+                                    {
+                                        self.register_memory_review()?;
+                                        MemoryWorkflow::SetReview {
+                                            editor,
+                                            seed,
+                                            review,
+                                        }
+                                    },
+                                    writer,
+                                )
+                            }
+                        }
+                    }
+                    _ => {
+                        TextRenderer::render_memory_editor(&editor, writer)
+                            .map_err(|_| UiError::Write)?;
+                        *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? =
+                            Some(MemoryWorkflow::Editing { editor, seed });
+                        Ok(())
+                    }
+                }
+            }
+            MemoryWorkflow::SetReview {
+                editor,
+                seed,
+                review,
+            } => self.process_set_review(line, editor, seed, review, writer),
+            MemoryWorkflow::DeleteReview { review } => {
+                self.process_delete_review(line, review, writer)
+            }
+            MemoryWorkflow::ProposalResolutionReview { review } => {
+                self.process_resolution_review(line, review, writer)
+            }
+            confirmation @ (MemoryWorkflow::SetConfirmation { .. }
+            | MemoryWorkflow::DeleteConfirmation { .. }
+            | MemoryWorkflow::ProposalResolutionConfirmation { .. }) => {
+                self.process_memory_confirmation(line, confirmation, writer)
+            }
+        }
+    }
+
+    fn process_set_review<W: Write>(
+        &self,
+        line: &str,
+        mut editor: MemoryEditor,
+        seed: Option<MemoryEntryVersion>,
+        review: MemoryEditReview,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        if line == ":cancel" {
+            self.cancel_registered_memory_review()?;
+            return TextRenderer::render_memory_cancelled(writer).map_err(|_| UiError::Write);
+        }
+        if line.trim() == "/quit" {
+            self.cancel_registered_memory_review()?;
+            TextRenderer::render_memory_cancelled(writer).map_err(|_| UiError::Write)?;
+            return self
+                .execute_command(ApplicationCommand::RequestShutdown, writer)
+                .map(|_| ());
+        }
+        let expected = expected_memory_confirmation("set", &review.review_digest);
+        if confirmation_matches(line, &expected) {
+            let MemoryEditorEffect::Confirm(command) = editor
+                .confirm()
+                .map_err(|error| UiError::Runtime(RuntimeError::Application(error.into())))?
+            else {
+                return Err(UiError::Panicked);
+            };
+            return self.process_memory_confirmation(
+                line,
+                MemoryWorkflow::SetConfirmation {
+                    editor,
+                    command,
+                    expected_confirmation: expected,
+                },
+                writer,
+            );
+        }
+        if line == ":back" {
+            self.cancel_registered_memory_review()?;
+            let _ = editor.back();
+            *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? =
+                Some(MemoryWorkflow::Editing { editor, seed });
+            return self.render_memory_workflow(writer);
+        }
+        self.retain_memory_review(
+            MemoryWorkflow::SetReview {
+                editor,
+                seed,
+                review,
+            },
+            writer,
+        )
+    }
+
+    fn process_delete_review<W: Write>(
+        &self,
+        line: &str,
+        review: MemoryEditReview,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        if line == ":cancel" {
+            self.cancel_registered_memory_review()?;
+            return TextRenderer::render_memory_cancelled(writer).map_err(|_| UiError::Write);
+        }
+        if line.trim() == "/quit" {
+            self.cancel_registered_memory_review()?;
+            TextRenderer::render_memory_cancelled(writer).map_err(|_| UiError::Write)?;
+            return self
+                .execute_command(ApplicationCommand::RequestShutdown, writer)
+                .map(|_| ());
+        }
+        let expected_confirmation = expected_memory_confirmation("delete", &review.review_digest);
+        if confirmation_matches(line, &expected_confirmation) {
+            let ExpectedMemoryEntryState::Present(expected) = review.expected.clone() else {
+                return Err(UiError::Panicked);
+            };
+            return self.process_memory_confirmation(
+                line,
+                MemoryWorkflow::DeleteConfirmation {
+                    command: ApplicationCommand::DeleteMemoryEntry {
+                        profile: review.profile.clone(),
+                        expected,
+                        review_token: review.review_token,
+                        review_digest: review.review_digest.clone(),
+                    },
+                    review,
+                    expected_confirmation,
+                },
+                writer,
+            );
+        }
+        self.retain_memory_review(MemoryWorkflow::DeleteReview { review }, writer)
+    }
+
+    fn process_resolution_review<W: Write>(
+        &self,
+        line: &str,
+        review: MemoryProposalResolutionReview,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        if line == ":cancel" {
+            self.cancel_registered_memory_review()?;
+            return TextRenderer::render_memory_cancelled(writer).map_err(|_| UiError::Write);
+        }
+        if line.trim() == "/quit" {
+            self.cancel_registered_memory_review()?;
+            TextRenderer::render_memory_cancelled(writer).map_err(|_| UiError::Write)?;
+            return self
+                .execute_command(ApplicationCommand::RequestShutdown, writer)
+                .map(|_| ());
+        }
+        let action = match review.action {
+            crate::memory::MemoryResolutionAction::Approve => "approve",
+            crate::memory::MemoryResolutionAction::Reject => "reject",
+        };
+        let expected_confirmation = expected_memory_confirmation(action, &review.review_digest);
+        if confirmation_matches(line, &expected_confirmation) {
+            let command = match review.action {
+                crate::memory::MemoryResolutionAction::Approve => {
+                    ApplicationCommand::ApproveMemoryProposal {
+                        proposal: review.proposal.reference(),
+                        approval_id: review.approval_id,
+                        expected_approval_status: review.expected_approval_status,
+                        expected_entry: review.expected_entry.clone(),
+                        review_token: review.review_token,
+                        review_digest: review.review_digest.clone(),
+                    }
+                }
+                crate::memory::MemoryResolutionAction::Reject => {
+                    ApplicationCommand::RejectMemoryProposal {
+                        proposal: review.proposal.reference(),
+                        approval_id: review.approval_id,
+                        expected_approval_status: review.expected_approval_status,
+                        expected_entry: review.expected_entry.clone(),
+                        review_token: review.review_token,
+                        review_digest: review.review_digest.clone(),
+                    }
+                }
+            };
+            return self.process_memory_confirmation(
+                line,
+                MemoryWorkflow::ProposalResolutionConfirmation {
+                    review,
+                    command,
+                    expected_confirmation,
+                },
+                writer,
+            );
+        }
+        self.retain_memory_review(MemoryWorkflow::ProposalResolutionReview { review }, writer)
+    }
+
+    fn retain_memory_review<W: Write>(
+        &self,
+        workflow: MemoryWorkflow,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? = Some(workflow);
+        TextRenderer::render_memory_confirmation_mismatch(writer).map_err(|_| UiError::Write)?;
+        self.render_memory_workflow(writer)
+    }
+
+    fn process_memory_confirmation<W: Write>(
+        &self,
+        line: &str,
+        workflow: MemoryWorkflow,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        if line == ":cancel" {
+            self.cancel_registered_memory_review()?;
+            return TextRenderer::render_memory_cancelled(writer).map_err(|_| UiError::Write);
+        }
+        if line.trim() == "/quit" {
+            self.cancel_registered_memory_review()?;
+            TextRenderer::render_memory_cancelled(writer).map_err(|_| UiError::Write)?;
+            return self
+                .execute_command(ApplicationCommand::RequestShutdown, writer)
+                .map(|_| ());
+        }
+        let (command, expected_confirmation) =
+            workflow.confirmation_parts().ok_or(UiError::Panicked)?;
+        if !confirmation_matches(line, expected_confirmation) {
+            *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? = Some(workflow);
+            TextRenderer::render_memory_confirmation_mismatch(writer)
+                .map_err(|_| UiError::Write)?;
+            return self.render_memory_workflow(writer);
+        }
+        *self.memory_workflow.lock().map_err(|_| UiError::Panicked)? = Some(workflow);
+        let pending = match self.client.try_submit(command) {
+            Ok(pending) => pending,
+            Err(error) => return self.handle_memory_confirmation_failure(error, writer),
+        };
+        match pending.recv() {
+            Ok(outcome) => {
+                self.memory_workflow
+                    .lock()
+                    .map_err(|_| UiError::Panicked)?
+                    .take()
+                    .ok_or(UiError::Panicked)?;
+                self.clear_memory_review_registration()?;
+                TextRenderer::render_outcome(&outcome, writer).map_err(|_| UiError::Write)
+            }
+            Err(error) => self.handle_memory_confirmation_failure(error, writer),
+        }
+    }
+
+    fn register_memory_review(&self) -> Result<(), UiError> {
+        let mut registered = self
+            .memory_review_registered
+            .lock()
+            .map_err(|_| UiError::Panicked)?;
+        if *registered {
+            return Err(UiError::Panicked);
+        }
+        *registered = true;
+        Ok(())
+    }
+
+    fn reject_newly_registered_memory_review(&self) -> Result<(), UiError> {
+        let mut registered = true;
+        let _ = cancel_registered_memory_review(&self.client, &mut registered);
+        Err(UiError::Panicked)
+    }
+
+    fn clear_memory_review_registration(&self) -> Result<(), UiError> {
+        *self
+            .memory_review_registered
+            .lock()
+            .map_err(|_| UiError::Panicked)? = false;
+        Ok(())
+    }
+
+    fn cancel_registered_memory_review(&self) -> Result<(), UiError> {
+        let mut registered = {
+            let mut registration = self
+                .memory_review_registered
+                .lock()
+                .map_err(|_| UiError::Panicked)?;
+            std::mem::take(&mut *registration)
+        };
+        cancel_registered_memory_review(&self.client, &mut registered).map_err(UiError::Runtime)
+    }
+
+    fn handle_memory_confirmation_failure<W: Write>(
+        &self,
+        error: RuntimeError,
+        writer: &mut W,
+    ) -> Result<(), UiError> {
+        if memory_confirmation_retryable(&error) {
+            TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write)?;
+            return self.render_memory_workflow(writer);
+        }
+        let cancellation = self.cancel_memory_workflow();
+        TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write)?;
+        TextRenderer::render_fresh_memory_review_required(writer).map_err(|_| UiError::Write)?;
+        if cancellation.is_err() {
+            Err(UiError::Runtime(error))
+        } else {
+            Ok(())
         }
     }
 
@@ -881,8 +1627,10 @@ impl FallbackRunner {
             CommandView::Skill(view) | CommandView::SkillVersion(view) => view.skill_ref,
             _ => return Err(UiError::Panicked),
         };
-        let Some(profile_view) = self
-            .read_view(ApplicationCommand::ShowAgentProfile { selector: agent }, writer)?
+        let Some(profile_view) = self.read_view(
+            ApplicationCommand::ShowAgentProfile { selector: agent },
+            writer,
+        )?
         else {
             return Ok(());
         };
@@ -917,16 +1665,18 @@ impl FallbackRunner {
         agent: AgentProfileSelector,
         writer: &mut W,
     ) -> Result<(), UiError> {
-        let Some(skill_view) = self
-            .read_view(ApplicationCommand::ShowSkill { selector: skill }, writer)?
+        let Some(skill_view) =
+            self.read_view(ApplicationCommand::ShowSkill { selector: skill }, writer)?
         else {
             return Ok(());
         };
         let CommandView::Skill(skill_view) = skill_view else {
             return Err(UiError::Panicked);
         };
-        let Some(profile_view) = self
-            .read_view(ApplicationCommand::ShowAgentProfile { selector: agent }, writer)?
+        let Some(profile_view) = self.read_view(
+            ApplicationCommand::ShowAgentProfile { selector: agent },
+            writer,
+        )?
         else {
             return Ok(());
         };
@@ -990,8 +1740,7 @@ impl FallbackRunner {
                 action,
                 creation_draft: None,
             });
-        TextRenderer::render_skill_assignment_review(&preview, writer)
-            .map_err(|_| UiError::Write)
+        TextRenderer::render_skill_assignment_review(&preview, writer).map_err(|_| UiError::Write)
     }
 
     fn process_skill_line<W: Write>(&self, line: &str, writer: &mut W) -> Result<(), UiError> {
@@ -1005,7 +1754,9 @@ impl FallbackRunner {
             SkillWorkflow::EditingCreation(mut draft) => {
                 let input = line.trim();
                 if input == ":cancel" {
-                    self.client.cancel_skill_review().map_err(UiError::Runtime)?;
+                    self.client
+                        .cancel_skill_review()
+                        .map_err(UiError::Runtime)?;
                     return TextRenderer::render_skill_cancelled(writer)
                         .map_err(|_| UiError::Write);
                 }
@@ -1020,7 +1771,9 @@ impl FallbackRunner {
                     };
                     let preview = match self.client.preview_skill_creation(candidate.clone()) {
                         Ok(preview) => preview,
-                        Err(error @ (RuntimeError::Application(_) | RuntimeError::Backpressure)) => {
+                        Err(
+                            error @ (RuntimeError::Application(_) | RuntimeError::Backpressure),
+                        ) => {
                             TextRenderer::render_runtime_error(&error, writer)
                                 .map_err(|_| UiError::Write)?;
                             return self.retain_skill_editor(draft, writer);
@@ -1084,7 +1837,9 @@ impl FallbackRunner {
                     self.execute_skill_confirmation(command, action, creation_draft, writer)
                 }
                 ":cancel" => {
-                    self.client.cancel_skill_review().map_err(UiError::Runtime)?;
+                    self.client
+                        .cancel_skill_review()
+                        .map_err(UiError::Runtime)?;
                     TextRenderer::render_skill_cancelled(writer).map_err(|_| UiError::Write)
                 }
                 _ => {
@@ -1138,8 +1893,8 @@ impl FallbackRunner {
                 return Ok(());
             }
             Err(error @ RuntimeError::Application(_)) => {
-                let primary = TextRenderer::render_runtime_error(&error, writer)
-                    .map_err(|_| UiError::Write);
+                let primary =
+                    TextRenderer::render_runtime_error(&error, writer).map_err(|_| UiError::Write);
                 let cleanup = self.client.cancel_skill_review();
                 primary?;
                 if let Some(draft) = creation_draft {
@@ -1450,12 +2205,23 @@ impl FallbackRunner {
             .take()
             .is_some();
         if active {
-            self.client.cancel_skill_review().map_err(UiError::Runtime)?;
+            self.client
+                .cancel_skill_review()
+                .map_err(UiError::Runtime)?;
         }
         Ok(())
     }
 
+    fn cancel_memory_workflow(&self) -> Result<(), UiError> {
+        self.memory_workflow
+            .lock()
+            .map_err(|_| UiError::Panicked)?
+            .take();
+        self.cancel_registered_memory_review()
+    }
+
     fn cancel_workflows(&self) -> Result<(), UiError> {
+        self.cancel_memory_workflow()?;
         self.cancel_profile_workflow()?;
         self.cancel_skill_workflow()
     }
@@ -1553,9 +2319,227 @@ impl FallbackRunner {
     }
 }
 
-fn assignment_command(
-    preview: &AgentSkillAssignmentPreview,
-) -> (ApplicationCommand, &'static str) {
+fn expected_memory_confirmation(action: &str, digest: &Digest) -> String {
+    format!("{action} {digest}")
+}
+
+fn confirmation_matches(input: &str, expected: &str) -> bool {
+    input.len() <= 80 && input == expected
+}
+
+fn memory_set_review_matches_request(
+    review: &MemoryEditReview,
+    requested_selector: &AgentProfileSelector,
+    requested_candidate: &MemoryEntryDraft,
+    seed: Option<&MemoryEntryVersion>,
+) -> bool {
+    if review.operation != MemoryMutationKind::Set
+        || review.candidate.as_ref() != Some(requested_candidate)
+        || !profile_matches_selector(&review.profile, requested_selector)
+        || !canonical_memory_edit_diff(&review.diff)
+    {
+        return false;
+    }
+    match (seed, &review.expected) {
+        (Some(seed), ExpectedMemoryEntryState::Present(entry)) => {
+            *entry == seed.reference()
+                && entry.namespace_id() == review.namespace_id
+                && seeded_present_set_diff(seed, requested_candidate)
+                    .is_some_and(|expected| review.diff == expected)
+        }
+        (Some(_), _) | (None, ExpectedMemoryEntryState::Present(_)) => false,
+        (None, ExpectedMemoryEntryState::Absent) => {
+            absent_set_diff_matches(&review.diff, requested_candidate)
+        }
+        (None, ExpectedMemoryEntryState::Deleted(entry)) => {
+            entry.namespace_id() == review.namespace_id
+                && entry.state() == MemoryEntryState::Deleted
+                && *entry.normalized_key() == requested_candidate.normalized_key()
+                && deleted_set_diff_matches(&review.diff, requested_candidate)
+        }
+    }
+}
+
+fn memory_delete_review_matches_request(
+    review: &MemoryEditReview,
+    requested_selector: &AgentProfileSelector,
+    requested_key: &NormalizedMemoryKey,
+) -> bool {
+    review.operation == MemoryMutationKind::Delete
+        && review.candidate.is_none()
+        && profile_matches_selector(&review.profile, requested_selector)
+        && canonical_memory_edit_diff(&review.diff)
+        && matches!(
+            &review.expected,
+            ExpectedMemoryEntryState::Present(entry)
+                if entry.namespace_id() == review.namespace_id
+                    && entry.state() == MemoryEntryState::Present
+                    && entry.normalized_key() == requested_key
+        )
+        && delete_diff_matches(&review.diff)
+}
+
+fn memory_resolution_review_matches_request(
+    review: &MemoryProposalResolutionReview,
+    requested_action: crate::memory::MemoryResolutionAction,
+    proposal_view: &crate::app::MemoryProposalView,
+) -> bool {
+    review.action == requested_action
+        && review.proposal == proposal_view.proposal
+        && review.proposal.reference() == proposal_view.proposal.reference()
+        && review.approval_id == proposal_view.proposal.approval_id()
+        && review.expected_approval_status == crate::policy::ApprovalStatus::Pending
+        && review.expected_entry == proposal_view.current_entry
+        && review.proposer_is_historical == proposal_view.proposer_is_historical
+        && review.proposer_identity == proposal_view.proposer_identity
+        && review.namespace_owner_identity == proposal_view.namespace_owner_identity
+        && review.plaintext_acknowledgement
+            == crate::memory::MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1
+}
+
+fn profile_matches_selector(
+    profile: &crate::agents::AgentProfileVersionRef,
+    selector: &AgentProfileSelector,
+) -> bool {
+    match selector {
+        AgentProfileSelector::Id(profile_id) => profile.profile_id() == *profile_id,
+        AgentProfileSelector::Name(_) => true,
+    }
+}
+
+fn absent_set_diff_matches(diff: &[MemoryFieldDiff], candidate: &MemoryEntryDraft) -> bool {
+    diff.len() == 4
+        && diff[0].field == MemoryField::DisplayKey
+        && diff[0].before == MemoryFieldValue::Missing
+        && text_value_matches(&diff[0].after, candidate.display_key())
+        && diff[1].field == MemoryField::State
+        && diff[1].before == MemoryFieldValue::Missing
+        && diff[1].after == MemoryFieldValue::State(MemoryEntryState::Present)
+        && diff[2].field == MemoryField::Value
+        && diff[2].before == MemoryFieldValue::Missing
+        && text_value_matches(&diff[2].after, candidate.value())
+        && diff[3].field == MemoryField::PurposeTags
+        && diff[3].before == MemoryFieldValue::Missing
+        && tags_value_matches(&diff[3].after, candidate.purpose_tags())
+}
+
+fn seeded_present_set_diff(
+    seed: &MemoryEntryVersion,
+    candidate: &MemoryEntryDraft,
+) -> Option<Vec<MemoryFieldDiff>> {
+    if seed.reference().state() != MemoryEntryState::Present
+        || *seed.reference().normalized_key() != candidate.normalized_key()
+    {
+        return None;
+    }
+    let value = seed.value()?;
+    let before = [
+        MemoryFieldValue::Text(seed.display_key().to_owned()),
+        MemoryFieldValue::State(MemoryEntryState::Present),
+        MemoryFieldValue::Text(value.to_owned()),
+        MemoryFieldValue::Tags(seed.purpose_tags().to_vec()),
+    ];
+    let after = [
+        MemoryFieldValue::Text(candidate.display_key().to_owned()),
+        MemoryFieldValue::State(MemoryEntryState::Present),
+        MemoryFieldValue::Text(candidate.value().to_owned()),
+        MemoryFieldValue::Tags(candidate.purpose_tags().to_vec()),
+    ];
+    Some(
+        [
+            MemoryField::DisplayKey,
+            MemoryField::State,
+            MemoryField::Value,
+            MemoryField::PurposeTags,
+        ]
+        .into_iter()
+        .zip(before)
+        .zip(after)
+        .filter_map(|((field, before), after)| {
+            (before != after).then_some(MemoryFieldDiff {
+                field,
+                before,
+                after,
+            })
+        })
+        .collect(),
+    )
+}
+
+fn memory_identical_content_matches_request(
+    seed: Option<&MemoryEntryVersion>,
+    candidate: &MemoryEntryDraft,
+) -> bool {
+    seed.and_then(|seed| seeded_present_set_diff(seed, candidate))
+        .is_some_and(|diff| diff.is_empty())
+}
+
+fn deleted_set_diff_matches(diff: &[MemoryFieldDiff], candidate: &MemoryEntryDraft) -> bool {
+    let required = if diff.first().is_some_and(|item| {
+        item.field == MemoryField::DisplayKey
+            && matches!(item.before, MemoryFieldValue::Text(_))
+            && text_value_matches(&item.after, candidate.display_key())
+    }) {
+        &diff[1..]
+    } else {
+        diff
+    };
+    required.len() == 3
+        && required[0].field == MemoryField::State
+        && required[0].before == MemoryFieldValue::State(MemoryEntryState::Deleted)
+        && required[0].after == MemoryFieldValue::State(MemoryEntryState::Present)
+        && required[1].field == MemoryField::Value
+        && required[1].before == MemoryFieldValue::Missing
+        && text_value_matches(&required[1].after, candidate.value())
+        && required[2].field == MemoryField::PurposeTags
+        && required[2].before == MemoryFieldValue::Missing
+        && tags_value_matches(&required[2].after, candidate.purpose_tags())
+}
+
+fn delete_diff_matches(diff: &[MemoryFieldDiff]) -> bool {
+    diff.len() == 3
+        && diff[0].field == MemoryField::State
+        && diff[0].before == MemoryFieldValue::State(MemoryEntryState::Present)
+        && diff[0].after == MemoryFieldValue::State(MemoryEntryState::Deleted)
+        && diff[1].field == MemoryField::Value
+        && matches!(diff[1].before, MemoryFieldValue::Text(_))
+        && diff[1].after == MemoryFieldValue::Missing
+        && diff[2].field == MemoryField::PurposeTags
+        && matches!(diff[2].before, MemoryFieldValue::Tags(_))
+        && diff[2].after == MemoryFieldValue::Missing
+}
+
+fn text_value_matches(value: &MemoryFieldValue, expected: &str) -> bool {
+    matches!(value, MemoryFieldValue::Text(actual) if actual == expected)
+}
+
+fn tags_value_matches(value: &MemoryFieldValue, expected: &[String]) -> bool {
+    matches!(value, MemoryFieldValue::Tags(actual) if actual == expected)
+}
+
+fn cancel_registered_memory_review(
+    client: &RuntimeClient,
+    registered: &mut bool,
+) -> Result<(), RuntimeError> {
+    if std::mem::take(registered) {
+        client.cancel_memory_review()?;
+    }
+    Ok(())
+}
+
+fn memory_confirmation_retryable(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Backpressure
+            | RuntimeError::Application(AppError::Persistence(
+                PersistenceError::Contention
+                    | PersistenceError::Capacity
+                    | PersistenceError::QueryFailed
+            ))
+    )
+}
+
+fn assignment_command(preview: &AgentSkillAssignmentPreview) -> (ApplicationCommand, &'static str) {
     match &preview.operation {
         AgentSkillAssignmentOperation::Assign { skill } => (
             ApplicationCommand::AssignAgentSkill {
@@ -1769,5 +2753,176 @@ pub fn run_stdio(
         let _ = resources;
         let _ = runtime.finish_and_join(ShutdownReason::ApplicationError);
         Err(UiError::LineSourceUnavailable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::Cursor,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::{
+        app::{CommandOutcome, MemoryEditPreview},
+        domain::{
+            Actor, AgentProfileId, EventId, MemoryEntryId, MemoryEntryVersionId, MemoryNamespaceId,
+        },
+        runtime::CommandExecutor,
+    };
+
+    #[derive(Default)]
+    struct InvalidDeleteState {
+        execute_calls: AtomicUsize,
+        preview_calls: AtomicUsize,
+        cancel_calls: AtomicUsize,
+    }
+
+    struct InvalidDeleteExecutor(Arc<InvalidDeleteState>);
+
+    impl CommandExecutor for InvalidDeleteExecutor {
+        fn execute_user(
+            &mut self,
+            _command: ApplicationCommand,
+        ) -> Result<CommandOutcome, AppError> {
+            self.0.execute_calls.fetch_add(1, Ordering::SeqCst);
+            Err(AppError::MemoryEntryNotFound)
+        }
+
+        fn preview_memory_delete(
+            &mut self,
+            _selector: AgentProfileSelector,
+            _display_key: String,
+        ) -> Result<MemoryEditPreview, AppError> {
+            self.0.preview_calls.fetch_add(1, Ordering::SeqCst);
+            Err(crate::domain::DomainError::MemoryReviewUnavailable.into())
+        }
+
+        fn cancel_memory_review(&mut self) -> Result<(), AppError> {
+            self.0.cancel_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn finish(&mut self, _reason: ShutdownReason) -> Result<(), AppError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn invalid_delete_key_renders_only_safe_code_without_preview_or_workflow() {
+        let state = Arc::new(InvalidDeleteState::default());
+        let runtime = ApplicationRuntime::spawn(InvalidDeleteExecutor(state.clone()), 1).unwrap();
+        let runner = FallbackRunner::new(runtime.client(), false);
+        let mut output = Vec::new();
+
+        runner
+            .start_memory_delete(
+                AgentProfileSelector::Id(AgentProfileId::from_uuid(Uuid::from_u128(701))),
+                "api key".into(),
+                &mut output,
+            )
+            .unwrap();
+
+        assert_eq!(
+            output,
+            b"Memory editor input was rejected [invalid_memory_field].\n"
+        );
+        assert_eq!(state.preview_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.cancel_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.execute_calls.load(Ordering::SeqCst), 0);
+        assert!(runner.memory_workflow.lock().unwrap().is_none());
+        assert!(!*runner.memory_review_registered.lock().unwrap());
+        let reason = runner.run(Cursor::new(Vec::new()), Vec::new()).unwrap();
+        assert_eq!(reason, ShutdownReason::InputClosed);
+        runtime.finish_and_join(reason).unwrap();
+    }
+
+    #[test]
+    fn invalid_set_key_renders_only_safe_code_without_read_preview_or_workflow() {
+        let state = Arc::new(InvalidDeleteState::default());
+        let runtime = ApplicationRuntime::spawn(InvalidDeleteExecutor(state.clone()), 1).unwrap();
+        let runner = FallbackRunner::new(runtime.client(), false);
+        let mut output = Vec::new();
+
+        runner
+            .start_memory_set(
+                AgentProfileSelector::Id(AgentProfileId::from_uuid(Uuid::from_u128(701))),
+                "api key".into(),
+                &mut output,
+            )
+            .unwrap();
+
+        assert_eq!(
+            output,
+            b"Memory editor input was rejected [invalid_memory_field].\n"
+        );
+        assert_eq!(state.execute_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.preview_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.cancel_calls.load(Ordering::SeqCst), 0);
+        assert!(runner.memory_workflow.lock().unwrap().is_none());
+        let reason = runner.run(Cursor::new(Vec::new()), Vec::new()).unwrap();
+        assert_eq!(reason, ShutdownReason::InputClosed);
+        runtime.finish_and_join(reason).unwrap();
+    }
+
+    #[test]
+    fn identical_content_requires_an_exact_valid_present_seed_candidate() {
+        let seed = MemoryEntryVersion::create_present(
+            MemoryNamespaceId::from_uuid(Uuid::from_u128(711)),
+            MemoryEntryId::from_uuid(Uuid::from_u128(712)),
+            MemoryEntryVersionId::from_uuid(Uuid::from_u128(713)),
+            MemoryEntryDraft::new(
+                "Earnings Thesis".into(),
+                "original value".into(),
+                vec!["Catalyst".into()],
+            )
+            .unwrap(),
+            Actor::Human,
+            1_700_000_000_000,
+            None,
+            EventId::from_uuid(Uuid::from_u128(714)),
+        )
+        .unwrap();
+        let exact = MemoryEntryDraft::new(
+            "Earnings Thesis".into(),
+            "original value".into(),
+            vec!["Catalyst".into()],
+        )
+        .unwrap();
+        let changed = MemoryEntryDraft::new(
+            "earnings thesis".into(),
+            "changed value".into(),
+            vec!["Changed".into()],
+        )
+        .unwrap();
+        let deleted = seed
+            .next_deleted(
+                MemoryEntryVersionId::from_uuid(Uuid::from_u128(715)),
+                Actor::Human,
+                1_700_000_000_001,
+                None,
+                EventId::from_uuid(Uuid::from_u128(716)),
+            )
+            .unwrap();
+
+        assert!(memory_identical_content_matches_request(
+            Some(&seed),
+            &exact
+        ));
+        assert!(!memory_identical_content_matches_request(
+            Some(&seed),
+            &changed
+        ));
+        assert!(!memory_identical_content_matches_request(None, &exact));
+        assert!(!memory_identical_content_matches_request(
+            Some(&deleted),
+            &exact
+        ));
     }
 }

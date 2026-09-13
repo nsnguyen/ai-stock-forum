@@ -12,6 +12,7 @@ pub enum ApprovalAction {
     GitMerge,
     GitPush,
     FinanceRecommendation,
+    MemoryMutation,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +151,36 @@ impl ApprovalRecord {
     pub fn resolution(&self) -> Option<&ApprovalResolution> {
         self.resolution.as_ref()
     }
+
+    pub fn resolve(
+        &self,
+        status: ApprovalStatus,
+        actor: Actor,
+        resolved_at_millis: i64,
+    ) -> Result<Self, ApprovalError> {
+        if self.status != ApprovalStatus::Pending || self.resolution.is_some() {
+            return Err(ApprovalError::AlreadyResolved);
+        }
+        if self.action == ApprovalAction::MemoryMutation
+            && (!matches!(
+                status,
+                ApprovalStatus::Accepted | ApprovalStatus::Rejected | ApprovalStatus::Expired
+            ) || actor != Actor::Human)
+        {
+            return Err(ApprovalError::InvalidMemoryResolution);
+        }
+        let resolution = ApprovalResolution::new(status, actor, resolved_at_millis)?;
+        Ok(Self {
+            approval_id: self.approval_id,
+            action: self.action,
+            object: self.object.clone(),
+            actor: self.actor.clone(),
+            status,
+            created_at_millis: self.created_at_millis,
+            expires_at_millis: self.expires_at_millis,
+            resolution: Some(resolution),
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -168,7 +199,7 @@ impl TryFrom<ApprovalRecordWire> for ApprovalRecord {
     type Error = ApprovalError;
 
     fn try_from(wire: ApprovalRecordWire) -> Result<Self, Self::Error> {
-        validate_persisted_state(wire.status, wire.resolution.as_ref())?;
+        validate_persisted_state(wire.action, wire.status, wire.resolution.as_ref())?;
         validate_expiry(wire.created_at_millis, wire.expires_at_millis)?;
 
         Ok(Self {
@@ -282,6 +313,7 @@ fn validate_pending_creation(
 }
 
 fn validate_persisted_state(
+    action: ApprovalAction,
     status: ApprovalStatus,
     resolution: Option<&ApprovalResolution>,
 ) -> Result<(), ApprovalError> {
@@ -291,7 +323,18 @@ fn validate_persisted_state(
         (_, None) => Err(ApprovalError::TerminalRecordMissingResolution),
         (status, Some(resolution)) if status == resolution.status() => Ok(()),
         (_, Some(_)) => Err(ApprovalError::ResolutionStatusMismatch),
+    }?;
+    if action == ApprovalAction::MemoryMutation
+        && resolution.is_some_and(|resolution| {
+            !matches!(
+                status,
+                ApprovalStatus::Accepted | ApprovalStatus::Rejected | ApprovalStatus::Expired
+            ) || resolution.actor() != &Actor::Human
+        })
+    {
+        return Err(ApprovalError::InvalidMemoryResolution);
     }
+    Ok(())
 }
 
 fn validate_expiry(
@@ -329,4 +372,8 @@ pub enum ApprovalError {
     ResolutionStatusMismatch,
     #[error("approval expiry must be later than creation")]
     ExpiryMustFollowCreation,
+    #[error("approval has already been resolved")]
+    AlreadyResolved,
+    #[error("memory approvals require a human accepted, rejected, or expired resolution")]
+    InvalidMemoryResolution,
 }

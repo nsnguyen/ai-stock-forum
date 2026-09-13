@@ -15,10 +15,12 @@ use thiserror::Error;
 
 use crate::agents::{AgentProfileDraft, ProfileEditPreview, ProfileTemplate};
 use crate::app::{
-    AgentSkillAssignmentPreview, AppError, ApplicationCommand, ApplicationService,
-    ApplicationWorker, CommandOutcome, ShutdownReason,
+    AgentProfileSelector, AgentSkillAssignmentPreview, AppError, ApplicationCommand,
+    ApplicationService, ApplicationWorker, CommandOutcome, MemoryEditPreview,
+    MemoryProposalResolutionReview, ShutdownReason,
 };
 use crate::domain::{AgentProfileId, AgentProfileVersionId, SkillId, SkillVersionId};
+use crate::memory::{MemoryEntryDraft, MemoryProposalRef};
 use crate::panic_boundary::catch_sensitive_unwind;
 use crate::skills::{SkillDraft, SkillEditPreview, SkillVersionRef};
 
@@ -90,6 +92,40 @@ pub trait CommandExecutor: Send + 'static {
     }
 
     fn cancel_skill_review(&mut self) -> Result<(), AppError> {
+        Ok(())
+    }
+
+    fn preview_memory_set(
+        &mut self,
+        _selector: AgentProfileSelector,
+        _candidate: MemoryEntryDraft,
+    ) -> Result<MemoryEditPreview, AppError> {
+        Err(crate::domain::DomainError::MemoryReviewUnavailable.into())
+    }
+
+    fn preview_memory_delete(
+        &mut self,
+        _selector: AgentProfileSelector,
+        _display_key: String,
+    ) -> Result<MemoryEditPreview, AppError> {
+        Err(crate::domain::DomainError::MemoryReviewUnavailable.into())
+    }
+
+    fn preview_memory_proposal_approval(
+        &mut self,
+        _proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        Err(crate::domain::DomainError::MemoryProposalReviewUnavailable.into())
+    }
+
+    fn preview_memory_proposal_rejection(
+        &mut self,
+        _proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        Err(crate::domain::DomainError::MemoryProposalReviewUnavailable.into())
+    }
+
+    fn cancel_memory_review(&mut self) -> Result<(), AppError> {
         Ok(())
     }
 
@@ -171,6 +207,40 @@ impl CommandExecutor for ApplicationService {
 
     fn cancel_skill_review(&mut self) -> Result<(), AppError> {
         Self::cancel_skill_review(self)
+    }
+
+    fn preview_memory_set(
+        &mut self,
+        selector: AgentProfileSelector,
+        candidate: MemoryEntryDraft,
+    ) -> Result<MemoryEditPreview, AppError> {
+        Self::preview_memory_set(self, selector, candidate)
+    }
+
+    fn preview_memory_delete(
+        &mut self,
+        selector: AgentProfileSelector,
+        display_key: String,
+    ) -> Result<MemoryEditPreview, AppError> {
+        Self::preview_memory_delete(self, selector, display_key)
+    }
+
+    fn preview_memory_proposal_approval(
+        &mut self,
+        proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        Self::preview_memory_proposal_approval(self, proposal)
+    }
+
+    fn preview_memory_proposal_rejection(
+        &mut self,
+        proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        Self::preview_memory_proposal_rejection(self, proposal)
+    }
+
+    fn cancel_memory_review(&mut self) -> Result<(), AppError> {
+        Self::cancel_memory_review(self)
     }
 
     fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
@@ -262,6 +332,27 @@ enum Request {
         response: Sender<Result<AgentSkillAssignmentPreview, RuntimeError>>,
     },
     CancelSkillReview {
+        response: Sender<Result<(), RuntimeError>>,
+    },
+    PreviewMemorySet {
+        selector: AgentProfileSelector,
+        candidate: MemoryEntryDraft,
+        response: Sender<Result<MemoryEditPreview, RuntimeError>>,
+    },
+    PreviewMemoryDelete {
+        selector: AgentProfileSelector,
+        display_key: String,
+        response: Sender<Result<MemoryEditPreview, RuntimeError>>,
+    },
+    PreviewMemoryProposalApproval {
+        proposal: MemoryProposalRef,
+        response: Sender<Result<MemoryProposalResolutionReview, RuntimeError>>,
+    },
+    PreviewMemoryProposalRejection {
+        proposal: MemoryProposalRef,
+        response: Sender<Result<MemoryProposalResolutionReview, RuntimeError>>,
+    },
+    CancelMemoryReview {
         response: Sender<Result<(), RuntimeError>>,
     },
 }
@@ -590,7 +681,10 @@ impl RuntimeClient {
         &self,
         candidate: SkillDraft,
     ) -> Result<SkillEditPreview, RuntimeError> {
-        self.request_reply(|response| Request::PreviewSkillCreation { candidate, response })
+        self.request_reply(|response| Request::PreviewSkillCreation {
+            candidate,
+            response,
+        })
     }
 
     pub fn preview_skill_version(
@@ -653,6 +747,51 @@ impl RuntimeClient {
 
     pub fn cancel_skill_review(&self) -> Result<(), RuntimeError> {
         self.request_reply(|response| Request::CancelSkillReview { response })
+    }
+
+    pub fn preview_memory_set(
+        &self,
+        selector: AgentProfileSelector,
+        candidate: MemoryEntryDraft,
+    ) -> Result<MemoryEditPreview, RuntimeError> {
+        self.request_reply(|response| Request::PreviewMemorySet {
+            selector,
+            candidate,
+            response,
+        })
+    }
+
+    pub fn preview_memory_delete(
+        &self,
+        selector: AgentProfileSelector,
+        display_key: String,
+    ) -> Result<MemoryEditPreview, RuntimeError> {
+        self.request_reply(|response| Request::PreviewMemoryDelete {
+            selector,
+            display_key,
+            response,
+        })
+    }
+
+    pub fn preview_memory_proposal_approval(
+        &self,
+        proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, RuntimeError> {
+        self.request_reply(|response| Request::PreviewMemoryProposalApproval { proposal, response })
+    }
+
+    pub fn preview_memory_proposal_rejection(
+        &self,
+        proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, RuntimeError> {
+        self.request_reply(|response| Request::PreviewMemoryProposalRejection {
+            proposal,
+            response,
+        })
+    }
+
+    pub fn cancel_memory_review(&self) -> Result<(), RuntimeError> {
+        self.request_reply(|response| Request::CancelMemoryReview { response })
     }
 
     fn request_reply<T>(
@@ -1019,6 +1158,40 @@ impl CommandExecutor for ServiceWorker {
         self.service.cancel_skill_review()
     }
 
+    fn preview_memory_set(
+        &mut self,
+        selector: AgentProfileSelector,
+        candidate: MemoryEntryDraft,
+    ) -> Result<MemoryEditPreview, AppError> {
+        self.service.preview_memory_set(selector, candidate)
+    }
+
+    fn preview_memory_delete(
+        &mut self,
+        selector: AgentProfileSelector,
+        display_key: String,
+    ) -> Result<MemoryEditPreview, AppError> {
+        self.service.preview_memory_delete(selector, display_key)
+    }
+
+    fn preview_memory_proposal_approval(
+        &mut self,
+        proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        self.service.preview_memory_proposal_approval(proposal)
+    }
+
+    fn preview_memory_proposal_rejection(
+        &mut self,
+        proposal: MemoryProposalRef,
+    ) -> Result<MemoryProposalResolutionReview, AppError> {
+        self.service.preview_memory_proposal_rejection(proposal)
+    }
+
+    fn cancel_memory_review(&mut self) -> Result<(), AppError> {
+        self.service.cancel_memory_review()
+    }
+
     fn finish(&mut self, reason: ShutdownReason) -> Result<(), AppError> {
         let result = self.service.finish(reason);
         if result.is_ok() {
@@ -1158,7 +1331,10 @@ fn execute_request(executor: &mut dyn CommandExecutor, request: Request, shared:
                 }
             }
         }
-        Request::PreviewSkillCreation { candidate, response } => {
+        Request::PreviewSkillCreation {
+            candidate,
+            response,
+        } => {
             send_runtime_reply(executor, shared, response, |executor| {
                 executor.preview_skill_creation(candidate)
             });
@@ -1220,6 +1396,39 @@ fn execute_request(executor: &mut dyn CommandExecutor, request: Request, shared:
         Request::CancelSkillReview { response } => {
             send_runtime_reply(executor, shared, response, |executor| {
                 executor.cancel_skill_review()
+            });
+        }
+        Request::PreviewMemorySet {
+            selector,
+            candidate,
+            response,
+        } => {
+            send_runtime_reply(executor, shared, response, |executor| {
+                executor.preview_memory_set(selector, candidate)
+            });
+        }
+        Request::PreviewMemoryDelete {
+            selector,
+            display_key,
+            response,
+        } => {
+            send_runtime_reply(executor, shared, response, |executor| {
+                executor.preview_memory_delete(selector, display_key)
+            });
+        }
+        Request::PreviewMemoryProposalApproval { proposal, response } => {
+            send_runtime_reply(executor, shared, response, |executor| {
+                executor.preview_memory_proposal_approval(proposal)
+            });
+        }
+        Request::PreviewMemoryProposalRejection { proposal, response } => {
+            send_runtime_reply(executor, shared, response, |executor| {
+                executor.preview_memory_proposal_rejection(proposal)
+            });
+        }
+        Request::CancelMemoryReview { response } => {
+            send_runtime_reply(executor, shared, response, |executor| {
+                executor.cancel_memory_review()
             });
         }
     }

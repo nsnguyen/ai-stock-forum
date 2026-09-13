@@ -157,16 +157,19 @@ fn skill_assignment_upgrade_and_unassignment_build_exact_candidates() {
     let current = create(valid_draft(Vec::new()));
 
     let assigned = current.assign_skill(initial_ref.clone()).unwrap();
-    assert_eq!(assigned.skill_refs(), &[initial_ref.clone()]);
+    assert_eq!(assigned.skill_refs(), std::slice::from_ref(&initial_ref));
     assert_eq!(
-        assigned.assign_skill(initial_ref.clone()).unwrap_err().code(),
+        assigned
+            .assign_skill(initial_ref.clone())
+            .unwrap_err()
+            .code(),
         "agent_profile_unchanged",
     );
 
     let upgraded = assigned
         .upgrade_skill(initial_ref.clone(), upgraded_ref.clone())
         .unwrap();
-    assert_eq!(upgraded.skill_refs(), &[upgraded_ref.clone()]);
+    assert_eq!(upgraded.skill_refs(), std::slice::from_ref(&upgraded_ref));
     assert_eq!(
         assigned
             .upgrade_skill(upgraded_ref.clone(), initial_ref.clone())

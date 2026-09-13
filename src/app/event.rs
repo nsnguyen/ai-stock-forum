@@ -8,7 +8,13 @@ use crate::{
         Actor, AgentProfileId, AgentProfileVersionId, CausationId, CorrelationId, EventId,
         InstallationId, ObjectRef, SessionId, Sha256Digest, canonical_json_bytes, sha256,
     },
+    memory::{
+        EpisodicSummary, EpisodicSummaryRef, MemoryEntryRef, MemoryEntryVersion, MemoryProposal,
+        MemoryProposalFilter, MemoryProposalRef, MemoryProposalResolution, MemoryProposalStatus,
+        MemorySnapshotMetadata,
+    },
     persistence::RecoveryError,
+    policy::ApprovalRecord,
     skills::{SkillProvenance, SkillVersionRef},
 };
 
@@ -26,6 +32,13 @@ pub struct SkillHistoryEventEntry {
     pub skill: SkillVersionRef,
     pub created_at_ms: i64,
     pub predecessor_version_id: Option<crate::domain::SkillVersionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryProposalStatusRef {
+    pub proposal: MemoryProposalRef,
+    pub status: MemoryProposalStatus,
 }
 
 pub const EVENT_SCHEMA_VERSION: u16 = 1;
@@ -155,6 +168,79 @@ pub enum ApplicationEvent {
         previous_profile_version_id: AgentProfileVersionId,
         expected: SkillVersionRef,
     },
+    MemoryEntrySet {
+        entry: MemoryEntryVersion,
+        expired_proposals: Vec<MemoryProposalResolution>,
+    },
+    MemoryEntryDeleted {
+        entry: MemoryEntryVersion,
+        expired_proposals: Vec<MemoryProposalResolution>,
+    },
+    MemoryProposalCreated {
+        proposal: MemoryProposal,
+        approval: ApprovalRecord,
+    },
+    MemoryProposalAccepted {
+        resolution: MemoryProposalResolution,
+        entry: MemoryEntryVersion,
+        expired_proposals: Vec<MemoryProposalResolution>,
+    },
+    MemoryProposalRejected {
+        resolution: MemoryProposalResolution,
+    },
+    EpisodicSummaryRecorded {
+        summary: EpisodicSummary,
+    },
+    MemoryEntriesListed {
+        profile: crate::agents::AgentProfileVersionRef,
+        namespace_id: crate::domain::MemoryNamespaceId,
+        entries: Vec<MemoryEntryRef>,
+        total_count: u64,
+        returned_count: u64,
+        omitted_count: u64,
+    },
+    MemoryEntryShown {
+        profile: crate::agents::AgentProfileVersionRef,
+        entry: MemoryEntryRef,
+    },
+    MemoryEntryHistoryShown {
+        profile: crate::agents::AgentProfileVersionRef,
+        current: MemoryEntryRef,
+        versions: Vec<MemoryEntryRef>,
+        total_count: u64,
+        returned_count: u64,
+        omitted_count: u64,
+    },
+    MemoryEntryVersionShown {
+        profile: crate::agents::AgentProfileVersionRef,
+        entry: MemoryEntryRef,
+    },
+    MemoryProposalsListed {
+        profile: crate::agents::AgentProfileVersionRef,
+        filter: MemoryProposalFilter,
+        proposals: Vec<MemoryProposalStatusRef>,
+        total_count: u64,
+        returned_count: u64,
+        omitted_count: u64,
+    },
+    MemoryProposalShown {
+        proposal: MemoryProposalRef,
+        status: MemoryProposalStatus,
+        resolution: Option<MemoryProposalResolution>,
+    },
+    EpisodicSummariesListed {
+        profile: crate::agents::AgentProfileVersionRef,
+        summaries: Vec<EpisodicSummaryRef>,
+        total_count: u64,
+        returned_count: u64,
+        omitted_count: u64,
+    },
+    EpisodicSummaryShown {
+        summary: EpisodicSummaryRef,
+    },
+    MemorySnapshotBuilt {
+        metadata: MemorySnapshotMetadata,
+    },
 }
 
 impl ApplicationEvent {
@@ -186,6 +272,21 @@ impl ApplicationEvent {
             Self::AgentSkillAssigned { .. } => "agent_skill_assigned",
             Self::AgentSkillUpgraded { .. } => "agent_skill_upgraded",
             Self::AgentSkillUnassigned { .. } => "agent_skill_unassigned",
+            Self::MemoryEntrySet { .. } => "memory_entry_set",
+            Self::MemoryEntryDeleted { .. } => "memory_entry_deleted",
+            Self::MemoryProposalCreated { .. } => "memory_proposal_created",
+            Self::MemoryProposalAccepted { .. } => "memory_proposal_accepted",
+            Self::MemoryProposalRejected { .. } => "memory_proposal_rejected",
+            Self::EpisodicSummaryRecorded { .. } => "episodic_summary_recorded",
+            Self::MemoryEntriesListed { .. } => "memory_entries_listed",
+            Self::MemoryEntryShown { .. } => "memory_entry_shown",
+            Self::MemoryEntryHistoryShown { .. } => "memory_entry_history_shown",
+            Self::MemoryEntryVersionShown { .. } => "memory_entry_version_shown",
+            Self::MemoryProposalsListed { .. } => "memory_proposals_listed",
+            Self::MemoryProposalShown { .. } => "memory_proposal_shown",
+            Self::EpisodicSummariesListed { .. } => "episodic_summaries_listed",
+            Self::EpisodicSummaryShown { .. } => "episodic_summary_shown",
+            Self::MemorySnapshotBuilt { .. } => "memory_snapshot_built",
         }
     }
 }
@@ -402,14 +503,15 @@ fn digest_for(
     pending: &PendingEvent,
     previous_event_digest: Option<&Sha256Digest>,
 ) -> Result<Sha256Digest, ()> {
+    let (actor_kind, actor_id) = actor_wire(&pending.actor);
     let material = DigestMaterial {
         digest_format_version: DIGEST_FORMAT_VERSION,
         sequence,
         event_id: &pending.event_id,
         event_schema_version: pending.event_schema_version,
         event_type: pending.event.kind(),
-        actor_kind: actor_kind(&pending.actor),
-        actor_id: None,
+        actor_kind,
+        actor_id: actor_id.as_deref(),
         occurred_at_ms: pending.occurred_at_ms,
         correlation_id: &pending.correlation_id,
         causation_id: pending.causation_id.as_ref(),
@@ -422,9 +524,10 @@ fn digest_for(
         .map_err(|_| ())
 }
 
-fn actor_kind(actor: &Actor) -> &'static str {
+pub(crate) fn actor_wire(actor: &Actor) -> (&'static str, Option<String>) {
     match actor {
-        Actor::Human => "human",
-        Actor::System => "system",
+        Actor::Human => ("human", None),
+        Actor::System => ("system", None),
+        Actor::Agent(id) => ("agent", Some(id.to_string())),
     }
 }

@@ -17,6 +17,10 @@ use super::migrations::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum PersistenceError {
+    #[error("memory proposal capacity has been reached")]
+    Capacity,
+    #[error("memory row does not match its authenticated representation")]
+    MemoryRowMismatch,
     #[error("database query failed")]
     QueryFailed,
     #[error("database migration record is invalid")]
@@ -60,6 +64,8 @@ pub enum PersistenceError {
 impl PersistenceError {
     pub const fn code(self) -> &'static str {
         match self {
+            Self::Capacity => "memory_proposal_capacity_reached",
+            Self::MemoryRowMismatch => "memory_row_mismatch",
             Self::QueryFailed => "database_write_failed",
             Self::InvalidMigrationRecord => "invalid_migration_record",
             Self::InvalidEventRecord => "invalid_event_record",
@@ -102,7 +108,8 @@ impl<'connection> ImmediateTransaction<'connection> {
         self.transaction.rollback().map_err(persistence_error)
     }
 
-    pub(crate) fn transaction(&self) -> &Transaction<'connection> {
+    #[doc(hidden)]
+    pub fn transaction(&self) -> &Transaction<'connection> {
         &self.transaction
     }
 }
@@ -186,6 +193,30 @@ impl Database {
             .iter()
             .find(|migration| migration.version == 3)
             .expect("schema v3 migration is registered");
+        let mut boundaries = migration_boundary_names(migration.sql);
+        boundaries.push("schema_migration_record");
+        boundaries
+    }
+
+    #[doc(hidden)]
+    pub fn v4_migration_boundaries() -> Vec<&'static str> {
+        let migrations = ordered();
+        let migration = migrations
+            .iter()
+            .find(|migration| migration.version == 4)
+            .expect("schema v4 migration is registered");
+        let mut boundaries = migration_boundary_names(migration.sql);
+        boundaries.push("schema_migration_record");
+        boundaries
+    }
+
+    #[doc(hidden)]
+    pub fn v5_migration_boundaries() -> Vec<&'static str> {
+        let migrations = ordered();
+        let migration = migrations
+            .iter()
+            .find(|migration| migration.version == 5)
+            .expect("schema v5 migration is registered");
         let mut boundaries = migration_boundary_names(migration.sql);
         boundaries.push("schema_migration_record");
         boundaries
@@ -488,8 +519,13 @@ fn startup_error(error: SqliteError) -> StartupError {
     }
 }
 
-fn persistence_error(error: SqliteError) -> PersistenceError {
+pub(crate) fn persistence_error(error: SqliteError) -> PersistenceError {
     match error {
+        SqliteError::SqliteFailure(error, _)
+            if matches!(error.code, ErrorCode::DiskFull | ErrorCode::TooBig) =>
+        {
+            PersistenceError::Capacity
+        }
         SqliteError::SqliteFailure(error, _)
             if matches!(
                 error.code,
@@ -521,6 +557,58 @@ mod tests {
         let error = verify_connection_pragmas(&connection).unwrap_err();
 
         assert_eq!(error.code(), "database_pragma_mismatch");
+    }
+
+    #[test]
+    fn real_sqlite_too_big_is_a_content_free_capacity_error() {
+        let connection = Connection::open_in_memory().unwrap();
+        let error = connection
+            .query_row("SELECT zeroblob(?1)", [i64::MAX], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            SqliteError::SqliteFailure(detail, _) if detail.code == ErrorCode::TooBig
+        ));
+
+        let mapped = persistence_error(error);
+        assert_eq!(mapped, PersistenceError::Capacity);
+        assert_eq!(mapped.code(), "memory_proposal_capacity_reached");
+        assert!(!mapped.to_string().contains("too big"));
+    }
+
+    #[test]
+    fn real_sqlite_disk_full_is_a_content_free_capacity_error() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let path = temporary_directory.path().join("capacity.sqlite3");
+        let connection = Connection::open(path).unwrap();
+        connection.pragma_update(None, "page_size", 512).unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "delete")
+            .unwrap();
+        connection.execute_batch("VACUUM;").unwrap();
+        connection
+            .execute_batch("CREATE TABLE capacity_test (value BLOB);")
+            .unwrap();
+        let pages: i64 = connection
+            .pragma_query_value(None, "page_count", |row| row.get(0))
+            .unwrap();
+        connection
+            .pragma_update(None, "max_page_count", pages)
+            .unwrap();
+        let error = connection
+            .execute("INSERT INTO capacity_test VALUES (randomblob(8192))", [])
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            SqliteError::SqliteFailure(detail, _) if detail.code == ErrorCode::DiskFull
+        ));
+
+        let mapped = persistence_error(error);
+        assert_eq!(mapped, PersistenceError::Capacity);
+        assert_eq!(mapped.code(), "memory_proposal_capacity_reached");
+        assert!(!mapped.to_string().contains("database or disk is full"));
     }
 
     #[cfg(unix)]

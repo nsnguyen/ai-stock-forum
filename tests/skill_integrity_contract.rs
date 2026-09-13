@@ -15,9 +15,7 @@ use ai_stock_forum::{
         IdGenerator, MemoryNamespaceId, ObjectRef, SkillId, SkillVersionId, canonical_json_bytes,
         sha256,
     },
-    persistence::{
-        Database, EventRepository, insert_skill_version, load_skill_version_by_id,
-    },
+    persistence::{Database, EventRepository, insert_skill_version, load_skill_version_by_id},
     recovery::RecoveryCoordinator,
     skills::{SkillDraft, SkillProvenance, SkillVersion, SkillVersionRef, builtin_manifests},
 };
@@ -61,15 +59,23 @@ impl Fixture {
         }
     }
 
-    fn bootstrap(&mut self) -> Result<ai_stock_forum::recovery::BootstrapState, ai_stock_forum::config::StartupError> {
+    fn bootstrap(
+        &mut self,
+    ) -> Result<ai_stock_forum::recovery::BootstrapState, ai_stock_forum::config::StartupError>
+    {
         RecoveryCoordinator::bootstrap(&mut self.database, &self.clock, &self.ids, &[])
     }
 
     fn count(&self, table: &str) -> i64 {
-        assert!(matches!(table, "skill_versions" | "active_skills" | "event_stream"));
+        assert!(matches!(
+            table,
+            "skill_versions" | "active_skills" | "event_stream"
+        ));
         self.database
             .connection()
-            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
             .unwrap()
     }
 
@@ -200,7 +206,10 @@ fn altered_immutable_builtin_row_fails_closed_before_startup_writes() {
         .connection()
         .execute(
             "DELETE FROM active_skills WHERE skill_id = ?1",
-            [builtin_manifests().unwrap()[0].skill().skill_id().to_string()],
+            [builtin_manifests().unwrap()[0]
+                .skill()
+                .skill_id()
+                .to_string()],
         )
         .unwrap();
     fixture
@@ -210,7 +219,10 @@ fn altered_immutable_builtin_row_fails_closed_before_startup_writes() {
             "UPDATE skill_versions
              SET content_digest = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
              WHERE skill_id = ?1",
-            [builtin_manifests().unwrap()[0].skill().skill_id().to_string()],
+            [builtin_manifests().unwrap()[0]
+                .skill()
+                .skill_id()
+                .to_string()],
         )
         .unwrap();
     let events_before = fixture.count("event_stream");
@@ -498,10 +510,9 @@ fn skill_create_and_version_receipts_bind_the_same_persisted_version_object() {
         panic!("skill created view");
     };
     let database = Database::open(&paths).unwrap();
-    let accepted =
-        load_skill_version_by_id(database.connection(), created_view.skill_version_id)
-            .unwrap()
-            .unwrap();
+    let accepted = load_skill_version_by_id(database.connection(), created_view.skill_version_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         created.committed_events[0].object.as_ref(),
         Some(&skill_object(&accepted)),
@@ -539,10 +550,9 @@ fn skill_create_and_version_receipts_bind_the_same_persisted_version_object() {
         panic!("skill version activated view");
     };
     let database = Database::open(&paths).unwrap();
-    let accepted =
-        load_skill_version_by_id(database.connection(), activated_view.skill_version_id)
-            .unwrap()
-            .unwrap();
+    let accepted = load_skill_version_by_id(database.connection(), activated_view.skill_version_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         activated.committed_events[0].object.as_ref(),
         Some(&skill_object(&accepted)),

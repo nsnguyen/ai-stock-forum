@@ -26,6 +26,10 @@ use crate::{
 use super::{label_value, panel, safe_text, workspace_focused};
 
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    if model.agents.pane == AgentsPane::Memory {
+        super::memory::render(frame, area, model, theme);
+        return;
+    }
     let mode = agent_layout_mode(frame.area());
     let layout = agent_workspace(area, mode);
     if let Some(list) = layout.list {
@@ -34,8 +38,12 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
     render_active(frame, layout.active, model, theme, layout.list.is_none());
 }
 
-pub(super) fn content_height(_model: &TuiModel, _width: u16) -> u16 {
-    0
+pub(super) fn content_height(model: &TuiModel, width: u16) -> u16 {
+    if model.agents.pane == AgentsPane::Memory {
+        super::memory::content_height(model, width)
+    } else {
+        0
+    }
 }
 
 fn render_active(
@@ -50,6 +58,7 @@ fn render_active(
         AgentsPane::Editor => render_editor(frame, area, model, theme),
         AgentsPane::Confirmation => render_confirmation(frame, area, model, theme),
         AgentsPane::History => render_history(frame, area, model, theme),
+        AgentsPane::Memory => super::memory::render(frame, area, model, theme),
         AgentsPane::List | AgentsPane::Detail => render_detail(frame, area, model, theme),
     }
 }
@@ -118,10 +127,7 @@ fn list_scroll_offset_for_area(model: &TuiModel, area: Rect) -> usize {
                 .line_count(inner_width)
         })
         .collect::<Vec<_>>();
-    let mut visible_height = heights
-        .iter()
-        .copied()
-        .fold(0usize, usize::saturating_add);
+    let mut visible_height = heights.iter().copied().fold(0usize, usize::saturating_add);
     for height in heights {
         if visible_height <= viewport_height || first == selected {
             break;
@@ -168,21 +174,25 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
             .agents
             .detail
             .as_ref()
-            .map(|detail| detail_lines(detail, theme))
+            .map(|detail| {
+                let mut lines = agent_detail_action_lines(model, theme);
+                lines.extend(detail_lines(detail, theme));
+                lines
+            })
             .unwrap_or_else(|| {
-            if model.agents.profiles.profiles.is_empty() {
-                vec![
-                    Line::styled("No agent profiles yet", theme.accent),
-                    Line::default(),
-                    Line::raw("Press c to create your first profile."),
-                ]
-            } else {
-                vec![
-                    Line::styled("No profile selected", theme.accent),
-                    Line::default(),
-                    Line::raw("Choose a profile and press Enter to load its detail."),
-                ]
-            }
+                if model.agents.profiles.profiles.is_empty() {
+                    vec![
+                        Line::styled("No agent profiles yet", theme.accent),
+                        Line::default(),
+                        Line::raw("Press c to create your first profile."),
+                    ]
+                } else {
+                    vec![
+                        Line::styled("No profile selected", theme.accent),
+                        Line::default(),
+                        Line::raw("Choose a profile and press Enter to load its detail."),
+                    ]
+                }
             })
     };
     frame.render_widget(
@@ -200,6 +210,33 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
             .scroll((scroll(model.agents.detail_scroll, area.height), 0)),
         area,
     );
+}
+
+fn agent_detail_action_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
+    let selected = model.agents.selected_detail_action;
+    vec![
+        Line::from(vec![
+            Span::styled(
+                "Assigned Skills",
+                if selected == crate::ui::tui::model::AgentDetailAction::AssignedSkills {
+                    theme.focus
+                } else {
+                    theme.muted
+                },
+            ),
+            Span::raw(" | "),
+            Span::styled(
+                "Memory",
+                if selected == crate::ui::tui::model::AgentDetailAction::Memory {
+                    theme.focus
+                } else {
+                    theme.muted
+                },
+            ),
+        ]),
+        Line::styled("Left/Right: choose | Enter: open", theme.muted),
+        Line::default(),
+    ]
 }
 
 fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
@@ -222,7 +259,12 @@ fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
     };
     let selected_action = model.selected_available_agent_skill_action();
     let mut action_spans = vec![Span::styled("Actions  ", theme.accent)];
-    for (index, action) in model.available_agent_skill_actions().iter().copied().enumerate() {
+    for (index, action) in model
+        .available_agent_skill_actions()
+        .iter()
+        .copied()
+        .enumerate()
+    {
         if index > 0 {
             action_spans.push(Span::raw("  "));
         }
@@ -233,7 +275,11 @@ fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
         };
         action_spans.push(Span::styled(
             format!("[{label}]"),
-            if action == selected_action { theme.focus } else { theme.muted },
+            if action == selected_action {
+                theme.focus
+            } else {
+                theme.muted
+            },
         ));
     }
     let availability = model.agent_skill_upgrade_availability();
@@ -287,12 +333,20 @@ fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
         lines.push(Line::styled(
             format!(
                 "{} {}  v{}  {}",
-                if index == model.agents.selected_assigned_skill { ">" } else { " " },
+                if index == model.agents.selected_assigned_skill {
+                    ">"
+                } else {
+                    " "
+                },
                 index + 1,
                 assigned.version().get(),
                 compact_identifier(&assigned.skill_id().to_string())
             ),
-            if index == model.agents.selected_assigned_skill { theme.focus } else { theme.muted },
+            if index == model.agents.selected_assigned_skill {
+                theme.focus
+            } else {
+                theme.muted
+            },
         ));
     }
     lines.extend([
@@ -300,9 +354,16 @@ fn assigned_skill_lines(model: &TuiModel, theme: &Theme) -> Vec<Line<'static>> {
         Line::styled("PINNED EXACT VERSION", theme.accent),
         label_value("Version", format!("v{}", reference.version().get()), theme),
         label_value("Skill ID", reference.skill_id().to_string(), theme),
-        label_value("Version ID", reference.skill_version_id().to_string(), theme),
+        label_value(
+            "Version ID",
+            reference.skill_version_id().to_string(),
+            theme,
+        ),
         label_value("Digest", reference.content_digest().to_string(), theme),
-        Line::styled("No automatic upgrades. Skill text grants no capability.", theme.muted),
+        Line::styled(
+            "No automatic upgrades. Skill text grants no capability.",
+            theme.muted,
+        ),
     ]);
     lines
 }

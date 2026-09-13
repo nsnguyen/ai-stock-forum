@@ -4,14 +4,31 @@ use crate::{
     agents::ProfileTemplate,
     app::{
         AgentProfileHistoryView, AgentProfileVersionView, AgentProfileView, AgentProfilesView,
-        ApplicationCommand, DatabaseReadiness, MAX_INPUT_BYTES, PresentationSnapshot,
-        ProcessGuardOwnership, SkillHistoryView, SkillView, SkillsView,
+        ApplicationCommand, CommandView, DatabaseReadiness, EpisodicSummariesView,
+        EpisodicSummaryView, MAX_INPUT_BYTES, MemoryEditPreview, MemoryEntriesView,
+        MemoryEntryHistoryView, MemoryEntryVersionView, MemoryEntryView, MemoryProfileIdentityView,
+        MemoryProposalResolutionReview, MemoryProposalView, MemoryProposalsView,
+        PresentationSnapshot, ProcessGuardOwnership, SkillHistoryView, SkillView, SkillsView,
     },
     audit::AuditEntry,
-    domain::{InstallationId, SessionId},
+    domain::{
+        DomainError, EpisodicSummaryId, InstallationId, MemoryEntryId, MemoryEntryVersionId,
+        MemoryNamespaceId, MemoryProposalId, ObjectVersion, SessionId,
+    },
+    memory::{
+        EpisodicSummaryRef, ExpectedMemoryEntryState, MemoryEditReview, MemoryEntryDraft,
+        MemoryEntryRef, MemoryEntryState, MemoryEntryVersion, MemoryField, MemoryFieldDiff,
+        MemoryFieldValue, MemoryMutationKind, MemoryPlaintextAcknowledgement, MemoryProposalFilter,
+        MemoryProposalOperation, MemoryProposalOperationKind, MemoryProposalRef,
+        MemoryProposalStatus, MemoryResolutionAction,
+    },
     setup::SetupStatus,
     skills::{SkillDraft, SkillVersionRef},
-    ui::{profile_editor::ProfileEditor, skill_editor::SkillEditor},
+    ui::{
+        memory_editor::{MemoryEditor, MemoryEditorStep},
+        profile_editor::ProfileEditor,
+        skill_editor::SkillEditor,
+    },
 };
 
 pub const COMMAND_HISTORY_CAPACITY: usize = 100;
@@ -32,6 +49,1376 @@ pub enum AgentsPane {
     History,
     Editor,
     Confirmation,
+    Memory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentDetailAction {
+    AssignedSkills,
+    Memory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryPane {
+    EntryList,
+    EntryDetail,
+    EntryHistory,
+    Editor,
+    MutationReview,
+    Confirmation,
+    Proposals,
+    ProposalDetail,
+    ProposalResolutionReview,
+    EpisodicSummaries,
+    EpisodicDetail,
+    Result,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryEntryDetailAction {
+    Edit,
+    Delete,
+    History,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryProposalDetailAction {
+    Approve,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryEditorOrigin {
+    Create,
+    Edit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryResultOrigin {
+    Mutation,
+    Resolution,
+}
+
+pub(crate) const MEMORY_RETAINED_ROW_CAP: usize = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MemoryPageCounts {
+    pub displayed: usize,
+    pub omitted: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryConfirmation {
+    pub command: ApplicationCommand,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryOutcomeIntent {
+    Entries,
+    EntryDetail(MemoryEntryId),
+    EntryHistory(MemoryEntryId),
+    EntryVersion {
+        selector: crate::app::AgentProfileSelector,
+        key: String,
+        version: ObjectVersion,
+        entry_version_id: MemoryEntryVersionId,
+    },
+    Proposals,
+    ProposalDetail(MemoryProposalId),
+    Episodes,
+    EpisodeDetail(EpisodicSummaryId),
+    Mutation,
+    Resolution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryViewState {
+    pub profile: Option<MemoryProfileIdentityView>,
+    pub namespace_id: Option<MemoryNamespaceId>,
+    pub pane: MemoryPane,
+    pub entries: Option<MemoryEntriesView>,
+    pub entry_detail: Option<MemoryEntryView>,
+    pub entry_history: Option<MemoryEntryHistoryView>,
+    pub entry_version: Option<MemoryEntryVersionView>,
+    pub proposals: Option<MemoryProposalsView>,
+    pub proposal_detail: Option<MemoryProposalView>,
+    pub episodes: Option<EpisodicSummariesView>,
+    pub episode_detail: Option<EpisodicSummaryView>,
+    pub selected_entry: usize,
+    pub selected_history_version: usize,
+    pub selected_proposal: usize,
+    pub selected_episode: usize,
+    pub selected_entry_detail_action: MemoryEntryDetailAction,
+    pub selected_proposal_detail_action: MemoryProposalDetailAction,
+    pub entry_scroll: usize,
+    pub detail_scroll: usize,
+    pub history_scroll: usize,
+    pub proposal_scroll: usize,
+    pub episode_scroll: usize,
+    pub editor: Option<MemoryEditor>,
+    pub editor_origin: MemoryEditorOrigin,
+    pub edit_review: Option<MemoryEditReview>,
+    pub resolution_review: Option<MemoryProposalResolutionReview>,
+    pub confirmation: Option<MemoryConfirmation>,
+    pub review_registered: bool,
+    pub result_origin: MemoryResultOrigin,
+    pub generation: u64,
+    pub pending_intent: Option<MemoryOutcomeIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MemoryExactDetailIdentity {
+    Entry(MemoryEntryRef),
+    HistoricalEntry(MemoryEntryRef),
+    Proposal(MemoryProposalRef),
+    Episodic(EpisodicSummaryRef),
+}
+
+impl Default for MemoryViewState {
+    fn default() -> Self {
+        Self {
+            profile: None,
+            namespace_id: None,
+            pane: MemoryPane::EntryList,
+            entries: None,
+            entry_detail: None,
+            entry_history: None,
+            entry_version: None,
+            proposals: None,
+            proposal_detail: None,
+            episodes: None,
+            episode_detail: None,
+            selected_entry: 0,
+            selected_history_version: 0,
+            selected_proposal: 0,
+            selected_episode: 0,
+            selected_entry_detail_action: MemoryEntryDetailAction::Edit,
+            selected_proposal_detail_action: MemoryProposalDetailAction::Approve,
+            entry_scroll: 0,
+            detail_scroll: 0,
+            history_scroll: 0,
+            proposal_scroll: 0,
+            episode_scroll: 0,
+            editor: None,
+            editor_origin: MemoryEditorOrigin::Create,
+            edit_review: None,
+            resolution_review: None,
+            confirmation: None,
+            review_registered: false,
+            result_origin: MemoryResultOrigin::Mutation,
+            generation: 0,
+            pending_intent: None,
+        }
+    }
+}
+
+impl MemoryViewState {
+    pub(crate) fn transition_to(&mut self, pane: MemoryPane) {
+        if self.pane != pane {
+            self.pane = pane;
+            self.detail_scroll = 0;
+        }
+    }
+
+    fn exact_detail_identity(&self) -> Option<MemoryExactDetailIdentity> {
+        match self.pane {
+            MemoryPane::EntryDetail => self
+                .entry_detail
+                .as_ref()
+                .map(|detail| MemoryExactDetailIdentity::Entry(detail.entry.reference())),
+            MemoryPane::EntryHistory => self
+                .entry_version
+                .as_ref()
+                .map(|detail| MemoryExactDetailIdentity::HistoricalEntry(detail.entry.reference())),
+            MemoryPane::ProposalDetail => self
+                .proposal_detail
+                .as_ref()
+                .map(|detail| MemoryExactDetailIdentity::Proposal(detail.proposal.reference())),
+            MemoryPane::EpisodicDetail => self
+                .episode_detail
+                .as_ref()
+                .map(|detail| MemoryExactDetailIdentity::Episodic(detail.summary.reference())),
+            MemoryPane::EntryList
+            | MemoryPane::Editor
+            | MemoryPane::MutationReview
+            | MemoryPane::Confirmation
+            | MemoryPane::Proposals
+            | MemoryPane::ProposalResolutionReview
+            | MemoryPane::EpisodicSummaries
+            | MemoryPane::Result => None,
+        }
+    }
+
+    pub fn has_protected_workflow(&self) -> bool {
+        self.editor.is_some()
+            || self.edit_review.is_some()
+            || self.resolution_review.is_some()
+            || self.confirmation.is_some()
+            || self.review_registered
+    }
+
+    pub fn bind_profile(
+        &mut self,
+        profile: MemoryProfileIdentityView,
+        namespace_id: MemoryNamespaceId,
+    ) -> Result<(), DomainError> {
+        let unchanged =
+            self.profile.as_ref() == Some(&profile) && self.namespace_id == Some(namespace_id);
+        if unchanged {
+            return Ok(());
+        }
+        if self.has_protected_workflow() {
+            return Err(DomainError::MemoryReviewUnavailable);
+        }
+        self.invalidate_profile_context();
+        self.profile = Some(profile);
+        self.namespace_id = Some(namespace_id);
+        Ok(())
+    }
+
+    fn invalidate_profile_context(&mut self) {
+        let generation = self.generation;
+        *self = Self {
+            generation,
+            ..Self::default()
+        };
+    }
+
+    pub fn open_create_editor(
+        &mut self,
+        selector: crate::app::AgentProfileSelector,
+    ) -> Result<(), DomainError> {
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(DomainError::MemoryGenerationOverflow)?;
+        if self.has_protected_workflow() {
+            return Err(DomainError::MemoryReviewUnavailable);
+        }
+        self.generation = generation;
+        self.editor = Some(MemoryEditor::for_create(selector));
+        self.editor_origin = MemoryEditorOrigin::Create;
+        self.edit_review = None;
+        self.resolution_review = None;
+        self.confirmation = None;
+        self.review_registered = false;
+        self.pending_intent = None;
+        self.transition_to(MemoryPane::Editor);
+        Ok(())
+    }
+
+    pub fn open_edit_editor(
+        &mut self,
+        selector: crate::app::AgentProfileSelector,
+        entry: crate::memory::MemoryEntryVersion,
+    ) -> Result<(), DomainError> {
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(DomainError::MemoryGenerationOverflow)?;
+        if self.has_protected_workflow() {
+            return Err(DomainError::MemoryReviewUnavailable);
+        }
+        let editor = MemoryEditor::for_set(selector, entry)?;
+        self.generation = generation;
+        self.editor = Some(editor);
+        self.editor_origin = MemoryEditorOrigin::Edit;
+        self.edit_review = None;
+        self.resolution_review = None;
+        self.confirmation = None;
+        self.review_registered = false;
+        self.pending_intent = None;
+        self.transition_to(MemoryPane::Editor);
+        Ok(())
+    }
+
+    pub fn begin_review_request(&mut self) -> Result<u64, DomainError> {
+        let generation = self.next_review_request_generation()?;
+        self.generation = generation;
+        self.pending_intent = None;
+        Ok(generation)
+    }
+
+    pub(crate) fn next_review_request_generation(&self) -> Result<u64, DomainError> {
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(DomainError::MemoryGenerationOverflow)?;
+        if self.edit_review.is_some()
+            || self.resolution_review.is_some()
+            || self.confirmation.is_some()
+            || self.review_registered
+        {
+            return Err(DomainError::MemoryReviewUnavailable);
+        }
+        Ok(generation)
+    }
+
+    pub(crate) fn profile_selector(&self) -> Result<crate::app::AgentProfileSelector, DomainError> {
+        self.profile
+            .as_ref()
+            .map(|identity| identity.profile.profile_id().into())
+            .ok_or(DomainError::MemorySelectionUnavailable)
+    }
+
+    pub(crate) fn authenticated_edit_review(&self) -> Option<&MemoryEditReview> {
+        let review = self.edit_review.as_ref()?;
+        if !self.review_registered
+            || self.resolution_review.is_some()
+            || self.profile.as_ref().map(|identity| &identity.profile) != Some(&review.profile)
+            || self.namespace_id != Some(review.namespace_id)
+            || review.plaintext_acknowledgement
+                != MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1
+            || !canonical_memory_edit_diff(&review.diff)
+        {
+            return None;
+        }
+
+        match (&review.operation, &review.expected, &review.candidate) {
+            (MemoryMutationKind::Set, expected, Some(candidate)) => {
+                if !expected_state_matches_namespace_key(
+                    expected,
+                    review.namespace_id,
+                    &candidate.normalized_key(),
+                ) || !self.editor_is_authenticated()
+                {
+                    return None;
+                }
+                let editor = self.editor.as_ref()?;
+                if editor.step() != MemoryEditorStep::Review
+                    || !matches!(
+                        editor.preview(),
+                        Some(MemoryEditPreview::Review(retained)) if retained == review
+                    )
+                {
+                    return None;
+                }
+                let request = editor.preview_request().ok()?;
+                if request.selector != *editor.selector()
+                    || !self.matches_profile_selector(&request.selector)
+                    || request.candidate != *candidate
+                {
+                    return None;
+                }
+                let exact_diff = match (self.editor_origin, editor.seed(), expected) {
+                    (MemoryEditorOrigin::Create, None, ExpectedMemoryEntryState::Absent) => {
+                        absent_set_diff_matches(&review.diff, candidate)
+                    }
+                    (MemoryEditorOrigin::Create, None, ExpectedMemoryEntryState::Deleted(_)) => {
+                        deleted_set_diff_matches(&review.diff, candidate)
+                    }
+                    (
+                        MemoryEditorOrigin::Edit,
+                        Some(seed),
+                        ExpectedMemoryEntryState::Present(reference),
+                    ) if reference == &seed.reference() => seeded_present_set_diff(seed, candidate)
+                        .is_some_and(|expected_diff| review.diff == expected_diff),
+                    _ => false,
+                };
+                exact_diff.then_some(review)
+            }
+            (MemoryMutationKind::Delete, ExpectedMemoryEntryState::Present(expected), None) => {
+                if self.editor.is_some()
+                    || !expected_state_matches_namespace_key(
+                        &review.expected,
+                        review.namespace_id,
+                        expected.normalized_key(),
+                    )
+                {
+                    return None;
+                }
+                let detail = self.authenticated_entry_detail()?;
+                (*expected == detail.entry.reference()
+                    && delete_diff_matches(&review.diff, &detail.entry))
+                .then_some(review)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn edit_review_command(&self) -> Option<ApplicationCommand> {
+        let review = self.authenticated_edit_review()?;
+        match (&review.operation, &review.expected, &review.candidate) {
+            (MemoryMutationKind::Set, expected, Some(candidate)) => {
+                Some(ApplicationCommand::SetMemoryEntry {
+                    profile: review.profile.clone(),
+                    expected: expected.clone(),
+                    candidate: candidate.clone(),
+                    review_token: review.review_token,
+                    review_digest: review.review_digest.clone(),
+                })
+            }
+            (MemoryMutationKind::Delete, ExpectedMemoryEntryState::Present(expected), None) => {
+                Some(ApplicationCommand::DeleteMemoryEntry {
+                    profile: review.profile.clone(),
+                    expected: expected.clone(),
+                    review_token: review.review_token,
+                    review_digest: review.review_digest.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn reconstructed_resolution_review_command(&self) -> Option<ApplicationCommand> {
+        let review = self.resolution_review.as_ref()?;
+        let expected_action = match review.action {
+            MemoryResolutionAction::Approve => MemoryProposalDetailAction::Approve,
+            MemoryResolutionAction::Reject => MemoryProposalDetailAction::Reject,
+        };
+        if !self.review_registered
+            || self.edit_review.is_some()
+            || self.selected_proposal_detail_action != expected_action
+            || !self.matches_profile_namespace(
+                &review.namespace_owner_identity.profile,
+                review.proposal.namespace_id(),
+            )
+        {
+            return None;
+        }
+        let fields = (
+            review.proposal.reference(),
+            review.approval_id,
+            review.expected_approval_status,
+            review.expected_entry.clone(),
+            review.review_token,
+            review.review_digest.clone(),
+        );
+        Some(match review.action {
+            MemoryResolutionAction::Approve => ApplicationCommand::ApproveMemoryProposal {
+                proposal: fields.0,
+                approval_id: fields.1,
+                expected_approval_status: fields.2,
+                expected_entry: fields.3,
+                review_token: fields.4,
+                review_digest: fields.5,
+            },
+            MemoryResolutionAction::Reject => ApplicationCommand::RejectMemoryProposal {
+                proposal: fields.0,
+                approval_id: fields.1,
+                expected_approval_status: fields.2,
+                expected_entry: fields.3,
+                review_token: fields.4,
+                review_digest: fields.5,
+            },
+        })
+    }
+
+    pub(crate) fn authenticated_resolution_review(
+        &self,
+    ) -> Option<&MemoryProposalResolutionReview> {
+        let command = self.reconstructed_resolution_review_command()?;
+        let review = self.resolution_review.as_ref()?;
+        let expected_proposal = match command {
+            ApplicationCommand::ApproveMemoryProposal { proposal, .. }
+                if review.action == MemoryResolutionAction::Approve =>
+            {
+                proposal
+            }
+            ApplicationCommand::RejectMemoryProposal { proposal, .. }
+                if review.action == MemoryResolutionAction::Reject =>
+            {
+                proposal
+            }
+            _ => return None,
+        };
+        let owner = self.profile.as_ref()?;
+        (review.proposal.reference() == expected_proposal
+            && review.proposal.proposer() == &review.proposer_identity.profile
+            && review.namespace_owner_identity.profile == owner.profile
+            && review.proposal.namespace_id() == self.namespace_id?
+            && review.proposal.proposer().profile_id()
+                == review.namespace_owner_identity.profile.profile_id()
+            && review.proposer_is_historical
+                == (review.proposer_identity.profile != review.namespace_owner_identity.profile)
+            && review.approval_id == review.proposal.approval_id()
+            && review.expected_approval_status == crate::policy::ApprovalStatus::Pending
+            && review.plaintext_acknowledgement
+                == MemoryPlaintextAcknowledgement::LocalPlaintextHistoryV1
+            && expected_state_matches_namespace_key(
+                &review.expected_entry,
+                review.proposal.namespace_id(),
+                review.proposal.normalized_key(),
+            ))
+        .then_some(review)
+    }
+
+    pub(crate) fn resolution_review_command(&self) -> Option<ApplicationCommand> {
+        self.authenticated_resolution_review()?;
+        self.reconstructed_resolution_review_command()
+    }
+
+    pub(crate) fn confirmed_command(&self) -> Option<ApplicationCommand> {
+        let confirmation = self.confirmation.as_ref()?;
+        if confirmation.generation != self.generation {
+            return None;
+        }
+        let reconstructed = if self.edit_review.is_some() {
+            self.edit_review_command()
+        } else {
+            self.resolution_review_command()
+        }?;
+        (confirmation.command == reconstructed).then_some(reconstructed)
+    }
+
+    pub(crate) fn editor_is_authenticated(&self) -> bool {
+        let Some(namespace_id) = self.namespace_id else {
+            return false;
+        };
+        let Some(editor) = self.editor.as_ref() else {
+            return false;
+        };
+        if !self.matches_profile_selector(editor.selector()) {
+            return false;
+        }
+        match (self.editor_origin, editor.seed()) {
+            (MemoryEditorOrigin::Create, None) => true,
+            (MemoryEditorOrigin::Edit, Some(seed)) => {
+                let reference = seed.reference();
+                reference.state() == MemoryEntryState::Present
+                    && seed.value().is_some()
+                    && reference.namespace_id() == namespace_id
+                    && crate::memory::NormalizedMemoryKey::new(editor.key_input())
+                        .is_ok_and(|key| &key == reference.normalized_key())
+            }
+            (MemoryEditorOrigin::Create, Some(_)) | (MemoryEditorOrigin::Edit, None) => false,
+        }
+    }
+
+    pub fn begin_pending(&mut self, intent: MemoryOutcomeIntent) -> Result<u64, DomainError> {
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(DomainError::MemoryGenerationOverflow)?;
+        self.generation = generation;
+        self.pending_intent = Some(intent);
+        Ok(generation)
+    }
+
+    pub fn clear_pending(&mut self) {
+        self.pending_intent = None;
+    }
+
+    pub(crate) fn clear_pending_if(
+        &mut self,
+        intent: &MemoryOutcomeIntent,
+        generation: u64,
+    ) -> bool {
+        if self.generation != generation || self.pending_intent.as_ref() != Some(intent) {
+            return false;
+        }
+        self.pending_intent = None;
+        true
+    }
+
+    pub fn selected_entry_id(&self) -> Result<MemoryEntryId, DomainError> {
+        self.authenticated_selected_entry()
+            .map(|summary| summary.entry.entry_id())
+            .ok_or(DomainError::MemorySelectionUnavailable)
+    }
+
+    pub(crate) fn authenticated_entries(&self) -> Option<(&MemoryEntriesView, MemoryPageCounts)> {
+        let page = self.entries.as_ref()?;
+        if !self.matches_profile_namespace(&page.profile, page.namespace_id)
+            || u64::try_from(page.entries.len()).ok()? != page.returned_count
+            || page.returned_count.checked_add(page.omitted_count) != Some(page.total_count)
+        {
+            return None;
+        }
+        let displayed = page.entries.len().min(MEMORY_RETAINED_ROW_CAP);
+        if page.entries.iter().take(displayed).any(|summary| {
+            summary.entry.namespace_id() != page.namespace_id
+                || summary.entry.state() != MemoryEntryState::Present
+        }) {
+            return None;
+        }
+        Some((
+            page,
+            page_counts(
+                page.entries.len(),
+                displayed,
+                page.omitted_count,
+                page.total_count,
+            ),
+        ))
+    }
+
+    pub(crate) fn authenticated_selected_entry(&self) -> Option<&crate::app::MemoryEntrySummary> {
+        let (page, counts) = self.authenticated_entries()?;
+        page.entries
+            .get(self.selected_entry)
+            .filter(|_| self.selected_entry < counts.displayed)
+    }
+
+    pub(crate) fn authenticated_entry_detail(&self) -> Option<&MemoryEntryView> {
+        let selected = self.authenticated_selected_entry()?;
+        let detail = self.entry_detail.as_ref()?;
+        let reference = detail.entry.reference();
+        (self.profile.as_ref().map(|identity| &identity.profile) == Some(&detail.profile)
+            && self.namespace_id == Some(reference.namespace_id())
+            && reference.entry_id() == selected.entry.entry_id())
+        .then_some(detail)
+    }
+
+    pub(crate) fn authenticated_history(
+        &self,
+    ) -> Option<(&MemoryEntryHistoryView, MemoryPageCounts)> {
+        let selected_entry = self.authenticated_selected_entry()?;
+        let history = self.entry_history.as_ref()?;
+        if self.profile.as_ref().map(|identity| &identity.profile) != Some(&history.profile)
+            || self.namespace_id != Some(history.current.namespace_id())
+            || history.current.entry_id() != selected_entry.entry.entry_id()
+            || u64::try_from(history.versions.len()).ok()? != history.returned_count
+            || history.returned_count.checked_add(history.omitted_count)
+                != Some(history.total_count)
+        {
+            return None;
+        }
+        let displayed = history.versions.len().min(MEMORY_RETAINED_ROW_CAP);
+        if history.versions.iter().take(displayed).any(|version| {
+            version.entry.namespace_id() != history.current.namespace_id()
+                || version.entry.entry_id() != history.current.entry_id()
+        }) {
+            return None;
+        }
+        Some((
+            history,
+            page_counts(
+                history.versions.len(),
+                displayed,
+                history.omitted_count,
+                history.total_count,
+            ),
+        ))
+    }
+
+    pub(crate) fn authenticated_selected_history(
+        &self,
+    ) -> Option<&crate::app::MemoryEntryHistorySummary> {
+        let (history, counts) = self.authenticated_history()?;
+        history
+            .versions
+            .get(self.selected_history_version)
+            .filter(|_| self.selected_history_version < counts.displayed)
+    }
+
+    pub(crate) fn authenticated_history_version(
+        &self,
+    ) -> Result<Option<&MemoryEntryVersionView>, ()> {
+        let Some(detail) = self.entry_version.as_ref() else {
+            return Ok(None);
+        };
+        let (history, _) = self.authenticated_history().ok_or(())?;
+        let selected = self.authenticated_selected_history().ok_or(())?;
+        let reference = detail.entry.reference();
+        if self.profile.as_ref().map(|identity| &identity.profile) != Some(&detail.profile)
+            || detail.profile != history.profile
+            || self.namespace_id != Some(reference.namespace_id())
+            || reference.namespace_id() != history.current.namespace_id()
+            || reference.entry_id() != history.current.entry_id()
+            || reference.entry_version_id() != selected.entry.entry_version_id()
+        {
+            return Err(());
+        }
+        Ok(Some(detail))
+    }
+
+    pub(crate) fn authenticated_proposals(
+        &self,
+    ) -> Option<(&MemoryProposalsView, MemoryPageCounts)> {
+        let page = self.proposals.as_ref()?;
+        if !self.matches_profile_namespace(&page.profile, page.namespace_id)
+            || u64::try_from(page.proposals.len()).ok()? != page.returned_count
+            || page.returned_count.checked_add(page.omitted_count) != Some(page.total_count)
+        {
+            return None;
+        }
+        let displayed = page.proposals.len().min(MEMORY_RETAINED_ROW_CAP);
+        if page.proposals.iter().take(displayed).any(|summary| {
+            summary.namespace_id != page.namespace_id
+                || summary.proposer.profile_id() != page.profile.profile_id()
+                || (page.filter == MemoryProposalFilter::Pending
+                    && summary.status != MemoryProposalStatus::Pending)
+        }) {
+            return None;
+        }
+        Some((
+            page,
+            page_counts(
+                page.proposals.len(),
+                displayed,
+                page.omitted_count,
+                page.total_count,
+            ),
+        ))
+    }
+
+    pub(crate) fn authenticated_selected_proposal(
+        &self,
+    ) -> Option<&crate::app::MemoryProposalSummary> {
+        let (page, counts) = self.authenticated_proposals()?;
+        page.proposals
+            .get(self.selected_proposal)
+            .filter(|_| self.selected_proposal < counts.displayed)
+    }
+
+    pub(crate) fn authenticated_proposal_detail(&self) -> Option<&MemoryProposalView> {
+        let summary = self.authenticated_selected_proposal()?;
+        let detail = self.proposal_detail.as_ref()?;
+        let proposal = &detail.proposal;
+        let reference = proposal.reference();
+        if reference != summary.proposal
+            || self.namespace_id != Some(proposal.namespace_id())
+            || proposal.proposer() != &detail.proposer_identity.profile
+            || self.profile.as_ref().map(|identity| &identity.profile)
+                != Some(&detail.namespace_owner_identity.profile)
+            || proposal.proposer().profile_id()
+                != detail.namespace_owner_identity.profile.profile_id()
+            || detail.status != summary.status
+            || proposal_operation_kind(proposal.operation()) != summary.operation
+            || !expected_state_matches_namespace_key(
+                &detail.current_entry,
+                proposal.namespace_id(),
+                proposal.normalized_key(),
+            )
+            || detail
+                .resolution
+                .as_ref()
+                .is_some_and(|resolution| resolution.proposal() != &reference)
+        {
+            return None;
+        }
+        Some(detail)
+    }
+
+    pub(crate) fn authenticated_episodes(
+        &self,
+    ) -> Option<(&EpisodicSummariesView, MemoryPageCounts)> {
+        let page = self.episodes.as_ref()?;
+        if !self.matches_profile_namespace(&page.profile, page.namespace_id)
+            || u64::try_from(page.summaries.len()).ok()? != page.returned_count
+            || page.returned_count.checked_add(page.omitted_count) != Some(page.total_count)
+        {
+            return None;
+        }
+        let displayed = page.summaries.len().min(MEMORY_RETAINED_ROW_CAP);
+        if page.summaries.iter().take(displayed).any(|summary| {
+            summary.summary.namespace_id() != page.namespace_id
+                || summary.summary.profile() != &page.profile
+                || summary.source_count > 128
+        }) {
+            return None;
+        }
+        Some((
+            page,
+            page_counts(
+                page.summaries.len(),
+                displayed,
+                page.omitted_count,
+                page.total_count,
+            ),
+        ))
+    }
+
+    pub(crate) fn authenticated_selected_episode(
+        &self,
+    ) -> Option<&crate::app::EpisodicSummaryListItem> {
+        let (page, counts) = self.authenticated_episodes()?;
+        page.summaries
+            .get(self.selected_episode)
+            .filter(|_| self.selected_episode < counts.displayed)
+    }
+
+    pub(crate) fn authenticated_episode_detail(&self) -> Option<&EpisodicSummaryView> {
+        let selected = self.authenticated_selected_episode()?;
+        let detail = self.episode_detail.as_ref()?;
+        let reference = detail.summary.reference();
+        (reference == selected.summary
+            && self.namespace_id == Some(reference.namespace_id())
+            && self.profile.as_ref().map(|identity| &identity.profile) == Some(reference.profile())
+            && detail.summary.sources().len() <= 128
+            && u64::try_from(detail.summary.sources().len()).ok()? == selected.source_count)
+            .then_some(detail)
+    }
+
+    pub(crate) fn local_layer_cache_is_authenticated(&self) -> bool {
+        match self.pane {
+            MemoryPane::EntryList => self.authenticated_entries().is_some_and(|(_, counts)| {
+                counts.displayed == 0 || self.authenticated_selected_entry().is_some()
+            }),
+            MemoryPane::EntryDetail => self.authenticated_entry_detail().is_some(),
+            MemoryPane::EntryHistory => self.authenticated_history().is_some_and(|(_, counts)| {
+                (counts.displayed == 0 || self.authenticated_selected_history().is_some())
+                    && match self.entry_version {
+                        None => true,
+                        Some(_) => matches!(self.authenticated_history_version(), Ok(Some(_))),
+                    }
+            }),
+            MemoryPane::Proposals => self.authenticated_proposals().is_some_and(|(_, counts)| {
+                counts.displayed == 0 || self.authenticated_selected_proposal().is_some()
+            }),
+            MemoryPane::ProposalDetail => self.authenticated_proposal_detail().is_some(),
+            MemoryPane::EpisodicSummaries => {
+                self.authenticated_episodes().is_some_and(|(_, counts)| {
+                    counts.displayed == 0 || self.authenticated_selected_episode().is_some()
+                })
+            }
+            MemoryPane::EpisodicDetail => self.authenticated_episode_detail().is_some(),
+            MemoryPane::Editor => self.editor_is_authenticated(),
+            MemoryPane::MutationReview => self.edit_review_command().is_some(),
+            MemoryPane::Confirmation => self.confirmed_command().is_some(),
+            MemoryPane::ProposalResolutionReview => {
+                self.authenticated_resolution_review().is_some()
+            }
+            MemoryPane::Result => true,
+        }
+    }
+
+    pub fn apply_matching_view(&mut self, intent: &MemoryOutcomeIntent, view: CommandView) -> bool {
+        if self.pending_intent.as_ref() != Some(intent) {
+            return false;
+        }
+        let previous_detail_identity = self.exact_detail_identity();
+        let matched = match (intent, view) {
+            (MemoryOutcomeIntent::Entries, CommandView::MemoryEntries(value))
+                if self.matches_profile_namespace(&value.profile, value.namespace_id) =>
+            {
+                self.replace_entries(value);
+                true
+            }
+            (MemoryOutcomeIntent::EntryDetail(expected), CommandView::MemoryEntry(value))
+                if value.entry.reference().entry_id() == *expected
+                    && self.matches_profile_namespace(
+                        &value.profile,
+                        value.entry.reference().namespace_id(),
+                    ) =>
+            {
+                self.entry_detail = Some(value);
+                true
+            }
+            (
+                MemoryOutcomeIntent::EntryHistory(expected),
+                CommandView::MemoryEntryHistory(value),
+            ) if value.current.entry_id() == *expected
+                && self.matches_profile_namespace(&value.profile, value.current.namespace_id()) =>
+            {
+                self.replace_entry_history(value);
+                true
+            }
+            (
+                MemoryOutcomeIntent::EntryVersion {
+                    selector,
+                    key,
+                    version,
+                    entry_version_id,
+                },
+                CommandView::MemoryEntryVersion(value),
+            ) if self.matches_profile_selector(selector)
+                && self.matches_profile_namespace(
+                    &value.profile,
+                    value.entry.reference().namespace_id(),
+                )
+                && crate::memory::normalize_memory_key(key).ok().as_ref()
+                    == Some(value.entry.reference().normalized_key())
+                && value.entry.reference().version() == *version
+                && value.entry.reference().entry_version_id() == *entry_version_id =>
+            {
+                self.entry_version = Some(value);
+                true
+            }
+            (MemoryOutcomeIntent::Proposals, CommandView::MemoryProposals(value))
+                if self.matches_profile_namespace(&value.profile, value.namespace_id) =>
+            {
+                self.replace_proposals(value);
+                true
+            }
+            (MemoryOutcomeIntent::ProposalDetail(expected), CommandView::MemoryProposal(value))
+                if value.proposal.reference().proposal_id() == *expected
+                    && self.matches_profile_namespace(
+                        &value.namespace_owner_identity.profile,
+                        value.proposal.namespace_id(),
+                    ) =>
+            {
+                self.proposal_detail = Some(value);
+                true
+            }
+            (MemoryOutcomeIntent::Episodes, CommandView::EpisodicSummaries(value))
+                if self.matches_profile_namespace(&value.profile, value.namespace_id) =>
+            {
+                self.replace_episodes(value);
+                true
+            }
+            (MemoryOutcomeIntent::EpisodeDetail(expected), CommandView::EpisodicSummary(value))
+                if value.summary.reference().summary_id() == *expected
+                    && self.matches_profile_namespace(
+                        value.summary.reference().profile(),
+                        value.summary.reference().namespace_id(),
+                    ) =>
+            {
+                self.episode_detail = Some(value);
+                true
+            }
+            (MemoryOutcomeIntent::Mutation, CommandView::MemoryEntryMutation(value))
+                if self.matches_mutation_result(&value) =>
+            {
+                true
+            }
+            (MemoryOutcomeIntent::Resolution, CommandView::MemoryProposalResolution(value))
+                if self.matches_resolution_result(&value) =>
+            {
+                true
+            }
+            _ => false,
+        };
+        if matched {
+            self.pending_intent = None;
+            if self.exact_detail_identity() != previous_detail_identity {
+                self.detail_scroll = 0;
+            }
+        }
+        matched
+    }
+
+    fn matches_profile_namespace(
+        &self,
+        profile: &crate::agents::AgentProfileVersionRef,
+        namespace_id: MemoryNamespaceId,
+    ) -> bool {
+        self.profile
+            .as_ref()
+            .is_some_and(|identity| &identity.profile == profile)
+            && self.namespace_id == Some(namespace_id)
+    }
+
+    fn matches_profile_selector(&self, selector: &crate::app::AgentProfileSelector) -> bool {
+        let Some(identity) = self.profile.as_ref() else {
+            return false;
+        };
+        match selector {
+            crate::app::AgentProfileSelector::Id(profile_id) => {
+                identity.profile.profile_id() == *profile_id
+            }
+            crate::app::AgentProfileSelector::Name(_) => {
+                selector.normalized_name()
+                    == crate::app::AgentProfileSelector::Name(identity.display_name.clone())
+                        .normalized_name()
+            }
+        }
+    }
+
+    fn matches_mutation_result(&self, value: &crate::app::MemoryEntryMutationView) -> bool {
+        let Some(command) = self.confirmed_command() else {
+            return false;
+        };
+        let Some(review) = self.authenticated_edit_review() else {
+            return false;
+        };
+        if !matches!(
+            (&review.operation, command),
+            (
+                MemoryMutationKind::Set,
+                ApplicationCommand::SetMemoryEntry { .. }
+            ) | (
+                MemoryMutationKind::Delete,
+                ApplicationCommand::DeleteMemoryEntry { .. }
+            )
+        ) {
+            return false;
+        }
+        let result = &value.entry;
+        if result.namespace_id() != review.namespace_id {
+            return false;
+        }
+        let (expected_key, expected_state) = match (&review.operation, &review.candidate) {
+            (MemoryMutationKind::Set, Some(candidate)) => {
+                (candidate.normalized_key(), MemoryEntryState::Present)
+            }
+            (MemoryMutationKind::Delete, None) => {
+                let expected = match &review.expected {
+                    ExpectedMemoryEntryState::Present(expected) => expected,
+                    ExpectedMemoryEntryState::Absent | ExpectedMemoryEntryState::Deleted(_) => {
+                        return false;
+                    }
+                };
+                (expected.normalized_key().clone(), MemoryEntryState::Deleted)
+            }
+            _ => return false,
+        };
+        if result.normalized_key() != &expected_key || result.state() != expected_state {
+            return false;
+        }
+        match &review.expected {
+            ExpectedMemoryEntryState::Absent => true,
+            ExpectedMemoryEntryState::Present(expected)
+            | ExpectedMemoryEntryState::Deleted(expected) => {
+                result.entry_id() == expected.entry_id()
+            }
+        }
+    }
+
+    fn matches_resolution_result(&self, value: &crate::app::MemoryProposalResolutionView) -> bool {
+        let Some(command) = self.confirmed_command() else {
+            return false;
+        };
+        let Some(review) = self.authenticated_resolution_review() else {
+            return false;
+        };
+        if !matches!(
+            (review.action, command),
+            (
+                MemoryResolutionAction::Approve,
+                ApplicationCommand::ApproveMemoryProposal { .. }
+            ) | (
+                MemoryResolutionAction::Reject,
+                ApplicationCommand::RejectMemoryProposal { .. }
+            )
+        ) || value.resolution.proposal() != &review.proposal.reference()
+            || value.resolution.approval_id() != review.approval_id
+        {
+            return false;
+        }
+        value.resolution.status()
+            == match review.action {
+                MemoryResolutionAction::Approve => MemoryProposalStatus::Accepted,
+                MemoryResolutionAction::Reject => MemoryProposalStatus::Rejected,
+            }
+    }
+
+    fn replace_entries(&mut self, entries: MemoryEntriesView) {
+        let selected_id = self
+            .entries
+            .as_ref()
+            .and_then(|view| view.entries.get(self.selected_entry))
+            .map(|summary| summary.entry.entry_id());
+        self.entries = Some(entries);
+        let values = &self.entries.as_ref().expect("entries installed").entries;
+        self.selected_entry = selected_id
+            .and_then(|id| {
+                values
+                    .iter()
+                    .position(|summary| summary.entry.entry_id() == id)
+            })
+            .unwrap_or_else(|| self.selected_entry.min(values.len().saturating_sub(1)));
+        self.entry_scroll = self.entry_scroll.min(self.selected_entry);
+        let current_id = values
+            .get(self.selected_entry)
+            .map(|summary| summary.entry.entry_id());
+        if self
+            .entry_detail
+            .as_ref()
+            .map(|detail| detail.entry.reference().entry_id())
+            != current_id
+        {
+            self.entry_detail = None;
+            self.entry_history = None;
+            self.entry_version = None;
+        }
+    }
+
+    fn replace_entry_history(&mut self, history: MemoryEntryHistoryView) {
+        let selected_id = self
+            .entry_history
+            .as_ref()
+            .and_then(|view| view.versions.get(self.selected_history_version))
+            .map(|summary| summary.entry.entry_version_id());
+        self.entry_history = Some(history);
+        let versions = &self
+            .entry_history
+            .as_ref()
+            .expect("entry history installed")
+            .versions;
+        self.selected_history_version = selected_id
+            .and_then(|id| {
+                versions
+                    .iter()
+                    .position(|summary| summary.entry.entry_version_id() == id)
+            })
+            .unwrap_or_else(|| {
+                self.selected_history_version
+                    .min(versions.len().saturating_sub(1))
+            });
+        self.history_scroll = self.history_scroll.min(self.selected_history_version);
+        let current_id = versions
+            .get(self.selected_history_version)
+            .map(|summary| summary.entry.entry_version_id());
+        if self
+            .entry_version
+            .as_ref()
+            .map(|detail| detail.entry.reference().entry_version_id())
+            != current_id
+        {
+            self.entry_version = None;
+        }
+    }
+
+    fn replace_proposals(&mut self, proposals: MemoryProposalsView) {
+        let selected_id = self
+            .proposals
+            .as_ref()
+            .and_then(|view| view.proposals.get(self.selected_proposal))
+            .map(|summary| summary.proposal.proposal_id());
+        self.proposals = Some(proposals);
+        let values = &self
+            .proposals
+            .as_ref()
+            .expect("proposals installed")
+            .proposals;
+        self.selected_proposal = selected_id
+            .and_then(|id| {
+                values
+                    .iter()
+                    .position(|summary| summary.proposal.proposal_id() == id)
+            })
+            .unwrap_or_else(|| self.selected_proposal.min(values.len().saturating_sub(1)));
+        self.proposal_scroll = self.proposal_scroll.min(self.selected_proposal);
+        let current_id = values
+            .get(self.selected_proposal)
+            .map(|summary| summary.proposal.proposal_id());
+        if self
+            .proposal_detail
+            .as_ref()
+            .map(|detail| detail.proposal.reference().proposal_id())
+            != current_id
+        {
+            self.proposal_detail = None;
+        }
+    }
+
+    fn replace_episodes(&mut self, episodes: EpisodicSummariesView) {
+        let selected_id = self
+            .episodes
+            .as_ref()
+            .and_then(|view| view.summaries.get(self.selected_episode))
+            .map(|summary| summary.summary.summary_id());
+        self.episodes = Some(episodes);
+        let values = &self
+            .episodes
+            .as_ref()
+            .expect("episodes installed")
+            .summaries;
+        self.selected_episode = selected_id
+            .and_then(|id| {
+                values
+                    .iter()
+                    .position(|summary| summary.summary.summary_id() == id)
+            })
+            .unwrap_or_else(|| self.selected_episode.min(values.len().saturating_sub(1)));
+        self.episode_scroll = self.episode_scroll.min(self.selected_episode);
+        let current_id = values
+            .get(self.selected_episode)
+            .map(|summary| summary.summary.summary_id());
+        if self
+            .episode_detail
+            .as_ref()
+            .map(|detail| detail.summary.reference().summary_id())
+            != current_id
+        {
+            self.episode_detail = None;
+        }
+    }
+}
+
+fn page_counts(
+    raw_len: usize,
+    displayed: usize,
+    server_omitted: u64,
+    total: u64,
+) -> MemoryPageCounts {
+    let locally_omitted = u64::try_from(raw_len.saturating_sub(displayed)).unwrap_or(u64::MAX);
+    MemoryPageCounts {
+        displayed,
+        omitted: server_omitted.saturating_add(locally_omitted),
+        total,
+    }
+}
+
+fn proposal_operation_kind(operation: &MemoryProposalOperation) -> MemoryProposalOperationKind {
+    match operation {
+        MemoryProposalOperation::Set { .. } => MemoryProposalOperationKind::Set,
+        MemoryProposalOperation::Delete => MemoryProposalOperationKind::Delete,
+    }
+}
+
+pub(super) fn canonical_memory_edit_diff(diff: &[MemoryFieldDiff]) -> bool {
+    if diff.is_empty() || diff.len() > 4 {
+        return false;
+    }
+    diff.iter().all(|item| {
+        item.before != item.after
+            && memory_field_value_matches(item.field, &item.before)
+            && memory_field_value_matches(item.field, &item.after)
+    }) && diff
+        .windows(2)
+        .all(|items| memory_field_rank(items[0].field) < memory_field_rank(items[1].field))
+}
+
+fn memory_field_rank(field: MemoryField) -> u8 {
+    match field {
+        MemoryField::DisplayKey => 0,
+        MemoryField::State => 1,
+        MemoryField::Value => 2,
+        MemoryField::PurposeTags => 3,
+    }
+}
+
+fn memory_field_value_matches(field: MemoryField, value: &MemoryFieldValue) -> bool {
+    matches!(
+        (field, value),
+        (
+            MemoryField::DisplayKey | MemoryField::Value,
+            MemoryFieldValue::Missing
+        ) | (
+            MemoryField::DisplayKey | MemoryField::Value,
+            MemoryFieldValue::Text(_)
+        ) | (MemoryField::State, MemoryFieldValue::Missing)
+            | (MemoryField::State, MemoryFieldValue::State(_))
+            | (MemoryField::PurposeTags, MemoryFieldValue::Missing)
+            | (MemoryField::PurposeTags, MemoryFieldValue::Tags(_))
+    )
+}
+
+pub(super) fn absent_set_diff_matches(
+    diff: &[MemoryFieldDiff],
+    candidate: &MemoryEntryDraft,
+) -> bool {
+    diff.len() == 4
+        && diff[0].field == MemoryField::DisplayKey
+        && diff[0].before == MemoryFieldValue::Missing
+        && text_value_matches(&diff[0].after, candidate.display_key())
+        && diff[1].field == MemoryField::State
+        && diff[1].before == MemoryFieldValue::Missing
+        && diff[1].after == MemoryFieldValue::State(MemoryEntryState::Present)
+        && diff[2].field == MemoryField::Value
+        && diff[2].before == MemoryFieldValue::Missing
+        && text_value_matches(&diff[2].after, candidate.value())
+        && diff[3].field == MemoryField::PurposeTags
+        && diff[3].before == MemoryFieldValue::Missing
+        && tags_value_matches(&diff[3].after, candidate.purpose_tags())
+}
+
+pub(super) fn seeded_present_set_diff(
+    seed: &MemoryEntryVersion,
+    candidate: &MemoryEntryDraft,
+) -> Option<Vec<MemoryFieldDiff>> {
+    if seed.reference().state() != MemoryEntryState::Present
+        || seed.reference().normalized_key() != &candidate.normalized_key()
+    {
+        return None;
+    }
+    let before = [
+        MemoryFieldValue::Text(seed.display_key().to_owned()),
+        MemoryFieldValue::State(MemoryEntryState::Present),
+        MemoryFieldValue::Text(seed.value()?.to_owned()),
+        MemoryFieldValue::Tags(seed.purpose_tags().to_vec()),
+    ];
+    let after = [
+        MemoryFieldValue::Text(candidate.display_key().to_owned()),
+        MemoryFieldValue::State(MemoryEntryState::Present),
+        MemoryFieldValue::Text(candidate.value().to_owned()),
+        MemoryFieldValue::Tags(candidate.purpose_tags().to_vec()),
+    ];
+    Some(
+        [
+            MemoryField::DisplayKey,
+            MemoryField::State,
+            MemoryField::Value,
+            MemoryField::PurposeTags,
+        ]
+        .into_iter()
+        .zip(before)
+        .zip(after)
+        .filter_map(|((field, before), after)| {
+            (before != after).then_some(MemoryFieldDiff {
+                field,
+                before,
+                after,
+            })
+        })
+        .collect(),
+    )
+}
+
+pub(super) fn deleted_set_diff_matches(
+    diff: &[MemoryFieldDiff],
+    candidate: &MemoryEntryDraft,
+) -> bool {
+    let required = if diff.first().is_some_and(|item| {
+        item.field == MemoryField::DisplayKey
+            && matches!(&item.before, MemoryFieldValue::Text(prior_key) if {
+                MemoryEntryDraft::new(
+                    prior_key.clone(),
+                    candidate.value().to_owned(),
+                    candidate.purpose_tags().to_vec(),
+                )
+                .is_ok_and(|canonical| {
+                    canonical.display_key() == prior_key
+                        && canonical.normalized_key() == candidate.normalized_key()
+                })
+            })
+            && text_value_matches(&item.after, candidate.display_key())
+    }) {
+        &diff[1..]
+    } else {
+        diff
+    };
+    required.len() == 3
+        && required[0].field == MemoryField::State
+        && required[0].before == MemoryFieldValue::State(MemoryEntryState::Deleted)
+        && required[0].after == MemoryFieldValue::State(MemoryEntryState::Present)
+        && required[1].field == MemoryField::Value
+        && required[1].before == MemoryFieldValue::Missing
+        && text_value_matches(&required[1].after, candidate.value())
+        && required[2].field == MemoryField::PurposeTags
+        && required[2].before == MemoryFieldValue::Missing
+        && tags_value_matches(&required[2].after, candidate.purpose_tags())
+}
+
+pub(super) fn delete_diff_matches(
+    diff: &[MemoryFieldDiff],
+    requested_entry: &MemoryEntryVersion,
+) -> bool {
+    diff.len() == 3
+        && diff[0].field == MemoryField::State
+        && diff[0].before == MemoryFieldValue::State(MemoryEntryState::Present)
+        && diff[0].after == MemoryFieldValue::State(MemoryEntryState::Deleted)
+        && diff[1].field == MemoryField::Value
+        && requested_entry
+            .value()
+            .is_some_and(|value| text_value_matches(&diff[1].before, value))
+        && diff[1].after == MemoryFieldValue::Missing
+        && diff[2].field == MemoryField::PurposeTags
+        && tags_value_matches(&diff[2].before, requested_entry.purpose_tags())
+        && diff[2].after == MemoryFieldValue::Missing
+}
+
+fn text_value_matches(value: &MemoryFieldValue, expected: &str) -> bool {
+    matches!(value, MemoryFieldValue::Text(actual) if actual == expected)
+}
+
+fn tags_value_matches(value: &MemoryFieldValue, expected: &[String]) -> bool {
+    matches!(value, MemoryFieldValue::Tags(actual) if actual == expected)
+}
+
+pub(super) fn expected_state_matches_namespace_key(
+    expected: &ExpectedMemoryEntryState,
+    namespace_id: MemoryNamespaceId,
+    key: &crate::memory::NormalizedMemoryKey,
+) -> bool {
+    match expected {
+        ExpectedMemoryEntryState::Absent => true,
+        ExpectedMemoryEntryState::Present(reference) => {
+            reference.state() == MemoryEntryState::Present
+                && reference.namespace_id() == namespace_id
+                && reference.normalized_key() == key
+        }
+        ExpectedMemoryEntryState::Deleted(reference) => {
+            reference.state() == MemoryEntryState::Deleted
+                && reference.namespace_id() == namespace_id
+                && reference.normalized_key() == key
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,13 +1479,17 @@ pub enum AgentOutcomeIntent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillOperationOrigin {
     Skills(SkillsPane),
-    AgentSkills { profile_id: crate::domain::AgentProfileId },
+    AgentSkills {
+        profile_id: crate::domain::AgentProfileId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillWorkspaceOrigin {
     Cockpit(View),
-    AgentSkills { profile_id: crate::domain::AgentProfileId },
+    AgentSkills {
+        profile_id: crate::domain::AgentProfileId,
+    },
 }
 
 impl AssignmentKind {
@@ -182,7 +1573,9 @@ impl Default for SkillsViewState {
 
 impl SkillsViewState {
     pub fn replace_skills(&mut self, library: SkillsView) {
-        let selected_id = self.selected_summary().map(|summary| summary.skill_ref.skill_id());
+        let selected_id = self
+            .selected_summary()
+            .map(|summary| summary.skill_ref.skill_id());
         self.library = library;
         self.library_loaded = true;
         self.selected_skill = selected_id
@@ -262,7 +1655,9 @@ impl SkillsViewState {
 
     pub fn selected_action(&self) -> SkillDetailAction {
         let actions = self.available_detail_actions();
-        actions[self.selected_action_index.min(actions.len().saturating_sub(1))]
+        actions[self
+            .selected_action_index
+            .min(actions.len().saturating_sub(1))]
     }
 
     pub fn available_detail_actions(&self) -> &'static [SkillDetailAction] {
@@ -290,14 +1685,18 @@ impl SkillsViewState {
             self.version_detail
                 .as_ref()
                 .filter(|version| {
-                    self.detail.as_ref().map(|detail| detail.skill_ref.skill_id())
+                    self.detail
+                        .as_ref()
+                        .map(|detail| detail.skill_ref.skill_id())
                         == Some(version.skill_ref.skill_id())
                 })
                 .map(|version| &version.skill_ref)
-                .or_else(|| self.detail
-                .as_ref()
-                .map(|detail| &detail.skill_ref)
-                .or_else(|| self.selected_summary().map(|summary| &summary.skill_ref)))
+                .or_else(|| {
+                    self.detail
+                        .as_ref()
+                        .map(|detail| &detail.skill_ref)
+                        .or_else(|| self.selected_summary().map(|summary| &summary.skill_ref))
+                })
         }
     }
 
@@ -331,6 +1730,8 @@ impl SkillsViewState {
 pub struct AgentsViewState {
     pub selected_profile: usize,
     pub selected_template: usize,
+    pub selected_detail_action: AgentDetailAction,
+    pub memory: MemoryViewState,
     pub pane: AgentsPane,
     pub list_scroll: usize,
     pub detail_scroll: usize,
@@ -352,6 +1753,8 @@ impl Default for AgentsViewState {
         Self {
             selected_profile: 0,
             selected_template: 0,
+            selected_detail_action: AgentDetailAction::AssignedSkills,
+            memory: MemoryViewState::default(),
             pane: AgentsPane::List,
             list_scroll: 0,
             detail_scroll: 0,
@@ -376,15 +1779,16 @@ impl Default for AgentsViewState {
 }
 
 impl AgentsViewState {
-    pub fn select_profile_id(&mut self, profile_id: crate::domain::AgentProfileId) {
+    pub fn select_profile_id(&mut self, profile_id: crate::domain::AgentProfileId) -> bool {
         if let Some(index) = self
             .profiles
             .profiles
             .iter()
             .position(|summary| summary.profile_id == profile_id)
         {
-            self.select_profile_index(index);
+            return self.select_profile_index(index);
         }
+        false
     }
 
     pub fn selected_skill_action(&self) -> AgentSkillAction {
@@ -396,22 +1800,69 @@ impl AgentsViewState {
     }
 
     pub fn selected_assigned_skill_ref(&self) -> Option<&SkillVersionRef> {
-        self.detail
-            .as_ref()
-            .and_then(|detail| detail.profile.skill_refs().get(self.selected_assigned_skill))
+        self.detail.as_ref().and_then(|detail| {
+            detail
+                .profile
+                .skill_refs()
+                .get(self.selected_assigned_skill)
+        })
     }
 
     pub fn selected_summary(&self) -> Option<&crate::app::AgentProfileSummary> {
         self.profiles.profiles.get(self.selected_profile)
     }
 
-    fn select_profile_index(&mut self, index: usize) {
-        self.selected_profile = index.min(self.profiles.profiles.len().saturating_sub(1));
+    pub fn select_profile_index(&mut self, index: usize) -> bool {
+        let index = index.min(self.profiles.profiles.len().saturating_sub(1));
+        let previous_id = self.selected_summary().map(|summary| summary.profile_id);
+        let next_id = self
+            .profiles
+            .profiles
+            .get(index)
+            .map(|summary| summary.profile_id);
+        if self.memory.has_protected_workflow() && previous_id != next_id {
+            return false;
+        }
+        self.selected_profile = index;
         self.list_scroll = self.list_scroll.min(self.selected_profile);
+        if previous_id != next_id {
+            self.selected_detail_action = AgentDetailAction::AssignedSkills;
+            self.memory.invalidate_profile_context();
+        }
+        true
     }
 
-    pub fn replace_profiles(&mut self, profiles: AgentProfilesView) {
+    pub fn replace_profiles(&mut self, profiles: AgentProfilesView) -> bool {
         let selected_id = self.selected_summary().map(|summary| summary.profile_id);
+        if self.memory.has_protected_workflow() {
+            let protected_profile = self
+                .memory
+                .profile
+                .as_ref()
+                .map(|identity| &identity.profile);
+            let protected_is_preserved = selected_id
+                .and_then(|profile_id| {
+                    profiles
+                        .profiles
+                        .iter()
+                        .find(|summary| summary.profile_id == profile_id)
+                })
+                .is_some_and(|summary| {
+                    protected_profile.is_some_and(|profile| {
+                        summary.profile_version_id == profile.profile_version_id()
+                            && summary.version == profile.version()
+                            && summary.content_digest == *profile.content_digest()
+                    })
+                });
+            if !protected_is_preserved {
+                return false;
+            }
+        }
+        let bound_profile = self
+            .memory
+            .profile
+            .as_ref()
+            .map(|identity| identity.profile.clone());
         self.profiles = profiles;
         if self.profiles.profiles.is_empty() {
             self.selected_profile = 0;
@@ -420,7 +1871,9 @@ impl AgentsViewState {
             self.history = None;
             self.version_detail = None;
             self.skill_panel_open = false;
-            return;
+            self.selected_detail_action = AgentDetailAction::AssignedSkills;
+            self.memory.invalidate_profile_context();
+            return true;
         }
         let selected_profile = selected_id
             .and_then(|profile_id| {
@@ -433,21 +1886,53 @@ impl AgentsViewState {
                 self.selected_profile
                     .min(self.profiles.profiles.len().saturating_sub(1))
             });
-        self.select_profile_index(selected_profile);
-        let selected_id = self.selected_summary().map(|summary| summary.profile_id);
+        self.selected_profile = selected_profile;
+        self.list_scroll = self.list_scroll.min(self.selected_profile);
+        let next_summary = self.selected_summary();
+        let next_id = next_summary.map(|summary| summary.profile_id);
+        if selected_id != next_id {
+            self.selected_detail_action = AgentDetailAction::AssignedSkills;
+            self.memory.invalidate_profile_context();
+        } else if bound_profile.as_ref().is_some_and(|profile| {
+            next_summary.is_some_and(|summary| {
+                summary.profile_version_id != profile.profile_version_id()
+                    || summary.version != profile.version()
+                    || summary.content_digest != *profile.content_digest()
+            })
+        }) {
+            self.memory.invalidate_profile_context();
+        }
         if self
             .detail
             .as_ref()
             .map(|detail| detail.profile.profile_id())
-            != selected_id
+            != next_id
         {
             self.detail = None;
             self.history = None;
             self.version_detail = None;
         }
+        true
     }
 
-    pub fn replace_detail(&mut self, detail: AgentProfileView) {
+    pub fn replace_detail(&mut self, detail: AgentProfileView) -> bool {
+        if self.memory.has_protected_workflow()
+            && self
+                .memory
+                .profile
+                .as_ref()
+                .is_none_or(|identity| identity.profile != detail.profile.reference())
+        {
+            return false;
+        }
+        if self
+            .memory
+            .profile
+            .as_ref()
+            .is_some_and(|identity| identity.profile != detail.profile.reference())
+        {
+            self.memory.invalidate_profile_context();
+        }
         let profile_id = detail.profile.profile_id();
         if let Some(index) = self
             .profiles
@@ -462,12 +1947,30 @@ impl AgentsViewState {
             self.version_detail = None;
         }
         self.detail = Some(detail);
-        self.selected_assigned_skill = self
-            .selected_assigned_skill
-            .min(self.detail.as_ref().map(|detail| detail.profile.skill_refs().len().saturating_sub(1)).unwrap_or(0));
+        self.selected_assigned_skill = self.selected_assigned_skill.min(
+            self.detail
+                .as_ref()
+                .map(|detail| detail.profile.skill_refs().len().saturating_sub(1))
+                .unwrap_or(0),
+        );
+        true
     }
 
-    pub fn replace_history(&mut self, history: AgentProfileHistoryView) {
+    pub fn replace_history(&mut self, history: AgentProfileHistoryView) -> bool {
+        if self.memory.has_protected_workflow()
+            && self.memory.profile.as_ref().is_none_or(|identity| {
+                identity.profile.profile_id() != history.profile_id
+                    || identity.profile.profile_version_id() != history.active_version_id
+            })
+        {
+            return false;
+        }
+        if self.memory.profile.as_ref().is_some_and(|identity| {
+            identity.profile.profile_id() == history.profile_id
+                && identity.profile.profile_version_id() != history.active_version_id
+        }) {
+            self.memory.invalidate_profile_context();
+        }
         if let Some(index) = self
             .profiles
             .profiles
@@ -480,9 +1983,19 @@ impl AgentsViewState {
         self.history_scroll = 0;
         self.version_detail = None;
         self.history = Some(history);
+        true
     }
 
-    pub fn replace_version_detail(&mut self, version: AgentProfileVersionView) {
+    pub fn replace_version_detail(&mut self, version: AgentProfileVersionView) -> bool {
+        if self.memory.has_protected_workflow()
+            && self
+                .memory
+                .profile
+                .as_ref()
+                .is_none_or(|identity| identity.profile != version.profile.reference())
+        {
+            return false;
+        }
         let profile_id = version.profile.profile_id();
         if self.history.as_ref().map(|history| history.profile_id) != Some(profile_id) {
             self.history = None;
@@ -498,6 +2011,7 @@ impl AgentsViewState {
             self.select_profile_index(index);
         }
         self.version_detail = Some(version);
+        true
     }
 
     pub fn start_profile_create(
@@ -595,6 +2109,23 @@ impl CommandEditor {
         self.buffer.insert_str(self.cursor_byte, &accepted);
         self.cursor_byte = self.cursor_byte.saturating_add(accepted.len());
         self.history_index = None;
+    }
+
+    pub(super) fn ingest_memory_value(&mut self, text: &str) {
+        self.normalize_cursor();
+        let available = MAX_INPUT_BYTES.saturating_sub(self.buffer.len());
+        let accepted = bounded_multiline_prefix(text, available);
+        if accepted.is_empty() {
+            return;
+        }
+        self.buffer.insert_str(self.cursor_byte, &accepted);
+        self.cursor_byte = self.cursor_byte.saturating_add(accepted.len());
+        self.history_index = None;
+    }
+
+    pub(super) fn replace_with_memory_value(&mut self, value: &str) {
+        self.clear();
+        self.ingest_memory_value(value);
     }
 
     pub fn move_left(&mut self) {
@@ -735,6 +2266,27 @@ fn bounded_safe_prefix(input: &str, byte_limit: usize) -> String {
     bounded
 }
 
+fn bounded_multiline_prefix(input: &str, byte_limit: usize) -> String {
+    let mut bounded = String::with_capacity(input.len().min(byte_limit));
+    let mut characters = input.chars().peekable();
+    while let Some(mut character) = characters.next() {
+        if character == '\r' {
+            if characters.peek() == Some(&'\n') {
+                characters.next();
+            }
+            character = '\n';
+        }
+        if character.is_control() && character != '\n' {
+            continue;
+        }
+        if bounded.len().saturating_add(character.len_utf8()) > byte_limit {
+            break;
+        }
+        bounded.push(character);
+    }
+    bounded
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NavigationTab {
     Overview,
@@ -747,10 +2299,7 @@ pub(super) enum NavigationTab {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingOutcomeNavigation {
-    SelectIfUnchanged {
-        tab: NavigationTab,
-        generation: u64,
-    },
+    SelectIfUnchanged { tab: NavigationTab, generation: u64 },
     PreserveCurrent,
 }
 
@@ -1045,24 +2594,33 @@ impl TuiModel {
     }
 
     pub fn synchronize_geometry(&mut self) {
-        let area = ratatui::layout::Rect::new(
-            0,
-            0,
-            self.terminal_width,
-            self.terminal_height,
-        );
+        let area = ratatui::layout::Rect::new(0, 0, self.terminal_width, self.terminal_height);
         let geometry = if self.skills.active {
             super::layout::skill_geometry(area, self.inspector_open)
         } else {
-            super::layout::view_geometry(area, self.active_view, self.inspector_open)
+            super::layout::view_geometry_for_state(
+                area,
+                self.active_view,
+                self.inspector_open,
+                self.active_view == View::Agents && self.agents.pane == AgentsPane::Memory,
+            )
         };
         self.layout_mode = geometry.cockpit.mode;
         self.workspace_body_width = geometry.workspace_body_width;
         self.workspace_body_height = geometry.workspace_body_height;
+        self.normalize_visible_focus();
     }
 
     fn normalize_visible_focus(&mut self) {
         if self.focus == Focus::Command {
+            return;
+        }
+        if !self.skills.active
+            && self.active_view == View::Agents
+            && self.agents.pane == AgentsPane::Memory
+            && self.focus == Focus::Inspector
+        {
+            self.focus = Focus::Workspace;
             return;
         }
         let visible = match self.layout_mode {
@@ -1144,12 +2702,10 @@ impl TuiModel {
 
     pub fn set_command_in_flight(&mut self, command_in_flight: bool) {
         if command_in_flight && !self.command_in_flight {
-            self.pending_outcome_navigation = Some(
-                PendingOutcomeNavigation::SelectIfUnchanged {
-                    tab: self.active_navigation_tab(),
-                    generation: self.navigation_generation,
-                },
-            );
+            self.pending_outcome_navigation = Some(PendingOutcomeNavigation::SelectIfUnchanged {
+                tab: self.active_navigation_tab(),
+                generation: self.navigation_generation,
+            });
         } else if !command_in_flight {
             self.pending_outcome_navigation = None;
         }
@@ -1164,8 +2720,7 @@ impl TuiModel {
     pub(super) fn should_present_pending_outcome(&self) -> bool {
         match self.pending_outcome_navigation {
             Some(PendingOutcomeNavigation::SelectIfUnchanged { tab, generation }) => {
-                tab == self.active_navigation_tab()
-                    && generation == self.navigation_generation
+                tab == self.active_navigation_tab() && generation == self.navigation_generation
             }
             Some(PendingOutcomeNavigation::PreserveCurrent) => false,
             None => true,
@@ -1200,8 +2755,7 @@ impl TuiModel {
     }
 
     pub fn available_agent_skill_actions(&self) -> &'static [AgentSkillAction] {
-        const STANDARD: &[AgentSkillAction] =
-            &[AgentSkillAction::View, AgentSkillAction::Unassign];
+        const STANDARD: &[AgentSkillAction] = &[AgentSkillAction::View, AgentSkillAction::Unassign];
         const UPGRADEABLE: &[AgentSkillAction] = &[
             AgentSkillAction::View,
             AgentSkillAction::Upgrade,
@@ -1591,5 +3145,20 @@ mod tests {
         assert_eq!(model.audit_selection, Some(1));
         model.select_last_audit();
         assert_eq!(model.audit_selection, Some(1));
+    }
+
+    #[test]
+    fn memory_pending_cleanup_requires_the_exact_intent_and_generation() {
+        let mut state = MemoryViewState::default();
+        let generation = state
+            .begin_pending(MemoryOutcomeIntent::Entries)
+            .expect("pending generation");
+
+        assert!(!state.clear_pending_if(&MemoryOutcomeIntent::Proposals, generation));
+        assert!(!state.clear_pending_if(&MemoryOutcomeIntent::Entries, generation + 1));
+        assert_eq!(state.pending_intent, Some(MemoryOutcomeIntent::Entries));
+
+        assert!(state.clear_pending_if(&MemoryOutcomeIntent::Entries, generation));
+        assert_eq!(state.pending_intent, None);
     }
 }

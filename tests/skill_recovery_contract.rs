@@ -8,9 +8,7 @@ use ai_stock_forum::{
         Actor, AgentProfileId, AgentProfileVersionId, Clock, CorrelationId, EventId, IdGenerator,
         MemoryNamespaceId, ObjectRef, SkillId, SkillVersionId, canonical_json_bytes, sha256,
     },
-    persistence::{
-        Database, EventRepository, ProjectionRepository, insert_skill_version,
-    },
+    persistence::{Database, EventRepository, ProjectionRepository, insert_skill_version},
     recovery::{ProjectionState, RecoveryCoordinator, reduce},
     skills::{SkillDraft, SkillProvenance, SkillVersion, builtin_manifests},
 };
@@ -199,13 +197,9 @@ fn builtin_versions_reconcile_before_profile_skill_references_and_assignment_reb
         profile: profile.clone(),
     });
 
-    let state = RecoveryCoordinator::bootstrap(
-        &mut fixture.database,
-        &fixture.clock,
-        &fixture.ids,
-        &[],
-    )
-    .unwrap();
+    let state =
+        RecoveryCoordinator::bootstrap(&mut fixture.database, &fixture.clock, &fixture.ids, &[])
+            .unwrap();
 
     assert_eq!(skill_rows(&fixture.database).len(), 4);
     assert_eq!(active_rows(&fixture.database).len(), 4);
@@ -272,8 +266,8 @@ fn active_skills_rebuild_from_events_and_repeated_rebuild_is_deterministic() {
     );
     let events = EventRepository::load_all(fixture.database.connection()).unwrap();
 
-    let first_state = ProjectionRepository::rebuild(fixture.database.connection_mut(), &events)
-        .unwrap();
+    let first_state =
+        ProjectionRepository::rebuild(fixture.database.connection_mut(), &events).unwrap();
     let first_skills = skill_rows(&fixture.database);
     let first_active = active_rows(&fixture.database);
     let first_digest = first_state.digest().unwrap();
@@ -284,12 +278,18 @@ fn active_skills_rebuild_from_events_and_repeated_rebuild_is_deterministic() {
             "SELECT last_event_sequence, last_event_digest, projection_digest
              FROM projection_metadata WHERE singleton = 1",
             [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )
         .unwrap();
 
-    let second_state = ProjectionRepository::rebuild(fixture.database.connection_mut(), &events)
-        .unwrap();
+    let second_state =
+        ProjectionRepository::rebuild(fixture.database.connection_mut(), &events).unwrap();
 
     assert_eq!(skill_rows(&fixture.database), first_skills);
     assert_eq!(active_rows(&fixture.database), first_active);
@@ -302,7 +302,11 @@ fn active_skills_rebuild_from_events_and_repeated_rebuild_is_deterministic() {
                 "SELECT last_event_sequence, last_event_digest, projection_digest
                  FROM projection_metadata WHERE singleton = 1",
                 [],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?)),
+                |row| Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?
+                )),
             )
             .unwrap(),
         first_metadata,
@@ -645,13 +649,9 @@ fn assignment_upgrade_fixture() -> (Fixture, AgentProfileVersion, SkillVersion) 
 fn assignment_and_upgrade_events_rebuild_the_active_exact_profile_version() {
     let (mut fixture, upgraded, builtin_v2) = assignment_upgrade_fixture();
 
-    let state = RecoveryCoordinator::bootstrap(
-        &mut fixture.database,
-        &fixture.clock,
-        &fixture.ids,
-        &[],
-    )
-    .unwrap();
+    let state =
+        RecoveryCoordinator::bootstrap(&mut fixture.database, &fixture.clock, &fixture.ids, &[])
+            .unwrap();
 
     let active = state
         .projection()

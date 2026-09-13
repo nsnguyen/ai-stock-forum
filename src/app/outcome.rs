@@ -3,8 +3,14 @@ use crate::{
     app::{AuditLimit, EventEnvelope, InputRejection},
     audit::AuditEntry,
     domain::{
-        AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, Digest, InstallationId,
-        ObjectVersion, SessionId,
+        AgentProfileId, AgentProfileVersionId, ApprovalId, CommandId, CorrelationId, Digest,
+        InstallationId, MemoryNamespaceId, ObjectVersion, SessionId,
+    },
+    memory::{
+        EpisodicQualification, EpisodicSummary, EpisodicSummaryRef, ExpectedMemoryEntryState,
+        MemoryEntryRef, MemoryEntryVersion, MemoryProposal, MemoryProposalFilter,
+        MemoryProposalOperationKind, MemoryProposalRef, MemoryProposalResolution,
+        MemoryProposalStatus, MemorySnapshot,
     },
     setup::SetupStatus,
     skills::{ContentDigest, SkillDraft, SkillProvenance, SkillVersionRef},
@@ -251,6 +257,161 @@ pub struct AgentSkillAssignmentPreview {
     pub review_digest: ContentDigest,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryEntrySummary {
+    pub entry: MemoryEntryRef,
+    pub display_key: String,
+    pub purpose_tags: Vec<String>,
+    pub value_bytes: u64,
+    pub created_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryEntriesView {
+    pub profile: crate::agents::AgentProfileVersionRef,
+    pub namespace_id: MemoryNamespaceId,
+    pub entries: Vec<MemoryEntrySummary>,
+    pub total_count: u64,
+    pub returned_count: u64,
+    pub omitted_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryEntryView {
+    pub profile: crate::agents::AgentProfileVersionRef,
+    pub entry: MemoryEntryVersion,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryEntryHistorySummary {
+    pub entry: MemoryEntryRef,
+    pub display_key: String,
+    pub created_at_ms: i64,
+    pub accepted_proposal: Option<MemoryProposalRef>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryEntryHistoryView {
+    pub profile: crate::agents::AgentProfileVersionRef,
+    pub current: MemoryEntryRef,
+    pub versions: Vec<MemoryEntryHistorySummary>,
+    pub total_count: u64,
+    pub returned_count: u64,
+    pub omitted_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryEntryVersionView {
+    pub profile: crate::agents::AgentProfileVersionRef,
+    pub entry: MemoryEntryVersion,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryProposalSummary {
+    pub proposal: MemoryProposalRef,
+    pub namespace_id: MemoryNamespaceId,
+    pub proposer: crate::agents::AgentProfileVersionRef,
+    pub operation: MemoryProposalOperationKind,
+    pub display_key: String,
+    pub status: MemoryProposalStatus,
+    pub created_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryProposalsView {
+    pub profile: crate::agents::AgentProfileVersionRef,
+    pub namespace_id: MemoryNamespaceId,
+    pub filter: MemoryProposalFilter,
+    pub proposals: Vec<MemoryProposalSummary>,
+    pub total_count: u64,
+    pub returned_count: u64,
+    pub omitted_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryProfileIdentityView {
+    pub profile: crate::agents::AgentProfileVersionRef,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryProposalView {
+    pub proposal: MemoryProposal,
+    pub status: MemoryProposalStatus,
+    pub resolution: Option<MemoryProposalResolution>,
+    pub current_entry: ExpectedMemoryEntryState,
+    pub proposer_is_historical: bool,
+    pub proposer_identity: MemoryProfileIdentityView,
+    pub namespace_owner_identity: MemoryProfileIdentityView,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EpisodicSummaryListItem {
+    pub summary: EpisodicSummaryRef,
+    pub label: String,
+    pub purpose_tags: Vec<String>,
+    pub source_count: u64,
+    pub created_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EpisodicSummariesView {
+    pub profile: crate::agents::AgentProfileVersionRef,
+    pub namespace_id: MemoryNamespaceId,
+    pub summaries: Vec<EpisodicSummaryListItem>,
+    pub total_count: u64,
+    pub returned_count: u64,
+    pub omitted_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EpisodicSummaryView {
+    pub summary: EpisodicSummary,
+    pub qualification: EpisodicQualification,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryEntryMutationView {
+    pub entry: MemoryEntryRef,
+    pub expired_proposals: Vec<MemoryProposalRef>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryProposalCreatedView {
+    pub proposal: MemoryProposalRef,
+    pub approval_id: ApprovalId,
+    pub status: MemoryProposalStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryProposalResolutionView {
+    pub resolution: MemoryProposalResolution,
+    pub entry: Option<MemoryEntryRef>,
+    pub expired_proposals: Vec<MemoryProposalRef>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemorySnapshotView {
+    pub snapshot: MemorySnapshot,
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShutdownDisposition {
@@ -265,6 +426,7 @@ pub enum ShutdownDisposition {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
+#[allow(clippy::large_enum_variant)] // Contract variants intentionally retain exact typed payloads.
 pub enum CommandView {
     Help(HelpView),
     Status(StatusView),
@@ -285,6 +447,18 @@ pub enum CommandView {
     AgentSkillAssigned(AgentSkillMutationView),
     AgentSkillUpgraded(AgentSkillMutationView),
     AgentSkillUnassigned(AgentSkillMutationView),
+    MemoryEntries(MemoryEntriesView),
+    MemoryEntry(MemoryEntryView),
+    MemoryEntryHistory(MemoryEntryHistoryView),
+    MemoryEntryVersion(MemoryEntryVersionView),
+    MemoryProposals(MemoryProposalsView),
+    MemoryProposal(MemoryProposalView),
+    EpisodicSummaries(EpisodicSummariesView),
+    EpisodicSummary(EpisodicSummaryView),
+    MemoryEntryMutation(MemoryEntryMutationView),
+    MemoryProposalCreated(MemoryProposalCreatedView),
+    MemoryProposalResolution(MemoryProposalResolutionView),
+    MemorySnapshot(MemorySnapshotView),
     InputRejected(InputRejectedView),
     Shutdown(ShutdownView),
 }

@@ -7,16 +7,25 @@ use crate::{
     },
     app::{
         AgentSkillAssignmentOperation, AgentSkillAssignmentPreview, AppError, ApplicationCommand,
-        CommandOutcome, CommandView, InputRejectionCategory, SafeToken, ShutdownDisposition,
-        ShutdownReason,
+        CommandOutcome, CommandView, EpisodicSummariesView, EpisodicSummaryView,
+        InputRejectionCategory, MemoryEntriesView, MemoryEntryHistoryView, MemoryEntryMutationView,
+        MemoryEntryVersionView, MemoryEntryView, MemoryProfileIdentityView,
+        MemoryProposalCreatedView, MemoryProposalResolutionReview, MemoryProposalResolutionView,
+        MemoryProposalView, MemoryProposalsView, SafeToken, ShutdownDisposition, ShutdownReason,
     },
     cli::CliError,
     config::StartupError,
     domain::Actor,
+    memory::{
+        EpisodicQualification, ExpectedMemoryEntryState, MemoryEditReview, MemoryEntryDraft,
+        MemoryEntryRef, MemoryField, MemoryFieldDiff, MemoryFieldValue, MemoryNoChange,
+        MemoryProposalOperation, MemoryProposalRef,
+    },
     runtime::RuntimeError,
-    skills::{SkillDraft, SkillEditPreview, SkillVersionRef},
     setup::SetupStatus,
+    skills::{SkillDraft, SkillEditPreview, SkillVersionRef},
     ui::{
+        memory_editor::{MEMORY_PLAINTEXT_WARNING, MemoryEditor},
         profile_editor::{ProfileEditor, ProfileEditorMode, ProfileEditorStep},
         tui::TuiError,
     },
@@ -24,18 +33,177 @@ use crate::{
 
 const MAX_PROFILE_LIST_ROWS: usize = 100;
 const MAX_PROFILE_HISTORY_ROWS: usize = 100;
+const MAX_MEMORY_LIST_ROWS: usize = 100;
+const MAX_MEMORY_KEY_RENDER_BYTES: usize = 384;
+const MAX_MEMORY_TAG_RENDER_BYTES: usize = 128;
+const MAX_MEMORY_VALUE_RENDER_BYTES: usize = 16_384;
+const MAX_MEMORY_RATIONALE_RENDER_BYTES: usize = 2_048;
+const MAX_EPISODIC_LABEL_RENDER_BYTES: usize = 512;
+const MAX_EPISODIC_BODY_RENDER_BYTES: usize = 32_768;
+const MAX_EPISODIC_EVENT_TYPE_RENDER_BYTES: usize = 512;
+const MEMORY_USAGE: &[u8] = b"Usage:\n  /memory list <agent>\n  /memory get <agent> <key>\n  /memory history <agent> <key> [positive-version]\n  /memory set <agent> <key>\n  /memory delete <agent> <key>\n  /memory proposals <agent> [pending|all]\n  /memory proposal <proposal-id>\n  /memory approve <proposal-id>\n  /memory reject <proposal-id>\n  /memory episodes <agent>\n  /memory episode <summary-id>\n";
 
 pub struct TextRenderer;
 
 impl TextRenderer {
+    pub fn render_memory_editor<W: Write>(editor: &MemoryEditor, writer: &mut W) -> io::Result<()> {
+        writeln!(writer, "Memory editor [{:?}]", editor.step())?;
+        writeln!(writer, "{MEMORY_PLAINTEXT_WARNING}")?;
+        writer.write_all(b"Controls: :back :cancel\n")
+    }
+
+    pub fn render_memory_editor_error<W: Write>(code: &str, writer: &mut W) -> io::Result<()> {
+        writeln!(writer, "Memory editor input was rejected [{code}].")
+    }
+
+    pub fn render_memory_cancelled<W: Write>(writer: &mut W) -> io::Result<()> {
+        writer.write_all(b"Memory workflow cancelled.\n")
+    }
+
+    pub fn render_memory_no_change<W: Write>(
+        no_change: MemoryNoChange,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writeln!(writer, "Memory edit has no effect: {no_change:?}.")
+    }
+
+    pub fn render_memory_edit_review<W: Write>(
+        review: &MemoryEditReview,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        let action = match review.operation {
+            crate::memory::MemoryMutationKind::Set => "set",
+            crate::memory::MemoryMutationKind::Delete => "delete",
+        };
+        writeln!(writer, "Memory {action} review")?;
+        writeln!(writer, "{MEMORY_PLAINTEXT_WARNING}")?;
+        writeln!(
+            writer,
+            "Profile: {}@{} version-id {} digest {}",
+            review.profile.profile_id(),
+            review.profile.version().get(),
+            review.profile.profile_version_id(),
+            review.profile.content_digest(),
+        )?;
+        writeln!(writer, "Namespace: {}", review.namespace_id)?;
+        render_expected_entry("Expected entry", &review.expected, writer)?;
+        if let ExpectedMemoryEntryState::Present(entry) | ExpectedMemoryEntryState::Deleted(entry) =
+            &review.expected
+        {
+            writeln!(writer, "Expected key: {}", entry.normalized_key().as_str())?;
+        }
+        if let Some(candidate) = &review.candidate {
+            render_memory_candidate(candidate, writer)?;
+        }
+        if canonical_memory_edit_diff(&review.diff) {
+            writeln!(writer, "Changed fields: {}", review.diff.len())?;
+            for diff in &review.diff {
+                render_memory_field_diff(diff, writer)?;
+            }
+        } else {
+            writeln!(writer, "Changed fields: invalid review shape")?;
+            writeln!(writer, "Review diff omitted: {} fields.", review.diff.len())?;
+        }
+        writeln!(writer, "Review digest: {}", review.review_digest)?;
+        writeln!(writer, "Type exactly: {action} {}", review.review_digest)
+    }
+
+    pub fn render_memory_resolution_review<W: Write>(
+        review: &MemoryProposalResolutionReview,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        let action = match review.action {
+            crate::memory::MemoryResolutionAction::Approve => "approve",
+            crate::memory::MemoryResolutionAction::Reject => "reject",
+        };
+        writeln!(writer, "Memory proposal {action} review")?;
+        writeln!(writer, "{MEMORY_PLAINTEXT_WARNING}")?;
+        let proposal = &review.proposal;
+        let proposal_ref = proposal.reference();
+        writeln!(
+            writer,
+            "Proposal: {}@{} digest {}",
+            proposal_ref.proposal_id(),
+            proposal_ref.version().get(),
+            proposal_ref.content_digest(),
+        )?;
+        writeln!(
+            writer,
+            "Approval: {} expected {:?}",
+            review.approval_id, review.expected_approval_status,
+        )?;
+        writeln!(writer, "Namespace: {}", proposal.namespace_id())?;
+        render_memory_profile_identity(
+            "Proposer",
+            &review.proposer_identity,
+            review.proposer_is_historical,
+            writer,
+        )?;
+        render_memory_profile_identity(
+            "Namespace owner",
+            &review.namespace_owner_identity,
+            false,
+            writer,
+        )?;
+        writeln!(
+            writer,
+            "Display key: {}",
+            escaped_bounded_bytes(proposal.display_key(), MAX_MEMORY_KEY_RENDER_BYTES),
+        )?;
+        writeln!(
+            writer,
+            "Normalized key: {}",
+            escaped_bounded_bytes(
+                proposal.normalized_key().as_str(),
+                MAX_MEMORY_KEY_RENDER_BYTES,
+            ),
+        )?;
+        render_expected_entry("Expected/current entry", &review.expected_entry, writer)?;
+        match proposal.operation() {
+            MemoryProposalOperation::Set { candidate } => {
+                writer.write_all(b"Operation: Set\n")?;
+                render_memory_candidate(candidate, writer)?;
+            }
+            MemoryProposalOperation::Delete => writer.write_all(b"Operation: Delete\n")?,
+        }
+        writeln!(
+            writer,
+            "Rationale: {}",
+            escaped_bounded_bytes(proposal.rationale(), MAX_MEMORY_RATIONALE_RENDER_BYTES),
+        )?;
+        writeln!(writer, "Created: {}", proposal.created_at_ms())?;
+        writeln!(writer, "Creation event: {}", proposal.creation_event_id())?;
+        writeln!(writer, "Review digest: {}", review.review_digest)?;
+        writeln!(writer, "Type exactly: {action} {}", review.review_digest)
+    }
+
+    pub fn render_memory_confirmation<W: Write>(
+        expected_confirmation: &str,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writeln!(writer, "{MEMORY_PLAINTEXT_WARNING}")?;
+        writeln!(writer, "Type exactly: {expected_confirmation}")
+    }
+
+    pub fn render_memory_confirmation_mismatch<W: Write>(writer: &mut W) -> io::Result<()> {
+        writer.write_all(b"Confirmation did not match; memory review retained.\n")
+    }
+
+    pub fn render_fresh_memory_review_required<W: Write>(writer: &mut W) -> io::Result<()> {
+        writer.write_all(b"Start a fresh /memory command to request a new review.\n")
+    }
+
     pub fn render_outcome<W: Write>(outcome: &CommandOutcome, writer: &mut W) -> io::Result<()> {
         Self::render_view(&outcome.view, writer)
     }
 
     pub fn render_view<W: Write>(view: &CommandView, writer: &mut W) -> io::Result<()> {
+        if let Some(result) = render_memory_view(view, writer) {
+            return result;
+        }
         match view {
             CommandView::Help(_) => writer.write_all(
-                b"Available commands:\n  /help\n  /status\n  /setup status\n  /audit tail [limit: 1-100]\n  /skill list\n  /skills\n  /skill add\n  /skill show <name-or-id> [version]\n  /skill assign <skill> <agent> [version]\n  /skill unassign <skill> <agent>\n  /quit\n",
+                b"Available commands:\n  /help\n  /status\n  /setup status\n  /audit tail [limit: 1-100]\n  /skill list\n  /skills\n  /skill add\n  /skill show <name-or-id> [version]\n  /skill assign <skill> <agent> [version]\n  /skill unassign <skill> <agent>\nMemory commands:\n    /memory list <agent>\n    /memory get <agent> <key>\n    /memory history <agent> <key> [version]\n    /memory set <agent> <key>\n    /memory delete <agent> <key>\n    /memory proposals <agent> [pending|all]\n    /memory proposal <proposal-id>\n    /memory approve <proposal-id>\n    /memory reject <proposal-id>\n    /memory episodes <agent>\n    /memory episode <summary-id>\n  /quit\nMemory internal producers are unavailable: proposal creation, summary mutation, and snapshot building.\n",
             ),
             CommandView::Status(_) => {
                 writer.write_all(b"Installation: ready\nSession: active\n")
@@ -56,6 +224,7 @@ impl TextRenderer {
                     let actor = match entry.actor {
                         Actor::Human => "human",
                         Actor::System => "system",
+                        Actor::Agent(_) => "agent",
                     };
                     let kind = escaped_bounded(&entry.kind, 64);
                     let summary = escaped_bounded(&entry.summary, 256);
@@ -81,13 +250,10 @@ impl TextRenderer {
                 }
                 InputRejectionCategory::Malformed => {
                     writer.write_all(b"Input rejected: malformed command.\n")?;
-                    if matches!(
-                        view.rejection.safe_token.as_ref().map(SafeToken::as_str),
-                        Some("/skill" | "/skills")
-                    ) {
-                        writer.write_all(b"Usage: /skill list | /skill add | /skill show <name-or-id> [version] | /skill assign <skill> <agent> [version] | /skill unassign <skill> <agent>\n")
-                    } else {
-                        Ok(())
+                    match view.rejection.safe_token.as_ref().map(SafeToken::as_str) {
+                        Some("/skill" | "/skills") => writer.write_all(b"Usage: /skill list | /skill add | /skill show <name-or-id> [version] | /skill assign <skill> <agent> [version] | /skill unassign <skill> <agent>\n"),
+                        Some("/memory") => writer.write_all(MEMORY_USAGE),
+                        _ => Ok(()),
                     }
                 }
                 InputRejectionCategory::Unknown => {
@@ -383,6 +549,26 @@ impl TextRenderer {
                 view.profile_id,
                 view.version.get(),
             ),
+            CommandView::MemoryEntries(_)
+            | CommandView::MemoryEntry(_)
+            | CommandView::MemoryEntryVersion(_)
+            | CommandView::MemoryEntryHistory(_)
+            | CommandView::MemoryProposals(_)
+            | CommandView::MemoryProposal(_)
+            | CommandView::EpisodicSummaries(_)
+            | CommandView::EpisodicSummary(_)
+            | CommandView::MemoryEntryMutation(_)
+            | CommandView::MemoryProposalCreated(_)
+            | CommandView::MemoryProposalResolution(_) => {
+                unreachable!("memory views are rendered before the non-memory view match")
+            }
+            CommandView::MemorySnapshot(view) => writeln!(
+                writer,
+                "Memory snapshot: entries {} summaries {} digest {}",
+                view.snapshot.entries().len(),
+                view.snapshot.summaries().len(),
+                view.snapshot.snapshot_digest(),
+            ),
         }
     }
 
@@ -404,16 +590,29 @@ impl TextRenderer {
         writer.write_all(b"Enter a template ID, or :cancel.\n")
     }
 
-    pub fn render_skill_editor<W: Write>(
-        draft: &SkillDraft,
-        writer: &mut W,
-    ) -> io::Result<()> {
+    pub fn render_skill_editor<W: Write>(draft: &SkillDraft, writer: &mut W) -> io::Result<()> {
         writer.write_all(b"Create skill editor\n")?;
-        writeln!(writer, "  Display name: {}", escaped_bounded(&draft.display_name, 64))?;
-        writeln!(writer, "  Description: {}", escaped_bounded(&draft.description, 256))?;
-        writeln!(writer, "  Use when: {}", escaped_bounded(&draft.use_when, 512))?;
+        writeln!(
+            writer,
+            "  Display name: {}",
+            escaped_bounded(&draft.display_name, 64)
+        )?;
+        writeln!(
+            writer,
+            "  Description: {}",
+            escaped_bounded(&draft.description, 256)
+        )?;
+        writeln!(
+            writer,
+            "  Use when: {}",
+            escaped_bounded(&draft.use_when, 512)
+        )?;
         writeln!(writer, "  Tags: {}", escaped_list(&draft.tags, 32))?;
-        writeln!(writer, "  Instructions: {}", escaped_bounded(&draft.instructions, 4_096))?;
+        writeln!(
+            writer,
+            "  Instructions: {}",
+            escaped_bounded(&draft.instructions, 4_096)
+        )?;
         writer.write_all(b"Controls: :name <text> :description <text> :use-when <text> :tag add <tag> :tag remove <tag> :instructions <text> :review :cancel\n")
     }
 
@@ -448,8 +647,7 @@ impl TextRenderer {
         writeln!(
             writer,
             "  Agent: {} base {}",
-            preview.profile_id,
-            preview.expected_active_profile_version_id,
+            preview.profile_id, preview.expected_active_profile_version_id,
         )?;
         writeln!(
             writer,
@@ -683,9 +881,627 @@ impl TextRenderer {
                 writer.write_all(b"Interrupt handling could not be started.\n")
             }
             TuiError::Runtime(error) => Self::render_runtime_error(error, writer),
+            TuiError::UnexpectedControllerEffect => {
+                writer.write_all(b"Terminal action could not be processed.\n")
+            }
+            TuiError::MemoryState(_) => {
+                writer.write_all(b"Memory action could not be processed.\n")
+            }
             TuiError::Panicked => writer.write_all(b"Terminal interface stopped unexpectedly.\n"),
         }
     }
+}
+
+pub(super) fn canonical_memory_edit_diff(diff: &[MemoryFieldDiff]) -> bool {
+    if diff.is_empty() || diff.len() > 4 {
+        return false;
+    }
+    diff.iter().all(|item| {
+        item.before != item.after
+            && memory_field_value_matches(item.field, &item.before)
+            && memory_field_value_matches(item.field, &item.after)
+    }) && diff
+        .windows(2)
+        .all(|items| memory_field_rank(items[0].field) < memory_field_rank(items[1].field))
+}
+
+fn memory_field_rank(field: MemoryField) -> u8 {
+    match field {
+        MemoryField::DisplayKey => 0,
+        MemoryField::State => 1,
+        MemoryField::Value => 2,
+        MemoryField::PurposeTags => 3,
+    }
+}
+
+fn memory_field_value_matches(field: MemoryField, value: &MemoryFieldValue) -> bool {
+    matches!(
+        (field, value),
+        (
+            MemoryField::DisplayKey | MemoryField::Value,
+            MemoryFieldValue::Missing | MemoryFieldValue::Text(_)
+        ) | (
+            MemoryField::State,
+            MemoryFieldValue::Missing | MemoryFieldValue::State(_)
+        ) | (
+            MemoryField::PurposeTags,
+            MemoryFieldValue::Missing | MemoryFieldValue::Tags(_)
+        )
+    )
+}
+
+fn render_memory_view<W: Write>(view: &CommandView, writer: &mut W) -> Option<io::Result<()>> {
+    match view {
+        CommandView::MemoryEntries(value) => Some(render_memory_entries(value, writer)),
+        CommandView::MemoryEntry(value) => Some(render_memory_entry(value, writer)),
+        CommandView::MemoryEntryHistory(value) => Some(render_memory_history(value, writer)),
+        CommandView::MemoryEntryVersion(value) => Some(render_memory_version(value, writer)),
+        CommandView::MemoryProposals(value) => Some(render_memory_proposals(value, writer)),
+        CommandView::MemoryProposal(value) => Some(render_memory_proposal(value, writer)),
+        CommandView::EpisodicSummaries(value) => Some(render_episodic_summaries(value, writer)),
+        CommandView::EpisodicSummary(value) => Some(render_episodic_summary(value, writer)),
+        CommandView::MemoryEntryMutation(value) => Some(render_memory_mutation(value, writer)),
+        CommandView::MemoryProposalCreated(value) => Some(render_proposal_created(value, writer)),
+        CommandView::MemoryProposalResolution(value) => {
+            Some(render_proposal_resolution(value, writer))
+        }
+        CommandView::MemorySnapshot(_) => None,
+        _ => None,
+    }
+}
+
+fn render_memory_entries<W: Write>(view: &MemoryEntriesView, writer: &mut W) -> io::Result<()> {
+    let (rendered_count, omitted_count) =
+        rendered_list_counts(view.omitted_count, view.entries.len());
+    writeln!(
+        writer,
+        "Memory entries: profile {} namespace {} returned {} of {} ({} omitted)",
+        view.profile.profile_id(),
+        view.namespace_id,
+        rendered_count,
+        view.total_count,
+        omitted_count,
+    )?;
+    writer.write_all(b"KEY | STATE | VERSION | BYTES | TAGS | CREATED | VERSION ID | DIGEST\n")?;
+    for item in view.entries.iter().take(MAX_MEMORY_LIST_ROWS) {
+        writeln!(
+            writer,
+            "{} | {:?} | {} | {} | {} | {} | {} | {}",
+            escaped_bounded_bytes(&item.display_key, MAX_MEMORY_KEY_RENDER_BYTES),
+            item.entry.state(),
+            item.entry.version().get(),
+            item.value_bytes,
+            escaped_memory_list(&item.purpose_tags, MAX_MEMORY_TAG_RENDER_BYTES),
+            item.created_at_ms,
+            item.entry.entry_version_id(),
+            item.entry.content_digest(),
+        )?;
+    }
+    write_memory_omitted(writer, "entries", omitted_count)
+}
+
+fn render_memory_entry<W: Write>(view: &MemoryEntryView, writer: &mut W) -> io::Result<()> {
+    render_memory_entry_detail("Memory entry", &view.profile, &view.entry, writer)
+}
+
+fn render_memory_history<W: Write>(
+    view: &MemoryEntryHistoryView,
+    writer: &mut W,
+) -> io::Result<()> {
+    let (rendered_count, omitted_count) =
+        rendered_list_counts(view.omitted_count, view.versions.len());
+    writeln!(
+        writer,
+        "Memory entry history: profile {} current {} returned {} of {} ({} omitted)",
+        view.profile.profile_id(),
+        view.current.entry_version_id(),
+        rendered_count,
+        view.total_count,
+        omitted_count,
+    )?;
+    writer.write_all(
+        b"VERSION | KEY | STATE | CREATED | VERSION ID | ACCEPTED PROPOSAL | DIGEST\n",
+    )?;
+    for item in view.versions.iter().take(MAX_MEMORY_LIST_ROWS) {
+        let accepted = item.accepted_proposal.as_ref().map_or_else(
+            || "none".to_owned(),
+            |proposal| {
+                format!(
+                    "{}@{}#{}",
+                    proposal.proposal_id(),
+                    proposal.version().get(),
+                    proposal.content_digest()
+                )
+            },
+        );
+        writeln!(
+            writer,
+            "{} | {} | {:?} | {} | {} | {} | {}",
+            item.entry.version().get(),
+            escaped_bounded_bytes(&item.display_key, MAX_MEMORY_KEY_RENDER_BYTES),
+            item.entry.state(),
+            item.created_at_ms,
+            item.entry.entry_version_id(),
+            accepted,
+            item.entry.content_digest(),
+        )?;
+    }
+    write_memory_omitted(writer, "versions", omitted_count)
+}
+
+fn render_memory_version<W: Write>(
+    view: &MemoryEntryVersionView,
+    writer: &mut W,
+) -> io::Result<()> {
+    render_memory_entry_detail(
+        "Memory entry historical version",
+        &view.profile,
+        &view.entry,
+        writer,
+    )
+}
+
+fn render_memory_proposals<W: Write>(view: &MemoryProposalsView, writer: &mut W) -> io::Result<()> {
+    let (rendered_count, omitted_count) =
+        rendered_list_counts(view.omitted_count, view.proposals.len());
+    writeln!(
+        writer,
+        "Memory proposals: profile {} namespace {} filter {:?} returned {} of {} ({} omitted)",
+        view.profile.profile_id(),
+        view.namespace_id,
+        view.filter,
+        rendered_count,
+        view.total_count,
+        omitted_count,
+    )?;
+    writer.write_all(b"KEY | OPERATION | STATUS | PROPOSER | CREATED | PROPOSAL ID | DIGEST\n")?;
+    for item in view.proposals.iter().take(MAX_MEMORY_LIST_ROWS) {
+        writeln!(
+            writer,
+            "{} | {:?} | {:?} | {}@{} | {} | {} | {}",
+            escaped_bounded_bytes(&item.display_key, MAX_MEMORY_KEY_RENDER_BYTES),
+            item.operation,
+            item.status,
+            item.proposer.profile_id(),
+            item.proposer.version().get(),
+            item.created_at_ms,
+            item.proposal.proposal_id(),
+            item.proposal.content_digest(),
+        )?;
+    }
+    write_memory_omitted(writer, "proposals", omitted_count)
+}
+
+fn render_memory_proposal<W: Write>(view: &MemoryProposalView, writer: &mut W) -> io::Result<()> {
+    let proposal_ref = view.proposal.reference();
+    writeln!(writer, "Memory proposal: {}", proposal_ref.proposal_id())?;
+    writeln!(writer, "Version: {}", proposal_ref.version().get())?;
+    writeln!(writer, "Status: {:?}", view.status)?;
+    writeln!(writer, "Digest: {}", proposal_ref.content_digest())?;
+    writeln!(writer, "Approval ID: {}", view.proposal.approval_id())?;
+    writeln!(writer, "Namespace: {}", view.proposal.namespace_id())?;
+    render_memory_profile_identity(
+        "Proposer",
+        &view.proposer_identity,
+        view.proposer_is_historical,
+        writer,
+    )?;
+    render_memory_profile_identity(
+        "Namespace owner",
+        &view.namespace_owner_identity,
+        false,
+        writer,
+    )?;
+    writeln!(
+        writer,
+        "Display key: {}",
+        escaped_bounded_bytes(view.proposal.display_key(), MAX_MEMORY_KEY_RENDER_BYTES),
+    )?;
+    writeln!(
+        writer,
+        "Normalized key: {}",
+        escaped_bounded_bytes(
+            view.proposal.normalized_key().as_str(),
+            MAX_MEMORY_KEY_RENDER_BYTES,
+        ),
+    )?;
+    render_expected_entry("Expected entry", view.proposal.expected(), writer)?;
+    render_expected_entry("Current entry", &view.current_entry, writer)?;
+    match view.proposal.operation() {
+        MemoryProposalOperation::Set { candidate } => {
+            writer.write_all(b"Operation: Set\n")?;
+            render_memory_candidate(candidate, writer)?;
+        }
+        MemoryProposalOperation::Delete => writer.write_all(b"Operation: Delete\n")?,
+    }
+    writeln!(
+        writer,
+        "Rationale: {}",
+        escaped_bounded_bytes(view.proposal.rationale(), MAX_MEMORY_RATIONALE_RENDER_BYTES,),
+    )?;
+    writeln!(writer, "Created: {}", view.proposal.created_at_ms())?;
+    if let Some(resolution) = &view.resolution {
+        writeln!(
+            writer,
+            "Resolution: {:?} approval {} event {} at {}",
+            resolution.status(),
+            resolution.approval_id(),
+            resolution.resolution_event_id(),
+            resolution.resolved_at_ms(),
+        )?;
+    }
+    Ok(())
+}
+
+fn render_episodic_summaries<W: Write>(
+    view: &EpisodicSummariesView,
+    writer: &mut W,
+) -> io::Result<()> {
+    let (rendered_count, omitted_count) =
+        rendered_list_counts(view.omitted_count, view.summaries.len());
+    writeln!(
+        writer,
+        "Episodic summaries: profile {} namespace {} returned {} of {} ({} omitted)",
+        view.profile.profile_id(),
+        view.namespace_id,
+        rendered_count,
+        view.total_count,
+        omitted_count,
+    )?;
+    writer
+        .write_all(b"QUALIFICATION | LABEL | TAGS | SOURCES | CREATED | SUMMARY ID | DIGEST\n")?;
+    for item in view.summaries.iter().take(MAX_MEMORY_LIST_ROWS) {
+        writeln!(
+            writer,
+            "{} | {} | {} | {} | {} | {} | {}",
+            EpisodicQualification::SummaryVerifySources.label(),
+            escaped_bounded_bytes(&item.label, MAX_EPISODIC_LABEL_RENDER_BYTES),
+            escaped_memory_list(&item.purpose_tags, MAX_MEMORY_TAG_RENDER_BYTES),
+            item.source_count,
+            item.created_at_ms,
+            item.summary.summary_id(),
+            item.summary.content_digest(),
+        )?;
+    }
+    write_memory_omitted(writer, "summaries", omitted_count)
+}
+
+fn render_episodic_summary<W: Write>(view: &EpisodicSummaryView, writer: &mut W) -> io::Result<()> {
+    let reference = view.summary.reference();
+    writeln!(writer, "Episodic summary: {}", reference.summary_id())?;
+    writeln!(writer, "Qualification: {}", view.qualification.label())?;
+    writeln!(writer, "Version: {}", reference.version().get())?;
+    render_memory_profile_ref("Profile", reference.profile(), writer)?;
+    writeln!(writer, "Namespace: {}", reference.namespace_id())?;
+    writeln!(writer, "Digest: {}", reference.content_digest())?;
+    writeln!(
+        writer,
+        "Creation event sequence: {}",
+        reference.creation_event_sequence()
+    )?;
+    writeln!(
+        writer,
+        "Creation event ID: {}",
+        reference.creation_event_id()
+    )?;
+    writeln!(
+        writer,
+        "Source set digest: {}",
+        reference.source_set_digest()
+    )?;
+    writeln!(
+        writer,
+        "Label: {}",
+        escaped_bounded_bytes(view.summary.label(), MAX_EPISODIC_LABEL_RENDER_BYTES),
+    )?;
+    writeln!(
+        writer,
+        "Body: {}",
+        escaped_bounded_bytes(view.summary.body(), MAX_EPISODIC_BODY_RENDER_BYTES),
+    )?;
+    writeln!(
+        writer,
+        "Purpose tags: {}",
+        escaped_memory_list(view.summary.purpose_tags(), MAX_MEMORY_TAG_RENDER_BYTES),
+    )?;
+    writer.write_all(b"Sources:\n")?;
+    for source in view.summary.sources() {
+        writeln!(
+            writer,
+            "  sequence {} event {} type {} digest {}",
+            source.sequence(),
+            source.event_id(),
+            escaped_bounded_bytes(source.event_type(), MAX_EPISODIC_EVENT_TYPE_RENDER_BYTES,),
+            source.event_digest(),
+        )?;
+    }
+    writeln!(writer, "Created: {}", view.summary.created_at_ms())
+}
+
+fn render_memory_profile_identity<W: Write>(
+    label: &str,
+    identity: &MemoryProfileIdentityView,
+    historical: bool,
+    writer: &mut W,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "{label}: {}",
+        escaped_bounded_bytes(&identity.display_name, MAX_EPISODIC_LABEL_RENDER_BYTES,),
+    )?;
+    render_memory_profile_ref(&format!("{label} profile"), &identity.profile, writer)?;
+    if historical {
+        writeln!(writer, "{label} warning: historical profile version")?;
+    }
+    Ok(())
+}
+
+fn render_memory_profile_ref<W: Write>(
+    label: &str,
+    profile: &crate::agents::AgentProfileVersionRef,
+    writer: &mut W,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "{label}: {}@{}",
+        profile.profile_id(),
+        profile.version().get()
+    )?;
+    writeln!(
+        writer,
+        "{label} version ID: {}",
+        profile.profile_version_id()
+    )?;
+    writeln!(writer, "{label} digest: {}", profile.content_digest())
+}
+
+fn render_memory_mutation<W: Write>(
+    view: &MemoryEntryMutationView,
+    writer: &mut W,
+) -> io::Result<()> {
+    writer.write_all(b"Memory entry mutation:\n")?;
+    render_entry_ref("Entry", &view.entry, writer)?;
+    render_expired_proposals(&view.expired_proposals, writer)
+}
+
+fn render_proposal_created<W: Write>(
+    view: &MemoryProposalCreatedView,
+    writer: &mut W,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "Memory proposal created: {}",
+        view.proposal.proposal_id()
+    )?;
+    writeln!(writer, "Version: {}", view.proposal.version().get())?;
+    writeln!(writer, "Status: {:?}", view.status)?;
+    writeln!(writer, "Approval ID: {}", view.approval_id)?;
+    writeln!(writer, "Digest: {}", view.proposal.content_digest())
+}
+
+fn render_proposal_resolution<W: Write>(
+    view: &MemoryProposalResolutionView,
+    writer: &mut W,
+) -> io::Result<()> {
+    let proposal = view.resolution.proposal();
+    writeln!(
+        writer,
+        "Memory proposal resolved: {}",
+        proposal.proposal_id()
+    )?;
+    writeln!(writer, "Version: {}", proposal.version().get())?;
+    writeln!(writer, "Status: {:?}", view.resolution.status())?;
+    writeln!(writer, "Approval ID: {}", view.resolution.approval_id())?;
+    writeln!(
+        writer,
+        "Resolution event: {}",
+        view.resolution.resolution_event_id()
+    )?;
+    writeln!(writer, "Resolved: {}", view.resolution.resolved_at_ms())?;
+    writeln!(writer, "Digest: {}", proposal.content_digest())?;
+    match &view.entry {
+        Some(entry) => render_entry_ref("Entry", entry, writer)?,
+        None => writer.write_all(b"Entry: none\n")?,
+    }
+    render_expired_proposals(&view.expired_proposals, writer)
+}
+
+fn render_memory_entry_detail<W: Write>(
+    title: &str,
+    profile: &crate::agents::AgentProfileVersionRef,
+    entry: &crate::memory::MemoryEntryVersion,
+    writer: &mut W,
+) -> io::Result<()> {
+    let reference = entry.reference();
+    writeln!(writer, "{title}: {}", reference.entry_id())?;
+    writeln!(writer, "Profile: {}", profile.profile_id())?;
+    writeln!(writer, "Namespace: {}", reference.namespace_id())?;
+    writeln!(writer, "Version: {}", reference.version().get())?;
+    writeln!(writer, "Version ID: {}", reference.entry_version_id())?;
+    writeln!(writer, "State: {:?}", reference.state())?;
+    writeln!(writer, "Digest: {}", reference.content_digest())?;
+    writeln!(
+        writer,
+        "Display key: {}",
+        escaped_bounded_bytes(entry.display_key(), MAX_MEMORY_KEY_RENDER_BYTES),
+    )?;
+    match entry.value() {
+        Some(value) => writeln!(
+            writer,
+            "Value: {}",
+            escaped_bounded_bytes(value, MAX_MEMORY_VALUE_RENDER_BYTES),
+        )?,
+        None => writer.write_all(b"Value: none (deleted)\n")?,
+    }
+    writeln!(
+        writer,
+        "Purpose tags: {}",
+        escaped_memory_list(entry.purpose_tags(), MAX_MEMORY_TAG_RENDER_BYTES),
+    )?;
+    writeln!(writer, "Created by: {:?}", entry.created_by())?;
+    writeln!(writer, "Created: {}", entry.created_at_ms())?;
+    writeln!(writer, "Creation event: {}", entry.creation_event_id())?;
+    if let Some(proposal) = entry.accepted_proposal() {
+        writeln!(
+            writer,
+            "Accepted proposal: {}@{}#{}",
+            proposal.proposal_id(),
+            proposal.version().get(),
+            proposal.content_digest(),
+        )?;
+    }
+    Ok(())
+}
+
+fn render_memory_candidate<W: Write>(
+    candidate: &MemoryEntryDraft,
+    writer: &mut W,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "Candidate key: {}",
+        escaped_bounded_bytes(candidate.display_key(), MAX_MEMORY_KEY_RENDER_BYTES),
+    )?;
+    writeln!(
+        writer,
+        "Candidate value: {}",
+        escaped_bounded_bytes(candidate.value(), MAX_MEMORY_VALUE_RENDER_BYTES),
+    )?;
+    writeln!(
+        writer,
+        "Candidate purpose tags: {}",
+        escaped_memory_list(candidate.purpose_tags(), MAX_MEMORY_TAG_RENDER_BYTES),
+    )
+}
+
+fn render_memory_field_diff<W: Write>(diff: &MemoryFieldDiff, writer: &mut W) -> io::Result<()> {
+    let label = match diff.field {
+        MemoryField::DisplayKey => "Display key",
+        MemoryField::State => "State",
+        MemoryField::Value => "Value",
+        MemoryField::PurposeTags => "Purpose tags",
+    };
+    writeln!(
+        writer,
+        "  {label}: {} -> {}",
+        rendered_memory_field_value(&diff.before),
+        rendered_memory_field_value(&diff.after),
+    )
+}
+
+fn rendered_memory_field_value(value: &MemoryFieldValue) -> String {
+    match value {
+        MemoryFieldValue::Missing => "missing".to_owned(),
+        MemoryFieldValue::Text(value) => {
+            escaped_bounded_bytes(value, MAX_MEMORY_VALUE_RENDER_BYTES)
+        }
+        MemoryFieldValue::Tags(tags) => escaped_memory_list(tags, MAX_MEMORY_TAG_RENDER_BYTES),
+        MemoryFieldValue::State(state) => format!("{state:?}"),
+    }
+}
+
+fn render_expected_entry<W: Write>(
+    label: &str,
+    expected: &ExpectedMemoryEntryState,
+    writer: &mut W,
+) -> io::Result<()> {
+    match expected {
+        ExpectedMemoryEntryState::Absent => writeln!(writer, "{label}: absent"),
+        ExpectedMemoryEntryState::Present(entry) | ExpectedMemoryEntryState::Deleted(entry) => {
+            write!(writer, "{label}: ")?;
+            render_entry_ref_inline(entry, writer)
+        }
+    }
+}
+
+fn render_entry_ref<W: Write>(
+    label: &str,
+    entry: &MemoryEntryRef,
+    writer: &mut W,
+) -> io::Result<()> {
+    write!(writer, "{label}: ")?;
+    render_entry_ref_inline(entry, writer)
+}
+
+fn render_entry_ref_inline<W: Write>(entry: &MemoryEntryRef, writer: &mut W) -> io::Result<()> {
+    writeln!(
+        writer,
+        "{} version {} version-id {} state {:?} digest {}",
+        entry.entry_id(),
+        entry.version().get(),
+        entry.entry_version_id(),
+        entry.state(),
+        entry.content_digest(),
+    )
+}
+
+fn render_expired_proposals<W: Write>(
+    proposals: &[MemoryProposalRef],
+    writer: &mut W,
+) -> io::Result<()> {
+    writeln!(writer, "Expired proposals: {}", proposals.len())?;
+    for proposal in proposals.iter().take(MAX_MEMORY_LIST_ROWS) {
+        writeln!(
+            writer,
+            "  {} version {} digest {}",
+            proposal.proposal_id(),
+            proposal.version().get(),
+            proposal.content_digest(),
+        )?;
+    }
+    write_memory_omitted(
+        writer,
+        "expired proposals",
+        rendered_omitted(0, proposals.len()),
+    )
+}
+
+fn rendered_omitted(server_omitted: u64, row_count: usize) -> u64 {
+    server_omitted.saturating_add(
+        u64::try_from(row_count.saturating_sub(MAX_MEMORY_LIST_ROWS)).unwrap_or(u64::MAX),
+    )
+}
+
+fn rendered_list_counts(server_omitted: u64, row_count: usize) -> (u64, u64) {
+    let rendered = u64::try_from(row_count.min(MAX_MEMORY_LIST_ROWS)).unwrap_or(u64::MAX);
+    (rendered, rendered_omitted(server_omitted, row_count))
+}
+
+fn write_memory_omitted<W: Write>(writer: &mut W, label: &str, omitted: u64) -> io::Result<()> {
+    if omitted == 0 {
+        Ok(())
+    } else {
+        writeln!(writer, "... {omitted} {label} omitted.")
+    }
+}
+
+fn escaped_memory_list(values: &[String], maximum_bytes: usize) -> String {
+    let mut rendered = values
+        .iter()
+        .take(8)
+        .map(|value| escaped_bounded_bytes(value, maximum_bytes))
+        .collect::<Vec<_>>();
+    if values.len() > 8 {
+        rendered.push("...".to_owned());
+    }
+    if rendered.is_empty() {
+        "none".to_owned()
+    } else {
+        rendered.join(", ")
+    }
+}
+
+fn escaped_bounded_bytes(value: &str, maximum_bytes: usize) -> String {
+    let mut escaped = String::new();
+    for character in value.chars() {
+        let fragment = character.escape_default().to_string();
+        if escaped.len().saturating_add(fragment.len()) > maximum_bytes {
+            escaped.push_str("...");
+            break;
+        }
+        escaped.push_str(&fragment);
+    }
+    escaped
 }
 
 fn render_draft<W: Write>(draft: &AgentProfileDraft, writer: &mut W) -> io::Result<()> {
@@ -922,6 +1738,10 @@ fn app_error_message(error: &AppError) -> &'static str {
         | AppError::SkillAlreadyAssigned
         | AppError::SkillNotAssigned
         | AppError::AgentSkillLimitExceeded => "Skill operation could not be completed.",
+        AppError::MemoryEntryNotFound
+        | AppError::MemoryProposalNotFound
+        | AppError::EpisodicSummaryNotFound
+        | AppError::WrongMemoryCommandDispatcher => "Memory operation could not be completed.",
         AppError::LifecycleFinished => "Application is shutting down.",
     }
 }

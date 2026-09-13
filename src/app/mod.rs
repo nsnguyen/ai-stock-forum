@@ -15,28 +15,35 @@ pub const MODULE_NAME: &str = "app";
 
 pub use command::{
     AgentProfileSelector, AgentSkillAssignmentOperation, ApplicationCommand, AuditLimit,
-    AuditLimitError, CommandEnvelope,
-    DEFAULT_AUDIT_LIMIT, InputRejection, InputRejectionCategory, MAX_AGENT_PROFILE_HISTORY_RESULTS,
-    MAX_AGENT_PROFILE_LIST_RESULTS, MAX_AUDIT_LIMIT, MAX_INPUT_BYTES, MAX_SAFE_TOKEN_CHARS,
-    MAX_SKILL_HISTORY_RESULTS, MAX_SKILL_LIST_RESULTS, SafeToken, SafeTokenError, SkillSelector,
+    AuditLimitError, CommandEnvelope, DEFAULT_AUDIT_LIMIT, InputRejection, InputRejectionCategory,
+    MAX_AGENT_PROFILE_HISTORY_RESULTS, MAX_AGENT_PROFILE_LIST_RESULTS, MAX_AUDIT_LIMIT,
+    MAX_INPUT_BYTES, MAX_SAFE_TOKEN_CHARS, MAX_SKILL_HISTORY_RESULTS, MAX_SKILL_LIST_RESULTS,
+    SafeToken, SafeTokenError, SkillSelector,
 };
-pub(crate) use event::envelope_from_pending;
 pub use event::{
-    ApplicationEvent, EVENT_SCHEMA_VERSION, EventEnvelope, EventEnvelopeWire, PendingEvent,
-    ShutdownReason, SkillEventSummary, SkillHistoryEventEntry,
+    ApplicationEvent, EVENT_SCHEMA_VERSION, EventEnvelope, EventEnvelopeWire,
+    MemoryProposalStatusRef, PendingEvent, ShutdownReason, SkillEventSummary,
+    SkillHistoryEventEntry,
 };
+pub(crate) use event::{actor_wire, envelope_from_pending};
 pub use outcome::{
     AgentProfileCreatedView, AgentProfileHistoryEntry, AgentProfileHistoryView,
     AgentProfileSummary, AgentProfileVersionActivatedView, AgentProfileVersionView,
-    AgentProfileView, AgentProfilesView, AuditTailView, CommandOutcome, CommandView, HelpView,
-    InputRejectedView, SetupStatusView, ShutdownDisposition, ShutdownView, StatusView,
-    AgentSkillMutationView, SkillCreatedView, SkillHistoryEntry, SkillHistoryView, SkillSummary,
-    SkillVersionActivatedView, SkillView, SkillsView, AgentSkillAssignmentPreview,
+    AgentProfileView, AgentProfilesView, AgentSkillAssignmentPreview, AgentSkillMutationView,
+    AuditTailView, CommandOutcome, CommandView, EpisodicSummariesView, EpisodicSummaryListItem,
+    EpisodicSummaryView, HelpView, InputRejectedView, MemoryEntriesView, MemoryEntryHistorySummary,
+    MemoryEntryHistoryView, MemoryEntryMutationView, MemoryEntrySummary, MemoryEntryVersionView,
+    MemoryEntryView, MemoryProfileIdentityView, MemoryProposalCreatedView,
+    MemoryProposalResolutionView, MemoryProposalSummary, MemoryProposalView, MemoryProposalsView,
+    MemorySnapshotView, SetupStatusView, ShutdownDisposition, ShutdownView, SkillCreatedView,
+    SkillHistoryEntry, SkillHistoryView, SkillSummary, SkillVersionActivatedView, SkillView,
+    SkillsView, StatusView,
 };
 pub use service::{
     ApplicationService, ApplicationWorker, AuthorizationDecision, CommandPolicy,
-    CommandTransactionHook, DatabaseReadiness, IndependentApplicationService,
-    NoopCommandTransactionHook, PresentationSnapshot, ProcessGuardOwnership,
+    CommandTransactionHook, DatabaseReadiness, IndependentApplicationService, MemoryEditPreview,
+    MemoryProposalResolutionReview, NoopCommandTransactionHook, PresentationSnapshot,
+    ProcessGuardOwnership,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -90,6 +97,14 @@ pub enum AppError {
     BindingReferenceUnavailable,
     #[error("application lifecycle is already finished")]
     LifecycleFinished,
+    #[error("memory entry was not found")]
+    MemoryEntryNotFound,
+    #[error("memory proposal was not found")]
+    MemoryProposalNotFound,
+    #[error("episodic summary was not found")]
+    EpisodicSummaryNotFound,
+    #[error("wrong memory command dispatcher")]
+    WrongMemoryCommandDispatcher,
 }
 
 impl AppError {
@@ -118,6 +133,10 @@ impl AppError {
             Self::AgentProfileHistoryMismatch => "agent_profile_history_mismatch",
             Self::BindingReferenceUnavailable => "binding_reference_unavailable",
             Self::LifecycleFinished => "lifecycle_finished",
+            Self::MemoryEntryNotFound => "memory_entry_not_found",
+            Self::MemoryProposalNotFound => "memory_proposal_not_found",
+            Self::EpisodicSummaryNotFound => "episodic_summary_not_found",
+            Self::WrongMemoryCommandDispatcher => "wrong_memory_command_dispatcher",
         }
     }
 }

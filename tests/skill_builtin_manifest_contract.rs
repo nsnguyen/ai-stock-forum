@@ -113,14 +113,11 @@ fn reconciliation_accepts_a_valid_later_active_version_and_remains_idempotent() 
     let manifests = builtin_manifests().expect("valid static manifests");
     let canonical_v1 = manifests[0].skill();
     let mut edited = canonical_v1.content().clone();
-    edited.instructions.push_str("\nRecord the decision boundary.");
-    let v2 = SkillVersion::next_version(
-        canonical_v1,
-        skill_version_id(0x3001),
-        1,
-        edited,
-    )
-    .expect("valid built-in version two");
+    edited
+        .instructions
+        .push_str("\nRecord the decision boundary.");
+    let v2 = SkillVersion::next_version(canonical_v1, skill_version_id(0x3001), 1, edited)
+        .expect("valid built-in version two");
     let mut projection = SkillsProjection::default();
     projection.insert(canonical_v1).expect("insert version one");
     projection
@@ -134,7 +131,10 @@ fn reconciliation_accepts_a_valid_later_active_version_and_remains_idempotent() 
 
     assert_eq!(first, second);
     assert_eq!(projection.active_skill(v2.skill_id()), Some(&v2));
-    assert_eq!(projection.history(v2.skill_id()), vec![canonical_v1.clone(), v2]);
+    assert_eq!(
+        projection.history(v2.skill_id()),
+        vec![canonical_v1.clone(), v2]
+    );
 }
 
 #[test]
@@ -194,7 +194,9 @@ fn reconciliation_rejects_tampered_immutable_version_one_metadata() {
 
     for (field, stored_v1) in tampered {
         let mut projection = SkillsProjection::default();
-        projection.insert(&stored_v1).expect("insert tampered record");
+        projection
+            .insert(&stored_v1)
+            .expect("insert tampered record");
 
         assert_eq!(
             reconcile_builtin_manifests(&mut projection, std::slice::from_ref(manifest)),
@@ -212,7 +214,9 @@ fn reconciliation_rejects_tampered_immutable_version_one_metadata() {
     )
     .expect("valid noncanonical predecessor");
     let mut successor_content = noncanonical_v1.content().clone();
-    successor_content.instructions.push_str("\nSuccessor guidance.");
+    successor_content
+        .instructions
+        .push_str("\nSuccessor guidance.");
     let successor = SkillVersion::next_version(
         &noncanonical_v1,
         skill_version_id(0x4003),

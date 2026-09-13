@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{collections::BTreeMap, str::FromStr};
 
 use rusqlite::{
     Connection, Error as SqliteError, ErrorCode, OptionalExtension, Transaction, params,
@@ -111,6 +111,79 @@ pub fn validate_skill_version_ref(
     match load_skill_version(connection, reference)? {
         Some(_) => Ok(()),
         None => Err(PersistenceError::SkillVersionReferenceMismatch),
+    }
+}
+
+pub(crate) fn validate_skill_version_refs_batch(
+    connection: &Connection,
+    references: &[SkillVersionRef],
+) -> Result<(), PersistenceError> {
+    let skill_ids = references
+        .iter()
+        .map(|reference| reference.skill_id().to_string())
+        .collect::<Vec<_>>();
+    let ids_json = canonical_json_bytes(&skill_ids)
+        .map_err(|_| PersistenceError::SkillVersionIntegrityMismatch)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT skill_id, skill_version_id, version, predecessor_version_id,
+                    display_name, normalized_name, content_digest, content_json,
+                    provenance_json, created_at_ms, record_digest, record_json
+               FROM skill_versions
+              WHERE skill_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
+              ORDER BY skill_id, version",
+        )
+        .map_err(|_| PersistenceError::QueryFailed)?;
+    let rows = statement
+        .query_map([ids_json], decode_row)
+        .map_err(|_| PersistenceError::QueryFailed)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PersistenceError::QueryFailed)?;
+    let mut grouped = BTreeMap::<String, Vec<StoredSkillRow>>::new();
+    for row in rows {
+        grouped.entry(row.skill_id.clone()).or_default().push(row);
+    }
+    let mut authenticated = Vec::new();
+    for (skill_id, rows) in grouped {
+        let skill_id = parse_id::<SkillId>(skill_id)?;
+        let mut versions = Vec::with_capacity(rows.len());
+        for row in rows {
+            if sha256(&row.record_json).as_str() != row.record_digest {
+                return Err(PersistenceError::SkillVersionIntegrityMismatch);
+            }
+            let row_skill_id = parse_id::<SkillId>(row.skill_id.clone())?;
+            let row_version_id = parse_id::<SkillVersionId>(row.skill_version_id.clone())?;
+            let content = serde_json::from_slice::<SkillDraft>(&row.content_json)
+                .map_err(|_| PersistenceError::SkillVersionIntegrityMismatch)?;
+            let provenance = serde_json::from_slice::<SkillProvenance>(&row.provenance_json)
+                .map_err(|_| PersistenceError::SkillVersionIntegrityMismatch)?;
+            let version = if let Some(previous) = versions.last() {
+                SkillVersion::next_version(previous, row_version_id, row.created_at_ms, content)
+            } else {
+                SkillVersion::create(
+                    row_skill_id,
+                    row_version_id,
+                    row.created_at_ms,
+                    provenance,
+                    content,
+                )
+            }
+            .map_err(|_| PersistenceError::SkillVersionIntegrityMismatch)?;
+            if version.skill_id() != skill_id || expected_row(&version)? != row {
+                return Err(PersistenceError::SkillVersionIntegrityMismatch);
+            }
+            versions.push(version);
+        }
+        authenticated.extend(versions);
+    }
+    if references.iter().all(|reference| {
+        authenticated
+            .iter()
+            .any(|skill| skill.reference() == *reference)
+    }) {
+        Ok(())
+    } else {
+        Err(PersistenceError::SkillVersionReferenceMismatch)
     }
 }
 

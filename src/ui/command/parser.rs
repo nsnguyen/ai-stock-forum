@@ -4,7 +4,8 @@ use crate::app::{
 };
 use crate::{
     agents::{ProfileTemplateId, builtin_profile_templates},
-    domain::ObjectVersion,
+    domain::{EpisodicSummaryId, MemoryProposalId, ObjectVersion},
+    memory::{MemoryProposalFilter, NormalizedMemoryKey},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,24 @@ pub enum SkillWorkflowCommand {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryWorkflowCommand {
+    Set {
+        agent: AgentProfileSelector,
+        key: String,
+    },
+    Delete {
+        agent: AgentProfileSelector,
+        key: String,
+    },
+    Approve {
+        proposal_id: MemoryProposalId,
+    },
+    Reject {
+        proposal_id: MemoryProposalId,
+    },
+}
+
 #[expect(
     clippy::large_enum_variant,
     reason = "fallback parsing returns owned typed commands without a second allocation contract"
@@ -37,6 +56,7 @@ pub enum FallbackParsedLine {
     Command(ApplicationCommand),
     AgentWorkflow(AgentWorkflowCommand),
     SkillWorkflow(SkillWorkflowCommand),
+    MemoryWorkflow(MemoryWorkflowCommand),
     Ignored,
 }
 
@@ -49,6 +69,7 @@ pub enum ParsedLine {
     Command(ApplicationCommand),
     AgentWorkflow(AgentWorkflowCommand),
     SkillWorkflow(SkillWorkflowCommand),
+    MemoryWorkflow(MemoryWorkflowCommand),
     Ignored,
 }
 
@@ -57,6 +78,7 @@ pub fn parse_line(input: &[u8]) -> ParsedLine {
         FallbackParsedLine::Command(command) => ParsedLine::Command(command),
         FallbackParsedLine::AgentWorkflow(command) => ParsedLine::AgentWorkflow(command),
         FallbackParsedLine::SkillWorkflow(command) => ParsedLine::SkillWorkflow(command),
+        FallbackParsedLine::MemoryWorkflow(command) => ParsedLine::MemoryWorkflow(command),
         FallbackParsedLine::Ignored => ParsedLine::Ignored,
     }
 }
@@ -165,10 +187,8 @@ pub fn parse_fallback_line(input: &[u8]) -> FallbackParsedLine {
         },
         ["/skill", "show", selector, version] => {
             let parsed = SkillSelector::from_input(selector).and_then(|selector| {
-                positive_version(version).map(|version| ApplicationCommand::ShowSkillVersion {
-                    selector,
-                    version,
-                })
+                positive_version(version)
+                    .map(|version| ApplicationCommand::ShowSkillVersion { selector, version })
             });
             parsed.unwrap_or_else(|_| {
                 reject(InputRejectionCategory::Malformed, safe_token(line), input)
@@ -233,6 +253,140 @@ pub fn parse_fallback_line(input: &[u8]) -> FallbackParsedLine {
                 FallbackParsedLine::SkillWorkflow,
             );
         }
+        ["/memory", "list", selector] => match AgentProfileSelector::from_input(selector) {
+            Ok(selector) => ApplicationCommand::ListMemoryEntries { selector },
+            Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
+        },
+        ["/memory", "get", selector, display_key] => {
+            match valid_memory_target(selector, display_key) {
+                Ok((selector, display_key)) => ApplicationCommand::ShowMemoryEntry {
+                    selector,
+                    display_key,
+                },
+                Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
+            }
+        }
+        ["/memory", "history", selector, display_key] => {
+            match valid_memory_target(selector, display_key) {
+                Ok((selector, display_key)) => ApplicationCommand::ShowMemoryEntryHistory {
+                    selector,
+                    display_key,
+                },
+                Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
+            }
+        }
+        ["/memory", "history", selector, display_key, version] => {
+            let parsed =
+                valid_memory_target(selector, display_key).and_then(|(selector, display_key)| {
+                    positive_version(version).map(|version| {
+                        ApplicationCommand::ShowMemoryEntryVersion {
+                            selector,
+                            display_key,
+                            version,
+                        }
+                    })
+                });
+            parsed.unwrap_or_else(|_| {
+                reject(InputRejectionCategory::Malformed, safe_token(line), input)
+            })
+        }
+        ["/memory", "set", agent, key] => {
+            let parsed = valid_memory_target(agent, key)
+                .map(|(agent, key)| MemoryWorkflowCommand::Set { agent, key });
+            return parsed.map_or_else(
+                |_| {
+                    FallbackParsedLine::Command(reject(
+                        InputRejectionCategory::Malformed,
+                        safe_token(line),
+                        input,
+                    ))
+                },
+                FallbackParsedLine::MemoryWorkflow,
+            );
+        }
+        ["/memory", "delete", agent, key] => {
+            let parsed = valid_memory_target(agent, key)
+                .map(|(agent, key)| MemoryWorkflowCommand::Delete { agent, key });
+            return parsed.map_or_else(
+                |_| {
+                    FallbackParsedLine::Command(reject(
+                        InputRejectionCategory::Malformed,
+                        safe_token(line),
+                        input,
+                    ))
+                },
+                FallbackParsedLine::MemoryWorkflow,
+            );
+        }
+        ["/memory", "proposals", selector] => match AgentProfileSelector::from_input(selector) {
+            Ok(selector) => ApplicationCommand::ListMemoryProposals {
+                selector,
+                filter: MemoryProposalFilter::Pending,
+            },
+            Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
+        },
+        ["/memory", "proposals", selector, "pending"] => {
+            match AgentProfileSelector::from_input(selector) {
+                Ok(selector) => ApplicationCommand::ListMemoryProposals {
+                    selector,
+                    filter: MemoryProposalFilter::Pending,
+                },
+                Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
+            }
+        }
+        ["/memory", "proposals", selector, "all"] => {
+            match AgentProfileSelector::from_input(selector) {
+                Ok(selector) => ApplicationCommand::ListMemoryProposals {
+                    selector,
+                    filter: MemoryProposalFilter::All,
+                },
+                Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
+            }
+        }
+        ["/memory", "proposal", proposal_id] => match proposal_id.parse::<MemoryProposalId>() {
+            Ok(proposal_id) => ApplicationCommand::ShowMemoryProposal { proposal_id },
+            Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
+        },
+        ["/memory", "approve", proposal_id] => {
+            return proposal_id.parse::<MemoryProposalId>().map_or_else(
+                |_| {
+                    FallbackParsedLine::Command(reject(
+                        InputRejectionCategory::Malformed,
+                        safe_token(line),
+                        input,
+                    ))
+                },
+                |proposal_id| {
+                    FallbackParsedLine::MemoryWorkflow(MemoryWorkflowCommand::Approve {
+                        proposal_id,
+                    })
+                },
+            );
+        }
+        ["/memory", "reject", proposal_id] => {
+            return proposal_id.parse::<MemoryProposalId>().map_or_else(
+                |_| {
+                    FallbackParsedLine::Command(reject(
+                        InputRejectionCategory::Malformed,
+                        safe_token(line),
+                        input,
+                    ))
+                },
+                |proposal_id| {
+                    FallbackParsedLine::MemoryWorkflow(MemoryWorkflowCommand::Reject {
+                        proposal_id,
+                    })
+                },
+            );
+        }
+        ["/memory", "episodes", selector] => match AgentProfileSelector::from_input(selector) {
+            Ok(selector) => ApplicationCommand::ListEpisodicSummaries { selector },
+            Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
+        },
+        ["/memory", "episode", summary_id] => match summary_id.parse::<EpisodicSummaryId>() {
+            Ok(summary_id) => ApplicationCommand::ShowEpisodicSummary { summary_id },
+            Err(_) => reject(InputRejectionCategory::Malformed, safe_token(line), input),
+        },
         ["/help"] => ApplicationCommand::ShowHelp,
         ["/status"] => ApplicationCommand::ShowStatus,
         ["/setup", "status"] => ApplicationCommand::ShowSetupStatus,
@@ -246,13 +400,23 @@ pub fn parse_fallback_line(input: &[u8]) -> FallbackParsedLine {
         },
         ["/quit"] => ApplicationCommand::RequestShutdown,
         [
-            "agent" | "/agent" | "/skill" | "/skills" | "/help" | "/status" | "/setup" | "/audit" | "/quit",
+            "agent" | "/agent" | "/skill" | "/skills" | "/memory" | "/help" | "/status" | "/setup"
+            | "/audit" | "/quit",
             ..,
         ] => reject(InputRejectionCategory::Malformed, safe_token(line), input),
         _ => reject(InputRejectionCategory::Unknown, safe_token(line), input),
     };
 
     FallbackParsedLine::Command(command)
+}
+
+fn valid_memory_target(
+    agent: &str,
+    key: &str,
+) -> Result<(AgentProfileSelector, String), crate::domain::DomainError> {
+    let agent = AgentProfileSelector::from_input(agent)?;
+    NormalizedMemoryKey::new(key)?;
+    Ok((agent, key.to_owned()))
 }
 
 fn positive_version(value: &str) -> Result<ObjectVersion, crate::domain::DomainError> {

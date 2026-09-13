@@ -3,15 +3,18 @@ mod support;
 use std::{
     collections::VecDeque,
     io::{self, BufRead, Cursor, Read, Write},
-    sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use ai_stock_forum::{
     agents::{AgentBindings, AgentProfileDraft, AgentRole},
     app::{
-        AgentSkillAssignmentPreview, AppError, ApplicationCommand,
-        ApplicationService, CommandOutcome, CommandView, HelpView, InputRejectionCategory,
-        ShutdownDisposition, ShutdownReason, ShutdownView, SkillSelector,
+        AgentSkillAssignmentPreview, AppError, ApplicationCommand, ApplicationService,
+        CommandOutcome, CommandView, HelpView, InputRejectionCategory, ShutdownDisposition,
+        ShutdownReason, ShutdownView, SkillSelector,
     },
     config::AppPaths,
     domain::{
@@ -22,8 +25,8 @@ use ai_stock_forum::{
     runtime::{ApplicationRuntime, CommandExecutor, RuntimeClient, RuntimeError},
     skills::{SkillDraft, SkillEditPreview, SkillProvenance, SkillVersion, SkillVersionRef},
     ui::command::{
-        BoundedLineReader, CancellableLineSource, FallbackHost, FallbackParsedLine,
-        FallbackRunner, LineSourceCancellation, LineSourceEvent, UiError,
+        BoundedLineReader, CancellableLineSource, FallbackHost, FallbackParsedLine, FallbackRunner,
+        LineSourceCancellation, LineSourceEvent, MemoryWorkflowCommand, UiError,
         parse_fallback_line,
     },
 };
@@ -36,8 +39,17 @@ fn direct_command(input: &[u8]) -> ApplicationCommand {
         FallbackParsedLine::Command(command) => command,
         FallbackParsedLine::AgentWorkflow(_) => panic!("expected direct command"),
         FallbackParsedLine::SkillWorkflow(_) => panic!("expected direct command"),
+        FallbackParsedLine::MemoryWorkflow(_) => panic!("expected direct command"),
         FallbackParsedLine::Ignored => panic!("expected command"),
     }
+}
+
+#[test]
+fn memory_workflow_is_not_classified_as_a_skill_or_direct_command() {
+    assert!(matches!(
+        parse_fallback_line(b"/memory delete analyst thesis"),
+        FallbackParsedLine::MemoryWorkflow(MemoryWorkflowCommand::Delete { .. })
+    ));
 }
 
 fn profile(name: &str) -> AgentProfileDraft {
@@ -127,7 +139,10 @@ impl CommandExecutor for ReviewProbeExecutor {
                 }
                 state.registered = false;
                 state.committed_mutations += 1;
-                Ok(command_outcome(CommandView::Help(HelpView), ShutdownDisposition::Continue))
+                Ok(command_outcome(
+                    CommandView::Help(HelpView),
+                    ShutdownDisposition::Continue,
+                ))
             }
             ApplicationCommand::RequestShutdown => Ok(command_outcome(
                 CommandView::Shutdown(ShutdownView {
@@ -237,7 +252,10 @@ struct FailAfterPreviewWriter {
 impl Write for FailAfterPreviewWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if self.state.lock().unwrap().registered {
-            Err(io::Error::new(io::ErrorKind::BrokenPipe, "injected write failure"))
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "injected write failure",
+            ))
         } else {
             Ok(bytes.len())
         }
@@ -282,7 +300,9 @@ impl CancellableLineSource for ProbeLineSource {
     }
 
     fn next_line(&mut self) -> io::Result<LineSourceEvent> {
-        self.events.pop_front().unwrap_or(Ok(LineSourceEvent::Cancelled))
+        self.events
+            .pop_front()
+            .unwrap_or(Ok(LineSourceEvent::Cancelled))
     }
 }
 
@@ -539,7 +559,9 @@ fn explicit_newer_version_routes_to_upgrade_without_changing_the_requested_ref()
     let mut output = Vec::new();
     let reason = FallbackRunner::new(client.clone(), false)
         .run(
-            Cursor::new(b"/skill assign \"Versioned Fallback\" \"Upgrade Agent\" 2\nupgrade\n/quit\n"),
+            Cursor::new(
+                b"/skill assign \"Versioned Fallback\" \"Upgrade Agent\" 2\nupgrade\n/quit\n",
+            ),
             &mut output,
         )
         .unwrap();
@@ -725,7 +747,10 @@ fn recoverable_creation_failure_cancels_review_and_restores_the_exact_draft() {
     assert_eq!(snapshot.cancel_calls, 1);
     assert_eq!(snapshot.mutation_attempts, 2);
     assert_eq!(snapshot.committed_mutations, 1);
-    assert_eq!(snapshot.preview_candidates, vec![expected.clone(), expected]);
+    assert_eq!(
+        snapshot.preview_candidates,
+        vec![expected.clone(), expected]
+    );
     drop(snapshot);
     runtime.finish_and_join(reason).unwrap();
 }

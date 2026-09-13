@@ -11,19 +11,66 @@ const LEGACY: [&str; 4] = [
     include_str!("../docs/superpowers/plans/2026-08-15-phase-0a-workspace-contract-foundation.md"),
 ];
 const EXPECTED_COMMAND_ROWS: [&str; 6] = [
-    "| `/help` | Outputs `Available commands:` followed by `/help`, `/status`, `/setup status`, `/audit tail [limit: 1-100]`, and `/quit`; commits `HelpViewed`. | Continues. |",
+    "| `/help` | Outputs `Available commands:` followed by the complete supported Phase 0, Skills, and Hybrid Memory grammar; explicitly states that internal Memory producers are unavailable; commits `HelpViewed`. | Continues. |",
     "| `/status` | Outputs exactly `Installation: ready` and `Session: active`; commits `StatusViewed`. | Continues. |",
     "| `/audit tail` | Outputs `Audit tail (limit 20):` plus the selected entries or `No audit entries.`; commits `AuditTailViewed(limit=20)`. | Continues. |",
     "| `/audit tail N` | Outputs `Audit tail (limit N):` plus the selected entries or `No audit entries.` for `N` from 1 through 100; commits `AuditTailViewed(limit=N)`. | Continues. |",
     "| `/setup status` | Outputs exactly `Setup: not started` and `Guided setup is not implemented in Phase 0.` on a fresh installation; commits `SetupStatusViewed`. | Continues. |",
     "| `/quit` | Outputs exactly `Shutting down.`; commits `ShutdownRequested` and ends the session with `UserQuit`. | Ends normally. |",
 ];
+const EXPECTED_MEMORY_COMMANDS: [&str; 11] = [
+    "/memory list <agent>",
+    "/memory get <agent> <key>",
+    "/memory history <agent> <key> [positive-version]",
+    "/memory set <agent> <key>",
+    "/memory delete <agent> <key>",
+    "/memory proposals <agent> [pending|all]",
+    "/memory proposal <proposal-id>",
+    "/memory approve <proposal-id>",
+    "/memory reject <proposal-id>",
+    "/memory episodes <agent>",
+    "/memory episode <summary-id>",
+];
+const EXPECTED_NAVIGATION_DESTINATIONS: [&str; 6] = [
+    "1 Overview",
+    "2 Setup",
+    "3 Audit",
+    "4 Help",
+    "a Agents",
+    "s Skills",
+];
+const EXPECTED_MEMORY_ROUTE_NAMES: [&str; 11] = [
+    "list",
+    "get",
+    "history",
+    "set",
+    "delete",
+    "proposals",
+    "proposal",
+    "approve",
+    "reject",
+    "episodes",
+    "episode",
+];
+const EXPECTED_MANUAL_SEED_LABELS: [&str; 7] = [
+    "profile_id=",
+    "tui_approval_proposal_id=",
+    "tui_rejection_proposal_id=",
+    "fallback_approval_proposal_id=",
+    "fallback_rejection_proposal_id=",
+    "restart_pending_proposal_id=",
+    "summary_id=",
+];
 const EXPECTED_PRIVACY_BLOCK: &str = "Privacy warning: users must not enter secrets; Phase 0 has no supported secret, credential, or profile workflow.\n\nOn rejection, a bounded escaped first token, category, exact byte count, and SHA-256 digest may be persisted. Audit rendering may show the category, bounded safe token, and byte count; the digest and rejected full line are not rendered.";
 
 fn read_repository_document(relative_path: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
-    fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("required documentation {} is unavailable: {error}", path.display()))
+    fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "required documentation {} is unavailable: {error}",
+            path.display()
+        )
+    })
 }
 
 fn heading_level(line: &str) -> Option<usize> {
@@ -99,6 +146,51 @@ fn fenced_commands(section: &str) -> Vec<&str> {
         }
     }
     commands
+}
+
+fn fenced_text_lines(section: &str) -> Vec<&str> {
+    let mut in_text_fence = false;
+    let mut lines = Vec::new();
+    for line in section.lines() {
+        match line.trim() {
+            "```text" => in_text_fence = true,
+            "```" if in_text_fence => break,
+            candidate if in_text_fence && !candidate.is_empty() => lines.push(candidate),
+            _ => {}
+        }
+    }
+    lines
+}
+
+fn markdown_table_commands(section: &str, prefix: &str) -> Vec<String> {
+    section
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
+                return None;
+            }
+            let code_start = trimmed.find('`')? + 1;
+            let code_end = code_start + trimmed[code_start..].find('`')?;
+            let command = trimmed[code_start..code_end].replace("\\|", "|");
+            command.starts_with(prefix).then_some(command)
+        })
+        .collect()
+}
+
+fn inline_code_spans(text: &str) -> Vec<&str> {
+    text.split('`').skip(1).step_by(2).collect()
+}
+
+fn assert_contains_all(document: &str, document_name: &str, required: &[&str]) {
+    let normalized_document = document.split_whitespace().collect::<Vec<_>>().join(" ");
+    for fragment in required {
+        let normalized_fragment = fragment.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized_document.contains(&normalized_fragment),
+            "{document_name} is missing required Hybrid Memory guidance: {fragment}"
+        );
+    }
 }
 
 fn validate_skill_slash_commands(section: &str) -> Result<(), String> {
@@ -247,10 +339,17 @@ fn token_window_is_negated(tokens: &[String], left: usize, right: usize) -> bool
                 | "isnt"
                 | "optional"
         )
-    }) || window.windows(2).any(|pair| pair[0] == "no" && pair[1] == "longer")
+    }) || window
+        .windows(2)
+        .any(|pair| pair[0] == "no" && pair[1] == "longer")
 }
 
-fn token_slice_contains_phrase(tokens: &[String], start: usize, end: usize, phrase: &[&str]) -> bool {
+fn token_slice_contains_phrase(
+    tokens: &[String],
+    start: usize,
+    end: usize,
+    phrase: &[&str],
+) -> bool {
     !phrase.is_empty()
         && start < end
         && end <= tokens.len()
@@ -301,7 +400,11 @@ fn control_relation_is_negated(tokens: &[String], start: usize, end: usize) -> b
 
 fn unit_maps_bare_q_to_exit(tokens: &[String]) -> bool {
     const EXIT_WORDS: [&str; 6] = ["quit", "quits", "exit", "exits", "close", "closes"];
-    for (q_index, _) in tokens.iter().enumerate().filter(|(_, token)| token.as_str() == "q") {
+    for (q_index, _) in tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| token.as_str() == "q")
+    {
         for (verb_index, _) in tokens
             .iter()
             .enumerate()
@@ -330,17 +433,40 @@ fn unit_maps_bare_q_to_exit(tokens: &[String]) -> bool {
 
 fn unit_requires_colon_skill_control(tokens: &[String]) -> bool {
     const OUTCOMES: [&str; 15] = [
-        "continue", "continues", "continuing", "advance", "advances", "advanced", "finish",
-        "finishes", "finished", "create", "creates", "created", "creating", "complete",
+        "continue",
+        "continues",
+        "continuing",
+        "advance",
+        "advances",
+        "advanced",
+        "finish",
+        "finishes",
+        "finished",
+        "create",
+        "creates",
+        "created",
+        "creating",
+        "complete",
         "completed",
     ];
     const REQUIREMENTS: [&str; 11] = [
-        "must", "required", "requires", "mandatory", "need", "needs", "use", "enter", "type",
-        "press", "run",
+        "must",
+        "required",
+        "requires",
+        "mandatory",
+        "need",
+        "needs",
+        "use",
+        "enter",
+        "type",
+        "press",
+        "run",
     ];
-    for (control_index, _) in tokens.iter().enumerate().filter(|(_, token)| {
-        matches!(token.as_str(), ":next" | ":create")
-    }) {
+    for (control_index, _) in tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| matches!(token.as_str(), ":next" | ":create"))
+    {
         for (outcome_index, _) in tokens
             .iter()
             .enumerate()
@@ -377,7 +503,9 @@ fn validate_control_guidance(document: &str) -> Result<(), String> {
             return Err(format!("bare q is mapped to shutdown: {unit}"));
         }
         if unit_requires_colon_skill_control(&tokens) {
-            return Err(format!("colon control is required by Skills guidance: {unit}"));
+            return Err(format!(
+                "colon control is required by Skills guidance: {unit}"
+            ));
         }
     }
     Ok(())
@@ -437,9 +565,8 @@ fn roadmap_status_units(document: &str) -> Vec<RoadmapStatusUnit> {
             continue;
         }
 
-        let starts_list_item = trimmed.starts_with("- ")
-            || trimmed.starts_with("* ")
-            || trimmed.starts_with("+ ");
+        let starts_list_item =
+            trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ");
         if starts_list_item {
             flush(&mut units, &mut current, phase, in_status_section);
         } else if !current.is_empty() {
@@ -548,14 +675,9 @@ fn validate_phase_status_contract(document: &str) -> Result<(), String> {
         let pending = checkbox == Some(false)
             || nearby_pending
             || negated_nearby_complete
-            || tokens
-                .windows(2)
-                .enumerate()
-                .any(|(index, pair)| {
-                    pair[0] == "not"
-                        && pair[1] == "started"
-                        && milestone_index.abs_diff(index) <= 6
-                });
+            || tokens.windows(2).enumerate().any(|(index, pair)| {
+                pair[0] == "not" && pair[1] == "started" && milestone_index.abs_diff(index) <= 6
+            });
         let status_statement = checkbox.is_some()
             || completed
             || pending
@@ -565,7 +687,10 @@ fn validate_phase_status_contract(document: &str) -> Result<(), String> {
             continue;
         }
         if pending {
-            return Err(format!("Milestone 2 has a pending status claim: {}", unit.text));
+            return Err(format!(
+                "Milestone 2 has a pending status claim: {}",
+                unit.text
+            ));
         }
         if completed {
             milestone_two_completions += 1;
@@ -671,19 +796,39 @@ fn declarative_skills_sections_preserve_capability_and_version_boundaries() {
     let guide = read_repository_document("docs/testing/declarative-skills.md");
     let introduction = guide.split("\n## ").next().expect("guide introduction");
     for required in [
-        "inert, bounded context", "cannot execute", "shell", "filesystem", "Git", "MCP",
-        "provider", "network", "Inference and chat begin in Phase 3",
+        "inert, bounded context",
+        "cannot execute",
+        "shell",
+        "filesystem",
+        "Git",
+        "MCP",
+        "provider",
+        "network",
+        "Inference and chat begin in Phase 3",
     ] {
-        assert!(introduction.contains(required), "guide introduction is missing: {required}");
+        assert!(
+            introduction.contains(required),
+            "guide introduction is missing: {required}"
+        );
     }
 
     let version_model = markdown_section(&guide, "## Library and version model");
     for required in [
-        "Evidence Review", "Filing Analysis", "Catalyst Mapping", "Risk Checklist",
-        "immutable version", "exact version", "does not auto-upgrade", "historical version",
-        "explicit upgrade", "Unassign",
+        "Evidence Review",
+        "Filing Analysis",
+        "Catalyst Mapping",
+        "Risk Checklist",
+        "immutable version",
+        "exact version",
+        "does not auto-upgrade",
+        "historical version",
+        "explicit upgrade",
+        "Unassign",
     ] {
-        assert!(version_model.contains(required), "version model is missing: {required}");
+        assert!(
+            version_model.contains(required),
+            "version model is missing: {required}"
+        );
     }
 }
 
@@ -700,11 +845,41 @@ fn keyboard_guide_matches_the_shipped_pane_specific_controller_contract() {
     assert!(!keyboard.contains("Option+"));
     assert!(!keyboard.contains("Alt+"));
     assert!(keyboard.contains("You never need `:next` or `:create`"));
-    validate_pane_keys(panes, "Library", &["Up/Down", "skill rows"], &["Left/Right"]).unwrap();
-    validate_pane_keys(panes, "Create source", &["Up/Down", "starting point"], &["Left/Right"]).unwrap();
-    validate_pane_keys(panes, "Detail actions", &["Left/Right", "action"], &["Up/Down"]).unwrap();
-    validate_pane_keys(panes, "History", &["Up/Down", "version rows"], &["Left/Right"]).unwrap();
-    validate_pane_keys(panes, "Agent picker", &["Up/Down", "agent rows"], &["Left/Right"]).unwrap();
+    validate_pane_keys(
+        panes,
+        "Library",
+        &["Up/Down", "skill rows"],
+        &["Left/Right"],
+    )
+    .unwrap();
+    validate_pane_keys(
+        panes,
+        "Create source",
+        &["Up/Down", "starting point"],
+        &["Left/Right"],
+    )
+    .unwrap();
+    validate_pane_keys(
+        panes,
+        "Detail actions",
+        &["Left/Right", "action"],
+        &["Up/Down"],
+    )
+    .unwrap();
+    validate_pane_keys(
+        panes,
+        "History",
+        &["Up/Down", "version rows"],
+        &["Left/Right"],
+    )
+    .unwrap();
+    validate_pane_keys(
+        panes,
+        "Agent picker",
+        &["Up/Down", "agent rows"],
+        &["Left/Right"],
+    )
+    .unwrap();
     validate_pane_keys(
         panes,
         "Agent assigned skills",
@@ -725,13 +900,7 @@ fn review_and_confirmation_are_documented_as_distinct_controller_states() {
         &["commits"],
     )
     .unwrap();
-    validate_pane_keys(
-        panes,
-        "Confirmation",
-        &["Enter", "commits"],
-        &["validates"],
-    )
-    .unwrap();
+    validate_pane_keys(panes, "Confirmation", &["Enter", "commits"], &["validates"]).unwrap();
 }
 
 #[test]
@@ -753,8 +922,16 @@ fn optional_slash_section_contains_only_the_supported_skill_commands() {
     let guide = read_repository_document("docs/testing/declarative-skills.md");
     let slash = markdown_section(&guide, "## Optional slash fallbacks");
     validate_skill_slash_commands(slash).unwrap();
-    for required in ["stages a review", "does not mutate directly", "Bare `q` is inert", "`/quit` exits"] {
-        assert!(slash.contains(required), "slash section is missing: {required}");
+    for required in [
+        "stages a review",
+        "does not mutate directly",
+        "Bare `q` is inert",
+        "`/quit` exits",
+    ] {
+        assert!(
+            slash.contains(required),
+            "slash section is missing: {required}"
+        );
     }
 }
 
@@ -813,12 +990,18 @@ fn workflow_recovery_compact_and_local_test_sections_remain_complete() {
     let guide = read_repository_document("docs/testing/declarative-skills.md");
     let recovery = markdown_section(&guide, "## Confirmation, cancellation, and recovery");
     for required in ["cancel", "rejected", "stale", "restart", "review"] {
-        assert!(recovery.contains(required), "recovery section is missing: {required}");
+        assert!(
+            recovery.contains(required),
+            "recovery section is missing: {required}"
+        );
     }
 
     let compact = markdown_section(&guide, "## Compact terminal expectations");
     for required in ["compact terminal", "60x18", "Enter", "Esc", "bare `q`"] {
-        assert!(compact.contains(required), "compact section is missing: {required}");
+        assert!(
+            compact.contains(required),
+            "compact section is missing: {required}"
+        );
     }
 
     let commands = markdown_section(&guide, "## Exact local commands");
@@ -827,15 +1010,26 @@ fn workflow_recovery_compact_and_local_test_sections_remain_complete() {
         "cargo build --release --locked",
         "XDG_DATA_HOME",
     ] {
-        assert!(commands.contains(required), "local commands section is missing: {required}");
+        assert!(
+            commands.contains(required),
+            "local commands section is missing: {required}"
+        );
     }
 
     let checklist = markdown_section(&guide, "## Manual acceptance checklist");
     for required in [
-        "Create a custom skill", "Create version 2", "Explicitly upgrade", "History",
-        "Unassign", "stale review", "Restart",
+        "Create a custom skill",
+        "Create version 2",
+        "Explicitly upgrade",
+        "History",
+        "Unassign",
+        "stale review",
+        "Restart",
     ] {
-        assert!(checklist.contains(required), "manual checklist is missing: {required}");
+        assert!(
+            checklist.contains(required),
+            "manual checklist is missing: {required}"
+        );
     }
 }
 
@@ -846,14 +1040,610 @@ fn readme_points_to_the_detailed_declarative_skills_guide() {
         "[Declarative Skills testing and workflow guide](docs/testing/declarative-skills.md)"
     ));
     let milestone = markdown_section(README, "## Phase 2 Declarative Skills Milestone 2");
-    for required in ["Inference and chat remain deferred to Phase 3"] {
-        assert!(milestone.contains(required), "README milestone is missing: {required}");
+    let required = "Inference and chat remain deferred to Phase 3";
+    assert!(
+        milestone.contains(required),
+        "README milestone is missing: {required}"
+    );
+}
+
+#[test]
+fn readme_documents_hybrid_memory_plaintext_review_and_exact_fallback_grammar() {
+    let introduction = README.split("\n## ").next().expect("README introduction");
+    assert_contains_all(
+        introduction,
+        "README introduction",
+        &[
+            "Phase 2 Hybrid Memory Milestone 3",
+            "local reviewed memory",
+            "durable agent proposals",
+            "source-qualified episodic summaries",
+            "bounded deterministic retrieval",
+            "without adding inference or chat",
+        ],
+    );
+
+    let cockpit = markdown_section(README, "## Phase 0B Adaptive Cockpit");
+    assert_contains_all(
+        cockpit,
+        "README Adaptive Cockpit navigation summary",
+        &[
+            "Phase 0B introduced four native views: Overview, Setup, Audit, and Help",
+            "The current global destination rail has exactly six destinations: Overview, Setup, Audit, Help, Agents, and Skills",
+        ],
+    );
+    assert!(!cockpit.contains("The cockpit has four native, non-transcript views"));
+
+    let sources = markdown_section(README, "## Sources of truth");
+    assert_contains_all(
+        sources,
+        "README Sources of truth",
+        &[
+            "[Phase 2 Hybrid Memory design](docs/superpowers/specs/2026-09-07-phase-2-hybrid-memory-design.md)",
+            "[Phase 2 Hybrid Memory testing guide](docs/testing/phase-2-hybrid-memory.md)",
+        ],
+    );
+
+    let milestone = markdown_section(README, "## Phase 2 Hybrid Memory Milestone 3");
+    assert_contains_all(
+        milestone,
+        "README Hybrid Memory milestone",
+        &[
+            "Agents → Memory",
+            "Direct Human edits",
+            "reviewed before commit",
+            "pending proposals",
+            "distinct Human approval",
+            "does not encrypt Hybrid Memory at rest",
+            "owner-only permissions",
+            "access control, not encryption",
+            "Entry and history rows",
+            "proposals and rationales",
+            "summaries and source links",
+            "mutation events",
+            "request/outcome receipts",
+            "SQLite WAL/journal sidecars",
+            "copied backups",
+            "Deliberate detail views display plaintext",
+            "bounded credential deny-list",
+            "best-effort",
+            "cannot prove that text contains no secret",
+            "Delete adds a tombstone",
+            "not secure erasure",
+            "Immutable versions, events, and receipts accumulate monotonically",
+            "repeated edits consume additional local capacity",
+            "SQLite may reuse pages",
+            "BEGIN IMMEDIATE",
+            "no partial",
+            "Summary — verify sources",
+            "bounded deterministic retrieval",
+            "Startup",
+            "fail closed",
+            "There is no seventh Memory destination",
+            "bare `m`",
+            "bare `7`",
+            "Modified shortcuts are inert",
+            "typed shortcut characters remain editor text",
+            "`?` remains a Help alias",
+            "not a destination label",
+        ],
+    );
+    let deferred = markdown_section(README, "### Recovery and deferred Hybrid Memory boundaries");
+    assert_contains_all(
+        deferred,
+        "README Hybrid Memory deferred features",
+        &[
+            "remain deferred",
+            "Inference/chat",
+            "automatic memory extraction",
+            "semantic/vector search",
+            "embeddings",
+            "autonomous proposal generation",
+            "remote sync",
+            "encryption at rest",
+            "credential vaulting",
+            "retention pruning",
+            "secure erasure",
+            "proposal creation",
+            "summary mutation",
+            "snapshot presentation",
+        ],
+    );
+    assert_contains_all(
+        deferred,
+        "README production Memory boundary",
+        &[
+            "no production proposal creator",
+            "summary writer",
+            "snapshot presentation route",
+        ],
+    );
+    for destination in EXPECTED_NAVIGATION_DESTINATIONS {
+        assert!(
+            milestone.contains(destination),
+            "README Hybrid Memory milestone is missing navigation destination: {destination}"
+        );
     }
+    assert_eq!(
+        fenced_text_lines(milestone),
+        EXPECTED_NAVIGATION_DESTINATIONS
+    );
+
+    let fallback = markdown_section(README, "### Hybrid Memory fallback commands");
+    assert_eq!(fenced_commands(fallback), EXPECTED_MEMORY_COMMANDS);
+    assert_contains_all(
+        fallback,
+        "README Hybrid Memory fallback commands",
+        &[
+            "There is no production `/memory propose`",
+            "summary-write",
+            "snapshot",
+        ],
+    );
+    assert!(!fallback.contains("proposal-uuid"));
+    assert!(!fallback.contains("summary-uuid"));
+
+    let supported = markdown_section(README, "## Supported commands");
+    assert_eq!(
+        markdown_table_commands(supported, "/memory "),
+        EXPECTED_MEMORY_COMMANDS
+    );
+
+    let storage = markdown_section(README, "## Storage, security, and privacy");
+    assert_contains_all(
+        storage,
+        "README storage and privacy section",
+        &[
+            "Hybrid Memory",
+            "local plaintext",
+            "not encrypted at rest",
+            "Current and historical entries",
+            "proposals and rationales",
+            "summaries and source links",
+            "mutation events",
+            "receipts",
+            "SQLite WAL/journal sidecars",
+            "deliberate detail displays",
+            "copied backups",
+            "Owner-only filesystem permissions",
+            "not encryption",
+            "bounded credential deny-list",
+            "best-effort",
+            "cannot prove",
+            "immutable tombstone",
+            "does not securely erase earlier versions",
+            "repeated edits consume capacity",
+            "SQLite may reuse pages",
+        ],
+    );
+
+    let non_goals = markdown_section(README, "## Explicit non-goals");
+    assert_contains_all(
+        non_goals,
+        "README explicit non-goals",
+        &[
+            "automatic memory extraction",
+            "semantic/vector search",
+            "autonomous proposal generation",
+            "production proposal/summary/snapshot producer routes",
+        ],
+    );
+    assert!(!non_goals.contains("do not add hybrid memory"));
+}
+
+#[test]
+fn architecture_documents_hybrid_memory_authority_atomicity_and_recovery() {
+    let architecture = read_repository_document("architecture.md");
+    let section_twelve = markdown_section(&architecture, "## 12. Skills, personality, and memory");
+    assert_eq!(
+        section_twelve
+            .matches("### Hybrid Memory durability and recovery")
+            .count(),
+        1
+    );
+    assert_eq!(
+        architecture
+            .matches("### Hybrid Memory durability and recovery")
+            .count(),
+        1
+    );
+    assert!(!architecture.contains("\n## Hybrid Memory durability and recovery\n"));
+    assert!(!architecture.contains("\n### Memory\n"));
+    assert!(
+        section_twelve
+            .find("### Hybrid Memory durability and recovery")
+            .expect("Hybrid Memory architecture heading")
+            < section_twelve
+                .find("### Room context and resume")
+                .expect("Room context architecture heading")
+    );
+
+    let memory = markdown_section(&architecture, "### Hybrid Memory durability and recovery");
+    assert_contains_all(
+        memory,
+        "architecture Hybrid Memory section",
+        &[
+            "stable agent memory namespace",
+            "different or copied profile",
+            "fresh empty namespace",
+            "memory-scope-v1",
+            "General",
+            "Tagged",
+            "immutable application event stream",
+            "authoritative",
+            "request/outcome receipts",
+            "rebuildable pointers",
+            "Generic audit",
+            "local plaintext",
+            "Application-managed durable records are local plaintext",
+            "current entry and history rows",
+            "proposals and rationales",
+            "summaries and source links",
+            "mutation events",
+            "SQLite WAL/journal sidecars",
+            "deliberate detail output",
+            "Copied backups can retain plaintext wherever stored",
+            "Owner-only permissions are access control, not encryption",
+            "Credentials are prohibited",
+            "bounded credential deny-list",
+            "best-effort",
+            "cannot prove",
+            "tombstone",
+            "not secure erasure",
+            "retain prior plaintext in immutable history",
+            "Immutable versions, events, and receipts accumulate monotonically",
+            "repeated edits consume additional local capacity",
+            "SQLite may reuse pages",
+            "BEGIN IMMEDIATE",
+            "Human",
+            "Agent",
+            "System",
+            "a Human may directly set/delete and may Approve or Reject",
+            "an Agent may only create a proposal for its own exact profile identity",
+            "System cannot mutate or resolve memory",
+            "process-local",
+            "one-use",
+            "pending approval",
+            "without modifying an entry",
+            "Approve",
+            "Reject",
+            "capacity/full-disk",
+            "cannot leave a partial",
+            "event",
+            "entry",
+            "proposal",
+            "approval",
+            "pointer",
+            "projection",
+            "audit record",
+            "receipt",
+            "canonical request fingerprint",
+            "never repeats current retrieval selection",
+            "deterministically ordered",
+            "fixed byte/item limits",
+            "source references",
+            "Summary — verify sources",
+            "safe startup refusal",
+            "altered",
+            "unexplained",
+        ],
+    );
+    assert!(!memory.contains("Every application-managed durable copy is local plaintext"));
+    assert!(!memory.contains("copied backups remain sensitive plaintext"));
+
+    let production_boundary = markdown_section(memory, "#### Production and deferred boundary");
+    assert_contains_all(
+        production_boundary,
+        "architecture production and deferred boundary",
+        &[
+            "no production proposal creator",
+            "summary writer",
+            "snapshot route",
+            "automatic extraction",
+            "semantic/vector search",
+            "embeddings",
+            "autonomous proposal generation",
+            "inference/chat",
+            "remote sync",
+            "encryption at rest",
+            "credential vault",
+            "retention pruning",
+            "secure erasure",
+        ],
+    );
+
+    let command_mode = markdown_section(
+        &architecture,
+        "## 8. Full-screen TUI and fallback command mode",
+    );
+    let memory_command_row = command_mode
+        .lines()
+        .find(|line| line.trim_start().starts_with("| `/memory"))
+        .expect("architecture command table must document /memory routes");
+    let command_cell = memory_command_row
+        .trim()
+        .trim_start_matches('|')
+        .split('|')
+        .next()
+        .expect("architecture /memory command cell");
+    let route_names = inline_code_spans(command_cell)
+        .into_iter()
+        .map(|span| span.strip_prefix("/memory ").unwrap_or(span))
+        .collect::<Vec<_>>();
+    assert_eq!(route_names, EXPECTED_MEMORY_ROUTE_NAMES);
+
+    let persistence = markdown_section(&architecture, "## 15. Persistence, audit, and secrets");
+    assert_contains_all(
+        persistence,
+        "architecture persistence section",
+        &[
+            "accepted memory mutation events intentionally retain approved plaintext",
+            "provider/runtime credentials",
+            "SQLite stores only opaque references",
+        ],
+    );
+    let persistence_units = logical_markdown_units(persistence);
+    assert!(!persistence_units.iter().any(|unit| {
+        unit == "Operational events are append-only and have stable IDs, actor, timestamp, correlation ID, object version/digest, and redacted payload"
+    }));
+    assert!(
+        !persistence_units
+            .iter()
+            .any(|unit| unit == "SQLite stores only opaque references and safe labels")
+    );
+    assert!(!architecture.contains(
+        "The next step after review is to write a detailed implementation plan for Phase 0."
+    ));
+}
+
+#[test]
+fn hybrid_memory_acceptance_guide_is_safe_exact_and_reproducible() {
+    let manual = read_repository_document("docs/testing/phase-2-hybrid-memory.md");
+    assert_contains_all(
+        &manual,
+        "Hybrid Memory acceptance guide",
+        &[
+            "# Phase 2 Hybrid Memory acceptance guide",
+            "disposable local state",
+            "does not encrypt Hybrid Memory at rest",
+            "owner-only permissions",
+            "access control, not encryption",
+            "synthetic text only",
+            "never enter credentials",
+            "cargo build --release --locked",
+            "cargo test --test hybrid_memory_acceptance",
+            "cargo test --test tui_navigation_contract",
+            "seed_manual_acceptance_state",
+            "seed_manual_memory_acceptance",
+            "final application-state directory is absent",
+            "parent exists",
+            "before any live launch",
+            "exactly once",
+            "identical discovered state path",
+            "atomically claiming the directory",
+            "do not retry that directory",
+            "fresh target",
+            "restart_pending_proposal_id",
+            "retain",
+            "Exit every process before cleanup",
+            "Move only the exact disposable directory to Trash",
+            "directories` v6 derives its normal path from `HOME`",
+            "safety policy",
+            "unperformed/blocked",
+            "create a distinct profile",
+            "allowed non-memory fields",
+            "authoritative proof",
+            "fresh empty namespace",
+            "60x18",
+            "100x24",
+            "80-column Memory workspace",
+            "140x30",
+            "120-column Memory workspace",
+            "navigation rail consumes 20 columns",
+            "Modified shortcuts are inert",
+            "typed shortcut characters remain editor text",
+            "Bare `q` is inert",
+            "`/quit`",
+            "Summary — verify sources",
+            "memory_recovery_contract",
+            "memory_atomicity_contract",
+            "exact commit",
+            "host and disposable account/environment",
+            "seeder labels and IDs only",
+            "exact terminal dimensions",
+            "cleanup/retention state",
+            "every check not performed",
+        ],
+    );
+    let automated = markdown_section(&manual, "## Automated gate");
+    assert_contains_all(
+        automated,
+        "Hybrid Memory automated gate",
+        &[
+            "cargo build --release --locked",
+            "cargo test --test hybrid_memory_acceptance",
+            "cargo test --test tui_navigation_contract",
+            "support::seed_manual_memory_acceptance",
+            "record_test_episodic_summary_at",
+        ],
+    );
+
+    let disposable = markdown_section(&manual, "## Disposable state");
+    assert_contains_all(
+        disposable,
+        "Hybrid Memory disposable-state procedure",
+        &[
+            "AI_STOCK_FORUM_MEMORY_ACCEPTANCE_STATE_DIR",
+            "final application-state directory is absent",
+            "parent exists",
+            "before any live launch",
+            "exactly once",
+            "identical discovered state path",
+            "atomically claiming the directory",
+            "do not retry that directory",
+            "fresh target",
+        ],
+    );
+    assert_eq!(fenced_text_lines(disposable), EXPECTED_MANUAL_SEED_LABELS);
+    for label in EXPECTED_MANUAL_SEED_LABELS {
+        assert!(
+            manual.contains(label),
+            "Hybrid Memory acceptance guide is missing seeder label: {label}"
+        );
+    }
+    for destination in EXPECTED_NAVIGATION_DESTINATIONS {
+        assert!(
+            manual.contains(destination),
+            "Hybrid Memory acceptance guide is missing navigation destination: {destination}"
+        );
+    }
+    let layout = markdown_section(&manual, "## Layout, shortcuts, shutdown, and cleanup");
+    assert_eq!(fenced_text_lines(layout), EXPECTED_NAVIGATION_DESTINATIONS);
+    assert_contains_all(
+        layout,
+        "Hybrid Memory layout and shortcut procedure",
+        &[
+            "`60x18`: one-pane Memory layout",
+            "`100x24`",
+            "80-column Memory workspace and two panes",
+            "`140x30`",
+            "120-column Memory workspace and three panes",
+            "bare `m`",
+            "bare `7`",
+            "`?` remains a Help alias",
+            "type `1234as`",
+            "Bare `q` is inert",
+            "`/quit` requests normal shutdown",
+            "exactly one review cancellation",
+            "terminal restoration",
+            "Exit every process before cleanup",
+            "Move only the exact disposable directory to Trash",
+            "Do not use a recursive deletion command",
+        ],
+    );
+
+    let direct = markdown_section(&manual, "## Direct memory and immutable history");
+    assert_contains_all(
+        direct,
+        "Hybrid Memory direct mutation procedure",
+        &[
+            "cancel once",
+            "no entry exists",
+            "set <review-digest>",
+            "versions 2 and 1 are newest-first",
+            "version-1 detail",
+            "delete <review-digest>",
+            "tombstone versions",
+            "list output omits values",
+            "same typed identity, version, state, and digest",
+        ],
+    );
+
+    let proposals = markdown_section(&manual, "## Proposals and episodic summaries");
+    assert_contains_all(
+        proposals,
+        "Hybrid Memory proposal and episodic procedure",
+        &[
+            "tui_approval_proposal_id",
+            "cancel its review once",
+            "one accepted entry version",
+            "one terminal approval",
+            "tui_rejection_proposal_id",
+            "Reject must change no entry",
+            "yes",
+            "opposite-action attempts must not commit",
+            "restart_pending_proposal_id",
+            "retain the fifth pending proposal through restart",
+            "Summary — verify sources",
+            "Generic Help, Status, Audit, navigation, and safe error output",
+        ],
+    );
+
+    let recovery = markdown_section(&manual, "## Isolation, restart, recovery, and capacity");
+    assert_contains_all(
+        recovery,
+        "Hybrid Memory isolation and recovery procedure",
+        &[
+            "never cross either profile direction",
+            "create a distinct profile",
+            "fresh empty namespace",
+            "retains the original namespace and memory",
+            "two accepted and two rejected proposal resolutions",
+            "still pending with its exact approval identity",
+            "Drafts and process-local review tokens must not survive restart",
+            "The automated acceptance test separately proves that command-looking text survives restart",
+            "memory_recovery_contract",
+            "memory_atomicity_contract",
+            "byte-identical before and after failure",
+            "same exact review can retry",
+            "no partial durable state",
+        ],
+    );
+    assert!(!recovery.contains("command-looking text are unchanged"));
+
+    let evidence = markdown_section(&manual, "## Evidence record");
+    assert_contains_all(
+        evidence,
+        "Hybrid Memory evidence record",
+        &[
+            "exact commit tested",
+            "host and disposable account/environment",
+            "exact disposable-state arrangement",
+            "seeder labels and IDs only",
+            "exact terminal dimensions",
+            "automated, focused, full-suite, and release gate summaries",
+            "each manual outcome",
+            "cleanup/retention state",
+            "every check not performed",
+        ],
+    );
+    assert!(!manual.contains("/agent duplicate"));
+    assert!(!manual.contains("rm -rf"));
+    assert!(!manual.contains("rm -r "));
+    assert!(!manual.contains("Remove-Item -Recurse"));
+}
+
+#[test]
+fn profile_foundation_guide_uses_current_navigation_and_shutdown_controls() {
+    let guide = read_repository_document("docs/testing/phase-2-agent-profile-foundation.md");
+    assert_contains_all(
+        &guide,
+        "Agent Profile Foundation testing guide",
+        &[
+            "keyboard-first",
+            "There is no seventh Memory destination",
+            "Modified shortcuts are inert",
+            "typed shortcut characters remain editor text",
+            "Bare `q` is inert",
+            "`/quit` requests normal shutdown",
+        ],
+    );
+    for destination in EXPECTED_NAVIGATION_DESTINATIONS {
+        assert!(
+            guide.contains(destination),
+            "Agent Profile Foundation testing guide is missing navigation destination: {destination}"
+        );
+    }
+    let adaptive = markdown_section(&guide, "## Adaptive Cockpit flow");
+    assert_eq!(
+        fenced_text_lines(adaptive),
+        EXPECTED_NAVIGATION_DESTINATIONS
+    );
+    for obsolete_control in [":next", ":review", ":create", ":activate", ":cancel"] {
+        assert!(
+            !guide.contains(obsolete_control),
+            "Agent Profile Foundation testing guide still documents obsolete colon control: {obsolete_control}"
+        );
+    }
+    validate_control_guidance(&guide).unwrap();
 }
 
 #[test]
 fn roadmap_marks_only_declarative_skills_complete() {
-    let phase_two = markdown_section(PHASES, "## Phase 2 — Agent profiles, skills, and hybrid memory");
+    let phase_two = markdown_section(
+        PHASES,
+        "## Phase 2 — Agent profiles, skills, and hybrid memory",
+    );
     let milestone_status = markdown_section(PHASES, "### Milestone status");
     for required in [
         "[x] **Milestone 2: Declarative skills.**",
@@ -861,7 +1651,10 @@ fn roadmap_marks_only_declarative_skills_complete() {
         "Phase 2 as a whole remains in progress",
         "Phase 3 remains pending",
     ] {
-        assert!(phase_two.contains(required), "Phase 2 roadmap is missing: {required}");
+        assert!(
+            phase_two.contains(required),
+            "Phase 2 roadmap is missing: {required}"
+        );
     }
     assert_eq!(milestone_status.matches("- [x] ").count(), 2);
     assert_eq!(milestone_status.matches("- [ ] ").count(), 1);

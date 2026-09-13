@@ -115,9 +115,15 @@ fn summary(event: &ApplicationEvent) -> String {
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "none".to_owned())
         ),
-        ApplicationEvent::SkillCreated { skill, display_name, provenance } => format!(
+        ApplicationEvent::SkillCreated {
+            skill,
+            display_name,
+            provenance,
+        } => format!(
             "skill created: skill={}, version={}, name={}, provenance={provenance:?}",
-            skill.skill_id(), skill.version().get(), defensive_text(display_name)
+            skill.skill_id(),
+            skill.version().get(),
+            defensive_text(display_name)
         ),
         ApplicationEvent::SkillVersionActivated {
             skill,
@@ -126,34 +132,185 @@ fn summary(event: &ApplicationEvent) -> String {
             provenance,
         } => format!(
             "skill version activated: skill={}, version={}, previous_version={}, name={}, provenance={provenance:?}",
-            skill.skill_id(), skill.version().get(), previous_version_id, defensive_text(display_name)
+            skill.skill_id(),
+            skill.version().get(),
+            previous_version_id,
+            defensive_text(display_name)
         ),
-        ApplicationEvent::SkillsListed { total_count, returned_count, truncated, .. } => format!(
+        ApplicationEvent::SkillsListed {
+            total_count,
+            returned_count,
+            truncated,
+            ..
+        } => format!(
             "skills listed: total_count={total_count}, returned_count={returned_count}, truncated={truncated}"
         ),
-        ApplicationEvent::SkillViewed { skill, display_name, provenance } => format!(
+        ApplicationEvent::SkillViewed {
+            skill,
+            display_name,
+            provenance,
+        } => format!(
             "skill viewed: skill={}, version={}, name={}, provenance={provenance:?}",
-            skill.skill_id(), skill.version().get(), defensive_text(display_name)
+            skill.skill_id(),
+            skill.version().get(),
+            defensive_text(display_name)
         ),
-        ApplicationEvent::SkillHistoryViewed { skill_id, active, total_count, returned_count, truncated, .. } => format!(
+        ApplicationEvent::SkillHistoryViewed {
+            skill_id,
+            active,
+            total_count,
+            returned_count,
+            truncated,
+            ..
+        } => format!(
             "skill history viewed: skill={skill_id}, active_version={}, total_count={total_count}, returned_count={returned_count}, truncated={truncated}",
             active.skill_version_id()
         ),
-        ApplicationEvent::SkillVersionViewed { skill, display_name, provenance, predecessor_version_id } => format!(
+        ApplicationEvent::SkillVersionViewed {
+            skill,
+            display_name,
+            provenance,
+            predecessor_version_id,
+        } => format!(
             "skill version viewed: skill={}, version={}, predecessor={}, name={}, provenance={provenance:?}",
-            skill.skill_id(), skill.version().get(), predecessor_version_id.map(|id| id.to_string()).unwrap_or_else(|| "none".to_owned()), defensive_text(display_name)
+            skill.skill_id(),
+            skill.version().get(),
+            predecessor_version_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".to_owned()),
+            defensive_text(display_name)
         ),
         ApplicationEvent::AgentSkillAssigned { profile, skill, .. } => format!(
             "agent skill assigned: profile={}, profile_version={}, skill={}, skill_version={}",
-            profile.profile_id(), profile.profile_version_id(), skill.skill_id(), skill.skill_version_id()
+            profile.profile_id(),
+            profile.profile_version_id(),
+            skill.skill_id(),
+            skill.skill_version_id()
         ),
-        ApplicationEvent::AgentSkillUpgraded { profile, expected, replacement, .. } => format!(
+        ApplicationEvent::AgentSkillUpgraded {
+            profile,
+            expected,
+            replacement,
+            ..
+        } => format!(
             "agent skill upgraded: profile={}, profile_version={}, skill={}, from={}, to={}",
-            profile.profile_id(), profile.profile_version_id(), replacement.skill_id(), expected.skill_version_id(), replacement.skill_version_id()
+            profile.profile_id(),
+            profile.profile_version_id(),
+            replacement.skill_id(),
+            expected.skill_version_id(),
+            replacement.skill_version_id()
         ),
-        ApplicationEvent::AgentSkillUnassigned { profile, expected, .. } => format!(
+        ApplicationEvent::AgentSkillUnassigned {
+            profile, expected, ..
+        } => format!(
             "agent skill unassigned: profile={}, profile_version={}, skill={}, skill_version={}",
-            profile.profile_id(), profile.profile_version_id(), expected.skill_id(), expected.skill_version_id()
+            profile.profile_id(),
+            profile.profile_version_id(),
+            expected.skill_id(),
+            expected.skill_version_id()
+        ),
+        ApplicationEvent::MemoryEntrySet {
+            entry,
+            expired_proposals,
+        } => format!(
+            "memory entry set: entry_version={}, version={}, expired_count={}",
+            entry.reference().entry_version_id(),
+            entry.reference().version().get(),
+            expired_proposals.len()
+        ),
+        ApplicationEvent::MemoryEntryDeleted {
+            entry,
+            expired_proposals,
+        } => format!(
+            "memory entry deleted: entry_version={}, version={}, expired_count={}",
+            entry.reference().entry_version_id(),
+            entry.reference().version().get(),
+            expired_proposals.len()
+        ),
+        ApplicationEvent::MemoryProposalCreated { proposal, .. } => format!(
+            "memory proposal created: proposal={}, version={}",
+            proposal.reference().proposal_id(),
+            proposal.reference().version().get()
+        ),
+        ApplicationEvent::MemoryProposalAccepted {
+            resolution,
+            entry,
+            expired_proposals,
+        } => format!(
+            "memory proposal accepted: proposal={}, entry_version={}, expired_count={}",
+            resolution.proposal().proposal_id(),
+            entry.reference().entry_version_id(),
+            expired_proposals.len()
+        ),
+        ApplicationEvent::MemoryProposalRejected { resolution } => format!(
+            "memory proposal rejected: proposal={}",
+            resolution.proposal().proposal_id()
+        ),
+        ApplicationEvent::EpisodicSummaryRecorded { summary } => format!(
+            "episodic summary recorded: summary={}",
+            summary.reference().summary_id()
+        ),
+        ApplicationEvent::MemoryEntriesListed {
+            profile,
+            total_count,
+            returned_count,
+            omitted_count,
+            ..
+        } => format!(
+            "memory entries listed: profile={}, total_count={total_count}, returned_count={returned_count}, omitted_count={omitted_count}",
+            profile.profile_id()
+        ),
+        ApplicationEvent::MemoryEntryShown { profile, entry }
+        | ApplicationEvent::MemoryEntryVersionShown { profile, entry } => format!(
+            "memory entry viewed: profile={}, entry_version={}",
+            profile.profile_id(),
+            entry.entry_version_id()
+        ),
+        ApplicationEvent::MemoryEntryHistoryShown {
+            profile,
+            current,
+            total_count,
+            returned_count,
+            omitted_count,
+            ..
+        } => format!(
+            "memory entry history viewed: profile={}, current_entry_version={}, total_count={total_count}, returned_count={returned_count}, omitted_count={omitted_count}",
+            profile.profile_id(),
+            current.entry_version_id()
+        ),
+        ApplicationEvent::MemoryProposalsListed {
+            profile,
+            total_count,
+            returned_count,
+            omitted_count,
+            ..
+        } => format!(
+            "memory proposals listed: profile={}, total_count={total_count}, returned_count={returned_count}, omitted_count={omitted_count}",
+            profile.profile_id()
+        ),
+        ApplicationEvent::MemoryProposalShown {
+            proposal, status, ..
+        } => format!(
+            "memory proposal viewed: proposal={}, status={status:?}",
+            proposal.proposal_id()
+        ),
+        ApplicationEvent::EpisodicSummariesListed {
+            profile,
+            total_count,
+            returned_count,
+            omitted_count,
+            ..
+        } => format!(
+            "episodic summaries listed: profile={}, total_count={total_count}, returned_count={returned_count}, omitted_count={omitted_count}",
+            profile.profile_id()
+        ),
+        ApplicationEvent::EpisodicSummaryShown { summary } => {
+            format!("episodic summary viewed: summary={}", summary.summary_id())
+        }
+        ApplicationEvent::MemorySnapshotBuilt { metadata } => format!(
+            "memory snapshot built: entry_count={}, summary_count={}",
+            metadata.entry_refs().len(),
+            metadata.summary_refs().len()
         ),
     }
 }

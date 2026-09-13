@@ -10,7 +10,8 @@ pub type Digest = Sha256Digest;
 pub use error::DomainError;
 pub use id::{
     Actor, AgentProfileId, AgentProfileVersionId, ApprovalId, CausationId, CommandId,
-    ConfigurationVersionId, CorrelationId, EventId, InstallationId, MemoryNamespaceId,
+    ConfigurationVersionId, CorrelationId, EpisodicSummaryId, EventId, InstallationId,
+    MemoryEntryId, MemoryEntryVersionId, MemoryNamespaceId, MemoryProposalId, MemoryReviewToken,
     ProfileReviewToken, SessionId, SetupDraftId, SkillId, SkillReviewToken, SkillVersionId,
 };
 pub use object::{ObjectRef, ObjectVersion};

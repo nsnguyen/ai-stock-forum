@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::{
     app::{
         AuditLimit, EVENT_SCHEMA_VERSION, EventEnvelope, EventEnvelopeWire, PendingEvent,
-        envelope_from_pending,
+        actor_wire, envelope_from_pending,
     },
     domain::{CausationId, EventId, ObjectRef, ObjectVersion, Sha256Digest},
 };
@@ -112,13 +112,14 @@ impl EventRepository {
             .transpose()
             .map_err(|_| PersistenceError::InvalidEventRecord)?;
         let result = transaction.transaction().execute(
-            "INSERT INTO event_stream (sequence, event_id, event_schema_version, event_type, actor_kind, actor_id, occurred_at_ms, correlation_id, causation_id, object_kind, object_id, object_version, object_digest, previous_event_digest, payload_json, event_digest) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "INSERT INTO event_stream (sequence, event_id, event_schema_version, event_type, actor_kind, actor_id, occurred_at_ms, correlation_id, causation_id, object_kind, object_id, object_version, object_digest, previous_event_digest, payload_json, event_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 i64::try_from(wire.sequence).map_err(|_| PersistenceError::InvalidEventRecord)?,
                 wire.event_id.to_string(),
                 i64::from(wire.event_schema_version),
                 wire.event_type,
-                actor_kind(&wire.actor),
+                actor_wire(&wire.actor).0,
+                actor_wire(&wire.actor).1,
                 wire.occurred_at_ms,
                 wire.correlation_id.to_string(),
                 wire.causation_id.map(|id| id.to_string()),
@@ -305,14 +306,9 @@ fn decode_row(row: &Row<'_>) -> Result<EventEnvelope, RecoveryError> {
     let actor = parse_actor(
         &row.get::<_, String>(4)
             .map_err(|_| RecoveryError::QueryFailed)?,
+        row.get::<_, Option<String>>(5)
+            .map_err(|_| RecoveryError::QueryFailed)?,
     )?;
-    if row
-        .get::<_, Option<String>>(5)
-        .map_err(|_| RecoveryError::QueryFailed)?
-        .is_some()
-    {
-        return Err(RecoveryError::InvalidEventRecord);
-    }
     let wire = EventEnvelopeWire {
         sequence,
         event_id: parse_id(
@@ -384,18 +380,18 @@ fn parse_id<T: FromStr>(value: String) -> Result<T, RecoveryError> {
     value.parse().map_err(|_| RecoveryError::InvalidEventRecord)
 }
 
-fn parse_actor(value: &str) -> Result<crate::domain::Actor, RecoveryError> {
-    match value {
-        "human" => Ok(crate::domain::Actor::Human),
-        "system" => Ok(crate::domain::Actor::System),
+fn parse_actor(kind: &str, id: Option<String>) -> Result<crate::domain::Actor, RecoveryError> {
+    match (kind, id) {
+        ("human", None) => Ok(crate::domain::Actor::Human),
+        ("system", None) => Ok(crate::domain::Actor::System),
+        ("agent", Some(id)) => {
+            let profile_id: crate::domain::AgentProfileId = parse_id(id.clone())?;
+            if id != profile_id.to_string() {
+                return Err(RecoveryError::InvalidEventRecord);
+            }
+            Ok(crate::domain::Actor::Agent(profile_id))
+        }
         _ => Err(RecoveryError::InvalidEventRecord),
-    }
-}
-
-fn actor_kind(actor: &crate::domain::Actor) -> &'static str {
-    match actor {
-        crate::domain::Actor::Human => "human",
-        crate::domain::Actor::System => "system",
     }
 }
 

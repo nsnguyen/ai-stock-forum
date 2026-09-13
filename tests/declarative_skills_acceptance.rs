@@ -189,7 +189,10 @@ fn keyboard_workflow_creates_versions_pins_upgrades_unassigns_and_restores_exact
         handle_event(&mut model, key(KeyCode::Char('c'))),
         ControllerEffect::Redraw
     );
-    assert_eq!(handle_event(&mut model, key(KeyCode::Enter)), ControllerEffect::Redraw);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::Redraw
+    );
     for value in [
         "Decision Journal",
         "Records the evidence behind an investment decision.",
@@ -215,7 +218,10 @@ fn keyboard_workflow_creates_versions_pins_upgrades_unassigns_and_restores_exact
             review_digest: sha256(b"create-review"),
         },
     ));
-    assert_eq!(handle_event(&mut model, key(KeyCode::Enter)), ControllerEffect::Redraw);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::Redraw
+    );
     assert!(matches!(
         handle_event(&mut model, key(KeyCode::Enter)),
         ControllerEffect::ExecuteSkill(ApplicationCommand::CreateSkill { .. })
@@ -226,7 +232,10 @@ fn keyboard_workflow_creates_versions_pins_upgrades_unassigns_and_restores_exact
     model.skills.replace_skills(library(&[&first]));
     model.skills.replace_detail(skill_view(&first));
     model.skills.selected_action_index = 1;
-    assert_eq!(handle_event(&mut model, key(KeyCode::Enter)), ControllerEffect::Redraw);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::Redraw
+    );
     for value in [
         "Decision Journal",
         "Records the evidence behind an investment decision.",
@@ -242,17 +251,27 @@ fn keyboard_workflow_creates_versions_pins_upgrades_unassigns_and_restores_exact
     else {
         panic!("version review request")
     };
-    assert!(model.skills.editor.as_mut().expect("version editor").apply_preview(
-        request.generation(),
-        SkillEditPreview {
-            skill_id: second.skill_id(),
-            expected_active_version_id: Some(first.skill_version_id()),
-            candidate_digest: second.content_digest().clone(),
-            review_token: SkillReviewToken::from_uuid(Uuid::from_u128(301)),
-            review_digest: sha256(b"version-review"),
-        },
-    ));
-    assert_eq!(handle_event(&mut model, key(KeyCode::Enter)), ControllerEffect::Redraw);
+    assert!(
+        model
+            .skills
+            .editor
+            .as_mut()
+            .expect("version editor")
+            .apply_preview(
+                request.generation(),
+                SkillEditPreview {
+                    skill_id: second.skill_id(),
+                    expected_active_version_id: Some(first.skill_version_id()),
+                    candidate_digest: second.content_digest().clone(),
+                    review_token: SkillReviewToken::from_uuid(Uuid::from_u128(301)),
+                    review_digest: sha256(b"version-review"),
+                },
+            )
+    );
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::Redraw
+    );
     assert!(matches!(
         handle_event(&mut model, key(KeyCode::Enter)),
         ControllerEffect::ExecuteSkill(ApplicationCommand::ActivateSkillVersion { .. })
@@ -279,8 +298,9 @@ fn keyboard_workflow_creates_versions_pins_upgrades_unassigns_and_restores_exact
         &mut model,
         outcome(CommandView::AgentProfile(empty_agent.clone())),
     );
-    let ControllerEffect::RequestSkillAssignmentPreview { target, assignment, .. } =
-        handle_event(&mut model, key(KeyCode::Enter))
+    let ControllerEffect::RequestSkillAssignmentPreview {
+        target, assignment, ..
+    } = handle_event(&mut model, key(KeyCode::Enter))
     else {
         panic!("pin review")
     };
@@ -295,8 +315,9 @@ fn keyboard_workflow_creates_versions_pins_upgrades_unassigns_and_restores_exact
         pinned_agent.profile.skill_refs().first(),
     ));
     model.skills.pane = SkillsPane::AssignmentReview;
-    let ControllerEffect::RequestSkillAssignmentPreview { target, assignment, .. } =
-        handle_event(&mut model, key(KeyCode::Enter))
+    let ControllerEffect::RequestSkillAssignmentPreview {
+        target, assignment, ..
+    } = handle_event(&mut model, key(KeyCode::Enter))
     else {
         panic!("upgrade review")
     };
@@ -315,8 +336,9 @@ fn keyboard_workflow_creates_versions_pins_upgrades_unassigns_and_restores_exact
     model.agents.detail = Some(upgraded_agent.clone());
     model.agents.skill_panel_open = true;
     model.agents.selected_skill_action_index = 2;
-    let ControllerEffect::RequestSkillAssignmentPreview { target, assignment, .. } =
-        handle_event(&mut model, key(KeyCode::Enter))
+    let ControllerEffect::RequestSkillAssignmentPreview {
+        target, assignment, ..
+    } = handle_event(&mut model, key(KeyCode::Enter))
     else {
         panic!("unassign review")
     };
@@ -450,11 +472,7 @@ fn upgrade_availability_derivation_rejects_unknown_and_inconsistent_library_stat
         }
     }
 
-    let mut inconsistent = agent_action_model(
-        vec![pinned_v1.reference()],
-        vec![&divergent],
-        false,
-    );
+    let mut inconsistent = agent_action_model(vec![pinned_v1.reference()], vec![&divergent], false);
     inconsistent.skills.library_loaded = true;
     let text = availability_text(&inconsistent);
     assert!(text.contains("INCONSISTENT"));
@@ -487,7 +505,10 @@ fn unknown_and_current_agent_actions_traverse_and_dispatch_only_view_or_unassign
     for (case, active) in [("unknown", Vec::new()), ("current", vec![&pinned])] {
         let mut model = agent_action_model(vec![pinned.reference()], active, false);
 
-        assert_eq!(model.agents.selected_skill_action(), ai_stock_forum::ui::tui::AgentSkillAction::View);
+        assert_eq!(
+            model.agents.selected_skill_action(),
+            ai_stock_forum::ui::tui::AgentSkillAction::View
+        );
         assert_eq!(
             handle_event(&mut model, key(KeyCode::Enter)),
             ControllerEffect::LoadSkillVersion {
@@ -500,7 +521,10 @@ fn unknown_and_current_agent_actions_traverse_and_dispatch_only_view_or_unassign
         model.skills.active = false;
         model.active_view = View::Agents;
         model.agents.skill_panel_open = true;
-        assert_eq!(handle_event(&mut model, key(KeyCode::Right)), ControllerEffect::Redraw);
+        assert_eq!(
+            handle_event(&mut model, key(KeyCode::Right)),
+            ControllerEffect::Redraw
+        );
         assert_eq!(
             model.agents.selected_skill_action(),
             ai_stock_forum::ui::tui::AgentSkillAction::Unassign,
@@ -523,7 +547,10 @@ fn available_agent_actions_dispatch_the_exact_derived_replacement_ref() {
     let active = skill(700, Some(&pinned));
     let mut model = agent_action_model(vec![pinned.reference()], vec![&active], false);
 
-    assert_eq!(handle_event(&mut model, key(KeyCode::Right)), ControllerEffect::Redraw);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Right)),
+        ControllerEffect::Redraw
+    );
     assert_eq!(
         model.agents.selected_skill_action(),
         ai_stock_forum::ui::tui::AgentSkillAction::Upgrade

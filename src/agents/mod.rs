@@ -18,9 +18,9 @@ pub use normalization::{
     normalize_tag_key, validate_visible_text,
 };
 pub use profile::{
-    AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentReadiness, AgentRole,
-    DESCRIPTION_MAX_BYTES, DISPLAY_NAME_MAX_BYTES, INSTRUCTIONS_MAX_BYTES, MAX_SPECIALTY_TAGS,
-    MAX_SKILL_REFS, McpRef, PERSONALITY_MAX_BYTES, PRIMARY_SPECIALTY_MAX_BYTES,
+    AgentBindings, AgentProfileDraft, AgentProfileVersion, AgentProfileVersionRef, AgentReadiness,
+    AgentRole, DESCRIPTION_MAX_BYTES, DISPLAY_NAME_MAX_BYTES, INSTRUCTIONS_MAX_BYTES,
+    MAX_SKILL_REFS, MAX_SPECIALTY_TAGS, McpRef, PERSONALITY_MAX_BYTES, PRIMARY_SPECIALTY_MAX_BYTES,
     SPECIALTY_TAG_MAX_BYTES,
 };
 pub use projection::AgentProfilesProjection;

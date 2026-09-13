@@ -69,28 +69,47 @@ terminal_before="$(stty -g)"
 target/release/ai-stock-forum
 ```
 
+The current cockpit is keyboard-first. Its global destination rail contains
+exactly these ordered labels:
+
+```text
+1 Overview
+2 Setup
+3 Audit
+4 Help
+a Agents
+s Skills
+```
+
+There is no seventh Memory destination; Memory is nested under Agents.
+Modified shortcuts are inert. In command, profile, skill, or Memory text
+editors, typed shortcut characters remain editor text. Bare `q` is inert and
+`/quit` requests normal shutdown. `?` is a Help alias but is not a destination
+label.
+
 Perform this exact flow in the cockpit:
 
 1. Press bare `a` and confirm Agents opens. Use bare `1`, `2`, `3`, and `4` in
-   turn, then return with bare `a`. Each shortcut must work from every non-text
-   browsing pane and confirmation, and Agents must return to the same pane and
-   selection. While command, profile, or skill text entry owns input, these
-   characters remain text; switching preserves tab state, drafts, and pending
-   confirmations.
+   turn, use bare `s` to open Skills, then return with bare `a`. Each shortcut
+   must work from every non-text browsing pane and confirmation, and Agents must
+   return to the same pane and selection. While text entry owns input, type
+   `1234as` and verify the characters remain text rather than navigating.
+   Switching preserves tab state, drafts, and pending confirmations.
 2. Press `c` to copy the selected pinned template. Keep bindings empty, rename
    the draft `Research North`, walk every guided step, and inspect the Review
    screen. No durable profile exists before confirmation.
-3. Enter `:create`, then type the exact phrase `create` at `Confirm Create` and
-   press `Enter`. The new active profile must show version 1 and `Not Ready`.
+3. Press `Enter` on Review to open the separate Confirm Create state, then press
+   `Enter` again. The new active profile must show version 1 and `Not Ready`.
 4. Select `Research North`, open detail with `Enter`, and press `e`.
 5. Change primary specialty, specialty tags, personality, and instructions.
-   Leave the unavailable production bindings unbound. Enter `:review` and
-   inspect every ordered Before/After field diff.
-6. Enter `:activate`, then press `Esc` at `Confirm Activate`. Confirm the editor
-   returns to the unchanged review and history still has only version 1.
-7. Enter `:activate` again, then type the exact displayed `activate
-   <review-digest>` phrase and press `Enter`. Confirm detail shows version 2 and
-   remains honestly `Not Ready`.
+   Leave unavailable production bindings unbound. Use `Enter` to advance
+   through every field, then inspect the authoritative ordered Before/After
+   preview on Review.
+6. Press `Enter` on the authoritative Review to open Confirm Activate, then
+   press `Esc`. Confirm the editor returns to the unchanged review and history
+   still has only version 1.
+7. Open Confirm Activate again and press `Enter`. Confirm detail shows version
+   2 and remains honestly `Not Ready`.
 8. Press `h`. Confirm history is newest-first, then select version 1 and inspect
    its complete accepted content, immutable metadata, and predecessor diff.
    Inspection must not move the active pointer.
@@ -98,7 +117,8 @@ Perform this exact flow in the cockpit:
    respectively uses one-pane narrow, two-pane medium, and three-pane wide
    presentation without losing selection, editor/detail state, or history.
 10. Resize below `60x18`; press `Esc` and confirm the app remains open, then
-    press `q` and confirm unconditional normal quit from the Too Small view.
+    press bare `q` and confirm it is inert. Open command entry with `/`, type
+    `quit`, and press `Enter` to request normal shutdown with `/quit`.
 11. Confirm shell usability after exit.
 
 If the terminal harness cannot resize, record exactly that limitation. Do not
@@ -148,12 +168,12 @@ newest-first, while the exact-version form must show version 1 content and its
 predecessor diff.
 Do not use a database browser or dump raw profile rows for routine inspection.
 
-For a complete fallback-only create/edit rehearsal, use `/agent create bull`
-and the same guided colon controls. Creation uses `:create` followed by exact
-`create`; editing uses `:activate` followed by exact `activate
-<review-digest>`. Cause one recoverable duplicate-name or transient submission
-error and verify the exact draft, review, and confirmation remain available for
-retry. EOF and `:cancel` discard local draft/review state.
+Profile mutation acceptance is exercised through the keyboard-first cockpit
+above and the automated host-parity contracts. In fallback mode, follow the
+rendered guided prompts and exact displayed confirmation action rather than
+assuming a TUI shortcut. Cause one recoverable duplicate-name or transient
+submission error and verify the exact draft, review, and confirmation remain
+available for retry. EOF discards local draft/review state.
 
 Oversized and invalid UTF-8 command lines must produce the authoritative typed
 `RejectInput` result, with bounded metadata, and must not be pre-dispatch local

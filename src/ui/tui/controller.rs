@@ -1,9 +1,12 @@
 use super::{
     TuiEvent,
     model::{
-        AgentOutcomeIntent, AgentSkillAction, AgentsPane, AssignmentKind, Focus, LayoutMode,
-        NavigationTab, ProfileConfirmation, RuntimeStatus, Severity, SkillConfirmation,
-        SkillDetailAction, SkillOperationOrigin, SkillWorkspaceOrigin, SkillsPane, TuiModel, View,
+        AgentDetailAction, AgentOutcomeIntent, AgentSkillAction, AgentsPane, AssignmentKind, Focus,
+        LayoutMode, MEMORY_RETAINED_ROW_CAP, MemoryConfirmation, MemoryEditorOrigin,
+        MemoryEntryDetailAction, MemoryPane, MemoryProposalDetailAction, MemoryResultOrigin,
+        MemoryViewState, NavigationTab, ProfileConfirmation, RuntimeStatus, Severity,
+        SkillConfirmation, SkillDetailAction, SkillOperationOrigin, SkillWorkspaceOrigin,
+        SkillsPane, TuiModel, View,
     },
     views,
 };
@@ -15,7 +18,9 @@ use crate::{
         ShutdownReason,
     },
     audit::AuditEntry,
+    memory::{MemoryProposalFilter, MemoryProposalRef, MemoryResolutionAction},
     ui::command::{AgentWorkflowCommand, ParsedLine, SkillWorkflowCommand, parse_line},
+    ui::memory_editor::{MemoryEditorEffect, MemoryEditorStep, MemoryPreviewRequest},
     ui::profile_editor::{
         PreviewEditRequest, ProfileEditorEffect, ProfileEditorMode, ProfileEditorStep,
     },
@@ -25,6 +30,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 const COMMAND_IN_FLIGHT_MESSAGE: &str = "A command is already running.";
 const COMMAND_REJECTED_MESSAGE: &str = "Command rejected. Check the command and try again.";
+const MEMORY_OUTCOME_MESSAGE: &str = "Memory command completed.";
 const PROTECTED_AGENTS_MESSAGE: &str =
     "Press a outside text input to finish the protected Agents workflow.";
 const PROTECTED_SKILLS_MESSAGE: &str =
@@ -65,15 +71,23 @@ pub enum ControllerEffect {
     ExecuteProfile(ApplicationCommand),
     CancelProfileReview,
     LoadSkills,
-    LoadSkill { selected_skill: usize },
-    LoadSkillHistory { skill_id: crate::domain::SkillId },
+    LoadSkill {
+        selected_skill: usize,
+    },
+    LoadSkillHistory {
+        skill_id: crate::domain::SkillId,
+    },
     LoadSkillVersion {
         skill_id: crate::domain::SkillId,
         version: crate::domain::ObjectVersion,
     },
-    LoadSkillStarter { selected_skill: usize },
+    LoadSkillStarter {
+        selected_skill: usize,
+    },
     LoadSkillAgents,
-    LoadSkillAgent { profile_id: crate::domain::AgentProfileId },
+    LoadSkillAgent {
+        profile_id: crate::domain::AgentProfileId,
+    },
     RequestSkillPreview(SkillPreviewRequest),
     RequestSkillAssignmentPreview {
         profile_id: crate::domain::AgentProfileId,
@@ -83,6 +97,41 @@ pub enum ControllerEffect {
     },
     ExecuteSkill(ApplicationCommand),
     CancelSkillReview,
+    LoadAgentMemory(AgentProfileSelector),
+    LoadMemoryEntry {
+        selector: AgentProfileSelector,
+        key: String,
+    },
+    LoadMemoryEntryHistory {
+        selector: AgentProfileSelector,
+        key: String,
+    },
+    LoadMemoryEntryVersion {
+        selector: AgentProfileSelector,
+        key: String,
+        version: crate::domain::ObjectVersion,
+        expected_entry_version_id: crate::domain::MemoryEntryVersionId,
+    },
+    RequestMemorySetPreview(MemoryPreviewRequest),
+    RequestMemoryDeletePreview {
+        selector: AgentProfileSelector,
+        key: String,
+        generation: u64,
+    },
+    LoadMemoryProposals {
+        selector: AgentProfileSelector,
+        filter: MemoryProposalFilter,
+    },
+    LoadMemoryProposal(crate::domain::MemoryProposalId),
+    RequestMemoryProposalResolutionPreview {
+        proposal: MemoryProposalRef,
+        action: MemoryResolutionAction,
+        generation: u64,
+    },
+    LoadEpisodicSummaries(AgentProfileSelector),
+    LoadEpisodicSummary(crate::domain::EpisodicSummaryId),
+    ExecuteMemory(ApplicationCommand),
+    CancelMemoryReview,
 }
 
 impl ControllerEffect {
@@ -96,10 +145,7 @@ impl ControllerEffect {
     pub(super) fn blocked_while_command_in_flight(&self) -> bool {
         !matches!(self, Self::None | Self::Redraw | Self::RequestShutdown(_))
             && !self.is_navigation_refresh()
-            && !matches!(
-                self,
-                Self::Submit(ApplicationCommand::RequestShutdown)
-            )
+            && !matches!(self, Self::Submit(ApplicationCommand::RequestShutdown))
     }
 }
 
@@ -238,9 +284,11 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
                 AgentOutcomeIntent::SkillAssignment if present_outcome => {
                     let target = model.skills.selected_skill_ref().cloned();
                     let current = target.as_ref().and_then(|target| {
-                        profile.profile.skill_refs().iter().find(|current| {
-                            current.skill_id() == target.skill_id()
-                        })
+                        profile
+                            .profile
+                            .skill_refs()
+                            .iter()
+                            .find(|current| current.skill_id() == target.skill_id())
                     });
                     model.skills.assignment = target
                         .as_ref()
@@ -397,6 +445,23 @@ pub fn apply_outcome(model: &mut TuiModel, outcome: CommandOutcome) -> Controlle
             }
             ShutdownDisposition::Continue
         }
+        CommandView::MemoryEntries(_)
+        | CommandView::MemoryEntry(_)
+        | CommandView::MemoryEntryHistory(_)
+        | CommandView::MemoryEntryVersion(_)
+        | CommandView::MemoryProposals(_)
+        | CommandView::MemoryProposal(_)
+        | CommandView::EpisodicSummaries(_)
+        | CommandView::EpisodicSummary(_)
+        | CommandView::MemoryEntryMutation(_)
+        | CommandView::MemoryProposalCreated(_)
+        | CommandView::MemoryProposalResolution(_)
+        | CommandView::MemorySnapshot(_) => {
+            if present_outcome {
+                model.set_message(Severity::Info, MEMORY_OUTCOME_MESSAGE);
+            }
+            ShutdownDisposition::Continue
+        }
     };
 
     merge_committed_audit(model, committed_audit);
@@ -415,12 +480,26 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         return ControllerEffect::RequestShutdown(ShutdownReason::Interrupted);
     }
 
+    if memory_text_entry_active(model) {
+        return handle_memory_editor_key(model, key);
+    }
+
     if model.layout_mode == LayoutMode::TooSmall {
         return handle_too_small_key(model, key);
     }
 
     if let Some(effect) = handle_global_navigation_shortcut(model, key) {
         return effect;
+    }
+
+    if !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane == AgentsPane::Memory
+        && model.focus != Focus::Command
+        && key.code == KeyCode::Char('i')
+        && no_modifiers(key.modifiers)
+    {
+        return ControllerEffect::Redraw;
     }
 
     if active_confirmation(model) {
@@ -440,6 +519,20 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
         model.command.insert('/');
         model.set_focus(Focus::Command);
         return ControllerEffect::Redraw;
+    }
+
+    if active_memory_editor(model) {
+        if !model.agents.memory.local_layer_cache_is_authenticated() {
+            return if key.code == KeyCode::Esc && no_modifiers(key.modifiers) {
+                handle_memory_editor_key(model, key)
+            } else {
+                ControllerEffect::Redraw
+            };
+        }
+        let effect = handle_memory_editor_key(model, key);
+        if effect != ControllerEffect::None {
+            return effect;
+        }
     }
 
     if active_skill_confirmation(model) {
@@ -501,6 +594,7 @@ fn handle_global_navigation_shortcut(
     let confirmation_active = active_confirmation(model) || active_skill_confirmation(model);
     let text_entry_active = active_profile_editor(model)
         || active_skill_editor(model)
+        || memory_text_entry_active(model)
         || model.focus == Focus::Command;
     if key.modifiers != KeyModifiers::NONE || (text_entry_active && !confirmation_active) {
         return None;
@@ -578,9 +672,7 @@ fn handle_navigation_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffec
         KeyCode::Down | KeyCode::Right | KeyCode::PageDown if no_modifiers(key.modifiers) => {
             move_navigation_selection(model, true)
         }
-        KeyCode::Home if no_modifiers(key.modifiers) => {
-            select_navigation_bound(model, false)
-        }
+        KeyCode::Home if no_modifiers(key.modifiers) => select_navigation_bound(model, false),
         KeyCode::End if no_modifiers(key.modifiers) => select_navigation_bound(model, true),
         _ => ControllerEffect::None,
     }
@@ -654,6 +746,13 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
         model.set_message(Severity::Warning, PROTECTED_SKILLS_MESSAGE);
         return ControllerEffect::Redraw;
     }
+    if matches!(&parsed, ParsedLine::MemoryWorkflow(_)) {
+        model.set_message(
+            Severity::Info,
+            "Open Agents → Memory to edit or resolve memory.",
+        );
+        return ControllerEffect::Redraw;
+    }
 
     let input = model.command.take_text();
     match parsed {
@@ -666,8 +765,7 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
             model.set_command_in_flight(true);
             if matches!(
                 command,
-                ApplicationCommand::ListAgentProfiles
-                    | ApplicationCommand::ShowAgentProfile { .. }
+                ApplicationCommand::ListAgentProfiles | ApplicationCommand::ShowAgentProfile { .. }
             ) {
                 model.pending_agent_outcome = Some(AgentOutcomeIntent::AgentsWorkspace);
             }
@@ -696,7 +794,8 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
             model.command.remember(input);
             model.clear_message();
             if !model.skills.active {
-                model.skills.workspace_origin = Some(SkillWorkspaceOrigin::Cockpit(model.active_view));
+                model.skills.workspace_origin =
+                    Some(SkillWorkspaceOrigin::Cockpit(model.active_view));
             }
             model.skills.clear_skill_context();
             model.switch_tab(NavigationTab::Skills);
@@ -704,15 +803,46 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
             model.set_focus(Focus::Workspace);
             ControllerEffect::StartSkillWorkflow(workflow)
         }
+        ParsedLine::MemoryWorkflow(_) => unreachable!("memory workflow handled before consumption"),
     }
 }
 
 fn handle_paste(model: &mut TuiModel, text: &str) -> ControllerEffect {
-    if !active_profile_editor(model) && !active_skill_editor(model) && model.focus != Focus::Command {
+    if model.focus != Focus::Command
+        && !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane == AgentsPane::Memory
+        && matches!(
+            model.agents.memory.pane,
+            MemoryPane::Editor
+                | MemoryPane::MutationReview
+                | MemoryPane::ProposalResolutionReview
+                | MemoryPane::Confirmation
+        )
+        && !model.agents.memory.local_layer_cache_is_authenticated()
+    {
+        return ControllerEffect::Redraw;
+    }
+    if !active_profile_editor(model)
+        && !active_skill_editor(model)
+        && !memory_text_entry_active(model)
+        && model.focus != Focus::Command
+    {
         return ControllerEffect::None;
     }
     let before = model.command.text().len();
-    model.command.ingest(text);
+    let memory_value = memory_text_entry_active(model)
+        && model
+            .agents
+            .memory
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.step() == MemoryEditorStep::Value);
+    if memory_value {
+        model.command.ingest_memory_value(text);
+    } else {
+        model.command.ingest(text);
+    }
     if model.command.text().len() == before {
         ControllerEffect::None
     } else {
@@ -727,9 +857,7 @@ fn active_skill_confirmation(model: &TuiModel) -> bool {
 }
 
 fn active_skill_editor(model: &TuiModel) -> bool {
-    model.skills.active
-        && model.skills.pane == SkillsPane::Editor
-        && model.skills.editor.is_some()
+    model.skills.active && model.skills.pane == SkillsPane::Editor && model.skills.editor.is_some()
 }
 
 fn handle_skill_confirmation_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
@@ -818,14 +946,10 @@ fn handle_skill_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEff
             controller_effect
         }
         KeyCode::Up | KeyCode::Down if no_modifiers(key.modifiers) => {
-            let reference_picker = model
-                .skills
-                .editor
-                .as_ref()
-                .is_some_and(|editor| {
-                    editor.field() == crate::ui::skill_editor::SkillEditorField::ReferenceName
-                        && model.command.text().is_empty()
-                });
+            let reference_picker = model.skills.editor.as_ref().is_some_and(|editor| {
+                editor.field() == crate::ui::skill_editor::SkillEditorField::ReferenceName
+                    && model.command.text().is_empty()
+            });
             if !reference_picker {
                 return ControllerEffect::None;
             }
@@ -841,7 +965,9 @@ fn handle_skill_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEff
             model.command.insert(character);
             ControllerEffect::Redraw
         }
-        KeyCode::Backspace if no_modifiers(key.modifiers) => edit(model, |model| model.command.backspace()),
+        KeyCode::Backspace if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.backspace())
+        }
         KeyCode::Delete if no_modifiers(key.modifiers) => {
             if model
                 .skills
@@ -855,10 +981,18 @@ fn handle_skill_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEff
                 edit(model, |model| model.command.delete())
             }
         }
-        KeyCode::Left if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_left()),
-        KeyCode::Right if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_right()),
-        KeyCode::Home if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_home()),
-        KeyCode::End if no_modifiers(key.modifiers) => edit(model, |model| model.command.move_end()),
+        KeyCode::Left if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_left())
+        }
+        KeyCode::Right if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_right())
+        }
+        KeyCode::Home if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_home())
+        }
+        KeyCode::End if no_modifiers(key.modifiers) => {
+            edit(model, |model| model.command.move_end())
+        }
         _ => ControllerEffect::None,
     }
 }
@@ -905,7 +1039,9 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             ControllerEffect::Redraw
         }
         (SkillsPane::List, KeyCode::Enter) if no_modifiers(key.modifiers) => {
-            ControllerEffect::LoadSkill { selected_skill: model.skills.selected_skill }
+            ControllerEffect::LoadSkill {
+                selected_skill: model.skills.selected_skill,
+            }
         }
         (SkillsPane::List, KeyCode::Char('c')) if no_modifiers(key.modifiers) => {
             model.skills.pane = SkillsPane::CreateSource;
@@ -920,7 +1056,8 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             ControllerEffect::Redraw
         }
         (SkillsPane::CreateSource, KeyCode::Up) if no_modifiers(key.modifiers) => {
-            model.skills.selected_create_source = model.skills.selected_create_source.saturating_sub(1);
+            model.skills.selected_create_source =
+                model.skills.selected_create_source.saturating_sub(1);
             ControllerEffect::Redraw
         }
         (SkillsPane::CreateSource, KeyCode::Enter) if no_modifiers(key.modifiers) => {
@@ -935,12 +1072,21 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             }
         }
         (SkillsPane::Detail, KeyCode::Down | KeyCode::Right) if no_modifiers(key.modifiers) => {
-            let last = model.skills.available_detail_actions().len().saturating_sub(1);
-            model.skills.selected_action_index = model.skills.selected_action_index.saturating_add(1).min(last);
+            let last = model
+                .skills
+                .available_detail_actions()
+                .len()
+                .saturating_sub(1);
+            model.skills.selected_action_index = model
+                .skills
+                .selected_action_index
+                .saturating_add(1)
+                .min(last);
             ControllerEffect::Redraw
         }
         (SkillsPane::Detail, KeyCode::Up | KeyCode::Left) if no_modifiers(key.modifiers) => {
-            model.skills.selected_action_index = model.skills.selected_action_index.saturating_sub(1);
+            model.skills.selected_action_index =
+                model.skills.selected_action_index.saturating_sub(1);
             ControllerEffect::Redraw
         }
         (SkillsPane::Detail, KeyCode::Enter) if no_modifiers(key.modifiers) => {
@@ -964,17 +1110,31 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             }
         }
         (SkillsPane::History, KeyCode::Down) if no_modifiers(key.modifiers) => {
-            let last = model.skills.history.as_ref().map(|history| history.versions.len().saturating_sub(1)).unwrap_or(0);
-            model.skills.selected_history_version = model.skills.selected_history_version.saturating_add(1).min(last);
+            let last = model
+                .skills
+                .history
+                .as_ref()
+                .map(|history| history.versions.len().saturating_sub(1))
+                .unwrap_or(0);
+            model.skills.selected_history_version = model
+                .skills
+                .selected_history_version
+                .saturating_add(1)
+                .min(last);
             ControllerEffect::Redraw
         }
         (SkillsPane::History, KeyCode::Up) if no_modifiers(key.modifiers) => {
-            model.skills.selected_history_version = model.skills.selected_history_version.saturating_sub(1);
+            model.skills.selected_history_version =
+                model.skills.selected_history_version.saturating_sub(1);
             ControllerEffect::Redraw
         }
         (SkillsPane::History, KeyCode::Enter) if no_modifiers(key.modifiers) => {
-            let Some(history) = model.skills.history.as_ref() else { return Some(ControllerEffect::Redraw); };
-            let Some(entry) = history.versions.get(model.skills.selected_history_version) else { return Some(ControllerEffect::Redraw); };
+            let Some(history) = model.skills.history.as_ref() else {
+                return Some(ControllerEffect::Redraw);
+            };
+            let Some(entry) = history.versions.get(model.skills.selected_history_version) else {
+                return Some(ControllerEffect::Redraw);
+            };
             ControllerEffect::LoadSkillVersion {
                 skill_id: history.skill_id,
                 version: entry.skill_ref.version(),
@@ -1004,7 +1164,10 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             let target = model.skills.selected_skill_ref()?.clone();
             let assignment = model.skills.assignment.clone()?;
             if assignment == AssignmentKind::AlreadyAssigned {
-                model.set_message(Severity::Warning, "Agent already has this exact skill version.");
+                model.set_message(
+                    Severity::Warning,
+                    "Agent already has this exact skill version.",
+                );
                 ControllerEffect::Redraw
             } else {
                 model.skills.operation_origin = model
@@ -1063,17 +1226,15 @@ fn restore_skill_origin(model: &mut TuiModel, origin: SkillOperationOrigin) {
 
 fn unwind_skills(model: &mut TuiModel) -> ControllerEffect {
     match model.skills.pane {
-        SkillsPane::List => {
-            match model.skills.workspace_origin.take() {
-                Some(SkillWorkspaceOrigin::Cockpit(view)) => model.select_view(view),
-                Some(SkillWorkspaceOrigin::AgentSkills { profile_id }) => {
-                    model.select_view(View::Agents);
-                    model.agents.select_profile_id(profile_id);
-                    model.agents.skill_panel_open = true;
-                }
-                None => model.select_view(model.active_view),
+        SkillsPane::List => match model.skills.workspace_origin.take() {
+            Some(SkillWorkspaceOrigin::Cockpit(view)) => model.select_view(view),
+            Some(SkillWorkspaceOrigin::AgentSkills { profile_id }) => {
+                model.select_view(View::Agents);
+                model.agents.select_profile_id(profile_id);
+                model.agents.skill_panel_open = true;
             }
-        }
+            None => model.select_view(model.active_view),
+        },
         SkillsPane::Detail
             if matches!(
                 model.skills.workspace_origin,
@@ -1089,7 +1250,9 @@ fn unwind_skills(model: &mut TuiModel) -> ControllerEffect {
             model.agents.skill_panel_open = true;
         }
         SkillsPane::CreateSource | SkillsPane::Detail => model.skills.pane = SkillsPane::List,
-        SkillsPane::History | SkillsPane::AgentPicker | SkillsPane::Result => model.skills.pane = SkillsPane::Detail,
+        SkillsPane::History | SkillsPane::AgentPicker | SkillsPane::Result => {
+            model.skills.pane = SkillsPane::Detail
+        }
         SkillsPane::AssignmentReview => model.skills.pane = SkillsPane::AgentPicker,
         SkillsPane::Editor => {
             model.skills.editor = None;
@@ -1277,20 +1440,857 @@ fn apply_profile_editor_effect(
     }
 }
 
+fn active_memory_editor(model: &TuiModel) -> bool {
+    !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane == AgentsPane::Memory
+        && model.agents.memory.pane == MemoryPane::Editor
+        && model.agents.memory.editor.is_some()
+}
+
+fn memory_text_entry_active(model: &TuiModel) -> bool {
+    active_memory_editor(model)
+        && model.agents.memory.local_layer_cache_is_authenticated()
+        && model
+            .agents
+            .memory
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.step() != MemoryEditorStep::Review)
+}
+
+fn handle_memory_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
+    let on_review = model
+        .agents
+        .memory
+        .editor
+        .as_ref()
+        .is_some_and(|editor| editor.step() == MemoryEditorStep::Review);
+    match key.code {
+        KeyCode::Esc if no_modifiers(key.modifiers) => {
+            if on_review && model.agents.memory.review_registered {
+                return ControllerEffect::CancelMemoryReview;
+            }
+            let effect = model
+                .agents
+                .memory
+                .editor
+                .as_mut()
+                .map(|editor| editor.back())
+                .unwrap_or(MemoryEditorEffect::Cancelled);
+            apply_memory_editor_effect(model, effect)
+        }
+        KeyCode::Enter if no_modifiers(key.modifiers) => {
+            if on_review && key.kind != KeyEventKind::Press {
+                return ControllerEffect::None;
+            }
+            let submits_tags = model
+                .agents
+                .memory
+                .editor
+                .as_ref()
+                .is_some_and(|editor| editor.step() == MemoryEditorStep::PurposeTags);
+            if submits_tags && let Err(error) = model.agents.memory.next_review_request_generation()
+            {
+                return memory_failure(model, error);
+            }
+            let effect = if on_review {
+                model
+                    .agents
+                    .memory
+                    .editor
+                    .as_ref()
+                    .map(|editor| editor.confirm())
+                    .unwrap_or(Ok(MemoryEditorEffect::Cancelled))
+            } else {
+                let input = model.command.take_text();
+                model
+                    .agents
+                    .memory
+                    .editor
+                    .as_mut()
+                    .map(|editor| {
+                        if editor.step() == MemoryEditorStep::Value {
+                            editor.submit_line(input)
+                        } else {
+                            editor.submit_keyboard_line(&input)
+                        }
+                    })
+                    .unwrap_or(Ok(MemoryEditorEffect::Cancelled))
+            };
+            match effect {
+                Ok(effect) => apply_memory_editor_effect(model, effect),
+                Err(error) => {
+                    model.set_message(Severity::Warning, error.code());
+                    ControllerEffect::Redraw
+                }
+            }
+        }
+        KeyCode::Char(character) if text_modifiers(key.modifiers) && !on_review => {
+            model.command.insert(character);
+            ControllerEffect::Redraw
+        }
+        KeyCode::Backspace if no_modifiers(key.modifiers) && !on_review => {
+            edit(model, |model| model.command.backspace())
+        }
+        KeyCode::Delete if no_modifiers(key.modifiers) && !on_review => {
+            edit(model, |model| model.command.delete())
+        }
+        KeyCode::Left if no_modifiers(key.modifiers) && !on_review => {
+            edit(model, |model| model.command.move_left())
+        }
+        KeyCode::Right if no_modifiers(key.modifiers) && !on_review => {
+            edit(model, |model| model.command.move_right())
+        }
+        KeyCode::Home if no_modifiers(key.modifiers) && !on_review => {
+            edit(model, |model| model.command.move_home())
+        }
+        KeyCode::End if no_modifiers(key.modifiers) && !on_review => {
+            edit(model, |model| model.command.move_end())
+        }
+        KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+            if no_modifiers(key.modifiers) && !on_review =>
+        {
+            let (_, detail_page) = memory_page_sizes(model);
+            move_memory_detail_scroll(&mut model.agents.memory, key.code, detail_page);
+            ControllerEffect::Redraw
+        }
+        _ => ControllerEffect::None,
+    }
+}
+
+fn apply_memory_editor_effect(
+    model: &mut TuiModel,
+    effect: MemoryEditorEffect,
+) -> ControllerEffect {
+    match effect {
+        MemoryEditorEffect::None => {
+            synchronize_memory_editor_input(model);
+            ControllerEffect::Redraw
+        }
+        MemoryEditorEffect::Preview(request) => match model.agents.memory.begin_review_request() {
+            Ok(_) => {
+                synchronize_memory_editor_input(model);
+                ControllerEffect::RequestMemorySetPreview(request)
+            }
+            Err(error) => {
+                model.set_message(Severity::Warning, error.code());
+                ControllerEffect::Redraw
+            }
+        },
+        MemoryEditorEffect::Confirm(command) => {
+            let Some(registered_command) = model.agents.memory.edit_review_command() else {
+                return memory_failure(
+                    model,
+                    crate::domain::DomainError::MemorySelectionUnavailable,
+                );
+            };
+            if command != registered_command {
+                return memory_failure(
+                    model,
+                    crate::domain::DomainError::MemorySelectionUnavailable,
+                );
+            }
+            model.command.clear();
+            model.agents.memory.confirmation = Some(MemoryConfirmation {
+                command: registered_command,
+                generation: model.agents.memory.generation,
+            });
+            set_memory_pane(&mut model.agents.memory, MemoryPane::Confirmation);
+            ControllerEffect::Redraw
+        }
+        MemoryEditorEffect::Cancelled => {
+            model.command.clear();
+            model.agents.memory.editor = None;
+            let pane = match model.agents.memory.editor_origin {
+                MemoryEditorOrigin::Create => MemoryPane::EntryList,
+                MemoryEditorOrigin::Edit => MemoryPane::EntryDetail,
+            };
+            set_memory_pane(&mut model.agents.memory, pane);
+            ControllerEffect::Redraw
+        }
+    }
+}
+
+fn synchronize_memory_editor_input(model: &mut TuiModel) {
+    let input = model
+        .agents
+        .memory
+        .editor
+        .as_ref()
+        .map(|editor| {
+            let input = match editor.step() {
+                MemoryEditorStep::Key => editor.key_input(),
+                MemoryEditorStep::Value => editor.value_input(),
+                MemoryEditorStep::PurposeTags => editor.tags_input(),
+                MemoryEditorStep::Review => "",
+            };
+            (editor.step(), input.to_owned())
+        })
+        .unwrap_or((MemoryEditorStep::Key, String::new()));
+    if input.0 == MemoryEditorStep::Value {
+        model.command.replace_with_memory_value(&input.1);
+    } else {
+        model.command.clear();
+        model.command.ingest(&input.1);
+    }
+}
+
+fn memory_failure(model: &mut TuiModel, error: crate::domain::DomainError) -> ControllerEffect {
+    model.set_message(Severity::Warning, error.code());
+    ControllerEffect::Redraw
+}
+
+fn reconcile_memory_entry_detail(memory: &mut MemoryViewState) {
+    let selected_id = memory
+        .authenticated_selected_entry()
+        .map(|summary| summary.entry.entry_id());
+    if memory
+        .entry_detail
+        .as_ref()
+        .map(|detail| detail.entry.reference().entry_id())
+        != selected_id
+    {
+        memory.entry_detail = None;
+        memory.entry_history = None;
+        memory.entry_version = None;
+    }
+}
+
+fn reconcile_memory_history_detail(memory: &mut MemoryViewState) {
+    let selected_id = memory
+        .authenticated_selected_history()
+        .map(|summary| summary.entry.entry_version_id());
+    if memory
+        .entry_version
+        .as_ref()
+        .map(|detail| detail.entry.reference().entry_version_id())
+        != selected_id
+    {
+        memory.entry_version = None;
+    }
+}
+
+fn reconcile_memory_proposal_detail(memory: &mut MemoryViewState) {
+    let selected_id = memory
+        .authenticated_selected_proposal()
+        .map(|summary| summary.proposal.proposal_id());
+    if memory
+        .proposal_detail
+        .as_ref()
+        .map(|detail| detail.proposal.reference().proposal_id())
+        != selected_id
+    {
+        memory.proposal_detail = None;
+    }
+}
+
+fn reconcile_memory_episode_detail(memory: &mut MemoryViewState) {
+    let selected_id = memory
+        .authenticated_selected_episode()
+        .map(|summary| summary.summary.summary_id());
+    if memory
+        .episode_detail
+        .as_ref()
+        .map(|detail| detail.summary.reference().summary_id())
+        != selected_id
+    {
+        memory.episode_detail = None;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MemoryListMovement {
+    Previous,
+    Next,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+}
+
+fn memory_page_sizes(model: &TuiModel) -> (usize, usize) {
+    let terminal = ratatui::layout::Rect::new(0, 0, model.terminal_width, model.terminal_height);
+    let workspace =
+        super::layout::view_geometry_for_state(terminal, View::Agents, model.inspector_open, true)
+            .cockpit
+            .workspace;
+    let nested =
+        super::layout::memory_workspace(workspace, super::layout::memory_layout_mode(workspace));
+    let list_page = super::layout::memory_list_visible_items(nested.primary);
+    let detail = nested.detail.unwrap_or(nested.primary);
+    let detail_page = usize::from(detail.height.saturating_sub(2).max(1));
+    (list_page, detail_page)
+}
+
+fn move_memory_list_selection(
+    selection: &mut usize,
+    first_visible: &mut usize,
+    raw_len: usize,
+    visible_items: usize,
+    movement: MemoryListMovement,
+) -> bool {
+    let retained_len = raw_len.min(MEMORY_RETAINED_ROW_CAP);
+    if retained_len == 0 {
+        let changed = *selection != 0;
+        *selection = 0;
+        *first_visible = 0;
+        return changed;
+    }
+
+    let original = *selection;
+    let previous = original.min(retained_len.saturating_sub(1));
+    let page = visible_items.max(1);
+    let last = retained_len.saturating_sub(1);
+    let next = match movement {
+        MemoryListMovement::Previous => previous.saturating_sub(1),
+        MemoryListMovement::Next => previous.saturating_add(1).min(last),
+        MemoryListMovement::PageUp => previous.saturating_sub(page),
+        MemoryListMovement::PageDown => previous.saturating_add(page).min(last),
+        MemoryListMovement::Home => 0,
+        MemoryListMovement::End => last,
+    };
+    *selection = next;
+
+    let max_first = retained_len.saturating_sub(page);
+    let mut first = (*first_visible).min(max_first);
+    if next < first {
+        first = next;
+    } else if next >= first.saturating_add(page) {
+        first = next.saturating_add(1).saturating_sub(page).min(max_first);
+    }
+    *first_visible = first;
+    next != original
+}
+
+fn memory_list_movement(code: KeyCode) -> Option<MemoryListMovement> {
+    match code {
+        KeyCode::Up => Some(MemoryListMovement::Previous),
+        KeyCode::Down => Some(MemoryListMovement::Next),
+        KeyCode::PageUp => Some(MemoryListMovement::PageUp),
+        KeyCode::PageDown => Some(MemoryListMovement::PageDown),
+        KeyCode::Home => Some(MemoryListMovement::Home),
+        KeyCode::End => Some(MemoryListMovement::End),
+        _ => None,
+    }
+}
+
+fn exact_history_version_is_installed(memory: &MemoryViewState) -> bool {
+    matches!(memory.authenticated_history_version(), Ok(Some(_)))
+}
+
+fn memory_pane_local_key(pane: MemoryPane, code: KeyCode) -> bool {
+    let scroll = matches!(
+        code,
+        KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
+    );
+    match pane {
+        MemoryPane::EntryList => {
+            scroll || matches!(code, KeyCode::Enter | KeyCode::Char('c' | 'p' | 'e'))
+        }
+        MemoryPane::EntryDetail | MemoryPane::ProposalDetail => {
+            scroll || matches!(code, KeyCode::Left | KeyCode::Right | KeyCode::Enter)
+        }
+        MemoryPane::EntryHistory | MemoryPane::Proposals | MemoryPane::EpisodicSummaries => {
+            scroll || code == KeyCode::Enter
+        }
+        MemoryPane::EpisodicDetail => scroll,
+        MemoryPane::Editor
+        | MemoryPane::MutationReview
+        | MemoryPane::Confirmation
+        | MemoryPane::ProposalResolutionReview
+        | MemoryPane::Result => false,
+    }
+}
+
+fn memory_detail_scroll_owned(memory: &MemoryViewState) -> bool {
+    match memory.pane {
+        MemoryPane::EntryHistory => exact_history_version_is_installed(memory),
+        MemoryPane::EntryDetail
+        | MemoryPane::Editor
+        | MemoryPane::MutationReview
+        | MemoryPane::Confirmation
+        | MemoryPane::Result
+        | MemoryPane::ProposalDetail
+        | MemoryPane::ProposalResolutionReview
+        | MemoryPane::EpisodicDetail => true,
+        MemoryPane::EntryList | MemoryPane::Proposals | MemoryPane::EpisodicSummaries => false,
+    }
+}
+
+fn set_memory_pane(memory: &mut MemoryViewState, pane: MemoryPane) {
+    memory.transition_to(pane);
+}
+
+fn move_memory_detail_scroll(
+    memory: &mut MemoryViewState,
+    code: KeyCode,
+    detail_page: usize,
+) -> bool {
+    match code {
+        KeyCode::Down => {
+            memory.detail_scroll = memory.detail_scroll.saturating_add(1);
+            true
+        }
+        KeyCode::Up => {
+            memory.detail_scroll = memory.detail_scroll.saturating_sub(1);
+            true
+        }
+        KeyCode::PageDown => {
+            memory.detail_scroll = memory.detail_scroll.saturating_add(detail_page);
+            true
+        }
+        KeyCode::PageUp => {
+            memory.detail_scroll = memory.detail_scroll.saturating_sub(detail_page);
+            true
+        }
+        KeyCode::Home => {
+            memory.detail_scroll = 0;
+            true
+        }
+        KeyCode::End => {
+            memory.detail_scroll = usize::MAX;
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_memory_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
+    let (list_page, detail_page) = memory_page_sizes(model);
+    if no_modifiers(key.modifiers)
+        && key.code != KeyCode::Esc
+        && (memory_pane_local_key(model.agents.memory.pane, key.code)
+            || matches!(
+                model.agents.memory.pane,
+                MemoryPane::Editor
+                    | MemoryPane::MutationReview
+                    | MemoryPane::Confirmation
+                    | MemoryPane::ProposalResolutionReview
+            ))
+        && !model.agents.memory.local_layer_cache_is_authenticated()
+    {
+        return ControllerEffect::Redraw;
+    }
+    let memory = &mut model.agents.memory;
+    if no_modifiers(key.modifiers)
+        && memory_detail_scroll_owned(memory)
+        && move_memory_detail_scroll(memory, key.code, detail_page)
+    {
+        return ControllerEffect::Redraw;
+    }
+    match (memory.pane, key.code) {
+        (MemoryPane::EntryList, code)
+            if no_modifiers(key.modifiers) && memory_list_movement(code).is_some() =>
+        {
+            let movement = memory_list_movement(code).expect("guard checked movement");
+            let len = memory.entries.as_ref().map_or(0, |view| view.entries.len());
+            let changed = move_memory_list_selection(
+                &mut memory.selected_entry,
+                &mut memory.entry_scroll,
+                len,
+                list_page,
+                movement,
+            );
+            if changed {
+                memory.detail_scroll = 0;
+            }
+            reconcile_memory_entry_detail(memory);
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::EntryList, KeyCode::Enter) if no_modifiers(key.modifiers) => {
+            reconcile_memory_entry_detail(memory);
+            let selection = memory.entries.as_ref().and_then(|view| {
+                view.entries
+                    .get(memory.selected_entry)
+                    .filter(|_| memory.selected_entry < MEMORY_RETAINED_ROW_CAP)
+                    .map(|summary| summary.display_key.clone())
+            });
+            let (Ok(selector), Some(key)) = (memory.profile_selector(), selection) else {
+                return memory_failure(
+                    model,
+                    crate::domain::DomainError::MemorySelectionUnavailable,
+                );
+            };
+            set_memory_pane(memory, MemoryPane::EntryDetail);
+            ControllerEffect::LoadMemoryEntry { selector, key }
+        }
+        (MemoryPane::EntryList, KeyCode::Char('c')) if no_modifiers(key.modifiers) => {
+            match memory
+                .profile_selector()
+                .and_then(|selector| memory.open_create_editor(selector))
+            {
+                Ok(()) => {
+                    memory.detail_scroll = 0;
+                    model.command.clear();
+                    ControllerEffect::Redraw
+                }
+                Err(error) => memory_failure(model, error),
+            }
+        }
+        (MemoryPane::EntryList, KeyCode::Char('p')) if no_modifiers(key.modifiers) => {
+            let Ok(selector) = memory.profile_selector() else {
+                return memory_failure(
+                    model,
+                    crate::domain::DomainError::MemorySelectionUnavailable,
+                );
+            };
+            set_memory_pane(memory, MemoryPane::Proposals);
+            ControllerEffect::LoadMemoryProposals {
+                selector,
+                filter: MemoryProposalFilter::Pending,
+            }
+        }
+        (MemoryPane::EntryList, KeyCode::Char('e')) if no_modifiers(key.modifiers) => {
+            let Ok(selector) = memory.profile_selector() else {
+                return memory_failure(
+                    model,
+                    crate::domain::DomainError::MemorySelectionUnavailable,
+                );
+            };
+            set_memory_pane(memory, MemoryPane::EpisodicSummaries);
+            ControllerEffect::LoadEpisodicSummaries(selector)
+        }
+        (MemoryPane::EntryDetail, KeyCode::Right) if no_modifiers(key.modifiers) => {
+            memory.selected_entry_detail_action = match memory.selected_entry_detail_action {
+                MemoryEntryDetailAction::Edit => MemoryEntryDetailAction::Delete,
+                MemoryEntryDetailAction::Delete => MemoryEntryDetailAction::History,
+                MemoryEntryDetailAction::History => MemoryEntryDetailAction::History,
+            };
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::EntryDetail, KeyCode::Left) if no_modifiers(key.modifiers) => {
+            memory.selected_entry_detail_action = match memory.selected_entry_detail_action {
+                MemoryEntryDetailAction::Edit => MemoryEntryDetailAction::Edit,
+                MemoryEntryDetailAction::Delete => MemoryEntryDetailAction::Edit,
+                MemoryEntryDetailAction::History => MemoryEntryDetailAction::Delete,
+            };
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::EntryDetail, KeyCode::Enter) if no_modifiers(key.modifiers) => {
+            let Some(detail) = memory.entry_detail.as_ref() else {
+                return memory_failure(
+                    model,
+                    crate::domain::DomainError::MemorySelectionUnavailable,
+                );
+            };
+            let entry = detail.entry.clone();
+            let key = entry.display_key().to_owned();
+            let Ok(selector) = memory.profile_selector() else {
+                return memory_failure(
+                    model,
+                    crate::domain::DomainError::MemorySelectionUnavailable,
+                );
+            };
+            match memory.selected_entry_detail_action {
+                MemoryEntryDetailAction::Edit => match memory.open_edit_editor(selector, entry) {
+                    Ok(()) => {
+                        memory.detail_scroll = 0;
+                        synchronize_memory_editor_input(model);
+                        ControllerEffect::Redraw
+                    }
+                    Err(error) => memory_failure(model, error),
+                },
+                MemoryEntryDetailAction::Delete => match memory.begin_review_request() {
+                    Ok(generation) => ControllerEffect::RequestMemoryDeletePreview {
+                        selector,
+                        key,
+                        generation,
+                    },
+                    Err(error) => memory_failure(model, error),
+                },
+                MemoryEntryDetailAction::History => {
+                    set_memory_pane(memory, MemoryPane::EntryHistory);
+                    ControllerEffect::LoadMemoryEntryHistory { selector, key }
+                }
+            }
+        }
+        (MemoryPane::EntryHistory, code)
+            if no_modifiers(key.modifiers)
+                && !exact_history_version_is_installed(memory)
+                && memory_list_movement(code).is_some() =>
+        {
+            let movement = memory_list_movement(code).expect("guard checked movement");
+            let len = memory
+                .entry_history
+                .as_ref()
+                .map_or(0, |view| view.versions.len());
+            let changed = move_memory_list_selection(
+                &mut memory.selected_history_version,
+                &mut memory.history_scroll,
+                len,
+                list_page,
+                movement,
+            );
+            if changed {
+                memory.detail_scroll = 0;
+            }
+            reconcile_memory_history_detail(memory);
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::EntryHistory, KeyCode::Enter) if no_modifiers(key.modifiers) => {
+            reconcile_memory_history_detail(memory);
+            let selected = memory.entry_history.as_ref().and_then(|history| {
+                history
+                    .versions
+                    .get(memory.selected_history_version)
+                    .filter(|_| memory.selected_history_version < MEMORY_RETAINED_ROW_CAP)
+                    .map(|summary| {
+                        (
+                            summary.display_key.clone(),
+                            summary.entry.version(),
+                            summary.entry.entry_version_id(),
+                        )
+                    })
+            });
+            let (Ok(selector), Some((key, version, expected_entry_version_id))) =
+                (memory.profile_selector(), selected)
+            else {
+                return memory_failure(
+                    model,
+                    crate::domain::DomainError::MemorySelectionUnavailable,
+                );
+            };
+            ControllerEffect::LoadMemoryEntryVersion {
+                selector,
+                key,
+                version,
+                expected_entry_version_id,
+            }
+        }
+        (MemoryPane::Proposals, code)
+            if no_modifiers(key.modifiers) && memory_list_movement(code).is_some() =>
+        {
+            let movement = memory_list_movement(code).expect("guard checked movement");
+            let len = memory
+                .proposals
+                .as_ref()
+                .map_or(0, |view| view.proposals.len());
+            let changed = move_memory_list_selection(
+                &mut memory.selected_proposal,
+                &mut memory.proposal_scroll,
+                len,
+                list_page,
+                movement,
+            );
+            if changed {
+                memory.detail_scroll = 0;
+            }
+            reconcile_memory_proposal_detail(memory);
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::Proposals, KeyCode::Enter) if no_modifiers(key.modifiers) => {
+            reconcile_memory_proposal_detail(memory);
+            let selected = memory
+                .proposals
+                .as_ref()
+                .and_then(|view| view.proposals.get(memory.selected_proposal))
+                .filter(|_| memory.selected_proposal < MEMORY_RETAINED_ROW_CAP)
+                .map(|summary| summary.proposal.proposal_id());
+            let Some(proposal_id) = selected else {
+                return memory_failure(
+                    model,
+                    crate::domain::DomainError::MemorySelectionUnavailable,
+                );
+            };
+            set_memory_pane(memory, MemoryPane::ProposalDetail);
+            ControllerEffect::LoadMemoryProposal(proposal_id)
+        }
+        (MemoryPane::ProposalDetail, KeyCode::Right) if no_modifiers(key.modifiers) => {
+            memory.selected_proposal_detail_action = MemoryProposalDetailAction::Reject;
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::ProposalDetail, KeyCode::Left) if no_modifiers(key.modifiers) => {
+            memory.selected_proposal_detail_action = MemoryProposalDetailAction::Approve;
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::ProposalDetail, KeyCode::Enter) if no_modifiers(key.modifiers) => {
+            let Some(proposal) = memory
+                .proposal_detail
+                .as_ref()
+                .map(|view| view.proposal.reference())
+            else {
+                return memory_failure(
+                    model,
+                    crate::domain::DomainError::MemorySelectionUnavailable,
+                );
+            };
+            let action = match memory.selected_proposal_detail_action {
+                MemoryProposalDetailAction::Approve => MemoryResolutionAction::Approve,
+                MemoryProposalDetailAction::Reject => MemoryResolutionAction::Reject,
+            };
+            match memory.begin_review_request() {
+                Ok(generation) => ControllerEffect::RequestMemoryProposalResolutionPreview {
+                    proposal,
+                    action,
+                    generation,
+                },
+                Err(error) => memory_failure(model, error),
+            }
+        }
+        (MemoryPane::EpisodicSummaries, code)
+            if no_modifiers(key.modifiers) && memory_list_movement(code).is_some() =>
+        {
+            let movement = memory_list_movement(code).expect("guard checked movement");
+            let len = memory
+                .episodes
+                .as_ref()
+                .map_or(0, |view| view.summaries.len());
+            let changed = move_memory_list_selection(
+                &mut memory.selected_episode,
+                &mut memory.episode_scroll,
+                len,
+                list_page,
+                movement,
+            );
+            if changed {
+                memory.detail_scroll = 0;
+            }
+            reconcile_memory_episode_detail(memory);
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::EpisodicSummaries, KeyCode::Enter) if no_modifiers(key.modifiers) => {
+            reconcile_memory_episode_detail(memory);
+            let selected = memory
+                .episodes
+                .as_ref()
+                .and_then(|view| view.summaries.get(memory.selected_episode))
+                .filter(|_| memory.selected_episode < MEMORY_RETAINED_ROW_CAP)
+                .map(|summary| summary.summary.summary_id());
+            let Some(summary_id) = selected else {
+                return memory_failure(
+                    model,
+                    crate::domain::DomainError::MemorySelectionUnavailable,
+                );
+            };
+            set_memory_pane(memory, MemoryPane::EpisodicDetail);
+            ControllerEffect::LoadEpisodicSummary(summary_id)
+        }
+        (MemoryPane::MutationReview | MemoryPane::ProposalResolutionReview, KeyCode::Esc)
+            if no_modifiers(key.modifiers) =>
+        {
+            ControllerEffect::CancelMemoryReview
+        }
+        (MemoryPane::MutationReview, KeyCode::Enter)
+            if key.kind == KeyEventKind::Press && no_modifiers(key.modifiers) =>
+        {
+            let Some(command) = memory.edit_review_command() else {
+                return ControllerEffect::Redraw;
+            };
+            memory.confirmation = Some(MemoryConfirmation {
+                command,
+                generation: memory.generation,
+            });
+            set_memory_pane(memory, MemoryPane::Confirmation);
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::ProposalResolutionReview, KeyCode::Enter)
+            if key.kind == KeyEventKind::Press && no_modifiers(key.modifiers) =>
+        {
+            let Some(command) = memory.resolution_review_command() else {
+                return ControllerEffect::Redraw;
+            };
+            memory.confirmation = Some(MemoryConfirmation {
+                command,
+                generation: memory.generation,
+            });
+            set_memory_pane(memory, MemoryPane::Confirmation);
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::Confirmation, KeyCode::Enter)
+            if key.kind == KeyEventKind::Press && no_modifiers(key.modifiers) =>
+        {
+            memory
+                .confirmed_command()
+                .map(ControllerEffect::ExecuteMemory)
+                .unwrap_or(ControllerEffect::Redraw)
+        }
+        (MemoryPane::Confirmation, KeyCode::Esc) if no_modifiers(key.modifiers) => {
+            let pane = if memory.resolution_review.is_some() {
+                MemoryPane::ProposalResolutionReview
+            } else if memory
+                .editor
+                .as_ref()
+                .is_some_and(|editor| editor.step() == MemoryEditorStep::Review)
+            {
+                MemoryPane::Editor
+            } else {
+                MemoryPane::MutationReview
+            };
+            set_memory_pane(memory, pane);
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::Result, KeyCode::Enter | KeyCode::Esc) if no_modifiers(key.modifiers) => {
+            let pane = match memory.result_origin {
+                MemoryResultOrigin::Mutation => MemoryPane::EntryList,
+                MemoryResultOrigin::Resolution => MemoryPane::Proposals,
+            };
+            set_memory_pane(memory, pane);
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::EntryHistory, KeyCode::Esc) if no_modifiers(key.modifiers) => {
+            if memory.entry_version.take().is_none() {
+                set_memory_pane(memory, MemoryPane::EntryDetail);
+            } else {
+                memory.detail_scroll = 0;
+            }
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::EntryDetail, KeyCode::Esc) if no_modifiers(key.modifiers) => {
+            set_memory_pane(memory, MemoryPane::EntryList);
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::Proposals, KeyCode::Esc) if no_modifiers(key.modifiers) => {
+            set_memory_pane(memory, MemoryPane::EntryList);
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::ProposalDetail, KeyCode::Esc) if no_modifiers(key.modifiers) => {
+            set_memory_pane(memory, MemoryPane::Proposals);
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::EpisodicSummaries, KeyCode::Esc) if no_modifiers(key.modifiers) => {
+            set_memory_pane(memory, MemoryPane::EntryList);
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::EpisodicDetail, KeyCode::Esc) if no_modifiers(key.modifiers) => {
+            set_memory_pane(memory, MemoryPane::EpisodicSummaries);
+            ControllerEffect::Redraw
+        }
+        (MemoryPane::EntryList, KeyCode::Esc) if no_modifiers(key.modifiers) => {
+            model.agents.pane = AgentsPane::Detail;
+            model.synchronize_geometry();
+            ControllerEffect::Redraw
+        }
+        _ => ControllerEffect::None,
+    }
+}
+
 fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEffect> {
     if model.agents.pane == AgentsPane::Detail && model.agents.skill_panel_open {
         return handle_agent_skills_key(model, key);
     }
+    if model.agents.pane == AgentsPane::Memory {
+        let effect = handle_memory_key(model, key);
+        return (effect != ControllerEffect::None).then_some(effect);
+    }
     let effect = match (model.agents.pane, key.code) {
         (AgentsPane::List, KeyCode::Down) if no_modifiers(key.modifiers) => {
             let last = model.agents.profiles.profiles.len().saturating_sub(1);
-            model.agents.selected_profile =
-                model.agents.selected_profile.saturating_add(1).min(last);
+            model
+                .agents
+                .select_profile_index(model.agents.selected_profile.saturating_add(1).min(last));
             model.agents.list_scroll = views::agent_list_scroll_offset(model);
             ControllerEffect::Redraw
         }
         (AgentsPane::List, KeyCode::Up) if no_modifiers(key.modifiers) => {
-            model.agents.selected_profile = model.agents.selected_profile.saturating_sub(1);
+            model
+                .agents
+                .select_profile_index(model.agents.selected_profile.saturating_sub(1));
             model.agents.list_scroll = views::agent_list_scroll_offset(model);
             ControllerEffect::Redraw
         }
@@ -1319,16 +2319,44 @@ fn handle_agents_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
             }
         }
         (AgentsPane::Detail, KeyCode::Enter) if no_modifiers(key.modifiers) => {
-            if model
-                .agents
-                .detail
-                .as_ref()
-                .is_some_and(|detail| !detail.profile.skill_refs().is_empty())
-            {
-                model.agents.skill_panel_open = true;
-                model.agents.selected_assigned_skill = 0;
-                model.agents.selected_skill_action_index = 0;
+            match model.agents.selected_detail_action {
+                AgentDetailAction::AssignedSkills => {
+                    model.agents.skill_panel_open = true;
+                    model.agents.selected_assigned_skill = 0;
+                    model.agents.selected_skill_action_index = 0;
+                    ControllerEffect::Redraw
+                }
+                AgentDetailAction::Memory => {
+                    let Some((profile_id, identity, namespace_id)) =
+                        model.agents.detail.as_ref().map(|detail| {
+                            (
+                                detail.profile.profile_id(),
+                                crate::app::MemoryProfileIdentityView {
+                                    profile: detail.profile.reference(),
+                                    display_name: detail.profile.display_name().to_owned(),
+                                },
+                                detail.profile.memory_namespace_id(),
+                            )
+                        })
+                    else {
+                        return Some(ControllerEffect::Redraw);
+                    };
+                    if let Err(error) = model.agents.memory.bind_profile(identity, namespace_id) {
+                        model.set_message(Severity::Warning, error.code());
+                        return Some(ControllerEffect::Redraw);
+                    }
+                    model.agents.pane = AgentsPane::Memory;
+                    model.synchronize_geometry();
+                    ControllerEffect::LoadAgentMemory(profile_id.into())
+                }
             }
+        }
+        (AgentsPane::Detail, KeyCode::Right) if no_modifiers(key.modifiers) => {
+            model.agents.selected_detail_action = AgentDetailAction::Memory;
+            ControllerEffect::Redraw
+        }
+        (AgentsPane::Detail, KeyCode::Left) if no_modifiers(key.modifiers) => {
+            model.agents.selected_detail_action = AgentDetailAction::AssignedSkills;
             ControllerEffect::Redraw
         }
         (AgentsPane::Detail, KeyCode::Down) if no_modifiers(key.modifiers) => {
@@ -1492,7 +2520,9 @@ fn has_protected_skills_workflow(model: &TuiModel) -> bool {
 }
 
 fn has_protected_agents_workflow(model: &TuiModel) -> bool {
-    model.agents.editor.is_some() || model.agents.pending_confirmation.is_some()
+    model.agents.editor.is_some()
+        || model.agents.pending_confirmation.is_some()
+        || model.agents.memory.has_protected_workflow()
 }
 
 fn move_agent_skill_action(model: &mut TuiModel, forward: bool) {
@@ -1503,7 +2533,9 @@ fn move_agent_skill_action(model: &mut TuiModel, forward: bool) {
         .position(|action| *action == current)
         .unwrap_or(0);
     let next_index = if forward {
-        current_index.saturating_add(1).min(actions.len().saturating_sub(1))
+        current_index
+            .saturating_add(1)
+            .min(actions.len().saturating_sub(1))
     } else {
         current_index.saturating_sub(1)
     };
@@ -1532,6 +2564,10 @@ fn unwind_agents(model: &mut TuiModel) -> ControllerEffect {
         AgentsPane::Confirmation => {
             model.agents.pending_confirmation = None;
             model.agents.pane = AgentsPane::Editor;
+            ControllerEffect::Redraw
+        }
+        AgentsPane::Memory => {
+            model.agents.pane = AgentsPane::Detail;
             ControllerEffect::Redraw
         }
     }
@@ -1620,6 +2656,17 @@ fn visible_focus_order(model: &TuiModel) -> &'static [Focus] {
     ];
     const NARROW: &[Focus] = &[Focus::Workspace, Focus::Command];
     const NARROW_INSPECTOR: &[Focus] = &[Focus::Workspace, Focus::Inspector, Focus::Command];
+
+    if !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane == AgentsPane::Memory
+    {
+        return match model.layout_mode {
+            LayoutMode::Wide | LayoutMode::Medium => MEDIUM,
+            LayoutMode::Narrow => NARROW,
+            LayoutMode::TooSmall => &[Focus::Workspace],
+        };
+    }
 
     match (model.layout_mode, model.inspector_open) {
         (LayoutMode::Wide, _) => WIDE,
@@ -1727,6 +2774,12 @@ fn workspace_max_scroll(model: &TuiModel) -> u16 {
 }
 
 fn clamp_workspace_scroll(model: &mut TuiModel) {
+    if !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane == AgentsPane::Memory
+    {
+        return;
+    }
     model.workspace_scroll = model.workspace_scroll.min(workspace_max_scroll(model));
 }
 
@@ -1903,21 +2956,9 @@ mod tests {
     #[test]
     fn global_keys_switch_views_focus_inspector_and_leave_bare_q_inert() {
         let mut model = model();
-        assert_redraw_and_view(
-            &mut model,
-            key('2'),
-            View::Setup,
-        );
-        assert_redraw_and_view(
-            &mut model,
-            key('3'),
-            View::Audit,
-        );
-        assert_redraw_and_view(
-            &mut model,
-            key('4'),
-            View::Help,
-        );
+        assert_redraw_and_view(&mut model, key('2'), View::Setup);
+        assert_redraw_and_view(&mut model, key('3'), View::Audit);
+        assert_redraw_and_view(&mut model, key('4'), View::Help);
         assert_eq!(handle_event(&mut model, key('i')), ControllerEffect::Redraw);
         assert!(model.inspector_open);
         assert_eq!(model.focus, Focus::Inspector);
@@ -2347,10 +3388,7 @@ mod tests {
         let mut model = model();
         model.replace_audit((1..=100).map(audit_entry).collect());
         model.set_command_in_flight(true);
-        assert_eq!(
-            handle_event(&mut model, key('3')),
-            ControllerEffect::Redraw
-        );
+        assert_eq!(handle_event(&mut model, key('3')), ControllerEffect::Redraw);
         model.audit_selection = Some(75);
 
         apply_outcome(

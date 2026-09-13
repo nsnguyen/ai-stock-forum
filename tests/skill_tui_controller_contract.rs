@@ -1,9 +1,9 @@
 use ai_stock_forum::{
     app::{
         AgentProfileSummary, AgentProfileView, AgentProfilesView, ApplicationCommand,
-        CommandOutcome, CommandView,
-        DatabaseReadiness, PresentationSnapshot, ProcessGuardOwnership, ShutdownDisposition,
-        SkillHistoryEntry, SkillHistoryView, SkillSummary, SkillView, SkillsView,
+        CommandOutcome, CommandView, DatabaseReadiness, PresentationSnapshot,
+        ProcessGuardOwnership, ShutdownDisposition, SkillHistoryEntry, SkillHistoryView,
+        SkillSummary, SkillView, SkillsView,
     },
     domain::{
         AgentProfileId, AgentProfileVersionId, CommandId, CorrelationId, InstallationId,
@@ -206,10 +206,11 @@ fn conflicting_slash_workflows_keep_protected_tabs_and_command_drafts_intact() {
     let mut agent_model = model();
     agent_model.skills.library_loaded = true;
     agent_model.select_view(View::Agents);
-    assert!(agent_model.agents.start_profile_create(
-        0,
-        ai_stock_forum::agents::builtin_profile_templates(),
-    ));
+    assert!(
+        agent_model
+            .agents
+            .start_profile_create(0, ai_stock_forum::agents::builtin_profile_templates(),)
+    );
     agent_model.select_view(View::Overview);
     let protected_agents = agent_model.agents.clone();
 
@@ -276,10 +277,11 @@ fn delayed_read_results_hydrate_without_displacing_protected_workflows() {
     let mut agent_model = model();
     agent_model.skills.library_loaded = true;
     agent_model.select_view(View::Agents);
-    assert!(agent_model.agents.start_profile_create(
-        0,
-        ai_stock_forum::agents::builtin_profile_templates(),
-    ));
+    assert!(
+        agent_model
+            .agents
+            .start_profile_create(0, ai_stock_forum::agents::builtin_profile_templates(),)
+    );
     let protected_editor = agent_model.agents.editor.clone();
     agent_model.select_view(View::Overview);
     assert_eq!(
@@ -334,10 +336,7 @@ fn delayed_agent_detail_does_not_replace_a_newer_selection_or_context_after_retu
     model.agents.pane = AgentsPane::List;
 
     assert!(matches!(
-        submit_command(
-            &mut model,
-            &format!("/agent show {}", agent_a.profile_id)
-        ),
+        submit_command(&mut model, &format!("/agent show {}", agent_a.profile_id)),
         ControllerEffect::Submit(ApplicationCommand::ShowAgentProfile { .. })
     ));
     assert_eq!(
@@ -395,10 +394,7 @@ fn delayed_skill_detail_does_not_replace_a_newer_selection_or_context_after_retu
     model.skills.pane = SkillsPane::List;
 
     assert!(matches!(
-        submit_command(
-            &mut model,
-            &format!("/skill show {}", skill_a.skill_id())
-        ),
+        submit_command(&mut model, &format!("/skill show {}", skill_a.skill_id())),
         ControllerEffect::Submit(ApplicationCommand::ShowSkill { .. })
     ));
     assert_eq!(
@@ -425,10 +421,7 @@ fn delayed_skill_detail_does_not_replace_a_newer_selection_or_context_after_retu
     let expected_skills = model.skills.clone();
 
     assert_eq!(
-        apply_outcome(
-            &mut model,
-            command_outcome(CommandView::Skill(detail_a))
-        ),
+        apply_outcome(&mut model, command_outcome(CommandView::Skill(detail_a))),
         ControllerEffect::Redraw
     );
     assert!(model.skills.active);
@@ -528,10 +521,7 @@ fn key(code: KeyCode) -> TuiEvent {
 }
 
 fn navigation_key(character: char) -> TuiEvent {
-    TuiEvent::Key(KeyEvent::new(
-        KeyCode::Char(character),
-        KeyModifiers::NONE,
-    ))
+    TuiEvent::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
 }
 
 fn submit_command(model: &mut TuiModel, command: &str) -> ControllerEffect {
@@ -731,13 +721,24 @@ fn agent_view_replaces_stale_skill_context_and_escape_returns_to_agent_skills() 
         ControllerEffect::Redraw
     );
     assert_eq!(model.skills.pane, SkillsPane::Detail);
-    assert_eq!(model.skills.selected_skill_ref(), Some(&skill_b.reference()));
     assert_eq!(
-        model.skills.detail.as_ref().map(|detail| detail.skill_ref.clone()),
+        model.skills.selected_skill_ref(),
+        Some(&skill_b.reference())
+    );
+    assert_eq!(
+        model
+            .skills
+            .detail
+            .as_ref()
+            .map(|detail| detail.skill_ref.clone()),
         Some(skill_b.reference())
     );
     assert_eq!(
-        model.skills.version_detail.as_ref().map(|detail| detail.skill_ref.clone()),
+        model
+            .skills
+            .version_detail
+            .as_ref()
+            .map(|detail| detail.skill_ref.clone()),
         Some(skill_b.reference())
     );
     assert!(model.skills.history.is_none());
@@ -804,7 +805,10 @@ fn agent_view_history_and_historical_assignment_never_reuse_selected_skill_a() {
         command_outcome(CommandView::SkillVersion(skill_view(&skill_b_v2))),
     );
     assert_eq!(
-        model.skills.selected_summary().map(|summary| summary.skill_ref.clone()),
+        model
+            .skills
+            .selected_summary()
+            .map(|summary| summary.skill_ref.clone()),
         Some(skill_b_v2.reference())
     );
 
@@ -849,7 +853,10 @@ fn agent_view_history_and_historical_assignment_never_reuse_selected_skill_a() {
         &mut model,
         command_outcome(CommandView::SkillVersion(skill_view(&skill_b_v1))),
     );
-    assert_eq!(model.skills.selected_skill_ref(), Some(&skill_b_v1.reference()));
+    assert_eq!(
+        model.skills.selected_skill_ref(),
+        Some(&skill_b_v1.reference())
+    );
 
     handle_event(&mut model, key(KeyCode::Left));
     handle_event(&mut model, key(KeyCode::Left));
@@ -864,9 +871,7 @@ fn agent_view_history_and_historical_assignment_never_reuse_selected_skill_a() {
         command_outcome(CommandView::AgentProfile(assigned_agent)),
     );
     let ControllerEffect::RequestSkillAssignmentPreview {
-        target,
-        assignment,
-        ..
+        target, assignment, ..
     } = handle_event(&mut model, key(KeyCode::Enter))
     else {
         panic!("historical B assignment preview")
@@ -942,9 +947,7 @@ fn opened_historical_version_assigns_its_exact_ref_and_classifies_historical_rea
     ));
     model.skills.pane = SkillsPane::AssignmentReview;
     let ControllerEffect::RequestSkillAssignmentPreview {
-        target,
-        assignment,
-        ..
+        target, assignment, ..
     } = handle_event(&mut model, key(KeyCode::Enter))
     else {
         panic!("historical assignment preview")
@@ -957,7 +960,10 @@ fn opened_historical_version_assigns_its_exact_ref_and_classifies_historical_rea
 
     let skill_b = skill(860, "Skill B");
     model.skills.replace_detail(skill_view(&skill_b));
-    assert_eq!(model.skills.selected_skill_ref(), Some(&skill_b.reference()));
+    assert_eq!(
+        model.skills.selected_skill_ref(),
+        Some(&skill_b.reference())
+    );
 }
 
 #[test]
@@ -1020,7 +1026,10 @@ fn active_skills_workspace_owns_keys_even_when_the_rendered_view_is_agents() {
         truncated: false,
     });
 
-    assert_eq!(handle_event(&mut model, key(KeyCode::Down)), ControllerEffect::Redraw);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Down)),
+        ControllerEffect::Redraw
+    );
     assert_eq!(model.skills.selected_skill, 1);
     assert_eq!(model.agents.selected_assigned_skill, 0);
 
@@ -1054,7 +1063,10 @@ fn loading_skill_b_after_skill_a_history_clears_the_historical_a_reference() {
 
     model.skills.replace_detail(skill_view(&skill_b));
 
-    assert_eq!(model.skills.selected_skill_ref(), Some(&skill_b.reference()));
+    assert_eq!(
+        model.skills.selected_skill_ref(),
+        Some(&skill_b.reference())
+    );
     assert!(model.skills.version_detail.is_none());
     assert!(model.skills.history.is_none());
 }
@@ -1067,7 +1079,10 @@ fn skill_editor_input_seeds_version_fields_and_enter_accepts_unchanged_values() 
     model.skills.replace_detail(skill_view(&version));
     model.skills.selected_action_index = 1;
 
-    assert_eq!(handle_event(&mut model, key(KeyCode::Enter)), ControllerEffect::Redraw);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::Redraw
+    );
     assert_eq!(model.command.text(), "Seeded Skill");
 
     let expected = [
@@ -1079,7 +1094,10 @@ fn skill_editor_input_seeds_version_fields_and_enter_accepts_unchanged_values() 
         "",
     ];
     for value in expected {
-        assert_eq!(handle_event(&mut model, key(KeyCode::Enter)), ControllerEffect::Redraw);
+        assert_eq!(
+            handle_event(&mut model, key(KeyCode::Enter)),
+            ControllerEffect::Redraw
+        );
         assert_eq!(model.command.text(), value);
     }
     assert_eq!(
@@ -1096,7 +1114,10 @@ fn skill_editor_input_keeps_invalid_text_in_the_visible_buffer() {
     let invalid = "x".repeat(65);
     model.command.ingest(&invalid);
 
-    assert_eq!(handle_event(&mut model, key(KeyCode::Enter)), ControllerEffect::Redraw);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::Redraw
+    );
     assert_eq!(model.command.text(), invalid);
     assert_eq!(
         model.skills.editor.as_ref().unwrap().field(),
@@ -1118,7 +1139,10 @@ fn skill_editor_input_escape_restores_the_previous_field_value() {
         ai_stock_forum::ui::skill_editor::SkillEditorField::UseWhen
     );
 
-    assert_eq!(handle_event(&mut model, key(KeyCode::Esc)), ControllerEffect::Redraw);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Esc)),
+        ControllerEffect::Redraw
+    );
     assert_eq!(
         model.skills.editor.as_ref().unwrap().field(),
         ai_stock_forum::ui::skill_editor::SkillEditorField::Purpose
@@ -1189,7 +1213,10 @@ fn arrows_and_enter_drive_list_detail_actions_history_and_agent_picker() {
         truncated: false,
     });
 
-    assert_eq!(handle_event(&mut model, key(KeyCode::Down)), ControllerEffect::Redraw);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Down)),
+        ControllerEffect::Redraw
+    );
     assert_eq!(model.skills.selected_skill, 1);
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Enter)),
@@ -1199,7 +1226,10 @@ fn arrows_and_enter_drive_list_detail_actions_history_and_agent_picker() {
     model.skills.pane = SkillsPane::Detail;
     assert_eq!(model.skills.selected_action(), SkillDetailAction::Assign);
     handle_event(&mut model, key(KeyCode::Down));
-    assert_eq!(model.skills.selected_action(), SkillDetailAction::CreateVersion);
+    assert_eq!(
+        model.skills.selected_action(),
+        SkillDetailAction::CreateVersion
+    );
     handle_event(&mut model, key(KeyCode::Down));
     assert_eq!(model.skills.selected_action(), SkillDetailAction::History);
     assert_eq!(
@@ -1272,7 +1302,10 @@ fn assignment_classification_never_auto_upgrades_an_exact_reference() {
     )
     .unwrap();
 
-    assert_eq!(AssignmentKind::classify(&first.reference(), None), AssignmentKind::Add);
+    assert_eq!(
+        AssignmentKind::classify(&first.reference(), None),
+        AssignmentKind::Add
+    );
     assert_eq!(
         AssignmentKind::classify(&first.reference(), Some(&first.reference())),
         AssignmentKind::AlreadyAssigned
@@ -1292,15 +1325,24 @@ fn escape_unwinds_one_skills_level_and_preserves_editor_state() {
     model.skills.start_create(None);
     model.command.ingest("Draft name");
 
-    assert_eq!(handle_event(&mut model, key(KeyCode::Esc)), ControllerEffect::Redraw);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Esc)),
+        ControllerEffect::Redraw
+    );
     assert!(model.skills.active);
     assert_eq!(model.skills.pane, SkillsPane::CreateSource);
     assert!(model.skills.editor.is_none());
     assert_eq!(model.command.text(), "");
 
-    assert_eq!(handle_event(&mut model, key(KeyCode::Esc)), ControllerEffect::Redraw);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Esc)),
+        ControllerEffect::Redraw
+    );
     assert_eq!(model.skills.pane, SkillsPane::List);
-    assert_eq!(handle_event(&mut model, key(KeyCode::Esc)), ControllerEffect::Redraw);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Esc)),
+        ControllerEffect::Redraw
+    );
     assert!(!model.skills.active);
 }
 
@@ -1327,12 +1369,18 @@ fn agent_detail_unassigns_the_selected_exact_current_reference_through_preview()
         profile,
     });
 
-    assert_eq!(handle_event(&mut model, key(KeyCode::Enter)), ControllerEffect::Redraw);
+    assert_eq!(
+        handle_event(&mut model, key(KeyCode::Enter)),
+        ControllerEffect::Redraw
+    );
     assert!(model.agents.skill_panel_open);
     assert_eq!(model.agents.selected_skill_action(), AgentSkillAction::View);
     handle_event(&mut model, key(KeyCode::Right));
     handle_event(&mut model, key(KeyCode::Right));
-    assert_eq!(model.agents.selected_skill_action(), AgentSkillAction::Unassign);
+    assert_eq!(
+        model.agents.selected_skill_action(),
+        AgentSkillAction::Unassign
+    );
 
     let ControllerEffect::RequestSkillAssignmentPreview {
         profile_id,

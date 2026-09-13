@@ -328,3 +328,18 @@ fn serde_rejects_expiry_not_later_than_creation() {
         assert!(serde_json::from_value::<ApprovalRecord>(encoded).is_err());
     }
 }
+
+#[test]
+fn serde_rejects_forged_non_human_and_cancelled_memory_approvals() {
+    for (status, resolver) in [("cancelled", json!("Human")), ("accepted", json!("System"))] {
+        let mut encoded = record_json();
+        encoded["action"] = json!("memory_mutation");
+        encoded["status"] = json!(status);
+        encoded["resolution"] = json!({
+            "status": status,
+            "actor": resolver,
+            "resolved_at_millis": 150,
+        });
+        assert!(serde_json::from_value::<ApprovalRecord>(encoded).is_err());
+    }
+}
