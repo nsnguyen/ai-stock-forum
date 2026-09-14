@@ -552,7 +552,7 @@ pub fn execute_agent_effect(
                 .agents
                 .start_profile_create(template_index, &templates)
             {
-                model.set_focus(super::model::Focus::Workspace);
+                model.set_focus(super::model::Focus::List);
                 model.command.clear();
                 model.clear_message();
             } else {
@@ -578,6 +578,7 @@ pub fn execute_agent_effect(
             if template_index
                 .is_some_and(|index| model.agents.start_profile_create(index, &templates))
             {
+                model.agents.editor_page = super::model::ProfileEditorPage::Home;
                 model.set_focus(super::model::Focus::Workspace);
                 model.command.clear();
                 model.clear_message();
@@ -1465,6 +1466,10 @@ fn start_profile_editor_from_detail(model: &mut TuiModel) -> Result<(), RuntimeE
             detail.profile.profile_version_id(),
             draft,
         ));
+        model.agents.editor_page = super::model::ProfileEditorPage::Home;
+        model.agents.profile_home_selection = 0;
+        model.agents.profile_role_selecting = false;
+        model.agents.detail_scroll = 0;
         model.agents.pane = super::model::AgentsPane::Editor;
         model.agents.synchronize_field_input();
         model.set_focus(super::model::Focus::Workspace);

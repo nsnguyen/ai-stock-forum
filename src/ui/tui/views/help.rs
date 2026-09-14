@@ -59,7 +59,7 @@ fn content(theme: &Theme) -> Vec<Line<'static>> {
         Line::styled("PROFILE FIELDS", theme.accent),
         Line::raw("Enter starts TYPE; letters, numbers, slash and colon are literal text."),
         Line::raw("Enter accepts a single-line field; Esc keeps the draft and returns NAV."),
-        Line::raw("Tab keeps input and moves fields, then leaves to surrounding sections."),
+        Line::raw("Tab keeps input and moves panes; WASD selects cards and fields."),
         Line::raw("Esc in NAV suspends; Resume returns to the draft; Discard is explicit."),
         Line::raw("Review changes first, then confirm separately to apply them."),
         Line::styled("TRANSITIONAL EDITORS", theme.accent),

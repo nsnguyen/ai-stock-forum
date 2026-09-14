@@ -112,6 +112,17 @@ contact, model execution, chat capability, or permission to run an agent.
 
 ## Profile editing checks
 
+Press `N` to open the separate template picker. `W`/`S` browses the template
+list, `Tab` moves to its preview, and `Enter` uses the selected template.
+Profile Home then shows Identity, Focus, Personality, and Instructions cards.
+`E` for an existing agent opens this Home directly, without a template selector.
+Template provenance is reference-only inside an established draft.
+
+Use WASD to select a card, `Enter` to open it, then WASD to select a field.
+In Identity, moving across Role must not change it: press `Enter` to choose a
+role, use WASD to select, and `Enter` or `Esc` to leave the choice control.
+`Esc` from a section returns to Profile Home, retaining the exact draft.
+
 Profile fields start in NAV. Select a text field and deliberately press `Enter`
 to enter TYPE. While TYPE owns input, type a sample such as
 `wasd123456789/n` and a value beginning with `:back`. WASD, digits, slash, and
@@ -119,14 +130,14 @@ the leading colon must remain literal profile text rather than navigation or
 commands.
 
 - `Esc` retains the exact field text and returns to NAV on that field.
-- `Tab` retains the exact field text, leaves TYPE, and moves to the next field
-  in NAV; `Shift+Tab` moves to the previous field. After Discard, Tab reaches
-  navigation; before Template, Shift+Tab reaches the agent list. Returning to
+- `Tab` retains the exact field text, leaves TYPE, and moves to the next pane;
+  `Shift+Tab` moves to the previous pane. The pane cycle is main navigation,
+  list, workspace. Returning to
   the workspace retains the selected field and its raw input.
 - Invalid raw input and its inline error remain available for correction after
   leaving the field or switching destinations.
-- Leaving Agents suspends the draft. Only the explicit labeled Discard action
-  abandons it.
+- Leaving Agents suspends the draft. Discard first opens a separate warning;
+  `Esc` keeps the draft, and only a second deliberate `Enter` abandons it.
 
 The footer names only actions available to its current owner. A retained draft
 shows Resume instead of New/Edit. History offers Edit for the current profile;
@@ -162,7 +173,8 @@ cargo run --locked --example two_pane_preview -- --scene agents --width 120 --he
 ```
 
 Available scenes are `home`, `home-populated`, `agents`, `empty`, `history`,
-`editor`, `type`, `invalid-field`, `review`, `confirmation`, `chat`, and
+`profile-home` (also `editor`), `template-picker`, `identity`, `focus`,
+`personality`, `instructions`, `type`, `invalid-field`, `review`, `confirmation`, `chat`, and
 `connections`. `home` models a zero-agent first run. Its synthetic snapshot
 includes the audit summary `agent profiles listed: total_count=0,
 returned_count=0, truncated=false` as input so visual review can verify that
@@ -177,6 +189,25 @@ identity, wrapping, field text, errors, confirmation controls, footer hints,
 and the absence of routine UUIDs or digests.
 
 Durable production-render evidence is available as native PNG:
+
+Profile Home and its separate template picker:
+
+- [Profile Home at 160x40](assets/two-pane/editor-profile-home-160x40.png)
+- [Profile Home at 120x30](assets/two-pane/editor-profile-home-120x30.png)
+- [Compact Profile Home at 60x18](assets/two-pane/editor-profile-home-60x18.png)
+- [NO_COLOR Profile Home at 80x24](assets/two-pane/editor-profile-home-80x24-no-color.png)
+- [Template picker at 160x40](assets/two-pane/editor-template-picker-160x40.png)
+- [Compact template picker at 60x18](assets/two-pane/editor-template-picker-60x18.png)
+- [Identity section at 120x30](assets/two-pane/editor-identity-120x30.png)
+- [Literal TYPE input at 120x30](assets/two-pane/editor-type-120x30.png)
+- [Compact NO_COLOR validation at 60x18](assets/two-pane/editor-invalid-field-60x18-no-color.png)
+
+At compact sizes, W/S scrolls the selected card into view; all four sections
+and both review/discard actions remain reachable. In the two-column grid,
+WASD follows the visible row/column and stops at edges rather than jumping
+sideways. The screenshot scenes use synthetic fixtures, not saved user data.
+
+Earlier Home and Agents visual-fidelity evidence:
 
 - [Home at 120x30](assets/two-pane/visual-fidelity-home-120x30.png)
 - [Populated Home at 120x30](assets/two-pane/visual-fidelity-home-populated-120x30.png)
@@ -200,6 +231,25 @@ the native SVG-to-PNG exporter. The `--svg` command above reproducibly emits
 their source format. They do not represent an interactive `make dev` run.
 
 ## Verification record
+
+### Profile Home update
+
+- Baseline: `cargo test --locked` — 1,293 passed, 0 failed, 1 ignored.
+- Final: `cargo test --locked --no-fail-fast` — 1,308 passed, 0 failed,
+  1 ignored across 102 result summaries.
+- New keyboard contracts: 9 passed, including spatial grid edges, shifted
+  WASD, literal input, template selection, pane focus, and separate confirmation.
+- New renderer contracts: 6 passed, including compact layouts, draft summaries,
+  visible validation, and no-color behavior.
+- Synthetic preview example: 11 passed.
+- Nine native PNGs above were inspected at their stated terminal sizes.
+- Formatting, strict all-target/all-feature Clippy, and diff whitespace checks
+  passed. Independent review found a directional grid-edge issue; its regression
+  test reproduced it, the fix passed, and re-review approved it.
+- The macOS PTY route was updated for the new template/Home flow but was not
+  executed. Interactive `make dev` testing of saved user data is not claimed.
+
+### Earlier Home / Agents visual-fidelity update
 
 Manual interactive testing of the user's application data is not claimed by
 this documentation preparation.

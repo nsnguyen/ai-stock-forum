@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //! `cargo run --example two_pane_preview -- [--width N] [--height N]
-//!      [--scene home|home-populated|agents|empty|history|editor|type|invalid-field|review|confirmation|chat|connections]
+//!      [--scene home|home-populated|agents|empty|history|profile-home|template-picker|identity|focus|personality|instructions|type|invalid-field|review|confirmation|chat|connections]
 //!      [--no-color] [--svg]`
 
 use std::{env, fmt::Write as _, process};
@@ -27,7 +27,7 @@ use ai_stock_forum::{
         profile_editor::{ProfileEditor, ProfileEditorEffect, ProfileTuiField},
         tui::{
             ControllerEffect, TuiEvent, handle_event,
-            model::{AgentsPane, TuiModel, View},
+            model::{AgentsPane, Focus, ProfileEditorPage, ProfileSection, TuiModel, View},
             render,
             theme::Theme,
         },
@@ -43,7 +43,7 @@ use ratatui::{
 use uuid::Uuid;
 
 const USAGE: &str = "Usage: two_pane_preview [--width N] [--height N] \
-    [--scene home|home-populated|agents|empty|history|editor|type|invalid-field|review|confirmation|chat|connections] \
+    [--scene home|home-populated|agents|empty|history|profile-home|template-picker|identity|focus|personality|instructions|type|invalid-field|review|confirmation|chat|connections] \
     [--no-color] [--svg]";
 const CELL_WIDTH: u16 = 8;
 const CELL_HEIGHT: u16 = 16;
@@ -58,6 +58,8 @@ enum Scene {
     Empty,
     History,
     Editor,
+    Templates,
+    Section(ProfileSection),
     Type,
     InvalidField,
     Review,
@@ -74,7 +76,12 @@ impl Scene {
             "agents" => Ok(Self::Agents),
             "empty" => Ok(Self::Empty),
             "history" => Ok(Self::History),
-            "editor" => Ok(Self::Editor),
+            "editor" | "profile-home" => Ok(Self::Editor),
+            "template-picker" => Ok(Self::Templates),
+            "identity" => Ok(Self::Section(ProfileSection::Identity)),
+            "focus" => Ok(Self::Section(ProfileSection::Focus)),
+            "personality" => Ok(Self::Section(ProfileSection::Personality)),
+            "instructions" => Ok(Self::Section(ProfileSection::Instructions)),
             "type" => Ok(Self::Type),
             "invalid-field" => Ok(Self::InvalidField),
             "review" => Ok(Self::Review),
@@ -369,12 +376,27 @@ fn model_for_scene(scene: Scene) -> TuiModel {
         Scene::Editor => {
             configure_editor(&mut model, &fixtures.long_horizon);
         }
+        Scene::Templates => {
+            model.active_view = View::Agents;
+            assert!(
+                model
+                    .agents
+                    .start_profile_create(0, builtin_profile_templates())
+            );
+            model.set_focus(Focus::List);
+        }
+        Scene::Section(section) => {
+            configure_editor(&mut model, &fixtures.long_horizon);
+            configure_section(&mut model, section);
+        }
         Scene::Type => {
             configure_editor(&mut model, &fixtures.long_horizon);
+            configure_section(&mut model, ProfileSection::Identity);
             press(&mut model, KeyCode::Enter);
         }
         Scene::InvalidField => {
             configure_editor(&mut model, &fixtures.long_horizon);
+            configure_section(&mut model, ProfileSection::Identity);
             press(&mut model, KeyCode::Enter);
             model.agents.field_input.clear();
             press(&mut model, KeyCode::Char(' '));
@@ -401,7 +423,19 @@ fn configure_editor(model: &mut TuiModel, profile: &AgentProfileVersion) {
     move_editor_to(&mut editor, ProfileTuiField::DisplayName);
     model.active_view = View::Agents;
     model.agents.pane = AgentsPane::Editor;
+    model.agents.editor_page = ProfileEditorPage::Home;
     model.agents.editor = Some(editor);
+    model.agents.synchronize_field_input();
+}
+
+fn configure_section(model: &mut TuiModel, section: ProfileSection) {
+    model.agents.editor_page = ProfileEditorPage::Section(section);
+    model
+        .agents
+        .editor
+        .as_mut()
+        .unwrap()
+        .select_tui_field(section.fields()[0]);
     model.agents.synchronize_field_input();
 }
 
@@ -438,6 +472,7 @@ fn configure_review(model: &mut TuiModel, profile: &AgentProfileVersion) {
     );
     model.active_view = View::Agents;
     model.agents.pane = AgentsPane::Editor;
+    model.agents.editor_page = ProfileEditorPage::Review;
     model.agents.editor = Some(editor);
     model.agents.synchronize_field_input();
 }
@@ -763,6 +798,34 @@ mod tests {
             detail.profile.profile_version_id(),
             selected.profile_version_id
         );
+    }
+
+    #[test]
+    fn profile_home_scenes_are_real_renderer_previews_with_distinct_pages() {
+        use ai_stock_forum::ui::tui::model::{ProfileEditorPage, ProfileSection};
+        for (name, page) in [
+            ("profile-home", ProfileEditorPage::Home),
+            ("template-picker", ProfileEditorPage::Templates),
+            (
+                "identity",
+                ProfileEditorPage::Section(ProfileSection::Identity),
+            ),
+            ("focus", ProfileEditorPage::Section(ProfileSection::Focus)),
+            (
+                "personality",
+                ProfileEditorPage::Section(ProfileSection::Personality),
+            ),
+            (
+                "instructions",
+                ProfileEditorPage::Section(ProfileSection::Instructions),
+            ),
+        ] {
+            let scene = Scene::parse(name).expect("supported production-render preview");
+            let model = model_for_scene(scene);
+            assert_eq!(model.agents.editor_page, page);
+            assert_eq!(model.agents.pane, AgentsPane::Editor);
+            assert!(model.agents.pending_confirmation.is_none());
+        }
     }
 
     #[test]

@@ -5,8 +5,9 @@ use super::{
         AgentSkillAction, AgentsPane, AssignmentKind, Focus, InputMode, LayoutMode,
         MEMORY_RETAINED_ROW_CAP, MemoryConfirmation, MemoryEditorOrigin, MemoryEntryDetailAction,
         MemoryPane, MemoryProposalDetailAction, MemoryResultOrigin, MemoryViewState, NavigationTab,
-        ProfileConfirmation, RuntimeStatus, Severity, SkillConfirmation, SkillDetailAction,
-        SkillOperationOrigin, SkillWorkspaceOrigin, SkillsPane, TuiModel, View,
+        ProfileConfirmation, ProfileEditorPage, ProfileSection, RuntimeStatus, Severity,
+        SkillConfirmation, SkillDetailAction, SkillOperationOrigin, SkillWorkspaceOrigin,
+        SkillsPane, TuiModel, View,
     },
     views,
 };
@@ -521,6 +522,16 @@ fn handle_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
 
     if active_confirmation(model) {
         return handle_confirmation_key(model, key);
+    }
+
+    if !model.skills.active
+        && model.active_view == View::Agents
+        && model.agents.pane == AgentsPane::Editor
+        && model.agents.editor.is_some()
+        && model.agents.editor_page == ProfileEditorPage::Templates
+        && matches!(model.focus, Focus::List | Focus::Workspace)
+    {
+        return handle_profile_templates_key(model, key);
     }
 
     if active_profile_editor(model) {
@@ -1390,18 +1401,22 @@ fn active_profile_editor(model: &TuiModel) -> bool {
 }
 
 fn move_profile_field_focus(model: &mut TuiModel, forward: bool) -> ControllerEffect {
-    let field = model.agents.editor.as_ref().unwrap().tui_field();
-    if (forward && field == ProfileTuiField::Discard)
-        || (!forward && field == ProfileTuiField::Template)
-    {
-        return cycle_focus(model, forward);
-    }
-    model
-        .agents
-        .editor
-        .as_mut()
-        .unwrap()
-        .move_tui_field(forward);
+    let ProfileEditorPage::Section(section) = model.agents.editor_page else {
+        return ControllerEffect::None;
+    };
+    let fields = section.fields();
+    let editor = model.agents.editor.as_mut().unwrap();
+    let current = fields
+        .iter()
+        .position(|field| *field == editor.tui_field())
+        .unwrap_or(0);
+    let next = if forward {
+        (current + 1).min(fields.len() - 1)
+    } else {
+        current.saturating_sub(1)
+    };
+    editor.select_tui_field(fields[next]);
+    model.agents.detail_scroll = 0;
     model.agents.synchronize_field_input();
     ControllerEffect::Redraw
 }
@@ -1456,7 +1471,7 @@ fn handle_profile_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerE
                 retain_profile_field(model);
                 model.set_input_mode(InputMode::Nav);
                 if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
-                    return move_profile_field_focus(model, key.code == KeyCode::Tab);
+                    return cycle_focus(model, key.code == KeyCode::Tab);
                 }
             }
             KeyCode::Char(character) if text_modifiers(key.modifiers) => {
@@ -1488,8 +1503,13 @@ fn handle_profile_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerE
         return ControllerEffect::Redraw;
     }
     let key = normalize_nav_direction(key);
+    if !no_modifiers(key.modifiers)
+        && !(key.code == KeyCode::BackTab && key.modifiers == KeyModifiers::SHIFT)
+    {
+        return ControllerEffect::None;
+    }
     let field = model.agents.editor.as_ref().unwrap().tui_field();
-    if field == ProfileTuiField::Review
+    if model.agents.editor_page == ProfileEditorPage::Review
         && matches!(
             key.code,
             KeyCode::Up
@@ -1516,20 +1536,37 @@ fn handle_profile_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerE
     }
     match key.code {
         KeyCode::Esc => {
-            model.agents.pane = AgentsPane::Detail;
+            if model.agents.profile_role_selecting {
+                model.agents.profile_role_selecting = false;
+            } else if model.agents.editor_page == ProfileEditorPage::Home {
+                model.agents.pane = AgentsPane::Detail;
+            } else {
+                model.agents.editor_page = ProfileEditorPage::Home;
+                model.agents.detail_scroll = 0;
+            }
             model.set_focus(Focus::Workspace);
             ControllerEffect::Redraw
         }
-        KeyCode::Tab | KeyCode::BackTab => {
-            model.agents.detail_scroll = 0;
-            move_profile_field_focus(model, key.code == KeyCode::Tab)
-        }
+        KeyCode::Tab | KeyCode::BackTab => cycle_focus(model, key.code == KeyCode::Tab),
         KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {
             let forward = matches!(key.code, KeyCode::Down | KeyCode::Right);
-            if field == ProfileTuiField::Template {
-                return cycle_profile_template(model, forward);
+            if model.agents.editor_page == ProfileEditorPage::Home {
+                let columns = views::agent_profile_home_columns(model);
+                let current = model.agents.profile_home_selection.min(5);
+                model.agents.profile_home_selection = match key.code {
+                    KeyCode::Up if current >= columns => current - columns,
+                    KeyCode::Down if current + columns <= 5 => current + columns,
+                    KeyCode::Left if columns == 1 || !current.is_multiple_of(columns) => {
+                        current.saturating_sub(1)
+                    }
+                    KeyCode::Right if columns == 1 || current % columns + 1 < columns => {
+                        (current + 1).min(5)
+                    }
+                    _ => current,
+                };
+                return ControllerEffect::Redraw;
             }
-            if field == ProfileTuiField::Role {
+            if model.agents.profile_role_selecting && field == ProfileTuiField::Role {
                 use crate::agents::AgentRole;
                 let roles = [
                     AgentRole::Bull,
@@ -1551,70 +1588,106 @@ fn handle_profile_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerE
                     }],
                 );
             } else {
-                model
-                    .agents
-                    .editor
-                    .as_mut()
-                    .unwrap()
-                    .move_tui_field(forward);
+                return move_profile_field_focus(model, forward);
             }
             model.agents.synchronize_field_input();
             ControllerEffect::Redraw
         }
         KeyCode::Enter if key.kind == KeyEventKind::Press => {
+            match model.agents.editor_page {
+                ProfileEditorPage::Home => {
+                    let selection = model.agents.profile_home_selection.min(5);
+                    let editor = model.agents.editor.as_mut().unwrap();
+                    model.agents.detail_scroll = 0;
+                    if let Some(section) = ProfileSection::ALL.get(selection).copied() {
+                        model.agents.editor_page = ProfileEditorPage::Section(section);
+                        editor.select_tui_field(section.fields()[0]);
+                        model.agents.synchronize_field_input();
+                        return ControllerEffect::Redraw;
+                    }
+                    if selection == 5 {
+                        model.agents.editor_page = ProfileEditorPage::Discard;
+                        return ControllerEffect::Redraw;
+                    }
+                    model.agents.editor_page = ProfileEditorPage::Review;
+                    editor.select_tui_field(ProfileTuiField::Review);
+                    let effect = editor.submit_line(":review");
+                    return apply_profile_editor_effect(model, effect);
+                }
+                ProfileEditorPage::Discard => {
+                    let effect = model.agents.editor.as_mut().unwrap().submit_line(":cancel");
+                    return apply_profile_editor_effect(model, effect);
+                }
+                ProfileEditorPage::Section(_) if field == ProfileTuiField::Role => {
+                    model.agents.profile_role_selecting = !model.agents.profile_role_selecting;
+                    return ControllerEffect::Redraw;
+                }
+                _ => {}
+            }
             if profile_text_field(field) {
                 model.agents.synchronize_field_input();
                 model.set_input_mode(InputMode::Type);
                 return ControllerEffect::Redraw;
             }
-            if matches!(field, ProfileTuiField::Review | ProfileTuiField::Discard) {
+            if model.agents.editor_page == ProfileEditorPage::Review {
                 let editor = model.agents.editor.as_mut().unwrap();
-                let control = if field == ProfileTuiField::Discard {
-                    ":cancel"
-                } else {
-                    match editor.mode() {
-                        ProfileEditorMode::Create { .. } => ":create",
-                        ProfileEditorMode::Edit { .. } if editor.review().is_some() => ":activate",
-                        ProfileEditorMode::Edit { .. } => ":review",
-                    }
+                let control = match editor.mode() {
+                    ProfileEditorMode::Create { .. } => ":create",
+                    ProfileEditorMode::Edit { .. } if editor.review().is_some() => ":activate",
+                    ProfileEditorMode::Edit { .. } => ":review",
                 };
                 let effect = editor.submit_line(control);
                 return apply_profile_editor_effect(model, effect);
             }
-            model.agents.editor.as_mut().unwrap().move_tui_field(true);
-            model.agents.synchronize_field_input();
             ControllerEffect::Redraw
         }
         _ => ControllerEffect::None,
     }
 }
 
-fn cycle_profile_template(model: &mut TuiModel, forward: bool) -> ControllerEffect {
-    let Some(editor) = model.agents.editor.as_mut() else {
-        return ControllerEffect::None;
-    };
-    if editor.tui_field() != ProfileTuiField::Template
-        || !matches!(editor.mode(), ProfileEditorMode::Create { .. })
+fn handle_profile_templates_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
+    let key = normalize_nav_direction(key);
+    if !no_modifiers(key.modifiers)
+        && !(key.code == KeyCode::BackTab && key.modifiers == KeyModifiers::SHIFT)
     {
-        return ControllerEffect::Redraw;
+        return ControllerEffect::None;
     }
     let templates = builtin_profile_templates();
-    let current = templates
-        .iter()
-        .position(|template| {
-            template.id.as_str() == editor.tui_field_text(ProfileTuiField::Template)
-        })
-        .unwrap_or(0);
-    let selected = if forward {
-        (current + 1).min(templates.len() - 1)
-    } else {
-        current.saturating_sub(1)
-    };
-    if editor.select_template(&templates[selected]) {
-        model.agents.selected_template = selected;
+    match key.code {
+        KeyCode::Tab | KeyCode::BackTab => cycle_focus(model, key.code == KeyCode::Tab),
+        KeyCode::Esc => {
+            model.agents.pane = AgentsPane::Detail;
+            model.set_focus(Focus::Workspace);
+            ControllerEffect::Redraw
+        }
+        KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+            if model.focus == Focus::List =>
+        {
+            let current = model.agents.selected_template;
+            model.agents.selected_template = if matches!(key.code, KeyCode::Down | KeyCode::Right) {
+                (current + 1).min(templates.len().saturating_sub(1))
+            } else {
+                current.saturating_sub(1)
+            };
+            model.agents.detail_scroll = 0;
+            ControllerEffect::Redraw
+        }
+        KeyCode::Enter if key.kind == KeyEventKind::Press => {
+            let Some(template) = templates.get(model.agents.selected_template) else {
+                return ControllerEffect::None;
+            };
+            let editor = model.agents.editor.as_mut().unwrap();
+            // This page is create-only and never reachable after choosing a template.
+            if editor.select_template(template) {
+                model.agents.editor_page = ProfileEditorPage::Home;
+                model.agents.profile_home_selection = 0;
+                model.agents.synchronize_field_input();
+                model.set_focus(Focus::Workspace);
+            }
+            ControllerEffect::Redraw
+        }
+        _ => ControllerEffect::None,
     }
-    model.agents.synchronize_field_input();
-    ControllerEffect::Redraw
 }
 
 fn apply_profile_editor_effect(

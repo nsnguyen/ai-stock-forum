@@ -133,16 +133,42 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
                 " NAV  Tab section  WASD destination  Enter open  Esc back".to_owned(),
                 " 1–9 destination · / command".to_owned(),
             ]
+        } else if model.agents.pane == AgentsPane::Editor
+            && model.agents.editor_page == super::model::ProfileEditorPage::Templates
+        {
+            vec![
+                if model.focus == Focus::List {
+                    " NAV  W/S template  Tab preview  Enter use  Esc back".to_owned()
+                } else {
+                    " NAV  Tab pane  Enter use template  Esc back".to_owned()
+                },
+                " New draft only · Review and confirm before creating".to_owned(),
+            ]
         } else if model.agents.pane == AgentsPane::Editor && model.focus != Focus::List {
             if model.input_mode == super::model::InputMode::Type {
                 vec![
                     " TYPE  WASD text  Enter accept  Esc keep & leave".to_owned(),
-                    " Tab next field · Single-line text".to_owned(),
+                    " Tab next pane · Single-line text".to_owned(),
+                ]
+            } else if model.agents.profile_role_selecting {
+                vec![
+                    " NAV  WASD choose role  Enter/Esc accept  Tab pane".to_owned(),
+                    " Draft not applied · Review, then confirm to save".to_owned(),
+                ]
+            } else if model.agents.editor_page == super::model::ProfileEditorPage::Review {
+                vec![
+                    " NAV  W/S scroll  Enter continue  Esc home  Tab pane".to_owned(),
+                    " Review changes · Confirmation comes next".to_owned(),
+                ]
+            } else if model.agents.editor_page == super::model::ProfileEditorPage::Discard {
+                vec![
+                    " NAV  Enter discard  Esc keep draft  Tab pane".to_owned(),
+                    " This discards the local draft, not the saved agent".to_owned(),
                 ]
             } else {
                 vec![
-                    " NAV  Tab next field/section  Enter select  Esc keep draft".to_owned(),
-                    " Review: W/S, PgUp/PgDn, Home/End scroll".to_owned(),
+                    " NAV  Tab pane  WASD move  Enter open/edit  Esc back".to_owned(),
+                    " Draft not applied · Review, then confirm to save".to_owned(),
                 ]
             }
         } else if model.agents.pane == AgentsPane::Confirmation {
@@ -192,9 +218,9 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
         && model.agents.pane == AgentsPane::Editor
     {
         if model.input_mode == super::model::InputMode::Type {
-            " TYPE  WASD text  Enter accept  Tab next field  Esc keep & leave"
+            " TYPE  WASD text  Enter accept  Tab next pane  Esc keep & leave"
         } else {
-            " NAV   Tab next field  WASD move  Enter edit/select  Esc keep draft"
+            " NAV   Tab pane  WASD move  Enter open/edit  Esc back"
         }
     } else if model.input_is_visible() {
         " TYPE  WASD text  Enter accept  Esc back/cancel"

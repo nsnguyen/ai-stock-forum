@@ -55,6 +55,53 @@ pub enum AgentsPane {
     Memory,
 }
 
+/// Presentation-only pages around the existing profile draft and review flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProfileEditorPage {
+    Templates,
+    #[default]
+    Home,
+    Section(ProfileSection),
+    Review,
+    Discard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileSection {
+    Identity,
+    Focus,
+    Personality,
+    Instructions,
+}
+
+impl ProfileSection {
+    pub const ALL: [Self; 4] = [
+        Self::Identity,
+        Self::Focus,
+        Self::Personality,
+        Self::Instructions,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Identity => "Identity",
+            Self::Focus => "Focus",
+            Self::Personality => "Personality",
+            Self::Instructions => "Instructions",
+        }
+    }
+
+    pub const fn fields(self) -> &'static [crate::ui::profile_editor::ProfileTuiField] {
+        use crate::ui::profile_editor::ProfileTuiField::*;
+        match self {
+            Self::Identity => &[DisplayName, Role, Description],
+            Self::Focus => &[PrimarySpecialty, Tags],
+            Self::Personality => &[Personality],
+            Self::Instructions => &[Instructions],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentDetailAction {
     Profile,
@@ -1787,6 +1834,9 @@ pub struct AgentsViewState {
     pub selected_assigned_skill: usize,
     pub selected_skill_action_index: usize,
     pub editor: Option<ProfileEditor>,
+    pub editor_page: ProfileEditorPage,
+    pub profile_home_selection: usize,
+    pub profile_role_selecting: bool,
     pub pending_confirmation: Option<ProfileConfirmation>,
     pub profiles: AgentProfilesView,
     pub detail: Option<AgentProfileView>,
@@ -1813,6 +1863,9 @@ impl Default for AgentsViewState {
             selected_assigned_skill: 0,
             selected_skill_action_index: 0,
             editor: None,
+            editor_page: ProfileEditorPage::Home,
+            profile_home_selection: 0,
+            profile_role_selecting: false,
             pending_confirmation: None,
             profiles: AgentProfilesView {
                 profiles: Vec::new(),
@@ -2147,6 +2200,11 @@ impl AgentsViewState {
             return false;
         };
         self.editor = Some(editor);
+        self.selected_template = template_index;
+        self.editor_page = ProfileEditorPage::Templates;
+        self.profile_home_selection = 0;
+        self.profile_role_selecting = false;
+        self.detail_scroll = 0;
         self.synchronize_field_input();
         self.pane = AgentsPane::Editor;
         true

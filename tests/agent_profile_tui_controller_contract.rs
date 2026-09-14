@@ -19,7 +19,10 @@ use ai_stock_forum::{
         tui::{
             ControllerEffect, TuiEvent, apply_outcome, handle_event,
             layout::view_geometry,
-            model::{AgentsPane, AgentsViewState, Focus, ProfileConfirmation, TuiModel, View},
+            model::{
+                AgentsPane, AgentsViewState, Focus, ProfileConfirmation, ProfileEditorPage,
+                ProfileSection, TuiModel, View,
+            },
         },
     },
 };
@@ -375,12 +378,15 @@ fn profile_type_keeps_literal_invalid_fields_on_escape_and_tab() {
     model.select_view(View::Agents);
     model.agents.editor = Some(create_editor());
     model.agents.pane = AgentsPane::Editor;
+    model.agents.editor_page = ProfileEditorPage::Section(ProfileSection::Identity);
+    model
+        .agents
+        .editor
+        .as_mut()
+        .unwrap()
+        .select_tui_field(ProfileTuiField::DisplayName);
+    model.agents.synchronize_field_input();
     model.set_focus(Focus::Workspace);
-    handle_event(&mut model, key(KeyCode::Tab));
-    assert_eq!(
-        model.agents.editor.as_ref().unwrap().tui_field(),
-        ProfileTuiField::DisplayName
-    );
     handle_event(&mut model, key(KeyCode::Enter));
     assert_eq!(model.input_mode, InputMode::Type);
     model.agents.field_input.clear();
@@ -410,7 +416,8 @@ fn profile_type_keeps_literal_invalid_fields_on_escape_and_tab() {
             .tui_field_error(ProfileTuiField::DisplayName)
             .is_some()
     );
-    assert_eq!(editor.tui_field(), ProfileTuiField::Role);
+    assert_eq!(editor.tui_field(), ProfileTuiField::DisplayName);
+    assert_eq!(model.focus, Focus::Navigation);
     handle_event(&mut model, key(KeyCode::Char('1')));
     assert_eq!(model.active_view, View::Overview);
     assert!(model.agents.editor.is_some());
@@ -487,13 +494,15 @@ fn enter_line(model: &mut TuiModel, line: &str) -> ControllerEffect {
 
 fn advance_create_editor_to_review(model: &mut TuiModel) {
     use ai_stock_forum::ui::profile_editor::ProfileTuiField;
-    for _ in 0..11 {
-        if model.agents.editor.as_ref().unwrap().tui_field() == ProfileTuiField::Review {
-            return;
-        }
-        handle_event(model, key(KeyCode::Tab));
-    }
-    panic!("Review must remain reachable");
+    model
+        .agents
+        .editor
+        .as_mut()
+        .expect("profile editor")
+        .select_tui_field(ProfileTuiField::Review);
+    model.agents.editor_page = ProfileEditorPage::Review;
+    model.agents.profile_role_selecting = false;
+    model.agents.synchronize_field_input();
 }
 
 fn advance_editor_to_review_with_enter(model: &mut TuiModel) {
@@ -932,7 +941,15 @@ fn bare_q_never_requests_shutdown_across_agent_input_owners_or_too_small() {
             .agents
             .start_profile_create(0, builtin_profile_templates())
     );
-    handle_event(&mut editor_model, key(KeyCode::Tab));
+    editor_model.agents.editor_page = ProfileEditorPage::Section(ProfileSection::Identity);
+    editor_model
+        .agents
+        .editor
+        .as_mut()
+        .unwrap()
+        .select_tui_field(ai_stock_forum::ui::profile_editor::ProfileTuiField::DisplayName);
+    editor_model.agents.synchronize_field_input();
+    editor_model.set_focus(Focus::Workspace);
     handle_event(&mut editor_model, key(KeyCode::Enter));
     editor_model.agents.field_input.clear();
     assert_eq!(
@@ -1078,7 +1095,13 @@ fn editor_preview_cancellation_and_confirmation_are_typed_controller_effects() {
         }
         effect => panic!("expected preview, got {effect:?}"),
     }
-    handle_event(&mut preview_model, key(KeyCode::Tab));
+    preview_model.agents.editor_page = ProfileEditorPage::Home;
+    preview_model.agents.profile_home_selection = 5;
+    assert_eq!(
+        handle_event(&mut preview_model, key(KeyCode::Enter)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(preview_model.agents.editor_page, ProfileEditorPage::Discard);
     assert_eq!(
         handle_event(&mut preview_model, key(KeyCode::Enter)),
         ControllerEffect::CancelProfileReview
@@ -1101,21 +1124,30 @@ fn keyboard_create_path_cycles_complete_templates_and_uses_enter_only() {
     use ai_stock_forum::ui::profile_editor::ProfileTuiField;
     let mut model = model();
     model.active_view = View::Agents;
-    model.agents.pane = AgentsPane::Editor;
-    model.agents.editor = Some(create_editor());
+    assert!(
+        model
+            .agents
+            .start_profile_create(0, builtin_profile_templates())
+    );
+    model.set_focus(Focus::List);
     handle_event(&mut model, key(KeyCode::Char('s')));
+    assert_eq!(model.agents.selected_template, 1);
     assert_eq!(
         model.agents.editor.as_ref().unwrap().draft(),
-        &builtin_profile_templates()[1].copy_to_draft().unwrap()
+        &builtin_profile_templates()[0].copy_to_draft().unwrap()
     );
-    handle_event(&mut model, key(KeyCode::Char('w')));
-    handle_event(&mut model, key(KeyCode::Char('w')));
+    handle_event(&mut model, key(KeyCode::Enter));
+    assert_eq!(model.agents.editor_page, ProfileEditorPage::Home);
+    assert_eq!(model.focus, Focus::Workspace);
     assert_eq!(
         model.agents.editor.as_ref().unwrap().draft().role,
-        AgentRole::Bull
+        AgentRole::Bear
     );
-    handle_event(&mut model, key(KeyCode::Char('s')));
-    handle_event(&mut model, key(KeyCode::Tab));
+    handle_event(&mut model, key(KeyCode::Enter));
+    assert_eq!(
+        model.agents.editor_page,
+        ProfileEditorPage::Section(ProfileSection::Identity)
+    );
     assert_eq!(
         model.agents.editor.as_ref().unwrap().tui_field(),
         ProfileTuiField::DisplayName
@@ -1149,26 +1181,32 @@ fn keyboard_create_path_cycles_complete_templates_and_uses_enter_only() {
 }
 
 #[test]
-fn edit_template_step_ignores_arrows_but_keeps_enter_and_role_alias() {
+fn edit_home_opens_an_explicit_role_chooser_without_mutating_role_during_field_navigation() {
     use ai_stock_forum::ui::profile_editor::ProfileTuiField;
     let mut model = model();
     model.active_view = View::Agents;
     model.agents.pane = AgentsPane::Editor;
     model.agents.editor = Some(edit_editor());
+    model.agents.editor_page = ProfileEditorPage::Section(ProfileSection::Identity);
+    model
+        .agents
+        .editor
+        .as_mut()
+        .unwrap()
+        .select_tui_field(ProfileTuiField::Role);
+    model.agents.synchronize_field_input();
     let draft = model.agents.editor.as_ref().unwrap().draft().clone();
     handle_event(&mut model, key(KeyCode::Down));
     handle_event(&mut model, key(KeyCode::Up));
     assert_eq!(model.agents.editor.as_ref().unwrap().draft(), &draft);
-    handle_event(&mut model, key(KeyCode::Tab));
-    handle_event(&mut model, key(KeyCode::Tab));
-    assert_eq!(
-        model.agents.editor.as_ref().unwrap().tui_field(),
-        ProfileTuiField::Role
-    );
+    handle_event(&mut model, key(KeyCode::Enter));
+    assert!(model.agents.profile_role_selecting);
     handle_event(&mut model, key(KeyCode::Char('d')));
+    handle_event(&mut model, key(KeyCode::Enter));
     let editor = model.agents.editor.as_ref().unwrap();
     assert_eq!(editor.draft().role, AgentRole::Bear);
     assert_eq!(editor.draft().display_name, "Bull Researcher");
+    assert!(!model.agents.profile_role_selecting);
 }
 
 #[test]
@@ -1498,7 +1536,14 @@ fn every_enter_modifier_submits_template_controls_and_clears_stale_validation() 
         model.active_view = View::Agents;
         model.agents.pane = AgentsPane::Editor;
         model.agents.editor = Some(create_editor());
-        handle_event(&mut model, key(KeyCode::Tab));
+        model.agents.editor_page = ProfileEditorPage::Section(ProfileSection::Identity);
+        model
+            .agents
+            .editor
+            .as_mut()
+            .unwrap()
+            .select_tui_field(ProfileTuiField::DisplayName);
+        model.agents.synchronize_field_input();
         handle_event(&mut model, key(KeyCode::Enter));
         model.agents.field_input.clear();
         for character in ":next".chars() {

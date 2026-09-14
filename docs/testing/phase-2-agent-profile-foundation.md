@@ -121,12 +121,13 @@ has not been performed for the current two-pane slice:
    Skills, then return with bare `3`. Each shortcut must work from every
    non-text browsing pane and confirmation, and Agents must return to the same
    pane and selection.
-2. Press `N` for the visible New action and copy the selected pinned template.
-   Keep bindings empty and rename the draft `Research North`. Profile fields
-   begin in NAV; select a field and press `Enter` deliberately to enter TYPE.
+2. Press `N` for the visible New action, browse the separate template picker,
+   then press `Enter` to use the chosen template. Open Identity from Profile
+   Home, keep bindings empty, and rename the draft `Research North`. Profile
+   fields begin in NAV; select a field and press `Enter` to enter TYPE.
    In Display name, type `wasd123456789/n` and a leading `:back`, then verify
    these remain literal text. `Esc` must retain text and return to NAV; `Tab`
-   must retain text and move to the next field in NAV. Invalid raw input and its
+   must retain text and move to the next pane. WASD selects fields in NAV. Invalid raw input and its
    error must remain available for correction. Profile normalization remains
    single-line, and the fallback colon grammar is not a TUI prose parser.
    Restore Display name to `Research North` before continuing. Inspect Review
