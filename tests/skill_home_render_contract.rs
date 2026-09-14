@@ -127,6 +127,20 @@ fn loaded_home_exposes_actions_and_guidance_without_technical_identifiers() {
     assert!(!text.contains("Left/Right"));
 }
 
+#[test]
+fn pending_preview_keeps_the_selected_name_visible_and_explains_the_wait() {
+    let mut model = fixture();
+    model.skills.detail = None;
+    model.set_command_in_flight(true);
+    let text = screen(&model, 120, 30);
+    assert!(text.contains("Loading preview"), "{text}");
+    assert!(text.contains("Catalyst Mapping"), "{text}");
+    assert!(
+        !text.contains("Select a library item and press Enter."),
+        "{text}"
+    );
+}
+
 // An editor that shows the sequential wizard instead of section cards hides direct edits.
 #[test]
 fn editor_home_offers_independent_sections_for_a_partial_draft() {

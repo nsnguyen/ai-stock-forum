@@ -432,11 +432,17 @@ fn delayed_skill_detail_does_not_replace_a_newer_selection_or_context_after_retu
     model.set_focus(Focus::Workspace);
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Up)),
-        ControllerEffect::Redraw
+        ControllerEffect::LoadSkillPreview {
+            selected_skill: 0,
+            starter: false
+        }
     );
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Down)),
-        ControllerEffect::Redraw
+        ControllerEffect::LoadSkillPreview {
+            selected_skill: 1,
+            starter: false
+        }
     );
     let expected_skills = model.skills.clone();
 

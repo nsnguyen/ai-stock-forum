@@ -352,15 +352,25 @@ pub(super) fn detail(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
         return;
     }
     let Some(detail) = loaded_detail(model) else {
-        frame.render_widget(
-            Paragraph::new(vec![
+        let lines = if model.command_in_flight
+            && let Some(selected) = model.skills.selected_summary()
+        {
+            vec![
+                Line::styled(
+                    format!("Loading preview · {}", safe_text(&selected.display_name)),
+                    theme.accent,
+                ),
+                Line::raw("Keep browsing with W/S. The preview will follow."),
+                Line::raw("Tab pane · Esc back"),
+            ]
+        } else {
+            vec![
                 Line::styled("Choose a skill to open its Home", theme.accent),
                 Line::raw("Select a library item and press Enter."),
                 Line::raw("N New skill · Tab pane · Esc back"),
-            ])
-            .wrap(Wrap { trim: false }),
-            inner,
-        );
+            ]
+        };
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
         return;
     };
     let active = model
