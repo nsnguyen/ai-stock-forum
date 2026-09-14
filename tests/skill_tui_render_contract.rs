@@ -14,9 +14,8 @@ use ai_stock_forum::{
     ui::{
         skill_editor::SkillEditor,
         tui::{
-            AssignmentKind, ControllerEffect, SkillConfirmation, SkillOperationOrigin, TuiEvent,
-            handle_event,
-            model::{AgentsPane, Focus, Severity, SkillsPane, TuiModel, View},
+            AssignmentKind, SkillConfirmation, SkillOperationOrigin, TuiEvent, handle_event,
+            model::{AgentsPane, Focus, Severity, SkillEditorPage, SkillsPane, TuiModel, View},
             render,
             theme::Theme,
         },
@@ -185,26 +184,26 @@ fn skills_workspace_uses_one_and_two_panes_at_adaptive_breakpoints() {
     let detail = skills_model(SkillsPane::Detail);
 
     let narrow = render_text(&detail, 79, 24);
-    assert!(narrow.contains("Skill detail"));
+    assert!(narrow.contains("SKILL HOME"));
     assert!(!narrow.contains("Skill library"));
     assert!(!narrow.contains("Skill context"));
 
     let medium = render_text(&detail, 100, 24);
     assert!(medium.contains("Skill library"));
-    assert!(medium.contains("Skill detail"));
+    assert!(medium.contains("SKILL HOME"));
     assert!(!medium.contains("Skill context"));
 
     let wide = render_text(&detail, 120, 30);
     assert!(wide.contains("Skill library"));
-    assert!(wide.contains("Skill detail"));
+    assert!(wide.contains("SKILL HOME"));
     assert!(!wide.contains("Skill context"));
 
     let list = skills_model(SkillsPane::List);
     let narrow_list = render_text(&list, 60, 18);
     assert!(narrow_list.contains("Skill library"));
-    assert!(narrow_list.contains("Up/Down"));
+    assert!(narrow_list.contains("W/S"));
     assert!(narrow_list.contains("Enter"));
-    assert!(narrow_list.contains("c Create"));
+    assert!(narrow_list.contains("N New skill"));
     assert!(narrow_list.contains("Esc"));
 }
 
@@ -236,7 +235,7 @@ fn starter_library_renders_name_active_version_and_provenance() {
     }
     assert!(text.matches("Built-in").count() >= 4);
     assert!(text.matches("v1").count() >= 4);
-    assert!(text.contains("Active version"));
+    assert!(text.contains("Version"));
 }
 
 #[test]
@@ -246,8 +245,8 @@ fn empty_loading_validation_and_recoverable_error_states_explain_the_next_action
     empty.skills.pane = SkillsPane::List;
     let empty_text = render_text(&empty, 80, 24);
     assert!(empty_text.contains("No skills saved"));
-    assert!(empty_text.contains("c Create first skill"));
-    assert!(empty_text.contains("saved guidance"));
+    assert!(empty_text.contains("N New skill"));
+    assert!(empty_text.contains("Saved guidance"));
     assert!(empty_text.contains("not executable"));
 
     empty.command_in_flight = true;
@@ -357,12 +356,10 @@ fn detail_and_history_make_active_historical_and_inert_content_unambiguous() {
     let text = render_text(&model, 160, 70);
     for expected in [
         "HISTORICAL",
-        "Exact version",
-        "Active version",
-        "INERT INSTRUCTIONS",
-        "INERT REFERENCE NOTES",
-        "text only",
-        "Content digest",
+        "Version 1",
+        "GUIDANCE AT A GLANCE",
+        "REFERENCE NOTES",
+        "Saved guidance",
     ] {
         assert!(text.contains(expected), "missing {expected}");
     }
@@ -508,7 +505,7 @@ fn history_footer_matches_up_down_enter_and_escape_state_machine_keys() {
     assert!(text.contains("Skill history"));
     assert!(text.contains("ACTIVE"));
     assert!(text.contains("HISTORICAL"));
-    assert!(text.contains("Up/Down: select"));
+    assert!(text.contains("W/S: select"));
     assert!(text.contains("Enter: open exact version"));
     assert!(text.contains("Esc: detail"));
 }
@@ -602,19 +599,54 @@ fn create_confirmation_uses_authoritative_candidate_state_and_names_version_one(
     let model = create_confirmation_model(&candidate, &unrelated);
     let text = render_text(&model, 120, 44);
 
-    for expected in ["Authoritative Candidate", "Digest", "Version v1"] {
+    for expected in ["Authoritative Candidate", "Version v1"] {
         assert!(text.contains(expected), "missing {expected}");
     }
     for exact_identity in [
         candidate.skill_id().to_string(),
         candidate.content_digest().to_string(),
     ] {
-        assert!(text.contains(&exact_identity[..8]));
-        assert!(text.contains(&exact_identity[exact_identity.len() - 8..]));
+        assert!(!text.contains(&exact_identity));
     }
     assert!(!text.contains("Unrelated Loaded Detail"));
     assert!(!text.contains("builtin.unrelated-loaded-detail"));
     assert!(!text.contains("Version Pending"));
+}
+
+#[test]
+fn technical_confirmation_details_scroll_without_hiding_confirm_controls() {
+    let candidate = skill(1_210, "Technical Candidate", SkillProvenance::User);
+    let unrelated = builtin(1_310, "Unrelated Detail");
+    let mut model = create_confirmation_model(&candidate, &unrelated);
+    model.skills.technical_details = true;
+    model.skills.content_scroll = u16::MAX;
+    let text = render_text(&model, 60, 18);
+    let review_digest = sha256(b"authoritative-create-review").to_string();
+    assert!(
+        text.contains(&review_digest[review_digest.len() - 6..]),
+        "{text}"
+    );
+    assert!(text.contains("Enter: confirm"));
+    assert!(text.contains("Esc: return"));
+}
+
+#[test]
+fn technical_assignment_review_scrolls_prior_pin_and_keeps_validation_controls() {
+    let target = skill(1_220, "Target guidance", SkillProvenance::User);
+    let prior = skill(1_320, "Prior guidance", SkillProvenance::User);
+    let mut model = skills_model(SkillsPane::AssignmentReview);
+    model.skills.detail = Some(view(&target));
+    model.skills.selected_agent_detail = Some(profile_with_skills(vec![prior.reference()]));
+    model.skills.assignment = Some(AssignmentKind::Upgrade {
+        expected: prior.reference(),
+    });
+    model.skills.technical_details = true;
+    model.skills.content_scroll = u16::MAX;
+    let text = render_text(&model, 60, 18);
+    let digest = prior.content_digest().to_string();
+    assert!(text.contains(&digest[digest.len() - 6..]), "{text}");
+    assert!(text.contains("Enter: validate"));
+    assert!(text.contains("Esc: agent picker"));
 }
 
 #[test]
@@ -680,9 +712,10 @@ fn editor_review_names_create_v1_and_the_next_object_version_without_fabricating
     create.go_to_review().expect("create review");
     let mut create_model = skills_model(SkillsPane::Editor);
     create_model.skills.editor = Some(create);
+    create_model.skills.editor_page = SkillEditorPage::Review;
     let create_text = render_text(&create_model, 180, 60);
     assert!(create_text.contains("Exact version v1"));
-    assert!(create_text.contains("version ID assigned on commit"));
+    assert!(!create_text.contains("Digest"));
 
     let mut editor = SkillEditor::for_version(
         first.skill_id(),
@@ -693,34 +726,47 @@ fn editor_review_names_create_v1_and_the_next_object_version_without_fabricating
     let mut model = skills_model(SkillsPane::Editor);
     model.skills.detail = Some(view(&first));
     model.skills.editor = Some(editor);
+    model.skills.editor_page = SkillEditorPage::Review;
 
     let text = render_text(&model, 180, 60);
     assert!(text.contains("Exact version v2"));
-    assert!(text.contains("version ID assigned on commit"));
+    assert!(!text.contains("Digest"));
     assert!(!text.contains(&SkillVersionId::from_uuid(Uuid::from_u128(1_502)).to_string()));
 }
 
 #[test]
-fn legacy_skill_editor_footer_does_not_advertise_unimplemented_tab_traversal() {
-    let mut model = skills_model(SkillsPane::Editor);
-    model.skills.editor = Some(SkillEditor::for_create(None));
-    model.command.ingest("literal draft");
-
-    let text = render_text(&model, 100, 30);
-    for hint in ["WASD text", "Enter accept", "Esc back/cancel"] {
-        assert!(text.contains(hint), "missing skill editor hint {hint:?}");
-    }
-    assert!(!text.contains("Tab next field"));
-
-    let before = model.clone();
-    assert_eq!(
-        handle_event(
-            &mut model,
-            TuiEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-        ),
-        ControllerEffect::None
+fn resumed_editor_review_does_not_use_an_unrelated_skills_provenance() {
+    let original = skill(1_520, "Original draft", SkillProvenance::User);
+    let mut editor = SkillEditor::for_version(
+        original.skill_id(),
+        original.skill_version_id(),
+        original.content().clone(),
     );
-    assert_eq!(model, before);
+    editor.go_to_review().unwrap();
+    let mut model = skills_model(SkillsPane::Editor);
+    model.skills.editor = Some(editor);
+    model.skills.editor_page = SkillEditorPage::Review;
+    let text = render_text(&model, 60, 30);
+    assert!(!text.contains("Built-in"), "{text}");
+    assert!(text.contains("Reviewed source not loaded"), "{text}");
+}
+
+#[test]
+fn skill_editor_home_traverses_sections_without_editing_values() {
+    let mut model = skills_model(SkillsPane::Editor);
+    model.focus = Focus::Workspace;
+    model.skills.editor = Some(SkillEditor::for_create(None));
+    let before = model.skills.editor.clone();
+    let text = render_text(&model, 100, 30);
+    assert!(text.contains("Basics"));
+    assert!(text.contains("Tab"));
+    assert!(!text.contains("WASD text"));
+    handle_event(
+        &mut model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+    );
+    assert_eq!(model.skills.editor, before);
+    assert_ne!(model.focus, Focus::Workspace);
 }
 
 #[test]
@@ -799,9 +845,9 @@ fn create_source_agent_picker_and_result_keep_complete_contextual_keys_compact_a
         (
             "create",
             &create,
-            ["Up/Down", "Enter: continue", "Esc: library"],
+            ["W/S", "Enter: continue", "Esc: library"],
         ),
-        ("picker", &picker, ["Up/Down", "Enter: review", "Esc:"]),
+        ("picker", &picker, ["W/S", "Enter: review", "Esc:"]),
         (
             "result",
             &result,
@@ -846,8 +892,8 @@ fn wide_long_content_keeps_truncation_guidance_and_actions_visible() {
     model.skills.detail = Some(view(&long));
 
     let text = render_text(&model, 160, 44);
-    assert!(text.contains("Long content may be truncated"));
-    assert!(text.contains("Left/Right: choose action"));
+    assert!(text.contains("W/S scroll"));
+    assert!(text.contains("A/D action"));
     assert!(text.contains("Enter: open"));
     assert!(text.contains("Esc: library"));
 }
@@ -899,7 +945,7 @@ fn agents_multi_skill_panel_shows_position_rows_and_contextual_available_actions
             "Unassign",
             "Enter:",
             "Esc: detail",
-            "Up/Down",
+            "W/S",
         ] {
             assert!(
                 available.contains(expected),
@@ -994,8 +1040,8 @@ fn medium_assignment_review_reserves_complete_contextual_controls_and_identity()
             );
         }
         let version_id = target.skill_version_id().to_string();
-        assert!(text.contains(&version_id[..8]));
-        assert!(text.contains(&version_id[version_id.len() - 8..]));
+        assert!(text.contains("v1"));
+        assert!(!text.contains(&version_id));
     }
 
     let mut already = skills_model(SkillsPane::AssignmentReview);
@@ -1058,8 +1104,8 @@ fn medium_assignment_confirmations_keep_enter_escape_and_exact_identity_visible(
             target.reference()
         };
         let version_id = expected_ref.skill_version_id().to_string();
-        assert!(text.contains(&version_id[..8]));
-        assert!(text.contains(&version_id[version_id.len() - 8..]));
+        assert!(text.contains("v1"));
+        assert!(!text.contains(&version_id));
     }
 }
 

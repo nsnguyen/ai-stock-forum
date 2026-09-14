@@ -1,9 +1,9 @@
 # Two-pane shell and Agents: local testing
 
-This guide covers the approved first slice of the two-pane redesign: the shared
-shell and the complete Agents experience. Memory and Skills use the shared
-navigation while retaining their existing workflows until their own usability
-passes. Chat and Connections remain honest Phase 3 placeholders.
+This guide covers the shared two-pane shell, the Agents experience, and the
+Skills card workspace. Memory uses the shared navigation while retaining its
+existing workflow until its own usability pass. Chat and Connections remain
+honest Phase 3 placeholders.
 
 > **Verification status:** The controls below are present in the current TUI,
 > and the automated gates and production-render preview matrix pass. The
@@ -57,9 +57,9 @@ The top menu is always ordered as follows:
 | `/quit`, then `Enter` | Request normal shutdown from command input. |
 
 WASD is the primary NAV vocabulary. Arrow keys are quiet aliases outside text
-entry. The footer shows the controls for the current context. Command input and
-the transitional Memory and Skills editors use their own actual contextual
-hints rather than the generic Agents profile hints.
+entry. The footer shows the controls for the current context. Command input,
+Memory, and the Skills editor use their own actual contextual hints rather than
+the generic Agents profile hints.
 
 At widths from 60 through 99 columns, one logical pane is visible and focus
 reveals the relevant pane. At 100 columns and above, the list and workspace are
@@ -155,11 +155,65 @@ action. `D` must not perform the final write, and one held or repeated `Enter`
 must not cross review and confirmation to cause a durable mutation. Cancel the
 confirmation if the purpose of the run is only visual or navigation testing.
 
+## Skills card workspace
+
+Press `4` to open the Skills library. `W`/`S` selects a saved skill, `Enter`
+opens its Home, and `Tab` moves between main navigation, library, and workspace.
+The compact layout shows one focused pane at a time; wider layouts show the
+library and workspace together without changing the logical focus order.
+
+Skill Home presents the saved purpose, when-to-use guidance, instructions,
+reference notes, provenance, and human-readable exact version. Use `A`/`D` to
+choose Assign to agent, Edit skill, or Version history and `Enter` to open the
+selected action. Routine Home hides UUIDs and digests behind a separate
+technical-details disclosure. The content remains inert saved guidance and
+does not imply provider availability, model execution, network access, or
+permission to run anything. `W`/`S` scrolls long workspace content while the
+selected action remains available. `I` shows or hides technical identifiers on
+Home, Review, and Confirmation.
+
+`N` opens the separate Starting Point picker for a blank skill or a copy of a
+library skill. If a draft already exists, `N` resumes it instead of replacing
+it. `E` begins the next version of the active skill, or resumes the retained
+edit draft. `Esc` from the picker returns to the library without creating a
+skill.
+
+Skill Editor Home contains Basics, When to use, Instructions, Reference notes,
+Review changes, and Discard draft. Use WASD to select a card and `Enter` to open
+it. Fields begin in NAV; press `Enter` explicitly to enter TYPE. In TYPE, WASD,
+digits, slash, colon, and shortcut letters remain literal input. `Esc` retains
+the exact field value and returns to NAV on the same field. A second `Esc`
+returns to Editor Home with the draft intact. `Tab` retains the field before
+moving panes, and leaving Skills suspends the draft for later resume.
+
+Reference notes have explicit add, edit, save, remove, and cancel states. They
+are inert text. Removing a note and discarding a draft each require the visible
+warning path; `Esc` retains the note or draft.
+
+Review names the proposed operation and human-readable exact version. `Enter`
+validates and moves to a distinct Confirmation screen. Only a deliberate
+`Enter` on the labeled confirmation creates immutable version 1 or the next
+immutable version. `Esc` backs out without mutation. One held or repeated key
+must not cross both boundaries.
+
+History labels each exact version ACTIVE or HISTORICAL. Creating a new active
+version does not auto-upgrade an agent. Assignment, upgrade, historical
+reassignment, and unassignment each show the agent, operation, and exact pin on
+Review and Confirmation. Each accepted operation creates a new immutable agent
+profile version; no action silently changes every assignment to the latest
+skill.
+
+For a non-destructive interactive pass, use the normal `make dev` route above
+and cancel before final Confirmation. Do not confirm a mutation against normal
+user data solely to collect visual evidence. The dedicated
+[Declarative Skills guide](declarative-skills.md) contains the focused test and
+synthetic-preview commands.
+
 ## Scope boundaries
 
 The redesign does not add credentials, provider/model execution, encryption,
-or a multiline profile editor. Full Memory and Skills redesigns are the next
-usability slices. Chat and Connections remain Phase 3 placeholders. Their pages
+or multiline profile/skill editors. A full Memory redesign remains a later
+usability slice. Chat and Connections remain Phase 3 placeholders. Their pages
 must not imply live chat, provider availability, or credential setup.
 
 ## Safe synthetic preview
@@ -174,8 +228,10 @@ cargo run --locked --example two_pane_preview -- --scene agents --width 120 --he
 
 Available scenes are `home`, `home-populated`, `agents`, `empty`, `history`,
 `profile-home` (also `editor`), `template-picker`, `identity`, `focus`,
-`personality`, `instructions`, `type`, `invalid-field`, `review`, `confirmation`, `chat`, and
-`connections`. `home` models a zero-agent first run. Its synthetic snapshot
+`personality`, `instructions`, `type`, `invalid-field`, `review`, `confirmation`,
+`skill-home`, `skill-editor`, `skill-starter`, `skill-section`, `skill-type`,
+`skill-history`, `skill-assignment`, `chat`, and `connections`. `home` models a
+zero-agent first run. Its synthetic snapshot
 includes the audit summary `agent profiles listed: total_count=0,
 returned_count=0, truncated=false` as input so visual review can verify that
 Home does not expose that internal text. `home-populated` uses the same three
@@ -189,6 +245,19 @@ identity, wrapping, field text, errors, confirmation controls, footer hints,
 and the absence of routine UUIDs or digests.
 
 Durable production-render evidence is available as native PNG:
+
+Skills Home, its card editor, and separate starter picker (synthetic data):
+
+- [Skills Home at 160x40](assets/two-pane/skills-home-160x40.png)
+- [Compact Skills Home at 60x18](assets/two-pane/skills-home-60x18.png)
+- [NO_COLOR Skills Home at 80x24](assets/two-pane/skills-home-80x24-no-color.png)
+- [Skill Editor Home at 120x30](assets/two-pane/skills-editor-home-120x30.png)
+- [Compact Skill Editor Home at 60x18](assets/two-pane/skills-editor-home-60x18.png)
+- [Separate starter picker at 120x30](assets/two-pane/skills-starter-120x30.png)
+- [Basics section at 120x30](assets/two-pane/skills-section-basics-120x30.png)
+- [Explicit TYPE field at 120x30](assets/two-pane/skills-type-120x30.png)
+- [Exact version history at 120x30](assets/two-pane/skills-history-120x30.png)
+- [Assignment review at 120x30](assets/two-pane/skills-assignment-120x30.png)
 
 Profile Home and its separate template picker:
 

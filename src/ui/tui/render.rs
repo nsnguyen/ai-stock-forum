@@ -107,6 +107,73 @@ fn numbered_tabs(model: &TuiModel, width: usize, theme: &Theme) -> Vec<Line<'sta
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    if model.skills.active && model.focus != Focus::Command {
+        use super::model::{InputMode, SkillEditorPage, SkillSection, SkillsPane};
+        let (hint, note) = if model.focus == Focus::Navigation {
+            (
+                " NAV  WASD destination  Tab pane  Enter open",
+                " 1–9 destination · / command",
+            )
+        } else if model.skills.pane == SkillsPane::Confirmation {
+            (
+                " NAV  Tab pane  Enter confirm  Esc review  I details",
+                " Only Enter in the confirmation pane saves",
+            )
+        } else if model.skills.pane == SkillsPane::Editor && model.focus != Focus::List {
+            if model.input_mode == InputMode::Type {
+                (
+                    " TYPE  WASD text  Enter/Esc keep  Tab pane",
+                    " Draft retained · no commands run while typing",
+                )
+            } else {
+                match model.skills.editor_page {
+                    SkillEditorPage::Review => (
+                        " NAV  W/S scroll  Enter continue  Esc home  Tab pane",
+                        " Review changes · confirmation comes next",
+                    ),
+                    SkillEditorPage::Discard => (
+                        " NAV  Enter discard  Esc keep draft  Tab pane",
+                        " Discards this draft, not the saved skill",
+                    ),
+                    SkillEditorPage::ReferenceRemove => (
+                        " NAV  Enter remove note  Esc keep note  Tab pane",
+                        " Changes affect only this draft",
+                    ),
+                    SkillEditorPage::Section(SkillSection::References) => (
+                        " NAV  W/S note  Enter edit  N add  X remove  Tab pane",
+                        " Esc home · unfinished notes are retained",
+                    ),
+                    _ => (
+                        " NAV  Tab pane  WASD move  Enter open/edit  Esc back",
+                        " Draft not saved · review, then confirm",
+                    ),
+                }
+            }
+        } else if model.skills.pane == SkillsPane::CreateSource {
+            (
+                " NAV  Tab pane  W/S browse  Enter choose  Esc back",
+                " Start blank or copy · original stays unchanged",
+            )
+        } else if model.focus == Focus::List || model.skills.pane == SkillsPane::List {
+            (
+                " NAV  W/S skill  Tab pane  Enter open  N new",
+                " E edit/resume · 1–9 destination",
+            )
+        } else {
+            (
+                " NAV  Tab pane  WASD move  Enter open  Esc back",
+                " N new  E edit/resume  I details  PgUp/PgDn scroll",
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(hint, theme.muted),
+                Line::styled(note, theme.muted),
+            ]),
+            area,
+        );
+        return;
+    }
     if !model.skills.active && model.active_view == View::Overview && model.focus != Focus::Command
     {
         let hint = if model.focus == Focus::Navigation {

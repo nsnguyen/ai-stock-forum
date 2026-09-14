@@ -179,3 +179,16 @@ fn invalid_reference_body_keeps_its_name_and_accepts_a_corrected_body() {
     assert_eq!(editor.draft().resources[0].name, "Source note");
     assert_eq!(editor.draft().resources[0].body, "Inert text only.");
 }
+
+#[test]
+fn review_rejects_uncommitted_reference_input_instead_of_omitting_it() {
+    let mut editor = SkillEditor::for_create(Some(draft("Pending reference")));
+    editor.go_to_review().unwrap();
+    editor.back();
+    editor.submit_keyboard_line("Unfinished note");
+    editor.submit_keyboard_line(&"x".repeat(4_097));
+
+    assert!(editor.go_to_review().is_err());
+    assert_eq!(editor.pending_reference_name(), Some("Unfinished note"));
+    assert!(editor.references().is_empty());
+}
