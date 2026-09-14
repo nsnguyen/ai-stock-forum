@@ -155,6 +155,7 @@ impl ControllerEffect {
             Self::LoadAgentProfiles
                 | Self::LoadAgentSkillLibrary
                 | Self::LoadSkills
+                | Self::LoadSkillPreview { .. }
                 | Self::LoadSelectedAgentProfile { .. }
         )
     }
@@ -3172,7 +3173,7 @@ fn clamp_workspace_scroll(model: &mut TuiModel) {
     model.workspace_scroll = model.workspace_scroll.min(workspace_max_scroll(model));
 }
 
-fn merge_committed_audit(model: &mut TuiModel, committed: Vec<AuditEntry>) {
+pub(super) fn merge_committed_audit(model: &mut TuiModel, committed: Vec<AuditEntry>) {
     let mut entries = model.audit_entries.clone();
     for entry in committed {
         if let Some(existing) = entries

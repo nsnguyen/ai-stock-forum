@@ -67,6 +67,17 @@ The library begins with four deterministic built-ins: Evidence Review, Filing
 Analysis, Catalyst Mapping, and Risk Checklist. Built-in and custom skills obey
 the same immutable version and assignment rules.
 
+Library highlights update immediately while the selected skill's preview loads
+in the background. When you browse quickly, only the latest waiting selection
+is loaded; an older reply cannot move the selection or replace another page.
+The same behavior applies to the blank/copy starter picker. Returning to Skills
+retries a missing preview that finished while you were away. Opening or saving
+still follows the existing pending-command and explicit confirmation guards.
+
+To check responsiveness, hold or tap W/S in the library and starter picker, then
+switch to Home and back with `1` and `4`. Selection should keep moving even if
+the preview takes longer. These are navigation-only checks; no save is needed.
+
 ### Pane controls
 
 | Pane | Selection | `Enter` | `Esc` |

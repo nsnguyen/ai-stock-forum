@@ -343,3 +343,54 @@ fn pasted_multiline_instructions_keep_line_breaks_and_tabs() {
         "First line\nSecond line\tvalue"
     );
 }
+
+#[test]
+fn library_selection_keeps_moving_while_a_preview_is_pending() {
+    use ai_stock_forum::{
+        app::{SkillSummary, SkillsView},
+        domain::{SkillId, SkillVersionId},
+        skills::{SkillProvenance, SkillVersion},
+    };
+    let skills = [10, 20, 30].map(|id| {
+        let skill = SkillVersion::create(
+            SkillId::from_uuid(Uuid::from_u128(id)),
+            SkillVersionId::from_uuid(Uuid::from_u128(id + 1)),
+            1,
+            SkillProvenance::User,
+            draft(),
+        )
+        .unwrap();
+        SkillSummary {
+            skill_ref: skill.reference(),
+            display_name: skill.content().display_name.clone(),
+            provenance: skill.provenance().clone(),
+        }
+    });
+    let mut model = model();
+    model.skills.replace_skills(SkillsView {
+        skills: skills.into(),
+        total_count: 3,
+        returned_count: 3,
+        truncated: false,
+    });
+    model.skills.pane = SkillsPane::List;
+    model.set_focus(Focus::List);
+    model.set_command_in_flight(true);
+    assert_eq!(
+        press(&mut model, KeyCode::Char('s')),
+        ControllerEffect::LoadSkillPreview {
+            selected_skill: 1,
+            starter: false
+        }
+    );
+    assert_eq!(model.skills.selected_skill, 1);
+    assert_eq!(
+        press(&mut model, KeyCode::Char('s')),
+        ControllerEffect::LoadSkillPreview {
+            selected_skill: 2,
+            starter: false
+        }
+    );
+    assert_eq!(model.skills.selected_skill, 2);
+    assert!(model.command_in_flight);
+}

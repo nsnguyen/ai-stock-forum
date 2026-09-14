@@ -1,4 +1,8 @@
+mod skill_preview;
+
 use std::{collections::VecDeque, panic::AssertUnwindSafe, time::Duration};
+
+use skill_preview::SkillPreviewTarget;
 
 use super::{
     TuiError,
@@ -710,20 +714,6 @@ pub fn execute_skill_effect(
             );
             model.restore_navigation_state(navigation);
             result?;
-            if model.skills.active
-                && model.skills.editor.is_none()
-                && !model.skills.library.skills.is_empty()
-                && model.skills.detail.is_none()
-            {
-                execute_skill_effect(
-                    client,
-                    model,
-                    ControllerEffect::LoadSkillPreview {
-                        selected_skill: model.skills.selected_skill,
-                        starter: false,
-                    },
-                )?;
-            }
         }
         ControllerEffect::LoadSkillPreview {
             selected_skill,
@@ -1683,6 +1673,8 @@ struct TuiRunner {
     pending_memory: Option<PendingMemoryRequest>,
     pending_profile: Option<PendingProfileRequest>,
     deferred_profile_refresh: Option<PendingProfileRequest>,
+    pending_skill_preview: Option<SkillPreviewTarget>,
+    deferred_skill_preview: Option<SkillPreviewTarget>,
     queued_shutdown: Option<ShutdownReason>,
     deferred_navigation_refresh: Option<ControllerEffect>,
     deferred_memory_refreshes: VecDeque<ControllerEffect>,
@@ -1703,6 +1695,8 @@ impl TuiRunner {
             pending_memory: None,
             pending_profile: None,
             deferred_profile_refresh: None,
+            pending_skill_preview: None,
+            deferred_skill_preview: None,
             queued_shutdown: None,
             deferred_navigation_refresh: None,
             deferred_memory_refreshes: VecDeque::new(),
@@ -1770,11 +1764,28 @@ impl TuiRunner {
             dirty |= self.update_layout(screen)?;
 
             if let Some(event) = events.next_event(EVENT_POLL_INTERVAL)? {
+                let skills_were_active = self.model.skills.active;
+                let previous_skills_pane = self.model.skills.pane;
                 let effect = handle_event(&mut self.model, event);
                 match self.apply_effect(effect)? {
                     LoopControl::Continue { redraw } => dirty |= redraw,
                     LoopControl::Finish(reason) => return Ok(reason),
                 }
+                if self.model.skills.active
+                    && (!skills_were_active || previous_skills_pane != self.model.skills.pane)
+                {
+                    self.queue_missing_skill_preview();
+                }
+            }
+
+            // Submission is nonblocking: drawing never waits for the response.
+            // At most the latest selection survives while another request runs.
+            if self.pending.is_none()
+                && self.queued_shutdown.is_none()
+                && let Some(target) = self.deferred_skill_preview.take()
+            {
+                self.start_skill_preview(target)?;
+                dirty = true;
             }
 
             if dirty {
@@ -1792,6 +1803,13 @@ impl TuiRunner {
             Ok(None) => return Ok(None),
             Err(error) => {
                 self.pending.take();
+                if let Some(target) = self.pending_skill_preview.take() {
+                    self.model.set_command_in_flight(false);
+                    if matches!(error, RuntimeError::Application(_)) {
+                        self.skill_preview_unavailable(&target);
+                        return Ok(Some(ControllerEffect::Redraw));
+                    }
+                }
                 if let Some(request) = self.pending_profile.take() {
                     self.model.set_command_in_flight(false);
                     if self.model.agents.profile_target().as_ref() == Some(&request.target) {
@@ -1819,6 +1837,10 @@ impl TuiRunner {
             }
         };
         self.pending.take();
+        if let Some(target) = self.pending_skill_preview.take() {
+            self.complete_skill_preview(target, outcome);
+            return Ok(Some(ControllerEffect::Redraw));
+        }
         if let Some(request) = self.pending_profile.take() {
             self.model.set_command_in_flight(false);
             if profile_read_matches(request.read, &outcome.view) {
@@ -1864,6 +1886,14 @@ impl TuiRunner {
     }
 
     fn apply_effect(&mut self, effect: ControllerEffect) -> Result<LoopControl, TuiError> {
+        if let ControllerEffect::LoadSkillPreview {
+            selected_skill,
+            starter,
+        } = effect
+        {
+            self.queue_skill_preview(selected_skill, starter);
+            return Ok(LoopControl::Continue { redraw: true });
+        }
         if let ControllerEffect::LoadSelectedAgentProfile { target, read } = &effect {
             if self.model.agents.profile_target().as_ref() != Some(target) {
                 return Ok(LoopControl::Continue { redraw: true });
@@ -1950,8 +1980,12 @@ impl TuiRunner {
                 }
                 Ok(LoopControl::Continue { redraw: true })
             }
-            effect @ (ControllerEffect::LoadSkills
-            | ControllerEffect::StartSkillWorkflow(_)
+            ControllerEffect::LoadSkills => {
+                execute_skill_effect(&self.client, &mut self.model, ControllerEffect::LoadSkills)?;
+                self.queue_missing_skill_preview();
+                Ok(LoopControl::Continue { redraw: true })
+            }
+            effect @ (ControllerEffect::StartSkillWorkflow(_)
             | ControllerEffect::LoadSkill { .. }
             | ControllerEffect::LoadSkillPreview { .. }
             | ControllerEffect::LoadSkillHistory { .. }
@@ -2394,6 +2428,7 @@ impl TuiRunner {
     }
 
     fn begin_stopping(&mut self) {
+        self.deferred_skill_preview = None;
         self.model.set_runtime_status(RuntimeStatus::Stopping);
     }
 
