@@ -290,6 +290,11 @@ impl ProfileEditor {
         self.tui_field
     }
 
+    /// Select a field without changing draft content or invalidating its review.
+    pub fn select_tui_field(&mut self, field: ProfileTuiField) {
+        self.set_tui_navigation_field(field);
+    }
+
     pub fn move_tui_field(&mut self, forward: bool) -> ProfileTuiField {
         let index = self.tui_field.index();
         let next = if forward {

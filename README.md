@@ -92,8 +92,8 @@ uses the TooSmall guidance screen.
 | `Esc` | Go back, cancel, or clear the current interaction. |
 | `/` | Focus the command editor with `/` prefilled. |
 | Command editor: text, `Enter`, arrows, `Home`, `End`, `Backspace`, `Delete`, `Up`, `Down`, `Tab`, `Shift+Tab`, `Esc` | Edit, submit, recall in-memory history, move focus, or cancel command entry. |
-| Agent profile editor in NAV: `WASD`, `Tab`, `Shift+Tab`, `Enter`, `Esc` | Navigate fields and actions; `Enter` deliberately enters TYPE on a text field. |
-| Agent profile editor in TYPE: text, `Enter`, `Esc`, `Tab`, `Shift+Tab` | Enter literal single-line text; retain it when returning to NAV or moving to another field. |
+| Agent profile editor in NAV: `WASD`, `Tab`, `Shift+Tab`, `Enter`, `Esc` | WASD selects cards/fields; Tab changes panes; Enter opens a section or edits a field; Esc returns with the draft retained. |
+| Agent profile editor in TYPE: text, `Enter`, `Esc`, `Tab`, `Shift+Tab` | Enter literal single-line text; retain it when returning to NAV or moving to another pane. |
 | `/quit` | Request the auditable normal shutdown from command entry, including the TooSmall screen. |
 | `Ctrl+C` | Request emergency interrupted shutdown from any focus. |
 
@@ -143,14 +143,23 @@ into the workspace, use `A`/`D` among Profile, Memory, Skills, and History, and
 press `Enter` to open the selected choice. Normal browsing never requires a UUID
 lookup. The visible Agents actions are `N` New, `E` Edit, and `H` History.
 
+`N` opens a separate template picker. Use `W`/`S` to browse and `Enter` to use a
+template; browsing alone does not replace the draft. `E` opens Profile Home
+directly. Templates are reference-only after that choice.
+
+Profile Home has four cards: Identity, Focus, Personality, and Instructions.
+Use WASD to select a card and `Enter` to open it. Inside a section, WASD selects
+fields; Role changes only after `Enter` opens its choice control. Review and
+Discard are separate Home actions. `Esc` returns to Home without losing text.
+
 Profile fields begin in NAV. Select a field and press `Enter` deliberately to
 enter TYPE. In TYPE, WASD, digits, slash, and a leading colon are literal input;
 they do not navigate or invoke editor commands. `Esc` retains the exact text and
-returns to NAV on that field. `Tab` retains it and moves to the next field in
-NAV. Invalid raw input and its error remain available for correction. Profile
+returns to NAV on that field. `Tab` retains it and moves to the next pane;
+`Shift+Tab` moves to the previous pane. Invalid raw input and its error remain available for correction. Profile
 text is normalized to the existing single-line storage contract.
 
-Leaving Agents suspends the draft; only the labeled Discard action abandons it.
+Leaving Agents suspends the draft; only confirming the labeled Discard action abandons it.
 Review and durable confirmation are separate steps. Final mutation requires a
 deliberate `Enter` on the labeled confirmation action: `D` and a held or
 repeated `Enter` cannot perform it. The fallback command-mode editor keeps its

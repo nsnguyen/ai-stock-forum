@@ -310,17 +310,20 @@ foreach geometry {{24 70 {Bull Researcher Revised}} {30 100 Description} {40 140
 after 200
 drain_output
 send -- "n"
-must_exact {Profile editor} "keyboard create opens editor"
+must_exact {NEW AGENT / TEMPLATES} "keyboard create opens template picker"
 after 200
 drain_output
-send -- "\033\[B"
-must_exact {Bear Researcher} "Down selects complete Bear template"
-for {set i 0} {$i < 9} {incr i} {
-    after 150
-    drain_output
-    send -- "\t"
-}
-must_exact {Review changes} "Tab navigation reaches create review"
+send -- "s"
+must_exact {Bear Researcher} "S selects Bear template preview"
+after 200
+drain_output
+send -- "\r"
+must_exact {PROFILE HOME} "Enter uses template and opens profile home"
+after 200
+drain_output
+send -- "ss"
+send -- "\r"
+must_exact {Review changes} "WASD navigation opens create review"
 after 200
 drain_output
 send -- "\r"
@@ -330,7 +333,7 @@ drain_output
 send -- "\r"
 must_exact {Agent workspace} "confirmation Enter creates profile"
 must_exact {Bear Researcher} "keyboard-created Bear profile"
-puts {PTY_TUI_KEYBOARD_CREATE_OK template=keyboard fields=tab review=enter confirmation=enter}
+puts {PTY_TUI_KEYBOARD_CREATE_OK template=keyboard sections=wasd panes=tab review=enter confirmation=enter}
 
 after 200
 drain_output

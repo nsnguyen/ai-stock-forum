@@ -58,6 +58,10 @@ pub(super) fn agent_list_scroll_offset(model: &TuiModel) -> usize {
     agents::list_scroll_offset(model)
 }
 
+pub(crate) fn agent_profile_home_columns(model: &TuiModel) -> usize {
+    agents::profile_home_columns(model)
+}
+
 pub(super) fn agent_detail_scroll_geometry(model: &TuiModel) -> (usize, usize) {
     agents::detail_scroll_geometry(model)
 }

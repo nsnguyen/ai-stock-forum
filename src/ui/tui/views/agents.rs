@@ -28,6 +28,8 @@ use crate::{
 use super::visuals::{ActionCard, Artwork, Icon, render_action_card, render_artwork};
 use super::{label_value, panel, safe_text, workspace_focused};
 
+mod profile_home;
+
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
     if model.agents.pane == AgentsPane::Memory {
         super::memory::render(frame, area, model, theme);
@@ -35,12 +37,22 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme:
     }
     let mode = agent_layout_mode(frame.area());
     let layout = agent_workspace(area, mode);
+    let templates = model.agents.pane == AgentsPane::Editor
+        && model.agents.editor_page == crate::ui::tui::model::ProfileEditorPage::Templates;
     if layout.list.is_none() && model.focus == Focus::List {
-        render_list(frame, area, model, theme);
+        if templates {
+            profile_home::render_template_list(frame, area, model, theme);
+        } else {
+            render_list(frame, area, model, theme);
+        }
         return;
     }
     if let Some(list) = layout.list {
-        render_list(frame, list, model, theme);
+        if templates {
+            profile_home::render_template_list(frame, list, model, theme);
+        } else {
+            render_list(frame, list, model, theme);
+        }
     }
     render_active(frame, layout.active, model, theme, layout.list.is_none());
 }
@@ -51,6 +63,10 @@ pub(super) fn content_height(model: &TuiModel, width: u16) -> u16 {
     } else {
         0
     }
+}
+
+pub(super) fn profile_home_columns(model: &TuiModel) -> usize {
+    profile_home::columns_for(active_area(model))
 }
 
 fn render_active(
@@ -114,7 +130,7 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Them
         let card = Rect::new(inner.x, y, inner.width, height);
         let selected = index == model.agents.selected_profile;
         let block = Block::default()
-            .title(if selected { ">" } else { "" })
+            .title(if selected && focused { ">" } else { "" })
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .style(if selected {
@@ -122,7 +138,7 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Them
             } else {
                 theme.surface()
             })
-            .border_style(if selected {
+            .border_style(if selected && focused {
                 theme.accent
             } else {
                 theme.border()
@@ -965,6 +981,26 @@ fn render_history(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &T
     );
 }
 fn render_editor(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Theme) {
+    use crate::ui::tui::model::ProfileEditorPage;
+    match model.agents.editor_page {
+        ProfileEditorPage::Templates => {
+            profile_home::render_template_preview(frame, area, model, theme);
+            return;
+        }
+        ProfileEditorPage::Home => {
+            profile_home::render_home(frame, area, model, theme);
+            return;
+        }
+        ProfileEditorPage::Section(section) => {
+            profile_home::render_section(frame, area, model, section, theme);
+            return;
+        }
+        ProfileEditorPage::Discard => {
+            profile_home::render_discard(frame, area, model, theme);
+            return;
+        }
+        ProfileEditorPage::Review => {}
+    }
     use crate::ui::tui::model::InputMode;
     let active = model
         .agents
@@ -1081,6 +1117,9 @@ fn render_editor(frame: &mut Frame<'_>, area: Rect, model: &TuiModel, theme: &Th
 fn editor_lines(editor: &ProfileEditor, theme: &Theme, focused: bool) -> Vec<Line<'static>> {
     use crate::ui::profile_editor::ProfileTuiField;
     let field = editor.tui_field();
+    if field == ProfileTuiField::Review {
+        return profile_home::review_lines(editor, theme, focused);
+    }
     let mode = if matches!(editor.mode(), ProfileEditorMode::Create { .. }) {
         "New agent"
     } else {
@@ -1101,28 +1140,6 @@ fn editor_lines(editor: &ProfileEditor, theme: &Theme, focused: bool) -> Vec<Lin
         ),
         Line::default(),
     ];
-    if field == ProfileTuiField::Review {
-        lines.push(Line::styled("Review changes", theme.accent));
-        if let Some(review) = editor.review() {
-            append_diffs(&mut lines, &review.preview().diffs, theme);
-        } else if let Some(baseline) = editor.create_baseline() {
-            append_create_diffs(&mut lines, baseline, editor.draft(), theme);
-        } else {
-            lines.push(Line::raw("Enter requests an authoritative review."));
-        }
-        lines.push(Line::styled(
-            if focused {
-                "Enter continues to a separate confirmation · Esc keeps draft"
-            } else {
-                "Draft retained · Return focus to review or confirm"
-            },
-            if focused { theme.focus } else { theme.muted },
-        ));
-        if let Some(message) = editor.local_message() {
-            lines.push(Line::styled(editor_message(message.code()), theme.warning));
-        }
-        return lines;
-    }
     for (item, label) in [
         (ProfileTuiField::Template, "Template"),
         (ProfileTuiField::DisplayName, "Display name"),

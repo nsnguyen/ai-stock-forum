@@ -24,8 +24,8 @@ use ai_stock_forum::{
         ControllerEffect, TuiEvent, apply_outcome, handle_event,
         model::{
             AgentsPane, Focus, LayoutMode, MemoryConfirmation, MemoryPane,
-            MemoryProposalDetailAction, ProfileConfirmation, SkillConfirmation,
-            SkillOperationOrigin, SkillsPane, TuiModel, View,
+            MemoryProposalDetailAction, ProfileConfirmation, ProfileEditorPage, ProfileSection,
+            SkillConfirmation, SkillOperationOrigin, SkillsPane, TuiModel, View,
         },
         render,
         theme::Theme,
@@ -634,10 +634,15 @@ fn bare_shortcut_characters_remain_text_for_each_active_text_owner() {
             .agents
             .start_profile_create(0, builtin_profile_templates())
     );
-    handle_event(
-        &mut profile_model,
-        TuiEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-    );
+    profile_model.agents.editor_page = ProfileEditorPage::Section(ProfileSection::Identity);
+    profile_model
+        .agents
+        .editor
+        .as_mut()
+        .unwrap()
+        .select_tui_field(ai_stock_forum::ui::profile_editor::ProfileTuiField::DisplayName);
+    profile_model.agents.synchronize_field_input();
+    profile_model.set_focus(Focus::Workspace);
     handle_event(
         &mut profile_model,
         TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -740,8 +745,19 @@ fn switching_away_from_a_profile_editor_preserves_its_exact_draft_and_input() {
             .agents
             .start_profile_create(0, builtin_profile_templates())
     );
+    model.agents.editor_page = ProfileEditorPage::Section(ProfileSection::Personality);
+    model.agents.profile_home_selection = 2;
+    model
+        .agents
+        .editor
+        .as_mut()
+        .unwrap()
+        .select_tui_field(ai_stock_forum::ui::profile_editor::ProfileTuiField::Personality);
+    model.agents.synchronize_field_input();
     model.command.ingest("Draft Analyst");
     let expected_editor = model.agents.editor.clone();
+    let expected_page = model.agents.editor_page;
+    let expected_home_selection = model.agents.profile_home_selection;
 
     model.select_view(View::Setup);
     assert_eq!(model.active_view, View::Setup);
@@ -753,6 +769,8 @@ fn switching_away_from_a_profile_editor_preserves_its_exact_draft_and_input() {
     );
     assert_eq!(model.command.text(), "");
     assert_eq!(model.agents.editor, expected_editor);
+    assert_eq!(model.agents.editor_page, expected_page);
+    assert_eq!(model.agents.profile_home_selection, expected_home_selection);
 
     assert_eq!(
         handle_event(&mut model, plain_character('3')),
@@ -761,6 +779,8 @@ fn switching_away_from_a_profile_editor_preserves_its_exact_draft_and_input() {
     assert_eq!(model.active_view, View::Agents);
     assert_eq!(model.agents.pane, AgentsPane::Editor);
     assert_eq!(model.agents.editor, expected_editor);
+    assert_eq!(model.agents.editor_page, expected_page);
+    assert_eq!(model.agents.profile_home_selection, expected_home_selection);
     assert_eq!(model.command.text(), "Draft Analyst");
 }
 

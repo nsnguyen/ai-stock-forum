@@ -101,10 +101,10 @@ fn advance_edit_to_preview(editor: &mut ProfileEditor, display_name: &str) -> Pr
 }
 
 #[test]
-fn explicit_create_leaves_command_type_and_opens_a_nav_template_picker() {
+fn explicit_template_create_leaves_command_type_and_opens_profile_home() {
     use ai_stock_forum::ui::tui::{
         handle_event,
-        model::{Focus, InputMode},
+        model::{Focus, InputMode, ProfileEditorPage},
     };
     let (_temp, _paths, service) = service();
     let runtime = ApplicationRuntime::spawn(service, 2).unwrap();
@@ -122,13 +122,14 @@ fn explicit_create_leaves_command_type_and_opens_a_nav_template_picker() {
     .unwrap();
     assert_eq!(model.input_mode, InputMode::Nav);
     assert_eq!(model.focus, Focus::Workspace);
+    assert_eq!(model.agents.editor_page, ProfileEditorPage::Home);
     handle_event(
         &mut model,
         TuiEvent::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
     );
     assert_eq!(
         model.agents.editor.as_ref().unwrap().draft().role,
-        builtin_profile_templates()[1].role
+        builtin_profile_templates()[0].role
     );
     assert!(model.command.text().is_empty());
     runtime

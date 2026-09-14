@@ -20,7 +20,7 @@ use ai_stock_forum::{
         tui::{
             ControllerEffect, ProfileConfirmation, TuiEvent, handle_event,
             layout::view_geometry,
-            model::{AgentsPane, SkillsPane, TuiModel, View},
+            model::{AgentsPane, ProfileEditorPage, ProfileSection, SkillsPane, TuiModel, View},
             render,
             theme::Theme,
         },
@@ -353,6 +353,14 @@ fn final_editor_boundary_tabs_leave_and_return_to_retained_invalid_fields() {
         let mut model = model(true, AgentsPane::Editor);
         model.agents.editor =
             Some(ProfileEditor::for_create(&builtin_profile_templates()[0]).unwrap());
+        model.agents.editor_page = ProfileEditorPage::Section(ProfileSection::Identity);
+        model
+            .agents
+            .editor
+            .as_mut()
+            .unwrap()
+            .select_tui_field(ProfileTuiField::DisplayName);
+        model.agents.synchronize_field_input();
         model.set_terminal_size(width, height);
         final_backtab(&mut model);
         assert_eq!(model.focus, Focus::List);
@@ -360,35 +368,28 @@ fn final_editor_boundary_tabs_leave_and_return_to_retained_invalid_fields() {
         final_key(&mut model, KeyCode::Char('w'));
         assert_eq!(
             model.agents.editor.as_ref().unwrap().tui_field(),
-            ProfileTuiField::Template
+            ProfileTuiField::DisplayName
         );
         handle_event(&mut model, TuiEvent::Paste("not editor input".into()));
         assert_eq!(
             model.agents.editor.as_ref().unwrap().tui_field(),
-            ProfileTuiField::Template
+            ProfileTuiField::DisplayName
         );
         final_key(&mut model, KeyCode::Tab);
         assert_eq!(model.focus, Focus::Workspace);
         assert_eq!(
             model.agents.editor.as_ref().unwrap().tui_field(),
-            ProfileTuiField::Template
+            ProfileTuiField::DisplayName
         );
-        final_key(&mut model, KeyCode::Tab);
         final_key(&mut model, KeyCode::Enter);
         model.agents.field_input.clear();
         let raw = "invalid".repeat(50);
         handle_event(&mut model, TuiEvent::Paste(raw.clone()));
         final_key(&mut model, KeyCode::Tab);
-        for _ in 0..20 {
-            if model.focus != Focus::Workspace {
-                break;
-            }
-            final_key(&mut model, KeyCode::Tab);
-        }
         assert_eq!(model.focus, Focus::Navigation);
         assert_eq!(model.input_mode, InputMode::Nav);
         let editor = model.agents.editor.as_ref().unwrap();
-        assert_eq!(editor.tui_field(), ProfileTuiField::Discard);
+        assert_eq!(editor.tui_field(), ProfileTuiField::DisplayName);
         assert_eq!(editor.tui_field_text(ProfileTuiField::DisplayName), raw);
         assert!(
             editor
@@ -397,10 +398,8 @@ fn final_editor_boundary_tabs_leave_and_return_to_retained_invalid_fields() {
         );
         final_backtab(&mut model);
         assert_eq!(model.focus, Focus::Workspace);
-        assert_eq!(
-            model.agents.editor.as_ref().unwrap().tui_field(),
-            ProfileTuiField::Discard
-        );
+        final_key(&mut model, KeyCode::Esc);
+        assert_eq!(model.agents.editor_page, ProfileEditorPage::Home);
         final_key(&mut model, KeyCode::Esc);
         assert!(final_footer(&model, width, height).contains("Resume"));
     }
@@ -571,7 +570,14 @@ fn final_shifted_actions_are_nav_shortcuts_but_modifiers_and_type_stay_literal()
     }
     let mut model = model(true, AgentsPane::Editor);
     model.agents.editor = Some(ProfileEditor::for_create(&builtin_profile_templates()[0]).unwrap());
-    final_key(&mut model, KeyCode::Tab);
+    model.agents.editor_page = ProfileEditorPage::Section(ProfileSection::Identity);
+    model
+        .agents
+        .editor
+        .as_mut()
+        .unwrap()
+        .select_tui_field(ai_stock_forum::ui::profile_editor::ProfileTuiField::DisplayName);
+    model.agents.synchronize_field_input();
     final_key(&mut model, KeyCode::Enter);
     model.agents.field_input.clear();
     for letter in ['N', 'E', 'H'] {
@@ -589,8 +595,15 @@ fn final_type_cursor_stays_visible_after_safe_wide_and_combining_text() {
         let mut model = model(false, AgentsPane::Editor);
         model.agents.editor =
             Some(ProfileEditor::for_create(&builtin_profile_templates()[0]).unwrap());
+        model.agents.editor_page = ProfileEditorPage::Section(ProfileSection::Identity);
+        model
+            .agents
+            .editor
+            .as_mut()
+            .unwrap()
+            .select_tui_field(ai_stock_forum::ui::profile_editor::ProfileTuiField::DisplayName);
+        model.agents.synchronize_field_input();
         model.set_terminal_size(60, 18);
-        final_key(&mut model, KeyCode::Tab);
         final_key(&mut model, KeyCode::Enter);
         model.agents.field_input.clear();
         handle_event(&mut model, TuiEvent::Paste(raw.clone()));
@@ -736,6 +749,7 @@ fn minimum_agents_and_editor_hints_remain_complete_and_review_scrolls_to_last_di
     }
     model.agents.editor = Some(editor);
     model.agents.pane = AgentsPane::Editor;
+    model.agents.editor_page = ProfileEditorPage::Review;
     model.set_terminal_size(60, 18);
     let text = render_text(&model, 60, 18);
     assert!(!text.contains("FINAL REVIEW LINE"));
@@ -745,7 +759,7 @@ fn minimum_agents_and_editor_hints_remain_complete_and_review_scrolls_to_last_di
     );
     let text = render_text(&model, 60, 18);
     assert!(text.contains("FINAL REVIEW LINE"));
-    assert!(text.contains("Esc keep"));
+    assert!(text.contains("Esc Home"));
     assert!(text.contains("Tab"));
     assert_eq!(
         model.agents.editor.as_ref().unwrap().tui_field(),
@@ -888,15 +902,19 @@ fn selected_agent_card_surface_moves_with_the_real_list_selection() {
 }
 
 #[test]
-fn long_invalid_profile_field_error_stays_visible_in_type_and_nav_at_minimum_size() {
+fn long_invalid_profile_field_is_retained_and_explained_at_minimum_size() {
     use ai_stock_forum::ui::profile_editor::ProfileTuiField;
     let mut model = model(false, AgentsPane::Editor);
     model.agents.editor = Some(ProfileEditor::for_create(&builtin_profile_templates()[0]).unwrap());
+    model.agents.editor_page = ProfileEditorPage::Section(ProfileSection::Identity);
+    model
+        .agents
+        .editor
+        .as_mut()
+        .unwrap()
+        .select_tui_field(ProfileTuiField::DisplayName);
+    model.agents.synchronize_field_input();
     model.set_terminal_size(60, 18);
-    handle_event(
-        &mut model,
-        TuiEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-    );
     handle_event(
         &mut model,
         TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -904,12 +922,12 @@ fn long_invalid_profile_field_error_stays_visible_in_type_and_nav_at_minimum_siz
     model.agents.field_input.clear();
     let raw = "x".repeat(300);
     handle_event(&mut model, TuiEvent::Paste(raw.clone()));
-    assert!(render_text(&model, 60, 18).contains("Display name: invalid"));
+    assert!(render_text(&model, 60, 18).contains("Display name: invalid; revise before review"));
     handle_event(
         &mut model,
         TuiEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
     );
-    assert!(render_text(&model, 60, 18).contains("Display name: invalid"));
+    assert!(render_text(&model, 60, 18).contains("Display name: invalid; revise before review"));
     assert_eq!(
         model
             .agents
@@ -928,12 +946,13 @@ fn long_invalid_profile_field_error_stays_visible_in_type_and_nav_at_minimum_siz
             .tui_field_error(ProfileTuiField::DisplayName)
             .is_some()
     );
-    while model.agents.editor.as_ref().unwrap().tui_field() != ProfileTuiField::Review {
-        handle_event(
-            &mut model,
-            TuiEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-        );
-    }
+    model
+        .agents
+        .editor
+        .as_mut()
+        .unwrap()
+        .select_tui_field(ProfileTuiField::Review);
+    model.agents.editor_page = ProfileEditorPage::Review;
     handle_event(
         &mut model,
         TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -960,15 +979,20 @@ fn hidden_profile_editor_does_not_claim_the_skills_command_bar() {
 
 #[test]
 fn profile_editor_footer_matches_nav_and_literal_type_controls() {
+    use ai_stock_forum::ui::profile_editor::ProfileTuiField;
     let mut model = model(false, AgentsPane::Editor);
     model.agents.editor = Some(ProfileEditor::for_create(&builtin_profile_templates()[0]).unwrap());
+    model.agents.editor_page = ProfileEditorPage::Section(ProfileSection::Identity);
+    model
+        .agents
+        .editor
+        .as_mut()
+        .unwrap()
+        .select_tui_field(ProfileTuiField::DisplayName);
+    model.agents.synchronize_field_input();
     let text = render_text(&model, 100, 30);
     assert!(text.contains("NAV"));
-    assert!(text.contains("Tab next field"));
-    handle_event(
-        &mut model,
-        TuiEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-    );
+    assert!(text.contains("Tab pane"));
     handle_event(
         &mut model,
         TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -1228,6 +1252,7 @@ fn editor_renders_progress_guidance_ordered_review_diffs_and_explicit_confirmati
     }
     let mut editor_model = model(true, AgentsPane::Editor);
     editor_model.agents.editor = Some(editor.clone());
+    editor_model.agents.editor_page = ProfileEditorPage::Review;
     let review = render_text(&editor_model, 100, 30);
     assert!(!review.contains("Step 7 of 7"));
     assert!(review.contains("Review"));
@@ -1257,12 +1282,12 @@ fn editor_renders_progress_guidance_ordered_review_diffs_and_explicit_confirmati
         ProfileEditor::for_create(&builtin_profile_templates()[0]).expect("valid create editor");
     let mut create = model(false, AgentsPane::Editor);
     create.agents.editor = Some(create_editor.clone());
+    create.agents.editor_page = ProfileEditorPage::Templates;
+    create.set_focus(ai_stock_forum::ui::tui::model::Focus::List);
     let create_text = render_text(&create, 79, 24);
-    assert!(create_text.contains("New agent"));
-    assert!(create_text.contains("WASD choose"));
-    assert!(create_text.contains("Enter edit/select"));
-    assert!(create_text.contains("Selected field"));
-    assert!(create_text.contains("Template"));
+    assert!(create_text.contains("NEW AGENT / TEMPLATES"));
+    assert!(create_text.contains("Bull Researcher"));
+    assert!(create_text.contains("Bear Researcher"));
 
     let mut edit_template = model(true, AgentsPane::Editor);
     edit_template.agents.editor = Some(ProfileEditor::for_edit(
@@ -1271,9 +1296,11 @@ fn editor_renders_progress_guidance_ordered_review_diffs_and_explicit_confirmati
         draft,
     ));
     let edit_text = render_text(&edit_template, 100, 30);
-    assert!(!edit_text.contains("Up/Down: choose template"));
-    assert!(!edit_text.contains("Choose the complete starting profile"));
-    assert!(edit_text.contains("Enter edit/select"));
+    assert!(edit_text.contains("Make this agent yours"));
+    for section in ["Identity", "Focus", "Personality", "Instructions"] {
+        assert!(edit_text.contains(section));
+    }
+    assert!(!edit_text.contains("Choose a template"));
     assert!(!edit_text.contains("Advanced: :role <role>"));
 
     for _ in 0..7 {
@@ -1286,6 +1313,8 @@ fn editor_renders_progress_guidance_ordered_review_diffs_and_explicit_confirmati
         create_editor.move_tui_field(true);
     }
     create.agents.editor = Some(create_editor);
+    create.agents.editor_page = ProfileEditorPage::Review;
+    create.set_focus(ai_stock_forum::ui::tui::model::Focus::Workspace);
     let create_review = render_text(&create, 100, 40);
     assert!(create_review.contains("separate confirmation"));
 }
@@ -1311,6 +1340,15 @@ fn guided_editor_renders_domain_limits_and_readonly_bindings() {
         for (width, height) in [(70, 24), (100, 30), (140, 40)] {
             let mut model = model(false, AgentsPane::Editor);
             model.agents.editor = Some(editor.clone());
+            model.agents.editor_page = ProfileEditorPage::Section(match field {
+                ProfileTuiField::DisplayName | ProfileTuiField::Description => {
+                    ProfileSection::Identity
+                }
+                ProfileTuiField::PrimarySpecialty => ProfileSection::Focus,
+                ProfileTuiField::Personality => ProfileSection::Personality,
+                ProfileTuiField::Instructions => ProfileSection::Instructions,
+                _ => unreachable!("text field has a profile section"),
+            });
             let text = render_text(&model, width, height);
             assert!(
                 text.contains(&format!("{limit} UTF-8 bytes")),
@@ -1318,14 +1356,10 @@ fn guided_editor_renders_domain_limits_and_readonly_bindings() {
             );
         }
     }
-    let mut editor = ProfileEditor::for_create(&builtin_profile_templates()[0]).unwrap();
-    while editor.tui_field() != ProfileTuiField::Bindings {
-        editor.move_tui_field(true);
-    }
     let mut model = model(false, AgentsPane::Editor);
-    model.agents.editor = Some(editor);
+    model.agents.editor = Some(ProfileEditor::for_create(&builtin_profile_templates()[0]).unwrap());
+    model.agents.editor_page = ProfileEditorPage::Home;
     let text = render_text(&model, 100, 30);
-    assert!(text.contains("Read-only"));
     assert!(!text.contains("binding-reference IDs"));
 }
 
