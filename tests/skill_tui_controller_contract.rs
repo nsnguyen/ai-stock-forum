@@ -15,9 +15,9 @@ use ai_stock_forum::{
     ui::tui::{
         ControllerEffect, TuiEvent, apply_outcome, handle_event,
         model::{
-            AgentSkillAction, AgentsPane, AssignmentKind, Focus, SkillConfirmation,
-            SkillDetailAction, SkillOperationOrigin, SkillWorkspaceOrigin, SkillsPane, TuiModel,
-            View,
+            AgentSkillAction, AgentsPane, AssignmentKind, Focus, InputMode, SkillConfirmation,
+            SkillDetailAction, SkillEditorPage, SkillOperationOrigin, SkillSection,
+            SkillWorkspaceOrigin, SkillsPane, TuiModel, View,
         },
     },
 };
@@ -44,6 +44,20 @@ fn model() -> TuiModel {
         },
         false,
     )
+}
+
+fn open_editor_section(model: &mut TuiModel, section: SkillSection) {
+    model.set_focus(Focus::Workspace);
+    model.skills.editor_page = SkillEditorPage::Home;
+    model.skills.editor_home_selection = SkillSection::ALL
+        .iter()
+        .position(|candidate| *candidate == section)
+        .unwrap();
+    assert_eq!(
+        handle_event(model, key(KeyCode::Enter)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.skills.editor_page, SkillEditorPage::Section(section));
 }
 
 #[test]
@@ -648,7 +662,10 @@ fn logical_list_focus_routes_skills_keys_to_the_visible_library() {
 
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Char('s'))),
-        ControllerEffect::Redraw
+        ControllerEffect::LoadSkillPreview {
+            selected_skill: 1,
+            starter: false
+        }
     );
     assert_eq!(model.skills.selected_skill, 1);
     assert_eq!(model.skills.selected_action_index, 0);
@@ -939,6 +956,12 @@ fn opened_historical_version_assigns_its_exact_ref_and_classifies_historical_rea
     .unwrap();
     let mut model = model();
     model.skills.active = true;
+    model.skills.replace_skills(SkillsView {
+        skills: vec![summary(&active)],
+        total_count: 1,
+        returned_count: 1,
+        truncated: false,
+    });
     model.skills.replace_detail(skill_view(&active));
     model.skills.replace_history(SkillHistoryView {
         skill_id: first.skill_id(),
@@ -1068,7 +1091,10 @@ fn active_skills_workspace_owns_keys_even_when_the_rendered_view_is_agents() {
 
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Down)),
-        ControllerEffect::Redraw
+        ControllerEffect::LoadSkillPreview {
+            selected_skill: 1,
+            starter: false
+        }
     );
     assert_eq!(model.skills.selected_skill, 1);
     assert_eq!(model.agents.selected_assigned_skill, 0);
@@ -1116,34 +1142,46 @@ fn skill_editor_input_seeds_version_fields_and_enter_accepts_unchanged_values() 
     let version = skill(560, "Seeded Skill");
     let mut model = model();
     model.skills.active = true;
+    model.skills.replace_skills(SkillsView {
+        skills: vec![summary(&version)],
+        total_count: 1,
+        returned_count: 1,
+        truncated: false,
+    });
     model.skills.replace_detail(skill_view(&version));
     model.skills.selected_action_index = 1;
-
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Enter)),
         ControllerEffect::Redraw
     );
-    assert_eq!(model.command.text(), "Seeded Skill");
-
-    let expected = [
-        "Purpose for Seeded Skill",
-        "Use for deterministic tests.",
-        "",
-        "Follow the evidence.",
-        "",
-        "",
-    ];
-    for value in expected {
-        assert_eq!(
-            handle_event(&mut model, key(KeyCode::Enter)),
-            ControllerEffect::Redraw
-        );
-        assert_eq!(model.command.text(), value);
+    for (section, values) in [
+        (
+            SkillSection::Basics,
+            vec!["Seeded Skill", "Purpose for Seeded Skill"],
+        ),
+        (
+            SkillSection::Usage,
+            vec!["Use for deterministic tests.", ""],
+        ),
+        (SkillSection::Instructions, vec!["Follow the evidence."]),
+    ] {
+        open_editor_section(&mut model, section);
+        for (index, value) in values.into_iter().enumerate() {
+            if index > 0 {
+                handle_event(&mut model, key(KeyCode::Down));
+            }
+            handle_event(&mut model, key(KeyCode::Enter));
+            assert_eq!(model.input_mode, InputMode::Type);
+            assert_eq!(model.skills.field_input.text(), value);
+            handle_event(&mut model, key(KeyCode::Enter));
+            assert_eq!(model.input_mode, InputMode::Nav);
+        }
     }
     assert_eq!(
-        model.skills.editor.as_ref().unwrap().step(),
-        ai_stock_forum::ui::skill_editor::SkillEditorStep::Review
+        model.skills.editor.as_ref().unwrap().draft(),
+        *version.content()
     );
+    assert!(model.command.text().is_empty());
 }
 
 #[test]
@@ -1151,43 +1189,55 @@ fn skill_editor_input_keeps_invalid_text_in_the_visible_buffer() {
     let mut model = model();
     model.skills.active = true;
     model.skills.start_create(None);
+    open_editor_section(&mut model, SkillSection::Basics);
+    handle_event(&mut model, key(KeyCode::Enter));
     let invalid = "x".repeat(65);
-    model.command.ingest(&invalid);
-
+    model.skills.field_input.ingest(&invalid);
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Enter)),
         ControllerEffect::Redraw
     );
-    assert_eq!(model.command.text(), invalid);
+    assert_eq!(model.skills.field_input.text(), invalid);
+    let editor = model.skills.editor.as_ref().unwrap();
+    assert_eq!(editor.raw_display_name(), invalid);
     assert_eq!(
-        model.skills.editor.as_ref().unwrap().field(),
+        editor.field(),
         ai_stock_forum::ui::skill_editor::SkillEditorField::DisplayName
     );
+    assert!(editor.local_error().is_some());
 }
 
 #[test]
-fn skill_editor_input_escape_restores_the_previous_field_value() {
+fn skill_editor_input_escape_retains_the_current_field_value() {
     let mut model = model();
     model.skills.active = true;
     model.skills.start_create(None);
-    model.command.ingest("Draft Skill");
+    open_editor_section(&mut model, SkillSection::Basics);
     handle_event(&mut model, key(KeyCode::Enter));
-    model.command.ingest("Draft purpose");
+    model.skills.field_input.ingest("Draft Skill");
     handle_event(&mut model, key(KeyCode::Enter));
-    assert_eq!(
-        model.skills.editor.as_ref().unwrap().field(),
-        ai_stock_forum::ui::skill_editor::SkillEditorField::UseWhen
-    );
-
+    handle_event(&mut model, key(KeyCode::Down));
+    handle_event(&mut model, key(KeyCode::Enter));
+    model.skills.field_input.ingest("Draft purpose");
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Esc)),
         ControllerEffect::Redraw
     );
+    assert_eq!(model.input_mode, InputMode::Nav);
     assert_eq!(
         model.skills.editor.as_ref().unwrap().field(),
         ai_stock_forum::ui::skill_editor::SkillEditorField::Purpose
     );
-    assert_eq!(model.command.text(), "Draft purpose");
+    handle_event(&mut model, key(KeyCode::Esc));
+    assert_eq!(model.skills.editor_page, SkillEditorPage::Home);
+    open_editor_section(&mut model, SkillSection::Basics);
+    handle_event(&mut model, key(KeyCode::Down));
+    handle_event(&mut model, key(KeyCode::Enter));
+    assert_eq!(model.skills.field_input.text(), "Draft purpose");
+    assert_eq!(
+        model.skills.editor.as_ref().unwrap().raw_display_name(),
+        "Draft Skill"
+    );
 }
 
 #[test]
@@ -1223,6 +1273,7 @@ fn editor_confirmation_escape_discards_the_cancelled_preview_before_retry() {
     model.skills.active = true;
     model.skills.pane = SkillsPane::Confirmation;
     model.skills.editor = Some(editor);
+    model.skills.editor_page = SkillEditorPage::Review;
     model.skills.pending_confirmation = Some(SkillConfirmation {
         command,
         origin: SkillOperationOrigin::Skills(SkillsPane::Editor),
@@ -1255,7 +1306,10 @@ fn arrows_and_enter_drive_list_detail_actions_history_and_agent_picker() {
 
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Down)),
-        ControllerEffect::Redraw
+        ControllerEffect::LoadSkillPreview {
+            selected_skill: 1,
+            starter: false
+        }
     );
     assert_eq!(model.skills.selected_skill, 1);
     assert_eq!(
@@ -1263,14 +1317,14 @@ fn arrows_and_enter_drive_list_detail_actions_history_and_agent_picker() {
         ControllerEffect::LoadSkill { selected_skill: 1 }
     );
 
-    model.skills.pane = SkillsPane::Detail;
+    model.skills.replace_detail(skill_view(&second));
     assert_eq!(model.skills.selected_action(), SkillDetailAction::Assign);
-    handle_event(&mut model, key(KeyCode::Down));
+    handle_event(&mut model, key(KeyCode::Char('d')));
     assert_eq!(
         model.skills.selected_action(),
         SkillDetailAction::CreateVersion
     );
-    handle_event(&mut model, key(KeyCode::Down));
+    handle_event(&mut model, key(KeyCode::Char('d')));
     assert_eq!(model.skills.selected_action(), SkillDetailAction::History);
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Enter)),
@@ -1363,27 +1417,36 @@ fn escape_unwinds_one_skills_level_and_preserves_editor_state() {
     let mut model = model();
     model.skills.active = true;
     model.skills.start_create(None);
-    model.command.ingest("Draft name");
-
+    open_editor_section(&mut model, SkillSection::Basics);
+    handle_event(&mut model, key(KeyCode::Enter));
+    model.skills.field_input.ingest("Draft name");
     assert_eq!(
         handle_event(&mut model, key(KeyCode::Esc)),
         ControllerEffect::Redraw
     );
+    assert_eq!(model.input_mode, InputMode::Nav);
+    assert_eq!(
+        model.skills.editor_page,
+        SkillEditorPage::Section(SkillSection::Basics)
+    );
+    handle_event(&mut model, key(KeyCode::Esc));
+    assert_eq!(model.skills.editor_page, SkillEditorPage::Home);
+    handle_event(&mut model, key(KeyCode::Esc));
     assert!(model.skills.active);
-    assert_eq!(model.skills.pane, SkillsPane::CreateSource);
-    assert!(model.skills.editor.is_none());
-    assert_eq!(model.command.text(), "");
-
+    assert_eq!(model.skills.pane, SkillsPane::Detail);
     assert_eq!(
-        handle_event(&mut model, key(KeyCode::Esc)),
-        ControllerEffect::Redraw
+        model.skills.editor.as_ref().unwrap().raw_display_name(),
+        "Draft name"
     );
+    assert!(model.command.text().is_empty());
+    handle_event(&mut model, key(KeyCode::Esc));
     assert_eq!(model.skills.pane, SkillsPane::List);
-    assert_eq!(
-        handle_event(&mut model, key(KeyCode::Esc)),
-        ControllerEffect::Redraw
-    );
+    handle_event(&mut model, key(KeyCode::Esc));
     assert!(!model.skills.active);
+    assert_eq!(
+        model.skills.editor.as_ref().unwrap().raw_display_name(),
+        "Draft name"
+    );
 }
 
 #[test]

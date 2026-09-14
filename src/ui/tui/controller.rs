@@ -1,3 +1,5 @@
+mod skills_home;
+
 use super::{
     TuiEvent,
     model::{
@@ -6,8 +8,8 @@ use super::{
         MEMORY_RETAINED_ROW_CAP, MemoryConfirmation, MemoryEditorOrigin, MemoryEntryDetailAction,
         MemoryPane, MemoryProposalDetailAction, MemoryResultOrigin, MemoryViewState, NavigationTab,
         ProfileConfirmation, ProfileEditorPage, ProfileSection, RuntimeStatus, Severity,
-        SkillConfirmation, SkillDetailAction, SkillOperationOrigin, SkillWorkspaceOrigin,
-        SkillsPane, TuiModel, View,
+        SkillConfirmation, SkillDetailAction, SkillEditorPage, SkillOperationOrigin, SkillSection,
+        SkillWorkspaceOrigin, SkillsPane, TuiModel, View,
     },
     views,
 };
@@ -25,7 +27,7 @@ use crate::{
     ui::profile_editor::{
         PreviewEditRequest, ProfileEditorEffect, ProfileEditorMode, ProfileTuiField,
     },
-    ui::skill_editor::{SkillEditorEffect, SkillPreviewRequest},
+    ui::skill_editor::{SkillEditorEffect, SkillEditorField, SkillPreviewRequest},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -81,6 +83,10 @@ pub enum ControllerEffect {
     LoadSkills,
     LoadSkill {
         selected_skill: usize,
+    },
+    LoadSkillPreview {
+        selected_skill: usize,
+        starter: bool,
     },
     LoadSkillHistory {
         skill_id: crate::domain::SkillId,
@@ -663,7 +669,7 @@ fn handle_global_navigation_shortcut(
 ) -> Option<ControllerEffect> {
     let confirmation_active = active_confirmation(model) || active_skill_confirmation(model);
     let text_entry_active = (active_profile_editor(model) && model.input_mode == InputMode::Type)
-        || active_skill_editor(model)
+        || (active_skill_editor(model) && model.input_mode == InputMode::Type)
         || memory_text_entry_active(model)
         || model.focus == Focus::Command;
     if key.modifiers != KeyModifiers::NONE || (text_entry_active && !confirmation_active) {
@@ -730,6 +736,9 @@ fn switch_to_skills(model: &mut TuiModel) -> ControllerEffect {
         model.skills.workspace_origin = Some(SkillWorkspaceOrigin::Cockpit(model.active_view));
     }
     model.switch_tab(NavigationTab::Skills);
+    if model.skills.pane == SkillsPane::List && model.focus == Focus::Workspace {
+        model.set_focus(Focus::List);
+    }
     if model.skills.library_loaded {
         ControllerEffect::Redraw
     } else {
@@ -907,6 +916,14 @@ fn submit_command(model: &mut TuiModel) -> ControllerEffect {
 }
 
 fn handle_paste(model: &mut TuiModel, text: &str) -> ControllerEffect {
+    if active_skill_editor(model) {
+        if model.input_mode != InputMode::Type {
+            return ControllerEffect::None;
+        }
+        model.skills.field_input.ingest_skill_value(text);
+        skills_home::retain_field(model);
+        return ControllerEffect::Redraw;
+    }
     if active_profile_editor(model) {
         if model.input_mode != InputMode::Type {
             return ControllerEffect::None;
@@ -964,10 +981,48 @@ fn active_skill_confirmation(model: &TuiModel) -> bool {
 }
 
 fn active_skill_editor(model: &TuiModel) -> bool {
-    model.skills.active && model.skills.pane == SkillsPane::Editor && model.skills.editor.is_some()
+    model.skills.active
+        && model.skills.pane == SkillsPane::Editor
+        && model.skills.editor.is_some()
+        && matches!(model.focus, Focus::Workspace | Focus::Actions)
 }
 
 fn handle_skill_confirmation_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
+    if key.code == KeyCode::Tab && no_modifiers(key.modifiers) {
+        return cycle_focus(model, true);
+    }
+    if key.code == KeyCode::BackTab && backtab_modifiers(key.modifiers) {
+        return cycle_focus(model, false);
+    }
+    if key.code == KeyCode::Char('i') && no_modifiers(key.modifiers) {
+        model.skills.technical_details = !model.skills.technical_details;
+        model.skills.content_scroll = 0;
+        return ControllerEffect::Redraw;
+    }
+    if key.code != KeyCode::Esc && model.focus != Focus::Workspace {
+        if model.focus == Focus::Navigation {
+            return handle_navigation_key(model, normalize_nav_direction(key));
+        }
+        if key.code == KeyCode::Enter && no_modifiers(key.modifiers) {
+            model.set_focus(Focus::Workspace);
+            return ControllerEffect::Redraw;
+        }
+        return ControllerEffect::None;
+    }
+    let key = normalize_nav_direction(key);
+    if no_modifiers(key.modifiers)
+        && matches!(
+            key.code,
+            KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::Up
+                | KeyCode::Down
+        )
+    {
+        return skills_home::scroll(model, key.code);
+    }
     match key.code {
         KeyCode::Enter if key.kind == KeyEventKind::Press && no_modifiers(key.modifiers) => model
             .skills
@@ -986,6 +1041,7 @@ fn handle_skill_confirmation_key(model: &mut TuiModel, key: KeyEvent) -> Control
                 && let Some(editor) = model.skills.editor.as_mut()
             {
                 editor.clear_review();
+                model.skills.editor_page = SkillEditorPage::Review;
             }
             restore_skill_origin(model, origin);
             if matches!(origin, SkillOperationOrigin::Skills(_)) {
@@ -998,110 +1054,7 @@ fn handle_skill_confirmation_key(model: &mut TuiModel, key: KeyEvent) -> Control
 }
 
 fn handle_skill_editor_key(model: &mut TuiModel, key: KeyEvent) -> ControllerEffect {
-    match key.code {
-        KeyCode::Esc if no_modifiers(key.modifiers) => {
-            if model
-                .skills
-                .editor
-                .as_mut()
-                .is_some_and(|editor| editor.cancel_reference_interaction())
-            {
-                synchronize_skill_editor_input(model);
-                return ControllerEffect::Redraw;
-            }
-            let effect = model
-                .skills
-                .editor
-                .as_mut()
-                .map(|editor| editor.back())
-                .unwrap_or(SkillEditorEffect::Cancelled);
-            let keep_editor = !matches!(effect, SkillEditorEffect::Cancelled);
-            let controller_effect = apply_skill_editor_effect(model, effect);
-            if keep_editor {
-                synchronize_skill_editor_input(model);
-            } else {
-                model.command.clear();
-            }
-            controller_effect
-        }
-        KeyCode::Enter if no_modifiers(key.modifiers) => {
-            if model
-                .skills
-                .editor
-                .as_mut()
-                .is_some_and(|editor| editor.begin_edit_selected_reference())
-            {
-                synchronize_skill_editor_input(model);
-                return ControllerEffect::Redraw;
-            }
-            let input = model.command.text().to_owned();
-            let effect = model
-                .skills
-                .editor
-                .as_mut()
-                .map(|editor| editor.submit_keyboard_line(&input))
-                .unwrap_or(SkillEditorEffect::None);
-            let valid = model
-                .skills
-                .editor
-                .as_ref()
-                .is_some_and(|editor| editor.local_error().is_none());
-            let controller_effect = apply_skill_editor_effect(model, effect);
-            if valid {
-                synchronize_skill_editor_input(model);
-            }
-            controller_effect
-        }
-        KeyCode::Up | KeyCode::Down if no_modifiers(key.modifiers) => {
-            let reference_picker = model.skills.editor.as_ref().is_some_and(|editor| {
-                editor.field() == crate::ui::skill_editor::SkillEditorField::ReferenceName
-                    && model.command.text().is_empty()
-            });
-            if !reference_picker {
-                return ControllerEffect::None;
-            }
-            if let Some(editor) = model.skills.editor.as_mut() {
-                editor.select_reference(matches!(key.code, KeyCode::Down));
-            }
-            ControllerEffect::Redraw
-        }
-        KeyCode::Char(character) if text_modifiers(key.modifiers) => {
-            if let Some(editor) = model.skills.editor.as_mut() {
-                editor.clear_reference_selection();
-            }
-            model.command.insert(character);
-            ControllerEffect::Redraw
-        }
-        KeyCode::Backspace if no_modifiers(key.modifiers) => {
-            edit(model, |model| model.command.backspace())
-        }
-        KeyCode::Delete if no_modifiers(key.modifiers) => {
-            if model
-                .skills
-                .editor
-                .as_mut()
-                .is_some_and(|editor| editor.remove_selected_reference())
-            {
-                synchronize_skill_editor_input(model);
-                ControllerEffect::Redraw
-            } else {
-                edit(model, |model| model.command.delete())
-            }
-        }
-        KeyCode::Left if no_modifiers(key.modifiers) => {
-            edit(model, |model| model.command.move_left())
-        }
-        KeyCode::Right if no_modifiers(key.modifiers) => {
-            edit(model, |model| model.command.move_right())
-        }
-        KeyCode::Home if no_modifiers(key.modifiers) => {
-            edit(model, |model| model.command.move_home())
-        }
-        KeyCode::End if no_modifiers(key.modifiers) => {
-            edit(model, |model| model.command.move_end())
-        }
-        _ => ControllerEffect::None,
-    }
+    skills_home::handle_editor_key(model, key)
 }
 
 fn apply_skill_editor_effect(model: &mut TuiModel, effect: SkillEditorEffect) -> ControllerEffect {
@@ -1129,6 +1082,9 @@ fn apply_skill_editor_effect(model: &mut TuiModel, effect: SkillEditorEffect) ->
 }
 
 fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEffect> {
+    if let Some(effect) = skills_home::handle_workspace_key(model, key) {
+        return Some(effect);
+    }
     let interaction_pane = if model.focus == Focus::List {
         SkillsPane::List
     } else {
@@ -1312,14 +1268,8 @@ fn handle_skills_key(model: &mut TuiModel, key: KeyEvent) -> Option<ControllerEf
 }
 
 fn synchronize_skill_editor_input(model: &mut TuiModel) {
-    let value = model
-        .skills
-        .editor
-        .as_ref()
-        .map(|editor| editor.current_value().to_owned())
-        .unwrap_or_default();
-    model.command.clear();
-    model.command.ingest(&value);
+    model.skills.synchronize_field_input();
+    model.set_input_mode(InputMode::Nav);
 }
 
 fn restore_skill_origin(model: &mut TuiModel, origin: SkillOperationOrigin) {
@@ -1374,7 +1324,6 @@ fn unwind_skills(model: &mut TuiModel) -> ControllerEffect {
         }
         SkillsPane::AssignmentReview => model.skills.pane = SkillsPane::AgentPicker,
         SkillsPane::Editor => {
-            model.skills.editor = None;
             model.skills.pane = SkillsPane::Detail;
         }
         SkillsPane::Confirmation => {
@@ -3091,6 +3040,12 @@ fn cycle_focus(model: &mut TuiModel, forward: bool) -> ControllerEffect {
         current - 1
     };
     model.set_focus(order[next]);
+    if model.skills.active
+        && model.focus == Focus::Workspace
+        && model.skills.pane == SkillsPane::List
+    {
+        model.skills.pane = SkillsPane::Detail;
+    }
     if !model.skills.active
         && model.active_view == View::Agents
         && model.focus == Focus::Workspace

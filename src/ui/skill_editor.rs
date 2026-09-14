@@ -195,6 +195,55 @@ impl SkillEditor {
         &self.raw.display_name
     }
 
+    /// Navigate without changing the draft or invalidating a completed review.
+    pub fn select_tui_field(&mut self, field: SkillEditorField) {
+        self.field = field;
+        self.step = match field {
+            SkillEditorField::DisplayName | SkillEditorField::Purpose => SkillEditorStep::Identity,
+            SkillEditorField::UseWhen | SkillEditorField::Tags => SkillEditorStep::Usage,
+            SkillEditorField::Instructions => SkillEditorStep::Instructions,
+            SkillEditorField::ReferenceName | SkillEditorField::ReferenceBody => {
+                SkillEditorStep::References
+            }
+            SkillEditorField::Review => SkillEditorStep::Review,
+        };
+    }
+
+    /// Keep raw text recoverable while validating independently of other fields.
+    pub fn set_tui_field(&mut self, field: SkillEditorField, text: &str) -> bool {
+        if field == SkillEditorField::Review {
+            return false;
+        }
+        if self.tui_field_text(field) != text {
+            self.clear_review();
+        }
+        match field {
+            SkillEditorField::DisplayName => self.raw.display_name = text.to_owned(),
+            SkillEditorField::Purpose => self.raw.description = text.to_owned(),
+            SkillEditorField::UseWhen => self.raw.use_when = text.to_owned(),
+            SkillEditorField::Tags => self.raw.tags = text.to_owned(),
+            SkillEditorField::Instructions => self.raw.instructions = text.to_owned(),
+            SkillEditorField::ReferenceName => self.pending_reference_name = Some(text.to_owned()),
+            SkillEditorField::ReferenceBody => self.pending_reference_body = text.to_owned(),
+            SkillEditorField::Review => unreachable!("review has no text"),
+        }
+        if self.probe_tui_field(field).is_err() {
+            let code = match field {
+                SkillEditorField::DisplayName => "skill_display_name_invalid",
+                SkillEditorField::Purpose => "skill_purpose_invalid",
+                SkillEditorField::UseWhen => "skill_use_when_invalid",
+                SkillEditorField::Tags => "skill_tags_invalid",
+                SkillEditorField::Instructions => "skill_instructions_invalid",
+                _ => "skill_reference_invalid",
+            };
+            self.invalid(field, code);
+            false
+        } else {
+            self.local_error = None;
+            true
+        }
+    }
+
     pub fn pending_reference_name(&self) -> Option<&str> {
         self.pending_reference_name.as_deref()
     }
@@ -224,7 +273,62 @@ impl SkillEditor {
         self.selected_reference = None;
     }
 
+    pub fn has_pending_reference(&self) -> bool {
+        self.editing_reference.is_some()
+            || self
+                .pending_reference_name
+                .as_deref()
+                .is_some_and(|name| !name.is_empty())
+            || !self.pending_reference_body.is_empty()
+    }
+
+    /// Refuse to replace an unfinished note; navigation can resume that note.
+    pub fn begin_add_reference(&mut self) -> bool {
+        if self.has_pending_reference() {
+            return false;
+        }
+        self.selected_reference = None;
+        self.pending_reference_name = Some(String::new());
+        self.select_tui_field(SkillEditorField::ReferenceName);
+        self.local_error = None;
+        true
+    }
+
+    /// Commit a complete note atomically, retaining raw text when validation fails.
+    pub fn commit_tui_reference(&mut self) -> bool {
+        let resource = SkillResource {
+            name: self.pending_reference_name.clone().unwrap_or_default(),
+            body: self.pending_reference_body.clone(),
+        };
+        let mut resources = self.raw.resources.clone();
+        if let Some(index) = self.editing_reference {
+            let Some(slot) = resources.get_mut(index) else {
+                self.invalid(SkillEditorField::ReferenceName, "skill_reference_invalid");
+                return false;
+            };
+            *slot = resource;
+        } else {
+            resources.push(resource);
+        }
+        if reference_probe(resources.clone()).is_err() {
+            self.invalid(SkillEditorField::ReferenceBody, "skill_reference_invalid");
+            return false;
+        }
+        self.raw.resources = resources;
+        self.pending_reference_name = None;
+        self.pending_reference_body.clear();
+        self.editing_reference = None;
+        self.selected_reference = None;
+        self.clear_review();
+        self.local_error = None;
+        self.select_tui_field(SkillEditorField::ReferenceName);
+        true
+    }
+
     pub fn begin_edit_selected_reference(&mut self) -> bool {
+        if self.has_pending_reference() {
+            return false;
+        }
         let Some(index) = self.selected_reference else {
             return false;
         };
@@ -236,12 +340,15 @@ impl SkillEditor {
         self.editing_reference = Some(index);
         self.pending_reference_name = Some(resource.name);
         self.pending_reference_body = resource.body;
-        self.field = SkillEditorField::ReferenceName;
+        self.select_tui_field(SkillEditorField::ReferenceName);
         self.local_error = None;
         true
     }
 
     pub fn remove_selected_reference(&mut self) -> bool {
+        if self.has_pending_reference() {
+            return false;
+        }
         let Some(index) = self.selected_reference else {
             return false;
         };
@@ -274,7 +381,11 @@ impl SkillEditor {
     }
 
     pub fn current_value(&self) -> &str {
-        match self.field {
+        self.tui_field_text(self.field)
+    }
+
+    pub fn tui_field_text(&self, field: SkillEditorField) -> &str {
+        match field {
             SkillEditorField::DisplayName => &self.raw.display_name,
             SkillEditorField::Purpose => &self.raw.description,
             SkillEditorField::UseWhen => &self.raw.use_when,
@@ -323,6 +434,12 @@ impl SkillEditor {
     }
 
     pub fn go_to_review(&mut self) -> Result<(), DomainError> {
+        if self.has_pending_reference() {
+            self.invalid(SkillEditorField::ReferenceBody, "skill_reference_pending");
+            return Err(DomainError::InvalidSkillField {
+                field: "resource_name",
+            });
+        }
         self.try_draft()?;
         self.step = SkillEditorStep::Review;
         self.field = SkillEditorField::Review;
@@ -474,6 +591,9 @@ impl SkillEditor {
     }
 
     fn submit_review(&mut self) -> SkillEditorEffect {
+        if self.has_pending_reference() {
+            return self.invalid(SkillEditorField::ReferenceBody, "skill_reference_pending");
+        }
         let Ok(candidate) = self.try_draft() else {
             return self.invalid(SkillEditorField::Review, "skill_draft_invalid");
         };
@@ -554,10 +674,47 @@ impl SkillEditor {
         )
     }
 
+    fn probe_tui_field(&self, field: SkillEditorField) -> Result<SkillDraft, DomainError> {
+        let text = self.tui_field_text(field).to_owned();
+        let mut candidate = reference_probe(Vec::new())?;
+        match field {
+            SkillEditorField::DisplayName => candidate.display_name = text,
+            SkillEditorField::Purpose => candidate.description = text,
+            SkillEditorField::UseWhen => candidate.use_when = text,
+            SkillEditorField::Tags => candidate.tags = parse_tags(&text),
+            SkillEditorField::Instructions => candidate.instructions = text,
+            SkillEditorField::ReferenceName => {
+                candidate.resources.push(SkillResource {
+                    name: text,
+                    body: String::new(),
+                });
+            }
+            SkillEditorField::ReferenceBody => {
+                candidate.resources.push(SkillResource {
+                    name: "Reference".to_owned(),
+                    body: text,
+                });
+            }
+            SkillEditorField::Review => {}
+        }
+        candidate.canonicalized()
+    }
+
     fn invalid(&mut self, field: SkillEditorField, code: &'static str) -> SkillEditorEffect {
         self.local_error = Some(SkillEditorError { field, code });
         SkillEditorEffect::None
     }
+}
+
+fn reference_probe(resources: Vec<SkillResource>) -> Result<SkillDraft, DomainError> {
+    SkillDraft::new(
+        "Draft skill".to_owned(),
+        String::new(),
+        "Use when appropriate.".to_owned(),
+        Vec::new(),
+        "Follow these instructions.".to_owned(),
+        resources,
+    )
 }
 
 fn empty_draft() -> SkillDraft {

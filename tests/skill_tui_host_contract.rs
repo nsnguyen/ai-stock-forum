@@ -28,8 +28,8 @@ use ai_stock_forum::{
             execute_skill_effect, handle_event,
             model::{
                 AgentSkillAction, AgentSkillUpgradeAvailability, AgentsPane, AssignmentKind, Focus,
-                ProfileConfirmation, SkillConfirmation, SkillOperationOrigin, SkillWorkspaceOrigin,
-                SkillsPane, TuiModel, View,
+                ProfileConfirmation, SkillConfirmation, SkillEditorPage, SkillOperationOrigin,
+                SkillSection, SkillWorkspaceOrigin, SkillsPane, TuiModel, View,
             },
             run_tui_with_screen,
             theme::Theme,
@@ -69,6 +69,25 @@ struct SuccessfulSkillMutation {
     active: SkillVersion,
     updated_profile: Option<AgentProfileView>,
     calls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+struct PreviewReply {
+    response: Option<SkillView>,
+    commands: Arc<Mutex<Vec<ApplicationCommand>>>,
+}
+
+impl CommandExecutor for PreviewReply {
+    fn execute_user(&mut self, command: ApplicationCommand) -> Result<CommandOutcome, AppError> {
+        self.commands.lock().unwrap().push(command);
+        self.response
+            .take()
+            .map(|detail| outcome(CommandView::SkillVersion(detail)))
+            .ok_or(AppError::LifecycleFinished)
+    }
+
+    fn finish(&mut self, _reason: ShutdownReason) -> Result<(), AppError> {
+        Ok(())
+    }
 }
 
 impl CommandExecutor for SuccessfulSkillMutation {
@@ -650,17 +669,36 @@ fn push_text(events: &mut VecDeque<Result<Option<TuiEvent>, TuiError>>, value: &
 
 fn review_events() -> VecDeque<Result<Option<TuiEvent>, TuiError>> {
     let mut events = VecDeque::from([
+        Ok(Some(TuiEvent::Resize(160, 40))),
         Ok(Some(navigation_key(KeyCode::Char('4')))),
         Ok(Some(key(KeyCode::Char('c')))),
         Ok(Some(key(KeyCode::Enter))),
+        Ok(Some(key(KeyCode::Enter))),
+        Ok(Some(key(KeyCode::Enter))),
     ]);
     push_text(&mut events, "Host cleanup");
+    events.extend([Ok(Some(key(KeyCode::Down))), Ok(Some(key(KeyCode::Enter)))]);
     push_text(&mut events, "Protect pending reviews");
+    events.extend([
+        Ok(Some(key(KeyCode::Esc))),
+        Ok(Some(key(KeyCode::Right))),
+        Ok(Some(key(KeyCode::Enter))),
+        Ok(Some(key(KeyCode::Enter))),
+    ]);
     push_text(&mut events, "Use during host termination");
-    push_text(&mut events, "");
+    events.extend([
+        Ok(Some(key(KeyCode::Esc))),
+        Ok(Some(key(KeyCode::Left))),
+        Ok(Some(key(KeyCode::Down))),
+        Ok(Some(key(KeyCode::Enter))),
+        Ok(Some(key(KeyCode::Enter))),
+    ]);
     push_text(&mut events, "Cancel exactly once");
-    push_text(&mut events, "");
-    events.push_back(Ok(Some(key(KeyCode::Enter))));
+    events.extend([
+        Ok(Some(key(KeyCode::Esc))),
+        Ok(Some(key(KeyCode::Down))),
+        Ok(Some(key(KeyCode::Enter))),
+    ]);
     events
 }
 
@@ -1581,52 +1619,38 @@ fn review_regression_reference_notes_are_keyboard_editable_and_removable() {
         skill.skill_version_id(),
         seed.clone(),
     ));
-    let tags = seed.tags.join(", ");
-
-    for value in [
-        seed.display_name.as_str(),
-        seed.description.as_str(),
-        seed.use_when.as_str(),
-        tags.as_str(),
-        seed.instructions.as_str(),
-    ] {
-        model.command.clear();
-        model.command.ingest(value);
-        assert_eq!(
-            handle_event(&mut model, key(KeyCode::Enter)),
-            ControllerEffect::Redraw
-        );
-    }
-
-    assert_eq!(
-        handle_event(&mut model, key(KeyCode::Down)),
-        ControllerEffect::Redraw
-    );
-    assert_eq!(
-        handle_event(&mut model, key(KeyCode::Enter)),
-        ControllerEffect::Redraw
-    );
-    assert_eq!(model.command.text(), "First");
-    model.command.clear();
-    model.command.ingest("Edited");
+    model.set_focus(Focus::Workspace);
+    model.skills.editor_home_selection = 3;
     handle_event(&mut model, key(KeyCode::Enter));
-    assert_eq!(model.command.text(), "Old body");
-    model.command.clear();
-    model.command.ingest("New body");
+    assert_eq!(
+        model.skills.editor_page,
+        SkillEditorPage::Section(SkillSection::References)
+    );
+    handle_event(&mut model, key(KeyCode::Enter));
+    assert_eq!(model.skills.editor_page, SkillEditorPage::ReferenceEdit);
+    handle_event(&mut model, key(KeyCode::Enter));
+    assert_eq!(model.skills.field_input.text(), "First");
+    model.skills.field_input.clear();
+    model.skills.field_input.ingest("Edited");
+    handle_event(&mut model, key(KeyCode::Enter));
+    handle_event(&mut model, key(KeyCode::Down));
+    handle_event(&mut model, key(KeyCode::Enter));
+    assert_eq!(model.skills.field_input.text(), "Old body");
+    model.skills.field_input.clear();
+    model.skills.field_input.ingest("New body");
+    handle_event(&mut model, key(KeyCode::Enter));
+    handle_event(&mut model, key(KeyCode::Down));
+    handle_event(&mut model, key(KeyCode::Enter));
+    assert_eq!(
+        model.skills.editor_page,
+        SkillEditorPage::Section(SkillSection::References)
+    );
+    handle_event(&mut model, key(KeyCode::Down));
+    handle_event(&mut model, key(KeyCode::Char('x')));
+    assert_eq!(model.skills.editor_page, SkillEditorPage::ReferenceRemove);
+    assert_eq!(model.skills.editor.as_ref().unwrap().references().len(), 2);
     handle_event(&mut model, key(KeyCode::Enter));
 
-    assert_eq!(
-        handle_event(&mut model, key(KeyCode::Down)),
-        ControllerEffect::Redraw
-    );
-    assert_eq!(
-        handle_event(&mut model, key(KeyCode::Down)),
-        ControllerEffect::Redraw
-    );
-    assert_eq!(
-        handle_event(&mut model, key(KeyCode::Delete)),
-        ControllerEffect::Redraw
-    );
     assert_eq!(
         model.skills.editor.as_ref().unwrap().draft().resources,
         vec![SkillResource {
@@ -1844,6 +1868,136 @@ fn first_skills_load_preserves_an_existing_editor_or_confirmation() {
 }
 
 #[test]
+fn live_skill_preview_reads_the_exact_version_without_replacing_editor_or_navigation() {
+    let selected = replacement_skill();
+    let view = host_skill_view(&selected);
+    for starter in [false, true] {
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let runtime = ApplicationRuntime::spawn(
+            PreviewReply {
+                response: Some(view.clone()),
+                commands: Arc::clone(&commands),
+            },
+            4,
+        )
+        .unwrap();
+        let mut model = model();
+        model.skills.active = true;
+        model.skills.replace_skills(SkillsView {
+            skills: vec![SkillSummary {
+                skill_ref: selected.reference(),
+                display_name: selected.content().display_name.clone(),
+                provenance: selected.provenance().clone(),
+            }],
+            total_count: 1,
+            returned_count: 1,
+            truncated: false,
+        });
+        model.skills.start_create(Some(draft()));
+        model.skills.editor_page = SkillEditorPage::Section(SkillSection::Instructions);
+        model.skills.editor.as_mut().unwrap().set_tui_field(
+            ai_stock_forum::ui::skill_editor::SkillEditorField::Instructions,
+            "Unfinished\nnotes",
+        );
+        model.skills.field_input.ingest("Unfinished\nnotes");
+        model.skills.field_input.move_home();
+        model.skills.content_scroll = 3;
+        model.skills.pane = if starter {
+            SkillsPane::CreateSource
+        } else {
+            SkillsPane::Editor
+        };
+        model.set_focus(if starter {
+            Focus::List
+        } else {
+            Focus::Workspace
+        });
+        model.command.ingest("preserved command");
+        let mut expected_skills = model.skills.clone();
+        if starter {
+            expected_skills.create_source_detail = Some(view.clone());
+        } else {
+            expected_skills.detail = Some(view.clone());
+            expected_skills.version_detail = None;
+        }
+        let expected_focus = model.focus;
+        let expected_command = model.command.clone();
+
+        execute_skill_effect(
+            &runtime.client(),
+            &mut model,
+            ControllerEffect::LoadSkillPreview {
+                selected_skill: 0,
+                starter,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(model.skills, expected_skills);
+        assert_eq!(model.focus, expected_focus);
+        assert_eq!(model.command, expected_command);
+        assert_eq!(
+            commands.lock().unwrap().as_slice(),
+            [ApplicationCommand::ShowSkillVersion {
+                selector: selected.skill_id().into(),
+                version: selected.version(),
+            }]
+        );
+        runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
+    }
+}
+
+#[test]
+fn failed_or_mismatched_starter_preview_clears_old_content_and_retains_draft() {
+    let selected = replacement_skill();
+    for response in [None, Some(host_skill_view(&assigned_skill()))] {
+        let runtime = ApplicationRuntime::spawn(
+            PreviewReply {
+                response,
+                commands: Arc::new(Mutex::new(Vec::new())),
+            },
+            4,
+        )
+        .unwrap();
+        let mut model = model();
+        model.skills.active = true;
+        model.skills.replace_skills(SkillsView {
+            skills: vec![SkillSummary {
+                skill_ref: selected.reference(),
+                display_name: selected.content().display_name.clone(),
+                provenance: selected.provenance().clone(),
+            }],
+            total_count: 1,
+            returned_count: 1,
+            truncated: false,
+        });
+        model.skills.start_create(Some(draft()));
+        model.skills.pane = SkillsPane::CreateSource;
+        model.skills.selected_create_source = 1;
+        model.skills.create_source_detail = Some(host_skill_view(&assigned_skill()));
+        model.set_focus(Focus::List);
+        let editor = model.skills.editor.clone();
+
+        execute_skill_effect(
+            &runtime.client(),
+            &mut model,
+            ControllerEffect::LoadSkillPreview {
+                selected_skill: 0,
+                starter: true,
+            },
+        )
+        .unwrap();
+
+        assert!(model.skills.create_source_detail.is_none());
+        assert_eq!(model.skills.editor, editor);
+        assert_eq!(model.skills.pane, SkillsPane::CreateSource);
+        assert_eq!(model.skills.selected_create_source, 1);
+        assert_eq!(model.focus, Focus::List);
+        runtime.finish_and_join(ShutdownReason::UserQuit).unwrap();
+    }
+}
+
+#[test]
 fn review_regression_historical_detail_cannot_create_a_version_but_active_detail_can() {
     let active = replacement_skill();
     let historical = assigned_skill();
@@ -1881,7 +2035,7 @@ fn review_regression_historical_detail_cannot_create_a_version_but_active_detail
 }
 
 #[test]
-fn cancelling_a_new_skill_editor_returns_to_create_source() {
+fn backing_out_of_a_new_skill_editor_keeps_its_draft_on_detail() {
     let mut model = model();
     model.skills.active = true;
     model.skills.pane = SkillsPane::CreateSource;
@@ -1891,12 +2045,12 @@ fn cancelling_a_new_skill_editor_returns_to_create_source() {
         handle_event(&mut model, key(KeyCode::Esc)),
         ControllerEffect::Redraw
     );
-    assert_eq!(model.skills.pane, SkillsPane::CreateSource);
-    assert!(model.skills.editor.is_none());
+    assert_eq!(model.skills.pane, SkillsPane::Detail);
+    assert!(model.skills.editor.is_some());
 }
 
 #[test]
-fn cancelling_a_create_version_editor_returns_to_skill_detail() {
+fn backing_out_of_a_create_version_editor_retains_its_draft_on_skill_detail() {
     let active = replacement_skill();
     let mut model = model();
     model.skills.active = true;
@@ -1908,7 +2062,10 @@ fn cancelling_a_create_version_editor_returns_to_skill_detail() {
         ControllerEffect::Redraw
     );
     assert_eq!(model.skills.pane, SkillsPane::Detail);
-    assert!(model.skills.editor.is_none());
+    assert_eq!(
+        model.skills.editor.as_ref().unwrap().draft(),
+        *active.content()
+    );
 }
 
 struct AgentTruthScreen {

@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //! `cargo run --example two_pane_preview -- [--width N] [--height N]
-//!      [--scene home|home-populated|agents|empty|history|profile-home|template-picker|identity|focus|personality|instructions|type|invalid-field|review|confirmation|chat|connections]
+//!      [--scene home|home-populated|agents|empty|history|profile-home|template-picker|identity|focus|personality|instructions|type|invalid-field|review|confirmation|skill-home|skill-editor|skill-starter|skill-section|skill-type|skill-history|skill-assignment|chat|connections]
 //!      [--no-color] [--svg]`
 
 use std::{env, fmt::Write as _, process};
@@ -15,19 +15,25 @@ use ai_stock_forum::{
     app::{
         AgentProfileHistoryEntry, AgentProfileHistoryView, AgentProfileSummary,
         AgentProfileVersionView, AgentProfileView, AgentProfilesView, DatabaseReadiness,
-        PresentationSnapshot, ProcessGuardOwnership,
+        PresentationSnapshot, ProcessGuardOwnership, SkillHistoryEntry, SkillHistoryView,
+        SkillSummary, SkillView, SkillsView,
     },
     audit::AuditEntry,
     domain::{
         Actor, AgentProfileId, AgentProfileVersionId, CorrelationId, InstallationId,
-        MemoryNamespaceId, ProfileReviewToken, SessionId, sha256,
+        MemoryNamespaceId, ProfileReviewToken, SessionId, SkillId, SkillVersionId, sha256,
     },
     setup::SetupStatus,
+    skills::{SkillDraft, SkillProvenance, SkillResource, SkillVersion},
     ui::{
         profile_editor::{ProfileEditor, ProfileEditorEffect, ProfileTuiField},
+        skill_editor::SkillEditorField,
         tui::{
             ControllerEffect, TuiEvent, handle_event,
-            model::{AgentsPane, Focus, ProfileEditorPage, ProfileSection, TuiModel, View},
+            model::{
+                AgentsPane, AssignmentKind, Focus, ProfileEditorPage, ProfileSection,
+                SkillEditorPage, SkillSection, SkillsPane, TuiModel, View,
+            },
             render,
             theme::Theme,
         },
@@ -43,7 +49,7 @@ use ratatui::{
 use uuid::Uuid;
 
 const USAGE: &str = "Usage: two_pane_preview [--width N] [--height N] \
-    [--scene home|home-populated|agents|empty|history|profile-home|template-picker|identity|focus|personality|instructions|type|invalid-field|review|confirmation|chat|connections] \
+    [--scene home|home-populated|agents|empty|history|profile-home|template-picker|identity|focus|personality|instructions|type|invalid-field|review|confirmation|skill-home|skill-editor|skill-starter|skill-section|skill-type|skill-history|skill-assignment|chat|connections] \
     [--no-color] [--svg]";
 const CELL_WIDTH: u16 = 8;
 const CELL_HEIGHT: u16 = 16;
@@ -64,6 +70,13 @@ enum Scene {
     InvalidField,
     Review,
     Confirmation,
+    SkillHome,
+    SkillEditor,
+    SkillStarter,
+    SkillSection,
+    SkillType,
+    SkillHistory,
+    SkillAssignment,
     Chat,
     Connections,
 }
@@ -86,6 +99,13 @@ impl Scene {
             "invalid-field" => Ok(Self::InvalidField),
             "review" => Ok(Self::Review),
             "confirmation" => Ok(Self::Confirmation),
+            "skill-home" => Ok(Self::SkillHome),
+            "skill-editor" => Ok(Self::SkillEditor),
+            "skill-starter" => Ok(Self::SkillStarter),
+            "skill-section" => Ok(Self::SkillSection),
+            "skill-type" => Ok(Self::SkillType),
+            "skill-history" => Ok(Self::SkillHistory),
+            "skill-assignment" => Ok(Self::SkillAssignment),
             "chat" => Ok(Self::Chat),
             "connections" => Ok(Self::Connections),
             _ => Err(format!("unknown scene {value:?}")),
@@ -173,6 +193,115 @@ struct ProfileFixtures {
     long_horizon: AgentProfileVersion,
     bear: AgentProfileVersion,
     engineering: AgentProfileVersion,
+}
+
+#[derive(Clone)]
+struct SkillFixtures {
+    evidence: SkillVersion,
+    filing: SkillVersion,
+    catalyst_predecessor: SkillVersion,
+    catalyst: SkillVersion,
+    risk: SkillVersion,
+}
+
+fn skill_fixtures() -> SkillFixtures {
+    let evidence = synthetic_skill(
+        100,
+        "Evidence Review",
+        "Separate facts, assumptions, and unresolved claims.",
+        "Use when a thesis needs an evidence-quality pass.",
+        "Trace every material claim to inspectable evidence.",
+    );
+    let filing = synthetic_skill(
+        110,
+        "Filing Analysis",
+        "Read financial filings with a repeatable checklist.",
+        "Use before relying on reported fundamentals.",
+        "Compare reported results with notes, risks, and prior periods.",
+    );
+    let catalyst_predecessor = synthetic_skill(
+        120,
+        "Catalyst Mapping",
+        "Find upcoming events that could change the thesis.",
+        "Use before earnings, launches, and regulatory decisions.",
+        "List each catalyst, its timing, and supporting evidence.",
+    );
+    let mut catalyst_draft = catalyst_predecessor.content().clone();
+    catalyst_draft.instructions =
+        "List each catalyst, its timing, supporting evidence, and disconfirming outcome."
+            .to_owned();
+    catalyst_draft.resources = vec![SkillResource {
+        name: "Catalyst source note".to_owned(),
+        body: "Reference text only; verify dates against primary sources.".to_owned(),
+    }];
+    let catalyst = SkillVersion::next_version(
+        &catalyst_predecessor,
+        SkillVersionId::from_uuid(Uuid::from_u128(122)),
+        1_800_000_000_122,
+        catalyst_draft,
+    )
+    .expect("valid synthetic skill version");
+    let risk = synthetic_skill(
+        130,
+        "Risk Checklist",
+        "Surface the material ways an investment thesis can fail.",
+        "Use before committing to a recommendation.",
+        "Rank risks by likelihood, impact, and observable warning signs.",
+    );
+    SkillFixtures {
+        evidence,
+        filing,
+        catalyst_predecessor,
+        catalyst,
+        risk,
+    }
+}
+
+fn synthetic_skill(
+    id_base: u128,
+    display_name: &str,
+    purpose: &str,
+    use_when: &str,
+    instructions: &str,
+) -> SkillVersion {
+    SkillVersion::create(
+        SkillId::from_uuid(Uuid::from_u128(id_base)),
+        SkillVersionId::from_uuid(Uuid::from_u128(id_base + 1)),
+        1_800_000_000_000 + i64::try_from(id_base).expect("small fixture identity"),
+        SkillProvenance::BuiltIn {
+            manifest_id: format!("builtin.{}", display_name.to_lowercase().replace(' ', "-")),
+            manifest_version: 1,
+            manifest_digest: sha256(display_name.as_bytes()),
+        },
+        SkillDraft::new(
+            display_name.to_owned(),
+            purpose.to_owned(),
+            use_when.to_owned(),
+            vec!["research".to_owned(), "evidence".to_owned()],
+            instructions.to_owned(),
+            Vec::new(),
+        )
+        .expect("valid synthetic skill draft"),
+    )
+    .expect("valid synthetic skill")
+}
+
+fn skill_summary(skill: &SkillVersion) -> SkillSummary {
+    SkillSummary {
+        skill_ref: skill.reference(),
+        display_name: skill.content().display_name.clone(),
+        provenance: skill.provenance().clone(),
+    }
+}
+
+fn skill_view(skill: &SkillVersion) -> SkillView {
+    SkillView {
+        skill_ref: skill.reference(),
+        content: skill.content().clone(),
+        created_at_ms: skill.created_at_ms(),
+        provenance: skill.provenance().clone(),
+        predecessor_version_id: skill.predecessor(),
+    }
 }
 
 fn profile_fixtures() -> ProfileFixtures {
@@ -342,6 +471,89 @@ fn history_entry(profile: &AgentProfileVersion) -> AgentProfileHistoryEntry {
     }
 }
 
+fn configure_skill_library(model: &mut TuiModel, fixtures: &SkillFixtures) {
+    model.skills.active = true;
+    model.skills.library_loaded = true;
+    model.skills.library = SkillsView {
+        skills: [
+            &fixtures.evidence,
+            &fixtures.filing,
+            &fixtures.catalyst,
+            &fixtures.risk,
+        ]
+        .into_iter()
+        .map(skill_summary)
+        .collect(),
+        total_count: 4,
+        returned_count: 4,
+        truncated: false,
+    };
+    model.skills.selected_skill = 2;
+    model.skills.detail = Some(skill_view(&fixtures.catalyst));
+    model.skills.version_detail = None;
+    model.skills.pane = SkillsPane::Detail;
+    model.set_focus(Focus::Workspace);
+}
+
+fn configure_skill_editor(model: &mut TuiModel, fixtures: &SkillFixtures) {
+    configure_skill_library(model, fixtures);
+    assert!(model.skills.start_version());
+    model.skills.editor_page = SkillEditorPage::Home;
+    model.skills.synchronize_field_input();
+}
+
+fn configure_skill_section(model: &mut TuiModel, fixtures: &SkillFixtures) {
+    configure_skill_editor(model, fixtures);
+    model.skills.editor_page = SkillEditorPage::Section(SkillSection::Basics);
+    model
+        .skills
+        .editor
+        .as_mut()
+        .expect("synthetic skill editor")
+        .select_tui_field(SkillEditorField::DisplayName);
+    model.skills.synchronize_field_input();
+}
+
+fn configure_skill_history(model: &mut TuiModel, fixtures: &SkillFixtures) {
+    configure_skill_library(model, fixtures);
+    model.skills.pane = SkillsPane::History;
+    model.skills.selected_history_version = 1;
+    model.skills.history = Some(SkillHistoryView {
+        skill_id: fixtures.catalyst.skill_id(),
+        active_version_id: fixtures.catalyst.skill_version_id(),
+        versions: vec![
+            SkillHistoryEntry {
+                skill_ref: fixtures.catalyst.reference(),
+                created_at_ms: fixtures.catalyst.created_at_ms(),
+                predecessor_version_id: fixtures.catalyst.predecessor(),
+            },
+            SkillHistoryEntry {
+                skill_ref: fixtures.catalyst_predecessor.reference(),
+                created_at_ms: fixtures.catalyst_predecessor.created_at_ms(),
+                predecessor_version_id: fixtures.catalyst_predecessor.predecessor(),
+            },
+        ],
+        total_count: 2,
+        returned_count: 2,
+        truncated: false,
+    });
+}
+
+fn configure_skill_assignment(
+    model: &mut TuiModel,
+    profile: &AgentProfileVersion,
+    fixtures: &SkillFixtures,
+) {
+    configure_skill_library(model, fixtures);
+    model.skills.pane = SkillsPane::AssignmentReview;
+    model.skills.selected_agent_detail = Some(AgentProfileView {
+        profile: profile.clone(),
+        readiness: AgentReadiness::Unbound,
+    });
+    model.skills.assignment = Some(AssignmentKind::Add);
+    model.skills.pending_confirmation = None;
+}
+
 fn model_for_scene(scene: Scene) -> TuiModel {
     if scene == Scene::Home {
         return TuiModel::new(home_snapshot(), false);
@@ -355,6 +567,7 @@ fn model_for_scene(scene: Scene) -> TuiModel {
     }
 
     let fixtures = profile_fixtures();
+    let skill_fixtures = skill_fixtures();
     let mut model = TuiModel::new(populated_snapshot(&fixtures), false);
     match scene {
         Scene::HomePopulated => {}
@@ -406,6 +619,24 @@ fn model_for_scene(scene: Scene) -> TuiModel {
         Scene::Confirmation => {
             configure_review(&mut model, &fixtures.long_horizon);
             press(&mut model, KeyCode::Enter);
+        }
+        Scene::SkillHome => configure_skill_library(&mut model, &skill_fixtures),
+        Scene::SkillEditor => configure_skill_editor(&mut model, &skill_fixtures),
+        Scene::SkillStarter => {
+            configure_skill_library(&mut model, &skill_fixtures);
+            model.skills.pane = SkillsPane::CreateSource;
+            model.skills.selected_create_source = 3;
+            model.skills.create_source_detail = Some(skill_view(&skill_fixtures.catalyst));
+            model.set_focus(Focus::List);
+        }
+        Scene::SkillSection => configure_skill_section(&mut model, &skill_fixtures),
+        Scene::SkillType => {
+            configure_skill_section(&mut model, &skill_fixtures);
+            press(&mut model, KeyCode::Enter);
+        }
+        Scene::SkillHistory => configure_skill_history(&mut model, &skill_fixtures),
+        Scene::SkillAssignment => {
+            configure_skill_assignment(&mut model, &fixtures.long_horizon, &skill_fixtures)
         }
         Scene::Chat => model.active_view = View::Chat,
         Scene::Connections => model.active_view = View::Connections,
@@ -876,5 +1107,116 @@ mod tests {
         let confirmation = model_for_scene(Scene::Confirmation);
         assert_eq!(confirmation.agents.pane, AgentsPane::Confirmation);
         assert!(confirmation.agents.pending_confirmation.is_some());
+    }
+
+    #[test]
+    fn parses_each_skills_production_preview_scene() {
+        for name in [
+            "skill-home",
+            "skill-editor",
+            "skill-starter",
+            "skill-section",
+            "skill-type",
+            "skill-history",
+            "skill-assignment",
+        ] {
+            assert!(
+                Scene::parse(name).is_ok(),
+                "missing production-render preview scene {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn skills_scenes_preserve_exact_fixture_and_guard_state() {
+        use ai_stock_forum::ui::{
+            skill_editor::SkillEditorField,
+            tui::model::{AssignmentKind, InputMode, SkillEditorPage, SkillSection, SkillsPane},
+        };
+
+        let typing = model_for_scene(Scene::parse("skill-type").expect("typing scene"));
+        assert_eq!(typing.skills.pane, SkillsPane::Editor);
+        assert_eq!(
+            typing.skills.editor_page,
+            SkillEditorPage::Section(SkillSection::Basics)
+        );
+        assert_eq!(typing.input_mode, InputMode::Type);
+        assert_eq!(
+            typing.skills.editor.as_ref().expect("skill editor").field(),
+            SkillEditorField::DisplayName
+        );
+        assert_eq!(typing.skills.field_input.text(), "Catalyst Mapping");
+
+        let history = model_for_scene(Scene::parse("skill-history").expect("history scene"));
+        assert_eq!(history.skills.pane, SkillsPane::History);
+        let history_view = history.skills.history.as_ref().expect("skill history");
+        assert_eq!(history_view.versions.len(), 2);
+        assert_ne!(
+            history_view.active_version_id,
+            history_view.versions[1].skill_ref.skill_version_id()
+        );
+
+        let assignment =
+            model_for_scene(Scene::parse("skill-assignment").expect("assignment scene"));
+        assert_eq!(assignment.skills.pane, SkillsPane::AssignmentReview);
+        assert!(assignment.skills.selected_agent_detail.is_some());
+        assert_eq!(assignment.skills.assignment, Some(AssignmentKind::Add));
+        assert!(assignment.skills.pending_confirmation.is_none());
+    }
+
+    #[test]
+    fn skills_scenes_render_sample_content_without_runtime_claims_or_identifiers() {
+        let home = render_scene(Config {
+            scene: Scene::parse("skill-home").expect("home scene"),
+            ..Config::default()
+        })
+        .expect("skill Home renders");
+        let home = cells_to_text(home.backend().buffer());
+        for expected in ["SKILL HOME", "Catalyst Mapping", "Saved guidance"] {
+            assert!(home.contains(expected), "missing {expected}\n{home}");
+        }
+        for forbidden in ["provider connected", "model available", "can execute"] {
+            assert!(
+                !home.contains(forbidden),
+                "invented runtime claim {forbidden}"
+            );
+        }
+        let fixtures = skill_fixtures();
+        for hidden in [
+            fixtures.catalyst.skill_id().to_string(),
+            fixtures.catalyst.skill_version_id().to_string(),
+            fixtures.catalyst.content_digest().to_string(),
+        ] {
+            assert!(!home.contains(&hidden), "routine Home leaked {hidden}");
+        }
+
+        let assignment = render_scene(Config {
+            scene: Scene::parse("skill-assignment").expect("assignment scene"),
+            ..Config::default()
+        })
+        .expect("assignment review renders");
+        let assignment = cells_to_text(assignment.backend().buffer());
+        for expected in [
+            "Operation",
+            "Assign exact version",
+            "Target",
+            "v2",
+            "Enter: validate",
+        ] {
+            assert!(
+                assignment.contains(expected),
+                "missing guarded review label {expected}\n{assignment}"
+            );
+        }
+        for hidden in [
+            fixtures.catalyst.skill_id().to_string(),
+            fixtures.catalyst.skill_version_id().to_string(),
+            fixtures.catalyst.content_digest().to_string(),
+        ] {
+            assert!(
+                !assignment.contains(&hidden),
+                "default assignment review leaked {hidden}"
+            );
+        }
     }
 }

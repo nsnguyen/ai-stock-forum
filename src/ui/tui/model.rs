@@ -1551,6 +1551,44 @@ pub enum SkillDetailAction {
     History,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkillEditorPage {
+    #[default]
+    Home,
+    Section(SkillSection),
+    ReferenceEdit,
+    ReferenceRemove,
+    Review,
+    Discard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillSection {
+    Basics,
+    Usage,
+    Instructions,
+    References,
+}
+
+impl SkillSection {
+    pub const ALL: [Self; 4] = [
+        Self::Basics,
+        Self::Usage,
+        Self::Instructions,
+        Self::References,
+    ];
+
+    pub fn fields(self) -> &'static [crate::ui::skill_editor::SkillEditorField] {
+        use crate::ui::skill_editor::SkillEditorField::*;
+        match self {
+            Self::Basics => &[DisplayName, Purpose],
+            Self::Usage => &[UseWhen, Tags],
+            Self::Instructions => &[Instructions],
+            Self::References => &[ReferenceName, ReferenceBody],
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssignmentKind {
     Add,
@@ -1621,6 +1659,14 @@ pub struct SkillsViewState {
     pub selected_agent_detail: Option<AgentProfileView>,
     pub assignment: Option<AssignmentKind>,
     pub editor: Option<SkillEditor>,
+    pub editor_page: SkillEditorPage,
+    pub editor_home_selection: usize,
+    pub field_input: CommandEditor,
+    pub reference_selection: usize,
+    pub reference_action: usize,
+    pub technical_details: bool,
+    pub content_scroll: u16,
+    pub create_source_detail: Option<SkillView>,
     pub editor_origin: SkillsPane,
     pub pending_confirmation: Option<SkillConfirmation>,
     pub review_registered: bool,
@@ -1652,6 +1698,14 @@ impl Default for SkillsViewState {
             selected_agent_detail: None,
             assignment: None,
             editor: None,
+            editor_page: SkillEditorPage::Home,
+            editor_home_selection: 0,
+            field_input: CommandEditor::default(),
+            reference_selection: 0,
+            reference_action: 0,
+            technical_details: false,
+            content_scroll: 0,
+            create_source_detail: None,
             editor_origin: SkillsPane::CreateSource,
             pending_confirmation: None,
             review_registered: false,
@@ -1690,6 +1744,8 @@ impl SkillsViewState {
         self.version_detail = None;
         self.detail = Some(detail);
         self.pane = SkillsPane::Detail;
+        self.content_scroll = 0;
+        self.technical_details = false;
     }
 
     pub fn replace_history(&mut self, history: SkillHistoryView) {
@@ -1795,6 +1851,7 @@ impl SkillsViewState {
         self.editor_origin = SkillsPane::CreateSource;
         self.pane = SkillsPane::Editor;
         self.pending_confirmation = None;
+        self.reset_editor_navigation();
     }
 
     pub fn start_version(&mut self) -> bool {
@@ -1804,6 +1861,12 @@ impl SkillsViewState {
         let Some(detail) = self.detail.as_ref() else {
             return false;
         };
+        if self
+            .selected_summary()
+            .is_some_and(|summary| summary.skill_ref != detail.skill_ref)
+        {
+            return false;
+        }
         self.editor = Some(SkillEditor::for_version(
             detail.skill_ref.skill_id(),
             detail.skill_ref.skill_version_id(),
@@ -1812,7 +1875,25 @@ impl SkillsViewState {
         self.editor_origin = SkillsPane::Detail;
         self.pane = SkillsPane::Editor;
         self.pending_confirmation = None;
+        self.reset_editor_navigation();
         true
+    }
+
+    fn reset_editor_navigation(&mut self) {
+        self.editor_page = SkillEditorPage::Home;
+        self.editor_home_selection = 0;
+        self.reference_selection = 0;
+        self.reference_action = 0;
+        self.content_scroll = 0;
+        self.technical_details = false;
+        self.field_input.clear();
+    }
+
+    pub fn synchronize_field_input(&mut self) {
+        self.field_input.clear();
+        if let Some(editor) = &self.editor {
+            self.field_input.ingest_skill_value(editor.current_value());
+        }
     }
 }
 
@@ -2300,9 +2381,17 @@ impl CommandEditor {
     }
 
     pub(super) fn ingest_memory_value(&mut self, text: &str) {
+        self.ingest_multiline_value(text, false);
+    }
+
+    pub(super) fn ingest_skill_value(&mut self, text: &str) {
+        self.ingest_multiline_value(text, true);
+    }
+
+    fn ingest_multiline_value(&mut self, text: &str, preserve_tabs: bool) {
         self.normalize_cursor();
         let available = MAX_INPUT_BYTES.saturating_sub(self.buffer.len());
-        let accepted = bounded_multiline_prefix(text, available);
+        let accepted = bounded_multiline_prefix(text, available, preserve_tabs);
         if accepted.is_empty() {
             return;
         }
@@ -2454,7 +2543,7 @@ fn bounded_safe_prefix(input: &str, byte_limit: usize) -> String {
     bounded
 }
 
-fn bounded_multiline_prefix(input: &str, byte_limit: usize) -> String {
+fn bounded_multiline_prefix(input: &str, byte_limit: usize, preserve_tabs: bool) -> String {
     let mut bounded = String::with_capacity(input.len().min(byte_limit));
     let mut characters = input.chars().peekable();
     while let Some(mut character) = characters.next() {
@@ -2464,7 +2553,7 @@ fn bounded_multiline_prefix(input: &str, byte_limit: usize) -> String {
             }
             character = '\n';
         }
-        if character.is_control() && character != '\n' {
+        if character.is_control() && character != '\n' && !(preserve_tabs && character == '\t') {
             continue;
         }
         if bounded.len().saturating_add(character.len_utf8()) > byte_limit {
@@ -2898,7 +2987,6 @@ impl TuiModel {
 
     pub(super) fn input_is_visible(&self) -> bool {
         self.focus == Focus::Command
-            || (self.skills.active && self.skills.pane == SkillsPane::Editor)
             || (!self.skills.active
                 && self.active_view == View::Agents
                 && self.agents.pane == AgentsPane::Memory

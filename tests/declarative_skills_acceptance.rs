@@ -13,7 +13,10 @@ use ai_stock_forum::{
     skills::{SkillDraft, SkillEditPreview, SkillProvenance, SkillVersion},
     ui::tui::{
         AssignmentKind, ControllerEffect, TuiEvent, apply_outcome, handle_event,
-        model::{AgentsPane, SkillConfirmation, SkillOperationOrigin, SkillsPane, TuiModel, View},
+        model::{
+            AgentsPane, InputMode, SkillConfirmation, SkillEditorPage, SkillOperationOrigin,
+            SkillSection, SkillsPane, TuiModel, View,
+        },
         render,
         theme::Theme,
     },
@@ -62,9 +65,62 @@ fn navigation_key(code: KeyCode) -> TuiEvent {
 }
 
 fn type_line(model: &mut TuiModel, value: &str) -> ControllerEffect {
-    model.command.clear();
-    model.command.ingest(value);
+    assert_eq!(
+        handle_event(model, key(KeyCode::Enter)),
+        ControllerEffect::Redraw
+    );
+    assert_eq!(model.input_mode, InputMode::Type);
+    model.skills.field_input.clear();
+    model.skills.field_input.ingest(value);
     handle_event(model, key(KeyCode::Enter))
+}
+
+fn fill_editor_and_select_review(model: &mut TuiModel, instructions: &str) {
+    assert_eq!(model.skills.editor_page, SkillEditorPage::Home);
+    handle_event(model, key(KeyCode::Enter));
+    assert_eq!(
+        model.skills.editor_page,
+        SkillEditorPage::Section(SkillSection::Basics)
+    );
+    assert_eq!(
+        type_line(model, "Decision Journal"),
+        ControllerEffect::Redraw
+    );
+    handle_event(model, key(KeyCode::Down));
+    assert_eq!(
+        type_line(model, "Records the evidence behind an investment decision."),
+        ControllerEffect::Redraw
+    );
+    for code in [KeyCode::Esc, KeyCode::Right, KeyCode::Enter] {
+        handle_event(model, key(code));
+    }
+    assert_eq!(
+        model.skills.editor_page,
+        SkillEditorPage::Section(SkillSection::Usage)
+    );
+    assert_eq!(
+        type_line(model, "Use before committing to a position."),
+        ControllerEffect::Redraw
+    );
+    handle_event(model, key(KeyCode::Down));
+    assert_eq!(
+        type_line(model, "decision, evidence"),
+        ControllerEffect::Redraw
+    );
+    for code in [KeyCode::Esc, KeyCode::Left, KeyCode::Down, KeyCode::Enter] {
+        handle_event(model, key(code));
+    }
+    assert_eq!(
+        model.skills.editor_page,
+        SkillEditorPage::Section(SkillSection::Instructions)
+    );
+    assert_eq!(type_line(model, instructions), ControllerEffect::Redraw);
+    for code in [KeyCode::Esc, KeyCode::Down] {
+        handle_event(model, key(code));
+    }
+    assert_eq!(model.skills.editor_page, SkillEditorPage::Home);
+    assert_eq!(model.skills.editor_home_selection, 4);
+    assert_eq!(model.input_mode, InputMode::Nav);
 }
 
 fn outcome(view: CommandView) -> CommandOutcome {
@@ -177,6 +233,7 @@ fn keyboard_workflow_creates_versions_pins_upgrades_unassigns_and_restores_exact
     let second = skill(100, Some(&first));
     let empty_agent = profile(200, Vec::new());
     let mut model = TuiModel::new(snapshot(Some(empty_agent.clone())), false);
+    model.set_terminal_size(160, 40);
 
     assert_eq!(
         handle_event(&mut model, navigation_key(KeyCode::Char('4'))),
@@ -193,16 +250,7 @@ fn keyboard_workflow_creates_versions_pins_upgrades_unassigns_and_restores_exact
         handle_event(&mut model, key(KeyCode::Enter)),
         ControllerEffect::Redraw
     );
-    for value in [
-        "Decision Journal",
-        "Records the evidence behind an investment decision.",
-        "Use before committing to a position.",
-        "decision, evidence",
-        "Record evidence and disconfirming facts.",
-        "",
-    ] {
-        assert_eq!(type_line(&mut model, value), ControllerEffect::Redraw);
-    }
+    fill_editor_and_select_review(&mut model, "Record evidence and disconfirming facts.");
     let ControllerEffect::RequestSkillPreview(request) =
         handle_event(&mut model, key(KeyCode::Enter))
     else {
@@ -236,16 +284,10 @@ fn keyboard_workflow_creates_versions_pins_upgrades_unassigns_and_restores_exact
         handle_event(&mut model, key(KeyCode::Enter)),
         ControllerEffect::Redraw
     );
-    for value in [
-        "Decision Journal",
-        "Records the evidence behind an investment decision.",
-        "Use before committing to a position.",
-        "decision, evidence",
+    fill_editor_and_select_review(
+        &mut model,
         "Record evidence, disconfirming facts, and the explicit exit condition.",
-        "",
-    ] {
-        assert_eq!(type_line(&mut model, value), ControllerEffect::Redraw);
-    }
+    );
     let ControllerEffect::RequestSkillPreview(request) =
         handle_event(&mut model, key(KeyCode::Enter))
     else {

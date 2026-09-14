@@ -640,6 +640,7 @@ pub fn execute_agent_effect(
         | ControllerEffect::RequestShutdown(_)
         | ControllerEffect::LoadSkills
         | ControllerEffect::LoadSkill { .. }
+        | ControllerEffect::LoadSkillPreview { .. }
         | ControllerEffect::LoadSkillHistory { .. }
         | ControllerEffect::LoadSkillVersion { .. }
         | ControllerEffect::LoadSkillStarter { .. }
@@ -709,6 +710,73 @@ pub fn execute_skill_effect(
             );
             model.restore_navigation_state(navigation);
             result?;
+            if model.skills.active
+                && model.skills.editor.is_none()
+                && !model.skills.library.skills.is_empty()
+                && model.skills.detail.is_none()
+            {
+                execute_skill_effect(
+                    client,
+                    model,
+                    ControllerEffect::LoadSkillPreview {
+                        selected_skill: model.skills.selected_skill,
+                        starter: false,
+                    },
+                )?;
+            }
+        }
+        ControllerEffect::LoadSkillPreview {
+            selected_skill,
+            starter,
+        } => {
+            let Some(expected) = model
+                .skills
+                .library
+                .skills
+                .get(selected_skill)
+                .map(|summary| summary.skill_ref.clone())
+            else {
+                return Ok(());
+            };
+            let navigation = model.navigation_state_snapshot();
+            let saved_skills = model.skills.clone();
+            let result = submit_agent_command(
+                client,
+                model,
+                ApplicationCommand::ShowSkillVersion {
+                    selector: expected.skill_id().into(),
+                    version: expected.version(),
+                },
+            );
+            let detail = match result {
+                Ok(outcome) => {
+                    let detail = match &outcome.view {
+                        CommandView::SkillVersion(view) if view.skill_ref == expected => {
+                            Some(view.clone())
+                        }
+                        _ => None,
+                    };
+                    let _ = apply_outcome(model, outcome);
+                    detail
+                }
+                Err(RuntimeError::Application(_) | RuntimeError::Backpressure) => None,
+                Err(error) => return Err(error),
+            };
+            model.skills = saved_skills;
+            model.restore_navigation_state(navigation);
+            model.set_command_in_flight(false);
+            if detail.is_none() {
+                model.set_message(
+                    super::model::Severity::Warning,
+                    "Skill preview unavailable. Reopen the skill to retry.",
+                );
+            }
+            if starter {
+                model.skills.create_source_detail = detail;
+            } else {
+                model.skills.detail = detail;
+                model.skills.version_detail = None;
+            }
         }
         ControllerEffect::LoadSkill { selected_skill }
         | ControllerEffect::LoadSkillStarter { selected_skill } => {
@@ -723,21 +791,43 @@ pub fn execute_skill_effect(
                 return Ok(());
             };
             let starter = matches!(effect, ControllerEffect::LoadSkillStarter { .. });
-            let outcome = submit_agent_command(
-                client,
-                model,
+            let command = if starter {
+                ApplicationCommand::ShowSkillVersion {
+                    selector: skill_id.into(),
+                    version: model.skills.library.skills[selected_skill]
+                        .skill_ref
+                        .version(),
+                }
+            } else {
                 ApplicationCommand::ShowSkill {
                     selector: skill_id.into(),
-                },
-            )?;
+                }
+            };
+            let outcome = submit_agent_command(client, model, command)?;
+            let seed = if starter {
+                match &outcome.view {
+                    CommandView::SkillVersion(detail)
+                        if detail.skill_ref
+                            == model.skills.library.skills[selected_skill].skill_ref =>
+                    {
+                        Some(detail.content.clone())
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             let _ = apply_outcome(model, outcome);
             if starter {
-                let seed = model
-                    .skills
-                    .detail
-                    .as_ref()
-                    .map(|detail| detail.content.clone());
-                model.skills.start_create(seed);
+                let Some(seed) = seed else {
+                    model.skills.pane = super::model::SkillsPane::CreateSource;
+                    model.set_message(
+                        super::model::Severity::Warning,
+                        "Starting point unavailable. Choose it again after refreshing the library.",
+                    );
+                    return Ok(());
+                };
+                model.skills.start_create(Some(seed));
                 synchronize_host_skill_input(model);
             }
         }
@@ -964,14 +1054,8 @@ fn execute_typed_skill_workflow(
 }
 
 fn synchronize_host_skill_input(model: &mut TuiModel) {
-    let value = model
-        .skills
-        .editor
-        .as_ref()
-        .map(|editor| editor.current_value().to_owned())
-        .unwrap_or_default();
-    model.command.clear();
-    model.command.ingest(&value);
+    model.skills.synchronize_field_input();
+    model.set_focus(super::model::Focus::Workspace);
 }
 
 fn execute_skill_preview(
@@ -1869,6 +1953,7 @@ impl TuiRunner {
             effect @ (ControllerEffect::LoadSkills
             | ControllerEffect::StartSkillWorkflow(_)
             | ControllerEffect::LoadSkill { .. }
+            | ControllerEffect::LoadSkillPreview { .. }
             | ControllerEffect::LoadSkillHistory { .. }
             | ControllerEffect::LoadSkillVersion { .. }
             | ControllerEffect::LoadSkillStarter { .. }

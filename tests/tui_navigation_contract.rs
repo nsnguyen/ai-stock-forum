@@ -665,6 +665,15 @@ fn bare_shortcut_characters_remain_text_for_each_active_text_owner() {
     skill_model.skills.active = true;
     skill_model.skills.library_loaded = true;
     skill_model.skills.start_create(None);
+    skill_model.set_focus(Focus::Workspace);
+    handle_event(
+        &mut skill_model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    );
+    handle_event(
+        &mut skill_model,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    );
     for character in characters.chars() {
         assert_eq!(
             handle_event(&mut skill_model, plain_character(character)),
@@ -674,7 +683,8 @@ fn bare_shortcut_characters_remain_text_for_each_active_text_owner() {
     }
     assert!(skill_model.skills.active);
     assert_eq!(skill_model.skills.pane, SkillsPane::Editor);
-    assert_eq!(skill_model.command.text(), characters);
+    assert_eq!(skill_model.skills.field_input.text(), characters);
+    assert!(skill_model.command.text().is_empty());
 }
 
 #[test]

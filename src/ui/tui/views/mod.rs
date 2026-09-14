@@ -62,6 +62,14 @@ pub(crate) fn agent_profile_home_columns(model: &TuiModel) -> usize {
     agents::profile_home_columns(model)
 }
 
+pub(super) fn skill_editor_home_columns(model: &TuiModel) -> usize {
+    skills::home_columns(model)
+}
+
+pub(super) fn skill_content_scroll_limit(model: &TuiModel) -> u16 {
+    skills::scroll_limit(model)
+}
+
 pub(super) fn agent_detail_scroll_geometry(model: &TuiModel) -> (usize, usize) {
     agents::detail_scroll_geometry(model)
 }

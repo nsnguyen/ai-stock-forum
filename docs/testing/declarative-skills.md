@@ -1,122 +1,171 @@
-# Declarative Skills Testing and Workflow Guide
+# Declarative Skills: local testing
 
-Declarative Skills Milestone 2 provides a local library of reusable guidance
-for agent profiles. A skill is inert, bounded context: accepted text describing
-what to consider and how to work. It cannot execute code or commands, and it
-cannot grant or use shell, filesystem, Git, MCP, provider, browser, or network
-capability. Text that looks like a command, path, URL, or tool name remains
-text. Inference and chat begin in Phase 3; this milestone does not send skill
-content to a model.
+Declarative Skills are reusable inert, bounded context for agent profiles. A
+skill can describe what to consider and how to work, but it cannot execute
+commands or grant shell, filesystem, Git, MCP, provider, browser, or network
+capability. Command-like text, paths, URLs, and reference notes remain saved
+text. Inference and chat begin in Phase 3.
+
+> **Verification status:** The keyboard contracts and synthetic
+> production-render previews cover the redesigned Skills workflow. An
+> interactive `make dev` run is still a separate manual check and is not
+> claimed by this guide.
 
 ## Library and version model
 
-Every installation starts with four deterministic built-ins at version 1:
+Every installation starts with Evidence Review, Filing Analysis, Catalyst Mapping,
+and Risk Checklist. A new skill accepts immutable version 1. Editing
+accepted content proposes the next immutable version while History keeps every
+earlier historical version.
 
-- Evidence Review
-- Filing Analysis
-- Catalyst Mapping
-- Risk Checklist
+An assignment stores an exact version identity and digest. Creating a newer
+version does not auto-upgrade an existing pin. Move a pin only through an
+explicit upgrade or deliberate historical reassignment. Unassign creates a new
+immutable agent profile version without deleting skill history.
 
-Built-in and custom skills follow the same assignment rules. Creating a skill
-accepts immutable version 1. Editing accepted content creates the next
-immutable version and leaves every earlier version available in History. An
-agent assignment stores an exact version identity and digest, not merely a
-skill name or its current pointer.
+## Normal testing path
 
-That exact pin is deliberate. Creating version 2 does not auto-upgrade an agent
-pinned to version 1. Use an explicit upgrade to move that agent to version 2,
-or open a historical version and deliberately assign it when older guidance is
-the right choice. Unassign removes the pin by creating a new immutable agent
-profile version; it does not remove any skill history.
+Quit any other running AI Stock Forum instance, then launch from the repository
+root:
+
+```sh
+make dev
+```
+
+This is the normal local launch. It does not require a temporary macOS account
+or a changed `HOME`. It uses the application's existing local data, so inspect
+and cancel freely but do not confirm create, edit, assignment, upgrade,
+reassignment, or unassignment merely for a visual check. Do not run corruption,
+recovery, migration, or destructive persistence experiments against normal user
+data.
 
 ## Keyboard-first workflow
 
-Launch the Adaptive Cockpit and press bare `4` to open Skills. Controls are pane-specific: `Up` and `Down` select
-vertical rows or items, while `Left` and `Right` select horizontal actions.
-`Enter` opens or accepts the visible action, and `Esc` returns or cancels. The
-footer shows the controls available in the current state. You never need `:next` or `:create`
-for this workflow.
+Launch the Adaptive Cockpit and press bare `4` to open Skills. The same
+navigation works in one-pane compact layouts and wider two-pane layouts.
+Bare `1`-`9` navigate from non-text browsing panes. During TYPE, characters remain text.
+Returning to Skills restores the retained pane, draft, and pending confirmation.
+You never need `:next` or `:create` for this workflow.
 
-Bare `1`-`9` navigate from non-text browsing panes and
-confirmations. While command, profile, or skill text entry owns input, those
-characters remain text. Returning to Skills restores the exact
-pane, selection, draft input, and pending confirmation; switching alone never
-submits or cancels an action.
+| Key | NAV behavior |
+| --- | --- |
+| `Tab` / `Shift+Tab` | Move to the next / previous enabled pane or section. |
+| `W` / `S` | Move up / down in the focused pane. |
+| `A` / `D` | Move left / right through visible actions or cards. |
+| `Enter` | Open the selected item or action. On a text field, explicitly enter TYPE. |
+| `Esc` | Retain safe draft text and return, or cancel the visible review or confirmation. |
+| `N` | Start a new skill, or resume the retained draft if one already exists. |
+| `E` | Edit the active skill by starting its next immutable version, or resume its retained draft. |
+
+Arrow keys are quiet NAV aliases. While TYPE owns a field, letters, digits,
+slashes, colons, and spaces are text rather than navigation or commands. `Esc`
+retains the exact field input and returns to NAV on that field. `Tab` also
+retains the field before moving panes. The footer names the actions available
+to the current owner.
+
+The library begins with four deterministic built-ins: Evidence Review, Filing
+Analysis, Catalyst Mapping, and Risk Checklist. Built-in and custom skills obey
+the same immutable version and assignment rules.
 
 ### Pane controls
 
 | Pane | Selection | `Enter` | `Esc` |
 | --- | --- | --- | --- |
-| Library | `Up/Down` selects skill rows. | Opens the selected exact active version. | Returns to the originating workspace. |
-| Create source | `Up/Down` selects a starting point: blank or a built-in. | Opens the editor with that starting point. | Returns to Library. |
-| Editor | Typing edits the field; `Left/Right` moves the text cursor. | Accepts the field or requests Review validation at the final step. | Returns to the prior field or cancels from the first step. |
-| Detail actions | `Left/Right` selects the Assign, Create Version, or History action. | Opens the selected action. | Returns to Library. |
-| History | `Up/Down` selects immutable version rows. | Opens the exact read-only version. | Returns to Detail. |
-| Agent picker | `Up/Down` selects agent rows. | Opens Review for that agent and exact skill version. | Returns to Detail. |
-| Agent assigned skills | `Up/Down` selects pinned skill rows; `Left/Right` selects available View, Upgrade, or Unassign actions; `r` reloads active skill data. | Opens the selected action or its Review. | Closes the assigned-skills panel. |
+| Library | `W/S` (`Up/Down`) selects skill rows. | Opens the selected exact active version. | Returns to the originating workspace. |
+| Create source | `W/S` (`Up/Down`) selects a starting point. | Opens the editor with that starting point. | Returns to Library. |
+| Editor Home | WASD selects section cards and actions. | Opens the selected section or action. | Returns to Skill Home with the draft retained. |
+| Editor section | WASD selects fields. | Explicitly enters TYPE on the selected field. | Returns to Editor Home with field text retained. |
+| Detail actions | `Left/Right` selects an action; `W/S` scrolls content. | Opens the selected action. | Returns to Library. |
+| History | `W/S` (`Up/Down`) selects version rows. | Opens the exact read-only version. | Returns to Detail. |
+| Agent picker | `W/S` (`Up/Down`) selects agent rows. | Opens Review for that agent and exact skill version. | Returns to Detail. |
+| Agent assigned skills | `W/S` (`Up/Down`) selects pinned skill rows; `Left/Right` selects actions. | Opens View or the selected mutation Review. | Closes the assigned-skills panel. |
 | Review | No selection changes. | `Enter` validates the displayed operation and opens Confirmation. | Returns to the originating picker, detail, or editor. |
-| Confirmation | No selection changes. | `Enter` commits only the displayed reviewed operation. | Cancels confirmation and returns without mutation. |
-| Result | No selection changes. | Returns to Detail. | Returns to Detail. |
+| Confirmation | No selection changes. | `Enter` commits only the displayed reviewed operation. | Returns without mutation. |
 
-### Create a custom skill
+## Skill Home and starting points
 
-1. Press `c` in the Skills library.
-2. Type the identity, usage guidance, tags, instructions, and optional reference
-   notes. Use `Enter` to accept each visible step and `Esc` to go back without
-   losing earlier fields.
-3. Inspect the complete candidate on Review. `Enter` advances to confirmation;
-   `Esc` returns to editing.
-4. Confirm with `Enter`. Only confirmation accepts immutable version 1.
+Select a library row with `W`/`S`, then press `Enter` to open Skill Home. Home
+shows the saved purpose, when-to-use guidance, instructions, reference notes,
+provenance, and human-readable version. Use `A`/`D` to select Assign to agent,
+Edit skill, or Version history, then press `Enter` to open that action. Routine
+Home does not need raw UUIDs or digests; technical details are a separate
+disclosure. `W`/`S` scrolls long guidance while keeping the selected action
+available. Press `I` to show or hide technical identifiers on Home and on the
+Review and Confirmation screens.
 
-### Create and inspect versions
+Press `N` to open the separate Starting Point picker. Choose Blank skill or a
+copy of a visible library skill with `W`/`S`. The preview must match the exact
+selected starting point. `Enter` continues into the editor and `Esc` returns to
+the library without creating anything.
 
-1. Select a skill row with `Up` and `Down`, then open it with `Enter`.
-2. Select Create Version with `Left` and `Right`, then press `Enter`.
-3. Edit the copied active content, review it, and confirm with `Enter`. Unchanged
-   content is rejected rather than creating a duplicate immutable version.
-4. Select History, choose a historical version with `Up` and `Down`, and press
-   `Enter` to inspect its exact read-only content.
+## Create or edit a skill
 
-### Assign, deliberately use history, upgrade, and unassign
+The editor opens on Skill Editor Home. Its independent destinations are:
 
-1. On skill detail or a historical version, select Assign with `Left` and
-   `Right`, then press `Enter`.
-2. Choose an agent with `Up` and `Down`; `Enter` opens a review naming the
-   agent, operation, and exact version. A second `Enter` opens confirmation and
-   confirmation `Enter` commits the new immutable agent profile version.
-3. To upgrade, open Agents with bare `3`. In assigned skills, use `Up` and `Down` to
-   select the pinned skill row and `Left` and `Right` to choose Upgrade, then
-   review and confirm the exact replacement version. A newer active skill alone
-   never changes the pin.
-4. To unassign, use `Left` and `Right` to choose Unassign from the same
-   assigned-skill row, then review and confirm. `Esc` backs out at every review
-   or confirmation step without applying the mutation.
+- Basics: display name and purpose.
+- When to use: use guidance and tags.
+- Instructions: inert working guidance.
+- Reference notes: optional inert name/body pairs.
+- Review changes.
+- Discard draft.
 
-Assigning a historical version is intentionally the same reviewed operation as
-assigning the active version. The review must identify that exact version so
-the choice cannot be mistaken for an upgrade to the latest content.
+Use WASD to select a section or action and `Enter` to open it. In a section,
+select a field in NAV and press `Enter` deliberately to enter TYPE. `Esc` leaves
+TYPE while retaining the exact raw text; another `Esc` returns to Editor Home
+with the draft intact. Invalid raw input and its inline correction guidance
+remain available after leaving and returning to a field.
+
+Reference notes are saved text, never executable resources. Add or select a
+note from the Reference notes section, edit its name and body through explicit
+TYPE, then choose the visible save action. Removing a note has its own warning;
+`Esc` keeps the note.
+
+Leaving Skills suspends the draft. Returning and pressing `N` or `E` resumes it
+instead of silently replacing it. Discard opens a separate warning, and only a
+deliberate confirmation abandons the retained draft.
 
 ## Confirmation, cancellation, and recovery
 
-Create, version, assign, explicit upgrade, and unassign all cross a separate
-review and confirmation boundary. No mutation occurs merely by opening an
-editor, picker, or review. `Esc` cancels the pending step and retains safe draft
-state where the interface offers a return to editing.
+Review shows the complete candidate and the exact operation. For a new skill,
+the target is immutable version 1. Editing an active skill proposes the next
+immutable version; it never overwrites accepted content. `Enter` on Review
+validates the candidate and advances to a separate Confirmation. Only `Enter`
+on that labeled confirmation performs the write. `Esc` returns without a
+mutation and retains the draft where editing can resume.
 
-If validation is rejected, correct the retained draft and request a fresh
-review. If a review becomes stale because the active skill or agent profile
-changed, confirmation fails without overwriting the newer state. Dismiss the
-message with `Esc`, reload the current detail, and stage a fresh review. An
-uncommitted review is process-local and should be started again after restart.
+Unchanged content is rejected instead of producing a duplicate version. A
+stale review also fails without overwriting newer state. Reload the current
+skill, inspect the new state, and stage a fresh review. A rejected candidate
+retains its draft for correction, and `Esc` can cancel without mutation.
+Accepted versions and assignments persist
+across restart; unfinished drafts and process-local reviews should not be
+treated as durable recovery records.
 
-Accepted skill versions, active pointers, exact agent assignments, resulting
-agent profile versions, and audit entries persist across restart. Restart with
-the same isolated state directory to verify them; drafts and review tokens are
-not durable state.
+## History and exact assignments
+
+History lists immutable versions as ACTIVE or HISTORICAL. Use `W`/`S` to select
+a row and `Enter` to open that exact read-only version. Creating a newer active
+version never changes an existing agent assignment.
+
+Assignment always pins an exact skill version and digest into a new immutable
+agent profile version:
+
+1. Choose Assign to agent from active or historical Skill Home.
+2. Select an agent with `W`/`S`, then press `Enter` to open Review.
+3. Verify the agent, operation, and human-readable exact version.
+4. Press `Enter` to validate, then press `Enter` again only on the separate
+   labeled Confirmation to commit.
+
+In an agent's assigned Skills panel, select a pin with `W`/`S` and choose View,
+Upgrade, or Unassign with `A`/`D`. Upgrade is explicit; it replaces the displayed
+exact pin only after review and confirmation. Assigning an older historical
+version is an explicit reassignment, not an upgrade. Unassign removes only the
+displayed exact pin by creating another immutable agent profile version.
 
 ## Optional slash fallbacks
 
-The command bar and line-command host offer these optional forms:
+The optional command input and line-command host support only these Skills
+forms:
 
 ```text
 /skill list
@@ -127,63 +176,67 @@ The command bar and line-command host offer these optional forms:
 /skill unassign <skill> <agent>
 ```
 
-`/skill list`, `/skills`, and `/skill show` are reads. `/skill add` opens the
-guided creator. `/skill assign` stages a review for assign or upgrade, and
-`/skill unassign` stages a review; each mutation command does not mutate directly.
-When assignment omits `[version]`, its review displays and pins the
-exact active version resolved when the flow starts. The fallback host may ask
-for the exact confirmation phrase shown on screen, but the primary cockpit
-workflow remains keyboard-first.
-
-Bare `q` is inert and neither confirms nor quits. `/quit` exits through the
-normal audited shutdown path.
+Each mutation command stages a review and does not mutate directly. Bare `q` is inert;
+`/quit` exits through the normal shutdown path.
 
 ## Compact terminal expectations
 
-The cockpit supports terminals from `60x18`. A compact terminal shows one
-focused pane at a time; medium and wide terminals progressively add context
-without adding required controls. The operation, distinguishing exact-version
-identity, validation or recovery guidance, and relevant `Enter` and `Esc`
-actions stay visible while long instructions or reference notes may be
-truncated with a disclosure. Below `60x18`, the Too Small screen retains `/quit`
-and keeps bare `q` inert.
+A compact terminal from `60x18` shows one focused pane at a time. `Tab` reveals
+the next pane; W/S keeps selected rows or cards visible. Operation identity,
+validation guidance, and the relevant `Enter` and `Esc` actions remain visible.
+Below the supported size, resize guidance keeps bare `q` inert and `/quit`
+available.
+
+## Safe synthetic production-render preview
+
+The preview uses synthetic fixtures, ratatui's test backend, and the real
+production renderer. It does not open or mutate application data:
+
+```sh
+cargo run --locked --example two_pane_preview -- --scene skill-home --width 120 --height 30
+cargo run --locked --example two_pane_preview -- --scene skill-editor --width 160 --height 40 --svg
+```
+
+Skills scenes are `skill-home`, `skill-editor`, `skill-starter`,
+`skill-section`, `skill-type`, `skill-history`, and `skill-assignment`. Add
+`--no-color` to inspect the color-independent presentation. Review representative
+scenes at `60x18`, `80x24`, `100x24`, `120x30`, and `160x40`.
+
+Run the focused automated checks with:
+
+```sh
+cargo test --locked --example two_pane_preview
+cargo test --locked --test skill_home_render_contract --test skill_tui_render_contract
+cargo test --locked --test skill_home_navigation_contract --test skill_tui_controller_contract
+```
 
 ## Exact local commands
 
-From the repository worktree, run the documentation and topology checkpoint:
+Run the documentation checkpoint and build in the normal development
+environment before an interactive pass:
 
 ```sh
 cargo test --test documentation_contract --test topology_contract
-```
-
-Build before isolating application state so Cargo and rustup continue to use
-the normal development environment:
-
-```sh
 cargo build --release --locked
-skills_smoke_root="$(mktemp -d)"
-mkdir -p "$skills_smoke_root/home" "$skills_smoke_root/xdg-data"
-HOME="$skills_smoke_root/home" XDG_DATA_HOME="$skills_smoke_root/xdg-data" target/release/ai-stock-forum
+make dev
 ```
 
-For the restart check, exit with `/quit` and run the final launch command again
-with the same `skills_smoke_root`. Do not point acceptance work at normal user
-state. The release orchestrator owns the fresh full-suite run and the final
-manual TUI evidence for this milestone.
+Do not create a temporary macOS account, override `HOME`, or redirect
+`XDG_DATA_HOME` for the normal path. Because `make dev` opens existing local
+application data, browse and cancel rather than confirming test mutations.
 
 ## Manual acceptance checklist
 
-- Press bare `4` to open Skills; inspect all four built-ins and their version 1
-  provenance.
-- Create a custom skill using typing, arrows, `Enter`, and `Esc` only.
-- Assign custom version 1 to an agent and confirm the displayed exact pin.
-- Create version 2 and confirm the existing assignment remains on version 1.
-- Explicitly upgrade the agent to version 2.
-- Open History and deliberately reassign version 1.
-- Unassign, cancel one review, and confirm cancellation writes nothing.
-- Exercise one rejected edit and one stale review; recover through a fresh
-  review without losing or overwriting accepted state.
-- Restart with the same isolated state and confirm versions, active pointers,
-  assignments, agent profile history, and audit entries persist.
-- At a compact terminal size, confirm controls remain visible; verify bare `q`
-  is inert and `/quit` exits normally.
+- Open all four built-ins and verify inert guidance and provenance.
+- Start and cancel Create a custom skill; confirm retained TYPE text.
+- Review the path that would accept immutable version 1 without committing it.
+- Inspect History and the path that would Create version 2.
+- Inspect the exact-pin review for assign, Explicitly upgrade, historical
+  reassignment, and Unassign.
+- Cancel Review and Confirmation and verify no visible state mutation.
+- Inspect rejected input and stale review recovery.
+- Restart only when validating deliberately accepted non-user test state.
+
+For an interactive visual pass on normal local data, use `make dev`, browse the
+same paths, and cancel before the final confirmation. Use the synthetic preview
+for reproducible screenshots and mutation-free evidence.
