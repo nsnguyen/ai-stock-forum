@@ -1,9 +1,9 @@
 # Two-pane shell and Agents: local testing
 
-This guide covers the approved first slice of the two-pane redesign: the shared
-shell and the complete Agents experience. Memory and Skills use the shared
-navigation while retaining their existing workflows until their own usability
-passes. Chat and Connections remain honest Phase 3 placeholders.
+This guide covers the shared two-pane shell, the Agents experience, and the
+Skills card workspace. Memory uses the shared navigation while retaining its
+existing workflow until its own usability pass. Chat and Connections remain
+honest Phase 3 placeholders.
 
 > **Verification status:** The controls below are present in the current TUI,
 > and the automated gates and production-render preview matrix pass. The
